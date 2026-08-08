@@ -61,32 +61,6 @@ SOURCE_REVISION_MEMBER_SOURCE_DOC_TYPES = frozenset(
 )
 
 
-def _active_manifest_references_source_document(
-    *,
-    pointer: dict | None,
-    manifest: dict | None,
-    session_id_hash: str,
-    source_document_id: str,
-) -> bool:
-    """Return whether the current pointer's manifest includes this source id."""
-
-    return (
-        pointer is not None
-        and str(pointer.get("doc_type") or "") == SourceDocType.ACTIVE_SOURCE_REVISION
-        and str(pointer.get("session_id_hash") or "") == session_id_hash
-        and manifest is not None
-        and str(manifest.get("_id") or "") == str(pointer.get("manifest_id") or "")
-        and str(manifest.get("doc_type") or "") == SourceDocType.SOURCE_REVISION_MANIFEST
-        and str(manifest.get("session_id_hash") or "") == session_id_hash
-        and isinstance(manifest.get("members"), list)
-        and any(
-            isinstance(member, dict)
-            and str(member.get("source_document_id") or "") == source_document_id
-            for member in manifest["members"]
-        )
-    )
-
-
 @dataclass(frozen=True)
 class StoredRevision:
     doc_id: str
@@ -160,6 +134,44 @@ class CouchDBSourceStore(Protocol):
     def find_by_session(self, *, session_id_hash: str, doc_type: str = "") -> list[dict]: ...
 
     def delete(self, doc_id: str) -> bool: ...
+
+
+def _require_active_source_revision_allows_write(
+    *,
+    store: CouchDBSourceStore,
+    doc_id: str,
+    doc_type: str,
+    session_id_hash: str,
+) -> None:
+    """Reject writes to active members or an incomplete active control plane."""
+
+    if doc_type not in SOURCE_REVISION_MEMBER_SOURCE_DOC_TYPES:
+        return
+    pointer = store.get(active_source_revision_pointer_doc_id(session_id_hash))
+    if pointer is None:
+        return
+    # Once a pointer exists, source mutation depends on its complete immutable
+    # control plane. A missing or corrupt member/manifest must not broaden the
+    # write path back to legacy unpinned behavior.
+    from .source_revision import (
+        SourceRevisionResolutionError,
+        resolve_active_source_revision,
+    )
+
+    try:
+        resolved = resolve_active_source_revision(
+            store=store,
+            session_id_hash=session_id_hash,
+        )
+    except SourceRevisionResolutionError as exc:
+        raise SourceStoreConflict("active source revision is invalid") from exc
+    source_documents = (
+        *resolved.sessions,
+        *resolved.conversation_chunks,
+        *resolved.tool_evidence_bundles,
+    )
+    if any(str(document.get("_id") or "") == doc_id for document in source_documents):
+        raise SourceStoreConflict("source revision member makes source document immutable")
 
 
 def payload_hash(document: dict) -> str:
@@ -358,19 +370,12 @@ class InMemoryCouchDBSourceStore:
         doc_type: str,
         session_id_hash: str,
     ) -> None:
-        if doc_type not in SOURCE_REVISION_MEMBER_SOURCE_DOC_TYPES:
-            return
-        pointer = self._docs.get(active_source_revision_pointer_doc_id(session_id_hash))
-        manifest = self._docs.get(str((pointer or {}).get("manifest_id") or ""))
-        if _active_manifest_references_source_document(
-            pointer=pointer,
-            manifest=manifest,
+        _require_active_source_revision_allows_write(
+            store=self,
+            doc_id=doc_id,
+            doc_type=doc_type,
             session_id_hash=session_id_hash,
-            source_document_id=doc_id,
-        ):
-            raise SourceStoreConflict(
-                "source revision member makes source document immutable"
-            )
+        )
 
     def put(self, document: dict) -> StoredRevision:
         validate_for_write(document)
@@ -432,6 +437,12 @@ class InMemoryCouchDBSourceStore:
                     outcome="duplicate",
                 )
             raise SourceStoreConflict("immutable source document already exists")
+
+        self._require_source_document_unpinned(
+            doc_id,
+            doc_type=str(document.get("doc_type") or ""),
+            session_id_hash=str(document.get("session_id_hash") or ""),
+        )
 
         rev = f"1-{incoming_hash.split(':', 1)[-1][:12]}"
         stored = copy.deepcopy(document)

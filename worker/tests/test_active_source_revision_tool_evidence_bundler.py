@@ -154,6 +154,32 @@ class _FailOnceCoverageStore(InMemoryCouchDBSourceStore):
         return super().put(document)
 
 
+class _OriginDriftAtPointerCasStore(InMemoryCouchDBSourceStore):
+    """Mutate one mutable origin immediately before a successor pointer CAS."""
+
+    def __init__(self, origin_document_id: str) -> None:
+        super().__init__()
+        self._origin_document_id = origin_document_id
+        self._inject_at_pointer_cas = False
+
+    def inject_origin_drift_at_next_pointer_cas(self) -> None:
+        self._inject_at_pointer_cas = True
+
+    def put_if_revision(self, document: dict, *, expected_rev: str):
+        if (
+            self._inject_at_pointer_cas
+            and str(document.get("doc_type") or "") == dm.SourceDocType.ACTIVE_SOURCE_REVISION
+        ):
+            self._inject_at_pointer_cas = False
+            origin = self.get(self._origin_document_id)
+            assert origin is not None
+            changed = dict(origin)
+            changed["body"] = "origin changed during successor pointer transition"
+            changed["content_hash"] = dm.sha256_hash(changed["body"])
+            super().put(changed)
+        return super().put_if_revision(document, expected_rev=expected_rev)
+
+
 def test_unpinned_tool_evidence_keeps_legacy_id_and_regular_upsert() -> None:
     store = InMemoryCouchDBSourceStore()
 
@@ -186,7 +212,10 @@ def test_pointer_appearing_after_legacy_bundle_write_converges_into_active_revis
     resolved = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
     coverage = store.get(dm.coverage_manifest_doc_id(_session_id_hash()))
     projection = store.get(dm.projection_state_doc_id(_session_id_hash()))
-    assert {bundle["_id"] for bundle in resolved.tool_evidence_bundles} == {stored[0].doc_id}
+    assert {
+        bundle["source_snapshot_origin_id"]
+        for bundle in resolved.tool_evidence_bundles
+    } == {stored[0].doc_id}
     assert coverage is not None
     assert coverage["source_hash"] == resolved.source_hash
     assert projection is not None
@@ -204,7 +233,10 @@ def test_initial_activation_converges_legacy_bundle_written_after_final_reload_b
     assert len(store.legacy_revisions) == 1
     resolved = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
     assert activated.source_hash == resolved.source_hash
-    assert {bundle["_id"] for bundle in resolved.tool_evidence_bundles} == {
+    assert {
+        bundle["source_snapshot_origin_id"]
+        for bundle in resolved.tool_evidence_bundles
+    } == {
         store.legacy_revisions[0].doc_id
     }
 
@@ -247,7 +279,10 @@ def test_active_pointer_adds_revision_scoped_bundle_and_activates_exact_allowlis
 
     assert added.doc_id != previous_bundle["_id"]
     assert store.get(previous_bundle["_id"]) == previous_snapshot
-    assert {document["_id"] for document in resolved.tool_evidence_bundles} == {
+    assert {
+        document["source_snapshot_origin_id"]
+        for document in resolved.tool_evidence_bundles
+    } == {
         previous_bundle["_id"],
         added.doc_id,
     }
@@ -255,10 +290,12 @@ def test_active_pointer_adds_revision_scoped_bundle_and_activates_exact_allowlis
     assert {
         membership["source_document_id"] for membership in manifest["members"]
     } == {
-        session["_id"],
-        chunk["_id"],
-        previous_bundle["_id"],
-        added.doc_id,
+        document["_id"]
+        for document in (
+            *resolved.sessions,
+            *resolved.conversation_chunks,
+            *resolved.tool_evidence_bundles,
+        )
     }
     assert legacy_only_chunk["_id"] not in {
         membership["source_document_id"] for membership in manifest["members"]
@@ -275,8 +312,10 @@ def test_active_pointer_duplicate_bundle_does_not_churn_pointer() -> None:
     pointer_before = store.get(pointer_id)
 
     duplicate = store_tool_evidence_bundles([_record()], store=store)[0]
+    resolved = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
 
-    assert duplicate.doc_id == bundle["_id"]
+    assert duplicate.doc_id == resolved.tool_evidence_bundles[0]["_id"]
+    assert resolved.tool_evidence_bundles[0]["source_snapshot_origin_id"] == bundle["_id"]
     assert duplicate.outcome == "duplicate"
     assert store.get(pointer_id) == pointer_before
 
@@ -311,7 +350,10 @@ def test_active_pointer_batches_new_bundles_into_one_allowlist_cas() -> None:
         str(pointer_before["_rev"]).split("-", 1)[0]
     ) + 1
     assert {revision.doc_id for revision in added}.isdisjoint({previous_bundle["_id"]})
-    assert {document["_id"] for document in resolved.tool_evidence_bundles} == {
+    assert {
+        document["source_snapshot_origin_id"]
+        for document in resolved.tool_evidence_bundles
+    } == {
         previous_bundle["_id"],
         *(revision.doc_id for revision in added),
     }
@@ -375,15 +417,59 @@ def test_active_pointer_duplicate_bundle_retry_repairs_currentness_after_coverag
     resolved = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
     coverage = store.get(dm.coverage_manifest_doc_id(_session_id_hash()))
     projection = store.get(dm.projection_state_doc_id(_session_id_hash()))
-    assert {bundle["_id"] for bundle in resolved.tool_evidence_bundles} == {
-        initial_bundle["_id"],
-        stored[0].doc_id,
+    assert stored[0].outcome == "duplicate"
+    assert stored[0].doc_id in {
+        bundle["_id"] for bundle in resolved.tool_evidence_bundles
+    }
+    assert len(resolved.tool_evidence_bundles) == 2
+    assert initial_bundle["_id"] in {
+        bundle["source_snapshot_origin_id"]
+        for bundle in resolved.tool_evidence_bundles
     }
     assert coverage is not None
     assert coverage["source_hash"] == resolved.source_hash
     assert projection is not None
     assert projection["projection_status"] == dm.ProjectionStatus.PENDING
     assert projection["source_hash"] == resolved.source_hash
+
+
+def test_tool_bundle_retry_after_origin_drift_activates_current_successor() -> None:
+    origin_chunk = dm.build_conversation_chunk_document(
+        chunk=TranscriptChunk.from_text(
+            chunk_id="pinned-conversation",
+            session_id_hash=_session_id_hash(),
+            provider="codex",
+            project=PROJECT,
+            turn_start_index=0,
+            turn_end_index=0,
+            text="public-safe pinned conversation",
+        )
+    )
+    store = _OriginDriftAtPointerCasStore(origin_chunk["_id"])
+    _session, seeded_chunk, _bundle = _seed_active_source(store)
+    assert seeded_chunk["_id"] == origin_chunk["_id"]
+    store.inject_origin_drift_at_next_pointer_cas()
+    records = [_record(summary="origin-drift recovery evidence", evidence_index=1)]
+
+    with pytest.raises(SourceStoreConflict, match="origin changed during activation"):
+        store_tool_evidence_bundles(records, store=store)
+
+    stale = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
+    assert stale.conversation_chunks[0]["body"] != "origin changed during successor pointer transition"
+
+    stored = store_tool_evidence_bundles(records, store=store)
+
+    recovered = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
+    coverage = store.get(dm.coverage_manifest_doc_id(_session_id_hash()))
+    projection = store.get(dm.projection_state_doc_id(_session_id_hash()))
+    assert stored[0].outcome == "duplicate"
+    assert recovered.source_hash != stale.source_hash
+    assert recovered.conversation_chunks[0]["body"] == "origin changed during successor pointer transition"
+    assert coverage is not None
+    assert coverage["source_hash"] == recovered.source_hash
+    assert projection is not None
+    assert projection["projection_status"] == dm.ProjectionStatus.PENDING
+    assert projection["source_hash"] == recovered.source_hash
 
 
 class _WriteTracingStore(InMemoryCouchDBSourceStore):

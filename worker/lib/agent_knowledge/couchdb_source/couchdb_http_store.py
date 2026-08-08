@@ -26,17 +26,15 @@ from ..rag_ingress.idempotency import IdempotencyOutcome
 from ..transport_contract import ProxyResponse
 from .document_model import (
     SourceDocType,
-    active_source_revision_pointer_doc_id,
     assert_hash_like,
 )
 from .source_store import (
     IMMUTABLE_SOURCE_REVISION_DOC_TYPES,
-    SOURCE_REVISION_MEMBER_SOURCE_DOC_TYPES,
     SourceStoreConflict,
     SourceStoreError,
     StoredRevision,
-    _active_manifest_references_source_document,
     _classify_document_idempotency,
+    _require_active_source_revision_allows_write,
     merge_transcript_session_documents,
     payload_hash,
     validate_for_write,
@@ -149,20 +147,12 @@ class CouchDBHttpSourceStore:
         doc_type: str,
         session_id_hash: str,
     ) -> None:
-        if doc_type not in SOURCE_REVISION_MEMBER_SOURCE_DOC_TYPES:
-            return
-        pointer = self.get(active_source_revision_pointer_doc_id(session_id_hash))
-        manifest_id = str((pointer or {}).get("manifest_id") or "")
-        manifest = self.get(manifest_id) if manifest_id else None
-        if _active_manifest_references_source_document(
-            pointer=pointer,
-            manifest=manifest,
+        _require_active_source_revision_allows_write(
+            store=self,
+            doc_id=doc_id,
+            doc_type=doc_type,
             session_id_hash=session_id_hash,
-            source_document_id=doc_id,
-        ):
-            raise SourceStoreConflict(
-                "source revision member makes source document immutable"
-            )
+        )
 
     def put(self, document: dict) -> StoredRevision:
         validate_for_write(document)
@@ -210,6 +200,12 @@ class CouchDBHttpSourceStore:
                     outcome="duplicate",
                 )
             raise SourceStoreConflict("immutable source document already exists")
+
+        self._require_source_document_unpinned(
+            doc_id,
+            doc_type=str(document.get("doc_type") or ""),
+            session_id_hash=str(document.get("session_id_hash") or ""),
+        )
 
         stored = copy.deepcopy(document)
         stored.pop("_rev", None)
@@ -597,12 +593,23 @@ class CouchDBHttpSourceStore:
         selector: dict = {"session_id_hash": session_id_hash}
         if doc_type:
             selector["doc_type"] = doc_type
-        status, payload = self._request(
-            "POST", f"/{self.db}/_find", json_body={"selector": selector, "limit": 10000}
-        )
-        if status != 200:
-            raise CouchDBError(f"_find failed: HTTP {status}")
-        docs = payload.get("docs", [])
+        docs: list[dict] = []
+        bookmark = ""
+        while True:
+            body: dict = {"selector": selector, "limit": 10000}
+            if bookmark:
+                body["bookmark"] = bookmark
+            status, payload = self._request("POST", f"/{self.db}/_find", json_body=body)
+            if status != 200:
+                raise CouchDBError(f"_find failed: HTTP {status}")
+            page = payload.get("docs", [])
+            if not page:
+                break
+            docs.extend(page)
+            next_bookmark = str(payload.get("bookmark") or "")
+            if not next_bookmark or next_bookmark == bookmark:
+                break
+            bookmark = next_bookmark
         docs.sort(key=lambda d: str(d.get("_id")))
         return docs
 

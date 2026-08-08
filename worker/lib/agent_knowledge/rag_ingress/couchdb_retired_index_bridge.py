@@ -72,6 +72,7 @@ from ..couchdb_source.session_memory_materializer import (
 )
 from ..couchdb_source.source_revision import (
     ResolvedSourceRevision,
+    active_source_origin_document_ids,
     activate_source_revision,
     resolve_active_source_revision,
 )
@@ -129,14 +130,26 @@ def _assert_active_revision_matches_ingress(
 def _active_revision_source_document_ids(
     active_revision: ResolvedSourceRevision,
 ) -> tuple[str, ...]:
-    return tuple(
-        str(document["_id"])
-        for document in (
-            *active_revision.sessions,
-            *active_revision.conversation_chunks,
-            *active_revision.tool_evidence_bundles,
-        )
-    )
+    """Use origins so a successor never mixes active copies with raw ingress."""
+
+    return active_source_origin_document_ids(active_revision)
+
+
+def _active_revision_provenance(
+    *,
+    store: CouchDBSourceStore,
+    active_revision: ResolvedSourceRevision,
+) -> dict[str, str]:
+    """Reuse immutable manifest provenance for an exact active duplicate."""
+
+    if not active_revision.manifest_id:
+        raise SourceStoreConflict("active source revision manifest is missing")
+    manifest = store.get(active_revision.manifest_id)
+    provenance = (manifest or {}).get("provenance")
+    if not isinstance(provenance, dict):
+        raise SourceStoreConflict("active source revision provenance is invalid")
+    return {str(key): str(value) for key, value in provenance.items()}
+
 
 def build_couchdb_docs_from_rag_document(document: RagReadyDocument) -> tuple[
     dict, dict, dict, dict, str, str
@@ -343,7 +356,10 @@ class CouchDBRetiredIndexBridgeAdapter:
             )
             chunk_document_id = str(chunk_doc["_id"])
             active_chunk_ids = {
-                str(document["_id"])
+                str(
+                    document.get("source_snapshot_origin_id")
+                    or document["_id"]
+                )
                 for document in active_revision.conversation_chunks
             }
             existing_chunk = self._store.get(chunk_document_id)
@@ -369,21 +385,31 @@ class CouchDBRetiredIndexBridgeAdapter:
             if on_step_complete is not None:
                 on_step_complete("chunk", document_ref=doc_ref)
 
-            activated = active_revision
-            if not active_duplicate:
-                activated = activate_source_revision(
-                    store=self._store,
-                    session_id_hash=session_id_hash,
-                    source_document_ids=(
-                        *_active_revision_source_document_ids(active_revision),
-                        chunk_document_id,
-                    ),
-                    expected_predecessor=active_revision,
-                )
-            # A retry may see its chunk already active after the pointer CAS
-            # succeeded but before coverage/projection did. Reconcile those
-            # secondary records for exact duplicates as well; matching-hash
-            # updates are idempotent no-ops.
+            activated = activate_source_revision(
+                store=self._store,
+                session_id_hash=session_id_hash,
+                source_document_ids=tuple(
+                    sorted(
+                        {
+                            *_active_revision_source_document_ids(active_revision),
+                            chunk_document_id,
+                        }
+                    )
+                ),
+                provenance=(
+                    _active_revision_provenance(
+                        store=self._store,
+                        active_revision=active_revision,
+                    )
+                    if active_duplicate
+                    else None
+                ),
+                expected_predecessor=active_revision,
+            )
+            # A retry may see its chunk already active after the pointer CAS.
+            # Re-run activation with its complete mutable origin set before
+            # secondary reconciliation so a CAS-window origin drift becomes a
+            # new immutable successor instead of a stale successful duplicate.
             coverage_doc = update_coverage_with_tool_evidence(
                 session_id_hash=session_id_hash,
                 store=self._store,

@@ -52,8 +52,11 @@ def _select_sessions_needing_projection(
     from .document_model import (
         ProjectionStatus,
         SourceDocType,
+        assert_hash_like,
         projection_state_doc_id,
+        session_doc_id,
     )
+    from .source_revision import resolve_active_source_revision_from_snapshot
 
     scope_selector = _scope_selector(project=project, provider=provider)
     states = store.find_by_type(
@@ -76,6 +79,9 @@ def _select_sessions_needing_projection(
     }
     from ..llm_brain_core.runtime import session_source_revision_from_couchdb_source
     selected: list[dict] = []
+    canonical_session_ids: set[str] = set()
+    current_only_session_ids: list[str] = []
+    current_only_seen: set[str] = set()
     sessions = iter(
         _iter_by_type(
             store,
@@ -93,6 +99,12 @@ def _select_sessions_needing_projection(
         session_id_hash = str(session.get("session_id_hash") or "")
         if not session_id_hash:
             continue
+        if str(session.get("_id") or "") != session_doc_id(session_id_hash):
+            if session_id_hash not in current_only_seen:
+                current_only_seen.add(session_id_hash)
+                current_only_session_ids.append(session_id_hash)
+            continue
+        canonical_session_ids.add(session_id_hash)
         projected_source_hash = projected_source_hashes.get(session_id_hash, "")
         current_source_hash = session_source_revision_from_couchdb_source(
             session_id_hash=session_id_hash,
@@ -102,6 +114,51 @@ def _select_sessions_needing_projection(
             not projected_source_hash
             or not current_source_hash
             or projected_source_hash != current_source_hash
+        ):
+            selected.append(session)
+
+    # A corrective current-source import can legitimately have no canonical
+    # legacy session row. Only then use the current session that a valid active
+    # revision resolves from one complete session snapshot. A generic snapshot
+    # is eligible only after that resolver proves it is the active revision;
+    # generic/orphan copies are never used as legacy source discovery, and a
+    # corrupt control document still propagates from the strict resolver.
+    for session_id_hash in current_only_session_ids:
+        if limit > 0 and len(selected) >= limit:
+            break
+        if session_id_hash in canonical_session_ids:
+            continue
+        source_snapshot = store.find_by_session(session_id_hash=session_id_hash)
+        resolved = resolve_active_source_revision_from_snapshot(
+            session_id_hash=session_id_hash,
+            documents=source_snapshot,
+        )
+        if resolved.is_legacy_unpinned or len(resolved.sessions) != 1:
+            continue
+        session = resolved.sessions[0]
+        if str(session.get("_id") or "") == session_doc_id(session_id_hash):
+            continue
+        if not str(session.get("source_snapshot_schema_version") or ""):
+            try:
+                assert_hash_like(
+                    "current_source_scope", str(session.get("current_source_scope") or "")
+                )
+                assert_hash_like(
+                    "supersedes_source_document_hash",
+                    str(session.get("supersedes_source_document_hash") or ""),
+                )
+            except ValueError:
+                continue
+        if (
+            (project and str(session.get("project") or "") != project)
+            or (provider and str(session.get("provider") or "") != provider)
+        ):
+            continue
+        projected_source_hash = projected_source_hashes.get(session_id_hash, "")
+        if (
+            not projected_source_hash
+            or not resolved.source_hash
+            or projected_source_hash != resolved.source_hash
         ):
             selected.append(session)
     return selected

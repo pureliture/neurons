@@ -154,6 +154,32 @@ class _FailOnceCoverageStore(InMemoryCouchDBSourceStore):
         return super().put(document)
 
 
+class _OriginDriftAtPointerCasStore(InMemoryCouchDBSourceStore):
+    """Mutate one mutable origin immediately before a successor pointer CAS."""
+
+    def __init__(self, origin_document_id: str) -> None:
+        super().__init__()
+        self._origin_document_id = origin_document_id
+        self._inject_at_pointer_cas = False
+
+    def inject_origin_drift_at_next_pointer_cas(self) -> None:
+        self._inject_at_pointer_cas = True
+
+    def put_if_revision(self, document: dict, *, expected_rev: str):
+        if (
+            self._inject_at_pointer_cas
+            and str(document.get("doc_type") or "") == dm.SourceDocType.ACTIVE_SOURCE_REVISION
+        ):
+            self._inject_at_pointer_cas = False
+            origin = self.get(self._origin_document_id)
+            assert origin is not None
+            changed = dict(origin)
+            changed["body"] = "origin changed during successor pointer transition"
+            changed["content_hash"] = dm.sha256_hash(changed["body"])
+            super().put(changed)
+        return super().put_if_revision(document, expected_rev=expected_rev)
+
+
 class _InitialActivationInterleavingStore(InMemoryCouchDBSourceStore):
     """Run one legacy ingress after member staging but before initial pointer CAS."""
 
@@ -222,6 +248,10 @@ def test_delivery_backend_rotates_active_pointer_for_distinct_chunk_not_duplicat
 
     assert _active_pointer(store) == pointer_before_duplicate
     assert _select_sessions_needing_projection(store, limit=0) == []
+    duplicate_projection = store.get(dm.projection_state_doc_id(SESSION_ID_HASH))
+    assert duplicate_projection is not None
+    assert duplicate_projection["projection_status"] == dm.ProjectionStatus.PROJECTED
+    assert duplicate_projection["projected_source_hash"] == first_resolved.source_hash
 
     backend.submit(_job(state_db, "delivery-second"))
 
@@ -236,6 +266,32 @@ def test_delivery_backend_rotates_active_pointer_for_distinct_chunk_not_duplicat
         "first-chunk",
         "second-chunk",
     }
+    manifest = store.get(resolved.manifest_id or "")
+    assert manifest is not None
+    active_source_ids = {
+        document["_id"]
+        for document in (
+            *resolved.sessions,
+            *resolved.conversation_chunks,
+            *resolved.tool_evidence_bundles,
+        )
+    }
+    assert {member["source_document_id"] for member in manifest["members"]} == active_source_ids
+    assert all(
+        document.get("source_snapshot_schema_version")
+        for document in (
+            *resolved.sessions,
+            *resolved.conversation_chunks,
+            *resolved.tool_evidence_bundles,
+        )
+    )
+    assert active_source_ids.isdisjoint(
+        {
+            dm.session_doc_id(SESSION_ID_HASH),
+            dm.conversation_chunk_doc_id(SESSION_ID_HASH, "first-chunk"),
+            dm.conversation_chunk_doc_id(SESSION_ID_HASH, "second-chunk"),
+        }
+    )
     assert [row["session_id_hash"] for row in _select_sessions_needing_projection(store, limit=0)] == [
         SESSION_ID_HASH
     ]
@@ -265,16 +321,19 @@ def test_initial_activation_staging_does_not_make_legacy_ingress_uncertain(tmp_p
         )
     )
 
-    with pytest.raises(SourceStoreConflict, match="source changed during activation"):
-        activate_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
+    activated = activate_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
 
     resolved = resolve_active_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
     assert {document["chunk_id"] for document in resolved.conversation_chunks} == {
         "first-chunk",
         "second-chunk",
     }
-    assert resolved.is_legacy_unpinned is True
-    assert store.get(dm.active_source_revision_pointer_doc_id(SESSION_ID_HASH)) is None
+    assert resolved.is_legacy_unpinned is False
+    assert resolved.source_hash == activated.source_hash
+    assert all(
+        document.get("source_snapshot_schema_version")
+        for document in resolved.conversation_chunks
+    )
     assert [delivery.status for delivery in interleaved_deliveries] == ["succeeded"]
 
 
@@ -320,6 +379,80 @@ def test_retired_index_bridge_rotates_active_pointer_for_distinct_chunk_not_dupl
         "first-chunk",
         "second-chunk",
     }
+
+
+def test_delivery_retry_after_origin_drift_activates_current_successor(tmp_path) -> None:
+    first = _payload(
+        idempotency_key="delivery-origin-drift-first",
+        chunk_id="first-chunk",
+        body="First active source chunk.",
+    )
+    second = _payload(
+        idempotency_key="delivery-origin-drift-second",
+        chunk_id="second-chunk",
+        body="Second active source chunk.",
+    )
+    state_db = _state_db(tmp_path)
+    apply_backfill_to_state_db(state_db=state_db, payloads=[first, second], dry_run=False)
+    store = _OriginDriftAtPointerCasStore(
+        dm.conversation_chunk_doc_id(SESSION_ID_HASH, "first-chunk")
+    )
+    backend = CouchDBDeliveryBackend(state_db=state_db, store=store)
+
+    backend.submit(_job(state_db, "delivery-origin-drift-first"))
+    activate_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
+    store.inject_origin_drift_at_next_pointer_cas()
+
+    with pytest.raises(DeliveryOutcomeUncertain):
+        backend.submit(_job(state_db, "delivery-origin-drift-second"))
+
+    stale = resolve_active_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
+    assert stale.conversation_chunks[0]["body"] != "origin changed during successor pointer transition"
+
+    backend.submit(_job(state_db, "delivery-origin-drift-second"))
+
+    recovered = resolve_active_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
+    assert recovered.source_hash != stale.source_hash
+    assert {
+        document["body"] for document in recovered.conversation_chunks
+    } >= {"origin changed during successor pointer transition"}
+    _assert_active_currentness_recovered(store)
+
+
+def test_retired_bridge_retry_after_origin_drift_activates_current_successor() -> None:
+    first = _payload(
+        idempotency_key="bridge-origin-drift-first",
+        chunk_id="first-chunk",
+        body="First active bridge chunk.",
+    )
+    second = _payload(
+        idempotency_key="bridge-origin-drift-second",
+        chunk_id="second-chunk",
+        body="Second active bridge chunk.",
+    )
+    store = _OriginDriftAtPointerCasStore(
+        dm.conversation_chunk_doc_id(SESSION_ID_HASH, "first-chunk")
+    )
+    adapter = CouchDBRetiredIndexBridgeAdapter(store=store)
+
+    adapter.submit_document(document_from_ingress_payload(first))
+    activate_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
+    store.inject_origin_drift_at_next_pointer_cas()
+
+    with pytest.raises(SourceStoreConflict, match="origin changed during activation"):
+        adapter.submit_document(document_from_ingress_payload(second))
+
+    stale = resolve_active_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
+    assert stale.conversation_chunks[0]["body"] != "origin changed during successor pointer transition"
+
+    adapter.submit_document(document_from_ingress_payload(second))
+
+    recovered = resolve_active_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
+    assert recovered.source_hash != stale.source_hash
+    assert {
+        document["body"] for document in recovered.conversation_chunks
+    } >= {"origin changed during successor pointer transition"}
+    _assert_active_currentness_recovered(store)
 
 
 def test_delivery_backend_duplicate_retry_repairs_active_currentness_after_coverage_failure(

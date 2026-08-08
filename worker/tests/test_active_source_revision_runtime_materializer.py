@@ -175,8 +175,14 @@ def test_active_pointer_uses_only_manifest_members_for_all_consumer_outputs() ->
         session_id_hash=_session_id_hash(),
         source_store=store,
     ) == resolved.source_hash
-    assert artifact.chunk_refs == (documents["active_chunk"]["_id"],)
-    assert artifact.tool_evidence_refs == (documents["active_bundle"]["_id"],)
+    assert artifact.chunk_refs == tuple(
+        document["_id"] for document in resolved.conversation_chunks
+    )
+    assert artifact.tool_evidence_refs == tuple(
+        document["_id"] for document in resolved.tool_evidence_bundles
+    )
+    assert artifact.chunk_refs != (documents["active_chunk"]["_id"],)
+    assert artifact.tool_evidence_refs != (documents["active_bundle"]["_id"],)
     assert "Active member supplies graph extraction facts." in extraction_text
     assert "Legacy-only graph extraction must not be used." not in extraction_text
     assert "Active member supplies graph extraction facts." in episode.extraction_text
