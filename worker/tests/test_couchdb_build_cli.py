@@ -571,6 +571,46 @@ class TestSelectSessionsNeedingProjection:
         assert [session["session_id_hash"] for session in selected] == [sid]
         assert [session["_id"] for session in selected] == [dm.session_doc_id(sid)]
 
+    def test_scoped_legacy_candidate_uses_active_revision_scope(self) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sid = _build_synthetic_session(
+            store,
+            provider="codex",
+            project="legacy-project",
+            raw_id="corrected-scope",
+        )
+        active_documents = []
+        for document in store.find_by_session(session_id_hash=sid):
+            if document["doc_type"] not in {
+                dm.SourceDocType.TRANSCRIPT_SESSION,
+                dm.SourceDocType.CONVERSATION_CHUNK,
+            }:
+                continue
+            corrected = dict(document)
+            corrected["provider"] = "claude"
+            corrected["project"] = "current-project"
+            active_documents.append(corrected)
+        revision_documents = build_revision_scoped_source_documents(
+            documents=active_documents,
+            source_snapshot_hash=dm.sha256_hash("corrected-scope"),
+        )
+        for document in revision_documents:
+            store.put_if_absent(document)
+        active = activate_source_revision(
+            store=store,
+            session_id_hash=sid,
+            source_document_ids=tuple(document["_id"] for document in revision_documents),
+        )
+
+        assert active.sessions[0]["provider"] == "claude"
+        assert active.sessions[0]["project"] == "current-project"
+        assert _select_sessions_needing_projection(
+            store,
+            limit=0,
+            provider="codex",
+            project="legacy-project",
+        ) == []
+
     def test_current_only_selection_fails_closed_for_corrupt_active_pointer(self) -> None:
         store = InMemoryCouchDBSourceStore()
         sid = _build_current_only_active_session(

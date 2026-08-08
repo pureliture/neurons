@@ -77,7 +77,6 @@ def _select_sessions_needing_projection(
         and str(state.get("_id") or "") == projection_state_doc_id(session_id_hash)
         and str(state.get("projection_status") or "") == ProjectionStatus.PROJECTED
     }
-    from ..llm_brain_core.runtime import session_source_revision_from_couchdb_source
     selected: list[dict] = []
     canonical_session_ids: set[str] = set()
     current_only_session_ids: list[str] = []
@@ -106,10 +105,20 @@ def _select_sessions_needing_projection(
             continue
         canonical_session_ids.add(session_id_hash)
         projected_source_hash = projected_source_hashes.get(session_id_hash, "")
-        current_source_hash = session_source_revision_from_couchdb_source(
+        resolved = resolve_active_source_revision_from_snapshot(
             session_id_hash=session_id_hash,
-            source_store=store,
+            documents=store.find_by_session(session_id_hash=session_id_hash),
         )
+        if not resolved.is_legacy_unpinned:
+            if len(resolved.sessions) != 1:
+                continue
+            active_session = resolved.sessions[0]
+            if (
+                (project and str(active_session.get("project") or "") != project)
+                or (provider and str(active_session.get("provider") or "") != provider)
+            ):
+                continue
+        current_source_hash = resolved.source_hash
         if (
             not projected_source_hash
             or not current_source_hash
