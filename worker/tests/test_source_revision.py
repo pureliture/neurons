@@ -316,6 +316,60 @@ def test_legacy_expected_predecessor_rejects_a_pointer_created_after_its_read() 
     assert store.all_docs() == documents_before
 
 
+class _LegacyPredecessorDriftBeforePointerCasStore(InMemoryCouchDBSourceStore):
+    """Add a legacy chunk after staging but before an expected-legacy CAS."""
+
+    def __init__(self, concurrent_document: dict) -> None:
+        super().__init__()
+        self._concurrent_document = concurrent_document
+        self._injected = False
+
+    def put_if_absent(self, document: dict):
+        stored = super().put_if_absent(document)
+        if (
+            not self._injected
+            and str(document.get("doc_type") or "") == dm.SourceDocType.SOURCE_REVISION_MANIFEST
+        ):
+            self._injected = True
+            super().put_if_absent(self._concurrent_document)
+        return stored
+
+
+def test_legacy_expected_predecessor_fails_closed_on_identity_drift_before_pointer_cas() -> None:
+    concurrent_chunk = dm.build_conversation_chunk_document(
+        chunk=TranscriptChunk.from_text(
+            chunk_id="concurrent-legacy",
+            session_id_hash=_session_id_hash(),
+            provider="codex",
+            project="neurons",
+            turn_start_index=1,
+            turn_end_index=1,
+            text="concurrent legacy public-safe source",
+        )
+    )
+    store = _LegacyPredecessorDriftBeforePointerCasStore(concurrent_chunk)
+    session, chunk, bundle = _seed_session_source(store)
+    legacy = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
+
+    with pytest.raises(SourceStoreConflict, match="expected predecessor legacy source changed"):
+        activate_source_revision(
+            store=store,
+            session_id_hash=_session_id_hash(),
+            source_document_ids=(session["_id"], chunk["_id"], bundle["_id"]),
+            expected_predecessor=legacy,
+        )
+
+    assert store.get(dm.active_source_revision_pointer_doc_id(_session_id_hash())) is None
+    resolved = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
+    assert resolved.is_legacy_unpinned is True
+    assert set(active_source_origin_document_ids(resolved)) == {
+        session["_id"],
+        chunk["_id"],
+        bundle["_id"],
+        concurrent_chunk["_id"],
+    }
+
+
 def test_stale_expected_predecessor_cannot_drop_concurrent_active_members() -> None:
     store = InMemoryCouchDBSourceStore()
     session, chunk, bundle = _seed_session_source(store)
