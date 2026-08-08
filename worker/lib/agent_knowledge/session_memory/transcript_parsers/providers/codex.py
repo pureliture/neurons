@@ -197,7 +197,7 @@ def _extract_codex_tool_evidence_from_fd(
             "observed_at": observed_at,
         }
 
-    def flush_resolved(*, final: bool = False) -> None:
+    def flush_resolved() -> None:
         while pending_calls:
             entry = pending_calls[0]
             payload = entry["payload"]
@@ -207,7 +207,7 @@ def _extract_codex_tool_evidence_from_fd(
             )
             has_output = call_id in outputs_by_call
             has_patch_result = call_id in patch_success_by_call
-            if not final and (not has_output or (is_patch and not has_patch_result)):
+            if not has_output or (is_patch and not has_patch_result):
                 return
             pending_calls.popleft()
             raw_items.append(raw_item(entry, outputs_by_call.pop(call_id, "")))
@@ -245,7 +245,9 @@ def _extract_codex_tool_evidence_from_fd(
     fingerprint = _consume_admitted_jsonl_fd(fd, admission, consume)
     if not session_id:
         raise _source_admission_error()
-    flush_resolved(final=True)
+    flush_resolved()
+    if pending_calls or outputs_by_call or patch_success_by_call:
+        raise _source_admission_error()
 
     return (
         tuple(_build_evidence_records(raw_items, session_hash=_sha256(f"codex:{session_id}"), provider="codex", project=project)),

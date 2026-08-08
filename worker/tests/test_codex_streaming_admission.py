@@ -117,6 +117,44 @@ def test_streaming_admission_returns_an_immutable_activation_snapshot(tmp_path):
     assert isinstance(snapshot.parsed_transcript.turns, tuple)
     assert isinstance(snapshot.parsed_transcript.tool_events, tuple)
     assert isinstance(snapshot.parsed_transcript.parser_warnings, tuple)
+
+
+@pytest.mark.parametrize(
+    "eof_record",
+    [
+        _response(
+            {
+                "type": "function_call",
+                "name": "exec_command",
+                "call_id": "unfinished-call",
+                "arguments": json.dumps({"cmd": "uv run pytest -q"}),
+            }
+        ),
+        _response(
+            {
+                "type": "function_call_output",
+                "call_id": "orphan-output",
+                "output": "completed without an observed call",
+            }
+        ),
+        _response(
+            {
+                "type": "patch_apply_end",
+                "call_id": "orphan-patch-result",
+                "success": True,
+            }
+        ),
+    ],
+    ids=("unfinished-call", "orphan-output", "orphan-patch-result"),
+)
+def test_streaming_admission_rejects_unpaired_tool_records_at_eof(tmp_path, eof_record):
+    source = tmp_path / "source.jsonl"
+    payload = _write_source(source, _source_records() + [eof_record])
+
+    with pytest.raises(ValueError, match="source_admission_failed"):
+        admit_codex_locator_snapshot(_manifest(source), _admission(payload), project=PROJECT)
+
+
 def test_locator_manifest_requires_exactly_three_codex_fields(tmp_path):
     source = tmp_path / "source.jsonl"
     _write_source(source)
