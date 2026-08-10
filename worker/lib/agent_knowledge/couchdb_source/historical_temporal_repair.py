@@ -332,6 +332,166 @@ def _snapshot_legacy_identity_gaps(
     return snapshot, gaps, counts
 
 
+def _snapshot_legacy_intersection_gaps(
+    store: CouchDBSourceStore,
+    *,
+    provider: str,
+    project: str,
+    target_document_limit: int,
+    monotonic: Callable[[], float] = time.monotonic,
+    started: float | None = None,
+    max_runtime_seconds: float | None = None,
+) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, int]]:
+    """Read one bounded legacy-only metadata snapshot for exact intersection.
+
+    Unlike ``_snapshot_legacy_identity_gaps``, this deliberately does not make
+    a query per source candidate.  The caller must first parse the one staged
+    source completely, then intersect its exact identities with this bounded
+    legacy-only snapshot in memory.
+    """
+    if _deadline_exceeded(
+        started=started,
+        max_runtime_seconds=max_runtime_seconds,
+        monotonic=monotonic,
+    ):
+        raise TimeoutError("snapshot_deadline_exceeded")
+    documents = store.find_by_type(
+        SourceDocType.CONVERSATION_CHUNK,
+        fields=_SNAPSHOT_FIELDS,
+        selector={"project": project, "provider": provider, "source_locator_hash": ""},
+        limit=int(target_document_limit) + 1,
+    )
+    if _deadline_exceeded(
+        started=started,
+        max_runtime_seconds=max_runtime_seconds,
+        monotonic=monotonic,
+    ):
+        raise TimeoutError("snapshot_deadline_exceeded")
+    # The selector is the authority.  Keep this defensive filter so a broken
+    # store implementation can never let a normal-locator document enter the
+    # intersection plan or its later postcheck.
+    legacy_documents = [
+        dict(document) for document in documents if document.get("source_locator_hash") == ""
+    ]
+    snapshot, gaps, counts = _summarize_snapshot(
+        legacy_documents,
+        target_document_limit=target_document_limit,
+    )
+    if not snapshot:
+        raise ValueError("legacy_target_not_found")
+    if not gaps:
+        raise ValueError("legacy_target_gap_not_found")
+    return snapshot, gaps, counts
+
+
+def _select_legacy_identity_intersection(
+    *,
+    candidates: Iterable[Mapping[str, object]],
+    legacy_snapshot: Iterable[Mapping[str, object]],
+    legacy_gaps: Iterable[Mapping[str, object]],
+    provider: str,
+    project: str,
+) -> tuple[dict[str, object], dict[str, object], int]:
+    """Return the sole safe legacy target/source pair, or fail closed.
+
+    Full source parsing keeps provider chunk identity stable.  This helper is
+    intentionally stricter than the regular legacy matcher: a duplicate,
+    malformed, or conflicting candidate cannot be silently reduced to one
+    source record before it is used to patch a legacy target.
+    """
+    candidate_by_id: dict[str, dict[str, object]] = {}
+    candidate_id_conflicts: set[str] = set()
+    candidates_by_identity: dict[tuple[str, str], list[dict[str, object]]] = {}
+    malformed_candidate_identities: set[tuple[str, str]] = set()
+    malformed_candidate_count = 0
+
+    for document in candidates:
+        if (
+            str(document.get("provider") or "") != provider
+            or str(document.get("project") or "") != project
+        ):
+            continue
+        candidate = dict(document)
+        session_id_hash = str(candidate.get("session_id_hash") or "")
+        content_hash = str(candidate.get("content_hash") or "")
+        identity = (session_id_hash, content_hash)
+        if (
+            _SHA256_RE.fullmatch(session_id_hash) is None
+            or _SHA256_RE.fullmatch(content_hash) is None
+        ):
+            malformed_candidate_count += 1
+            continue
+        document_id = str(candidate.get("_id") or "")
+        bounds = _provider_native_interval(
+            candidate.get("observed_at_start"), candidate.get("observed_at_end")
+        )
+        if (
+            not document_id
+            or _SHA256_RE.fullmatch(str(candidate.get("source_locator_hash") or "")) is None
+            or bounds is None
+        ):
+            malformed_candidate_identities.add(identity)
+            malformed_candidate_count += 1
+            continue
+        candidate["observed_at_start"], candidate["observed_at_end"] = bounds
+        existing = candidate_by_id.get(document_id)
+        if existing is not None:
+            candidate_id_conflicts.add(document_id)
+        else:
+            candidate_by_id[document_id] = candidate
+        candidates_by_identity.setdefault(identity, []).append(candidate)
+
+    if malformed_candidate_count or candidate_id_conflicts:
+        raise ValueError("legacy_intersection_candidate_malformed_or_conflicting")
+
+    target_by_identity: dict[tuple[str, str], list[dict[str, object]]] = {}
+    for document in legacy_snapshot:
+        target = dict(document)
+        if target.get("source_locator_hash") != "":
+            continue
+        session_id_hash = str(target.get("session_id_hash") or "")
+        content_hash = str(target.get("content_hash") or "")
+        if (
+            str(target.get("provider") or "") != provider
+            or str(target.get("project") or "") != project
+            or not str(target.get("_id") or "")
+            or not str(target.get("_rev") or "")
+            or _SHA256_RE.fullmatch(session_id_hash) is None
+            or _SHA256_RE.fullmatch(content_hash) is None
+        ):
+            raise ValueError("legacy_intersection_target_malformed")
+        target_by_identity.setdefault((session_id_hash, content_hash), []).append(target)
+
+    if any(len(targets) != 1 for targets in target_by_identity.values()):
+        raise ValueError("legacy_intersection_target_duplicate")
+
+    selected: list[tuple[dict[str, object], dict[str, object]]] = []
+    for document in legacy_gaps:
+        target = dict(document)
+        if target.get("source_locator_hash") != "":
+            continue
+        session_id_hash = str(target.get("session_id_hash") or "")
+        content_hash = str(target.get("content_hash") or "")
+        if (
+            _SHA256_RE.fullmatch(session_id_hash) is None
+            or _SHA256_RE.fullmatch(content_hash) is None
+        ):
+            raise ValueError("legacy_intersection_target_malformed")
+        identity = (session_id_hash, content_hash)
+        if identity in malformed_candidate_identities:
+            raise ValueError("legacy_intersection_candidate_malformed_or_conflicting")
+        source_candidates = candidates_by_identity.get(identity, [])
+        if len(source_candidates) > 1:
+            raise ValueError("legacy_intersection_candidate_duplicate")
+        if len(source_candidates) == 1:
+            selected.append((target, source_candidates[0]))
+
+    if len(selected) != 1:
+        raise ValueError("legacy_intersection_match_count_invalid")
+    target, candidate = selected[0]
+    return target, candidate, len(selected)
+
+
 def _summarize_snapshot(
     documents: Iterable[Mapping[str, object]],
     *,
@@ -817,6 +977,9 @@ def _plan_digest(
     max_runtime_seconds: float,
     non_target_source_redaction_skip_count: int,
     match_strategy: str,
+    legacy_identity_targeted_intersection: bool,
+    legacy_intersection_snapshot_fingerprint: str,
+    legacy_intersection_count: int,
     legacy_source_error_count: int,
 ) -> str:
     selected_items = list(items)
@@ -837,6 +1000,13 @@ def _plan_digest(
                 },
                 "selected_batch_fingerprint": selected_batch_fingerprint,
                 "match_strategy": match_strategy,
+                "legacy_identity_targeted_intersection": bool(
+                    legacy_identity_targeted_intersection
+                ),
+                "legacy_intersection_snapshot_fingerprint": (
+                    legacy_intersection_snapshot_fingerprint
+                ),
+                "legacy_intersection_count": int(legacy_intersection_count),
                 "legacy_source_error_count": int(legacy_source_error_count),
                 "non_target_source_redaction_skip_count": int(
                     non_target_source_redaction_skip_count
@@ -907,6 +1077,7 @@ def repair_historical_temporal_gaps(
     non_target_source_redaction_skip_count: int = 0,
     legacy_identity_match: bool = False,
     legacy_identity_targeted_snapshot: bool = False,
+    legacy_identity_targeted_intersection: bool = False,
     legacy_source_error_count: int = 0,
 ) -> dict[str, Any]:
     """Snapshot, plan, and conditionally patch historical temporal gaps.
@@ -923,6 +1094,7 @@ def repair_historical_temporal_gaps(
         raise ValueError("non_target_source_redaction_skip_count must be non-negative")
     legacy_identity_match = bool(legacy_identity_match)
     legacy_identity_targeted_snapshot = bool(legacy_identity_targeted_snapshot)
+    legacy_identity_targeted_intersection = bool(legacy_identity_targeted_intersection)
     legacy_source_error_count = int(legacy_source_error_count)
     if legacy_source_error_count < 0:
         raise ValueError("legacy_source_error_count must be non-negative")
@@ -930,11 +1102,17 @@ def repair_historical_temporal_gaps(
         raise ValueError("legacy_source_errors_require_legacy_identity_match")
     if legacy_identity_targeted_snapshot and not legacy_identity_match:
         raise ValueError("legacy_targeted_snapshot_requires_legacy_identity_match")
+    if legacy_identity_targeted_intersection and not legacy_identity_match:
+        raise ValueError("legacy_targeted_intersection_requires_legacy_identity_match")
+    if legacy_identity_targeted_snapshot and legacy_identity_targeted_intersection:
+        raise ValueError("legacy_targeted_modes_mutually_exclusive")
     match_strategy = "exact_source_locator"
     if legacy_identity_match:
         match_strategy = "legacy_identity_match"
     if legacy_identity_targeted_snapshot:
         match_strategy = "legacy_identity_targeted_snapshot"
+    if legacy_identity_targeted_intersection:
+        match_strategy = "legacy_identity_targeted_intersection"
     _validate_bounds(
         provider=provider,
         project=project,
@@ -951,6 +1129,16 @@ def repair_historical_temporal_gaps(
         or int(target_document_limit) != 1
     ):
         raise ValueError("legacy_targeted_snapshot_bounds_invalid")
+    if legacy_identity_targeted_intersection and (
+        int(source_file_limit) != 1
+        or int(source_entry_limit) != 1
+        or not 1 <= int(target_document_limit) <= MAX_LEGACY_IDENTITY_COUNT
+        or int(patch_limit) != 1
+        or int(batch_limit or 0) != 1
+    ):
+        raise ValueError("legacy_targeted_intersection_bounds_invalid")
+    if legacy_identity_targeted_intersection and snapshot_documents is not None:
+        raise ValueError("legacy_targeted_intersection_snapshot_documents_forbidden")
     if postcheck_document_ids is not None:
         postcheck_document_ids = tuple(
             str(document_id) for document_id in postcheck_document_ids if document_id
@@ -959,6 +1147,8 @@ def repair_historical_temporal_gaps(
         raise ValueError("legacy_targeted_snapshot_postcheck_document_ids_required")
     started = monotonic() if started is None else started
     target = dict(sorted((target_fingerprints or {}).items()))
+    legacy_intersection_snapshot_fingerprint = ""
+    legacy_intersection_count = 0
     report: dict[str, Any] = {
         "schema_version": REPAIR_SCHEMA_VERSION,
         "status": "dry_run" if not execute else "completed",
@@ -977,6 +1167,9 @@ def repair_historical_temporal_gaps(
         "max_runtime_seconds": float(max_runtime_seconds),
         "match_strategy": match_strategy,
         "legacy_identity_match_enabled": legacy_identity_match,
+        "legacy_identity_targeted_intersection_enabled": legacy_identity_targeted_intersection,
+        "legacy_intersection_count": legacy_intersection_count,
+        "legacy_intersection_snapshot_fingerprint": legacy_intersection_snapshot_fingerprint,
         "legacy_source_error_count": legacy_source_error_count,
         "non_target_source_redaction_skip_count": non_target_source_redaction_skip_count,
         "snapshot_document_count": 0,
@@ -1033,7 +1226,36 @@ def repair_historical_temporal_gaps(
         )
         return report
     try:
-        if snapshot_documents is None:
+        if legacy_identity_targeted_intersection:
+            full_candidates = list(historical_documents)
+            legacy_snapshot, legacy_gaps, _legacy_snapshot_counts = (
+                _snapshot_legacy_intersection_gaps(
+                    source_store,
+                    provider=provider,
+                    project=project,
+                    target_document_limit=target_document_limit,
+                    monotonic=monotonic,
+                    started=started,
+                    max_runtime_seconds=max_runtime_seconds,
+                )
+            )
+            selected_target, selected_candidate, legacy_intersection_count = (
+                _select_legacy_identity_intersection(
+                    candidates=full_candidates,
+                    legacy_snapshot=legacy_snapshot,
+                    legacy_gaps=legacy_gaps,
+                    provider=provider,
+                    project=project,
+                )
+            )
+            legacy_intersection_snapshot_fingerprint = _snapshot_fingerprint(legacy_snapshot)
+            snapshot_documents, gaps, snapshot_counts = _summarize_snapshot(
+                [selected_target],
+                target_document_limit=target_document_limit,
+            )
+            historical_documents = [selected_candidate]
+            postcheck_document_ids = (str(selected_target.get("_id") or ""),)
+        elif snapshot_documents is None:
             snapshot_documents, gaps, snapshot_counts = _snapshot_gaps(
                 source_store,
                 provider=provider,
@@ -1045,6 +1267,16 @@ def repair_historical_temporal_gaps(
                 snapshot_documents,
                 target_document_limit=target_document_limit,
             )
+    except TimeoutError:
+        report.update(
+            {
+                "status": "aborted_timeout",
+                "timed_out": True,
+                "error_count": 1,
+                "gap_count": 1,
+            }
+        )
+        return report
     except ValueError as exc:
         report.update({"status": "blocked", "error": str(exc), "error_count": 1, "gap_count": 1})
         return report
@@ -1058,6 +1290,10 @@ def repair_historical_temporal_gaps(
             }
         )
         return report
+    report["legacy_intersection_count"] = legacy_intersection_count
+    report["legacy_intersection_snapshot_fingerprint"] = (
+        legacy_intersection_snapshot_fingerprint
+    )
     report.update(snapshot_counts)
     if _deadline_exceeded(
         started=started, max_runtime_seconds=max_runtime_seconds, monotonic=monotonic
@@ -1274,6 +1510,9 @@ def repair_historical_temporal_gaps(
         max_runtime_seconds=max_runtime_seconds,
         non_target_source_redaction_skip_count=non_target_source_redaction_skip_count,
         match_strategy=match_strategy,
+        legacy_identity_targeted_intersection=legacy_identity_targeted_intersection,
+        legacy_intersection_snapshot_fingerprint=legacy_intersection_snapshot_fingerprint,
+        legacy_intersection_count=legacy_intersection_count,
         legacy_source_error_count=legacy_source_error_count,
     )
     if execute and expected_plan_digest != report["plan_digest"]:
@@ -1485,7 +1724,9 @@ def _parser() -> argparse.ArgumentParser:
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--execute", action="store_true")
     parser.add_argument("--legacy-identity-match", action="store_true")
-    parser.add_argument("--legacy-identity-targeted-snapshot", action="store_true")
+    legacy_targeting = parser.add_mutually_exclusive_group()
+    legacy_targeting.add_argument("--legacy-identity-targeted-snapshot", action="store_true")
+    legacy_targeting.add_argument("--legacy-identity-targeted-intersection", action="store_true")
     parser.add_argument("--expected-plan-digest", default="")
     parser.add_argument("--approval", default="")
     return parser
@@ -1499,17 +1740,29 @@ def main(argv: list[str] | None = None) -> int:
         provider = canonicalize_provider(args.provider)
         if args.legacy_identity_targeted_snapshot and not args.legacy_identity_match:
             raise ValueError("legacy_targeted_snapshot_requires_legacy_identity_match")
+        if args.legacy_identity_targeted_intersection and not args.legacy_identity_match:
+            raise ValueError("legacy_targeted_intersection_requires_legacy_identity_match")
         # The approved one-file staging and Jenkins runner are Codex-only.  Do
         # not pretend the same one-entry bound can safely traverse providers
         # whose native source formats require nested directories.
         if args.legacy_identity_targeted_snapshot and provider != "codex":
             raise ValueError("legacy_targeted_snapshot_provider_unsupported")
+        if args.legacy_identity_targeted_intersection and provider != "codex":
+            raise ValueError("legacy_targeted_intersection_provider_unsupported")
         if args.legacy_identity_targeted_snapshot and (
             int(args.source_file_limit) != 1
             or _effective_source_entry_limit(args.source_entry_limit) != 1
             or int(args.target_document_limit) != 1
         ):
             raise ValueError("legacy_targeted_snapshot_bounds_invalid")
+        if args.legacy_identity_targeted_intersection and (
+            int(args.source_file_limit) != 1
+            or _effective_source_entry_limit(args.source_entry_limit) != 1
+            or not 1 <= int(args.target_document_limit) <= MAX_LEGACY_IDENTITY_COUNT
+            or int(args.patch_limit) != 1
+            or int(args.batch_limit or 0) != 1
+        ):
+            raise ValueError("legacy_targeted_intersection_bounds_invalid")
         _validate_bounds(
             provider=args.provider,
             project=args.project,
@@ -1524,6 +1777,8 @@ def main(argv: list[str] | None = None) -> int:
         error = (
             "legacy_targeted_snapshot_provider_unsupported"
             if str(exc) == "legacy_targeted_snapshot_provider_unsupported"
+            else "legacy_targeted_intersection_provider_unsupported"
+            if str(exc) == "legacy_targeted_intersection_provider_unsupported"
             else "invalid_bounds"
         )
         print(json.dumps(_error_report(error, dry_run=not execute), sort_keys=True))
@@ -1557,7 +1812,69 @@ def main(argv: list[str] | None = None) -> int:
         deadline_monotonic=started + float(args.max_runtime_seconds),
     )
     project = str(args.project)
-    if args.legacy_identity_targeted_snapshot:
+    legacy_intersection_candidate_count = 0
+    if args.legacy_identity_targeted_intersection:
+        # Parse the complete, single staged source before its source identities
+        # are compared with the one bounded legacy-only metadata snapshot.
+        # Slicing the source would change its native chunk identities.
+        candidates, collection, timed_out = collect_historical_candidates(
+            provider=provider,
+            project=project,
+            source_root=Path(args.source_root).expanduser(),
+            source_file_limit=int(args.source_file_limit),
+            source_entry_limit=_optional_int(args.source_entry_limit),
+            required_source_locator_hashes=None,
+            started=started,
+            max_runtime_seconds=float(args.max_runtime_seconds),
+        )
+        if (
+            timed_out
+            or collection.get("source_entry_limit_exceeded")
+            or collection["source_file_limit_exceeded"]
+        ):
+            if timed_out:
+                error = "runtime_bound_exceeded"
+            elif collection.get("source_entry_limit_exceeded"):
+                error = "source_entry_limit_exceeded"
+            else:
+                error = "source_file_limit_exceeded"
+            report = _error_report(error, dry_run=not execute)
+            report.update(collection)
+            print(json.dumps(report, sort_keys=True))
+            return 1
+        if collection["parser_error_count"]:
+            report = _error_report("historical_source_parse_error", dry_run=not execute)
+            report.update(collection)
+            report.update(
+                {
+                    "error_count": int(collection["parser_error_count"]),
+                    "gap_count": int(collection["parser_error_count"]),
+                }
+            )
+            print(json.dumps(report, sort_keys=True))
+            return 1
+        excluded_temporal_candidate_count = int(
+            collection["excluded_temporal_candidate_count"] or 0
+        )
+        if excluded_temporal_candidate_count:
+            report = _error_report(
+                "legacy_intersection_excluded_temporal_candidate",
+                dry_run=not execute,
+            )
+            report.update(collection)
+            report.update(
+                {
+                    "error_count": excluded_temporal_candidate_count,
+                    "gap_count": excluded_temporal_candidate_count,
+                }
+            )
+            print(json.dumps(report, sort_keys=True))
+            return 1
+        legacy_intersection_candidate_count = len(
+            _legacy_candidate_identities(candidates, provider=provider, project=project)
+        )
+        has_legacy_locator_target = False
+    elif args.legacy_identity_targeted_snapshot:
         # Legacy targets have no locator to select before source parsing.  The
         # bounded source corpus therefore establishes their only valid CouchDB
         # identity scope; never read a provider/project-wide snapshot here.
@@ -1725,7 +2042,9 @@ def main(argv: list[str] | None = None) -> int:
         expected_plan_digest=str(args.expected_plan_digest or ""),
         target_fingerprints=target.target_fingerprints,
         started=started,
-        snapshot_documents=snapshot_documents,
+        snapshot_documents=(
+            None if args.legacy_identity_targeted_intersection else snapshot_documents
+        ),
         postcheck_document_ids=(
             [str(document.get("_id") or "") for document in snapshot_documents]
             if args.legacy_identity_targeted_snapshot
@@ -1736,6 +2055,9 @@ def main(argv: list[str] | None = None) -> int:
         ),
         legacy_identity_match=bool(args.legacy_identity_match),
         legacy_identity_targeted_snapshot=bool(args.legacy_identity_targeted_snapshot),
+        legacy_identity_targeted_intersection=bool(
+            args.legacy_identity_targeted_intersection
+        ),
         legacy_source_error_count=(
             int(collection["parser_error_count"])
             if legacy_source_errors_are_reportable
@@ -1743,6 +2065,8 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     report.update(collection)
+    if args.legacy_identity_targeted_intersection:
+        report["legacy_intersection_candidate_count"] = legacy_intersection_candidate_count
     print(json.dumps(report, sort_keys=True))
     if execute and args.batch_limit is not None:
         return int(not _batch_execute_succeeded_without_reported_errors(report))
