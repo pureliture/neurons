@@ -86,6 +86,20 @@ def _targeted_legacy_cli_args(source_root: Path, **overrides: object) -> list[st
     return _cli_args(source_root, **options)
 
 
+def _intersection_legacy_cli_args(source_root: Path, **overrides: object) -> list[str]:
+    options: dict[str, object] = {
+        "legacy_identity_match": True,
+        "legacy_identity_targeted_intersection": True,
+        "source_file_limit": 1,
+        "source_entry_limit": 1,
+        "target_document_limit": 1,
+        "patch_limit": 1,
+        "batch_limit": 1,
+    }
+    options.update(overrides)
+    return _cli_args(source_root, **options)
+
+
 def _seed_store(
     *,
     source_locator_hash: str = SOURCE_LOCATOR_HASH,
@@ -2658,6 +2672,448 @@ def test_cli_legacy_snapshot_caps_candidate_identity_queries(monkeypatch, capsys
     assert report["error"] == "legacy_candidate_identity_limit_exceeded"
     assert "plan_digest" not in report
     assert find_calls == 0
+
+
+def test_cli_legacy_intersection_selects_one_target_from_full_large_source(
+    monkeypatch, capsys, tmp_path
+):
+    source = tmp_path / "large-source.jsonl"
+    records = [
+        {
+            "type": "session_meta",
+            "payload": {"id": "synthetic-large-source", "cwd": "/workspace/neurons"},
+        }
+    ]
+    records.extend(
+        {
+            "type": "response_item",
+            "timestamp": "2026-07-01T10:00:00Z",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"text": f"synthetic temporal turn {index} " + "x" * 4096}],
+            },
+        }
+        for index in range(temporal_repair.MAX_LEGACY_IDENTITY_COUNT + 1)
+    )
+    source.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
+    candidates, collection, timed_out = collect_historical_candidates(
+        provider=PROVIDER,
+        project=PROJECT,
+        source_root=tmp_path,
+        source_file_limit=1,
+        source_entry_limit=1,
+    )
+    assert timed_out is False
+    assert collection["excluded_temporal_candidate_count"] == 0
+    assert len(candidates) > temporal_repair.MAX_LEGACY_IDENTITY_COUNT
+    legacy_target = dict(candidates[0])
+    legacy_target.update(
+        {"source_locator_hash": "", "observed_at_start": "", "observed_at_end": ""}
+    )
+    store = InMemoryCouchDBSourceStore()
+    store.put(legacy_target)
+    selectors: list[dict] = []
+    original_find_by_type = store.find_by_type
+
+    def record_legacy_snapshot(*args, **kwargs):
+        selectors.append(dict(kwargs["selector"]))
+        assert kwargs["limit"] == 2
+        return original_find_by_type(*args, **kwargs)
+
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+    store.find_by_type = record_legacy_snapshot  # type: ignore[method-assign]
+
+    rc = main(_intersection_legacy_cli_args(tmp_path))
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert selectors == [
+        {"project": PROJECT, "provider": PROVIDER, "source_locator_hash": ""}
+    ]
+    assert report["match_strategy"] == "legacy_identity_targeted_intersection"
+    assert report["legacy_intersection_candidate_count"] > temporal_repair.MAX_LEGACY_IDENTITY_COUNT
+    assert report["planned_update_count"] == 1
+    assert report["selected_batch_count"] == 1
+
+
+def test_cli_legacy_intersection_excludes_normal_locator_gap_from_snapshot_and_plan(
+    monkeypatch, capsys, tmp_path
+):
+    store, candidate = _seed_store(source_locator_hash="")
+    candidate["source_locator_hash"] = SOURCE_LOCATOR_HASH
+    legacy_target = store.get(candidate["_id"])
+    assert legacy_target is not None
+    normal_locator_target = {
+        **legacy_target,
+        "_id": "conversation_chunk:normal-locator-intersection-target",
+        "source_locator_hash": SOURCE_LOCATOR_HASH,
+    }
+    collection = temporal_repair._collection_counts(
+        source_entry_limit=1,
+        source_entry_count=1,
+        discovered_source_file_count=1,
+        source_file_count=1,
+        source_scan_complete=True,
+        source_tree_scan_complete=True,
+        required_target_scan_satisfied=True,
+        parsed_source_count=1,
+    )
+    original_find_by_type = store.find_by_type
+    selectors: list[dict] = []
+
+    def return_untrusted_normal_locator(*args, **kwargs):
+        selectors.append(dict(kwargs["selector"]))
+        return [*original_find_by_type(*args, **kwargs), normal_locator_target]
+
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+    monkeypatch.setattr(
+        temporal_repair,
+        "collect_historical_candidates",
+        lambda **_kwargs: ([candidate], collection, False),
+    )
+    store.find_by_type = return_untrusted_normal_locator  # type: ignore[method-assign]
+
+    rc = main(_intersection_legacy_cli_args(tmp_path, target_document_limit=2))
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert selectors == [
+        {"project": PROJECT, "provider": PROVIDER, "source_locator_hash": ""}
+    ]
+    assert report["snapshot_document_count"] == 1
+    assert report["legacy_intersection_snapshot_fingerprint"] == (
+        temporal_repair._snapshot_fingerprint([legacy_target])
+    )
+    assert report["planned_update_count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("mode", "target_document_limit", "expected_error"),
+    [
+        ("missing", 1, "legacy_intersection_match_count_invalid"),
+        ("two", 2, "legacy_intersection_match_count_invalid"),
+        ("duplicate", 2, "legacy_intersection_target_duplicate"),
+        ("candidate_duplicate", 1, "legacy_intersection_candidate_duplicate"),
+        ("malformed", 1, "legacy_intersection_candidate_malformed_or_conflicting"),
+        ("overflow", 1, "target_document_limit_exceeded"),
+    ],
+)
+def test_cli_legacy_intersection_blocks_invalid_intersection_before_planning(
+    monkeypatch, capsys, tmp_path, mode, target_document_limit, expected_error
+):
+    store, first_candidate = _seed_store(source_locator_hash="")
+    first_candidate["source_locator_hash"] = SOURCE_LOCATOR_HASH
+    candidates = [first_candidate]
+    if mode in {"two", "overflow"}:
+        second_candidate = _add_gap_chunk(
+            store,
+            chunk_id="legacy-intersection-second-target",
+            text="legacy intersection second target",
+            source_locator_hash="",
+        )
+        second_candidate["source_locator_hash"] = "sha256:" + "e" * 64
+        if mode == "two":
+            candidates.append(second_candidate)
+    if mode == "duplicate":
+        target = store.get(first_candidate["_id"])
+        assert target is not None
+        duplicate = dict(target)
+        duplicate["_id"] = "conversation_chunk:legacy-intersection-duplicate"
+        duplicate.pop("_rev", None)
+        duplicate.pop("idempotency_key", None)
+        duplicate.pop("payload_hash", None)
+        store.put(duplicate)
+    if mode == "missing":
+        candidates = [
+            {
+                **first_candidate,
+                "_id": "conversation_chunk:legacy-intersection-unmatched",
+                "content_hash": "sha256:" + "f" * 64,
+            }
+        ]
+    if mode == "candidate_duplicate":
+        candidates.append(
+            {
+                **first_candidate,
+                "_id": "conversation_chunk:legacy-intersection-duplicate-source",
+            }
+        )
+    if mode == "malformed":
+        candidates.append(
+            {
+                **first_candidate,
+                "_id": "conversation_chunk:legacy-intersection-malformed-source",
+                "content_hash": "not-a-content-hash",
+            }
+        )
+    collection = temporal_repair._collection_counts(
+        source_entry_limit=1,
+        source_entry_count=1,
+        discovered_source_file_count=1,
+        source_file_count=1,
+        source_scan_complete=True,
+        source_tree_scan_complete=True,
+        required_target_scan_satisfied=True,
+        parsed_source_count=1,
+    )
+
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+    monkeypatch.setattr(
+        temporal_repair,
+        "collect_historical_candidates",
+        lambda **_kwargs: (candidates, collection, False),
+    )
+    rc = main(
+        _intersection_legacy_cli_args(
+            tmp_path,
+            target_document_limit=target_document_limit,
+        )
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["status"] == "blocked"
+    assert report["error"] == expected_error
+    assert report["mutation_performed"] is False
+    assert report["plan_digest"] == ""
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"legacy_identity_targeted_intersection": True},
+        {
+            "legacy_identity_match": True,
+            "legacy_identity_targeted_intersection": True,
+            "patch_limit": 2,
+        },
+        {
+            "legacy_identity_match": True,
+            "legacy_identity_targeted_intersection": True,
+            "target_document_limit": temporal_repair.MAX_LEGACY_IDENTITY_COUNT + 1,
+        },
+    ],
+)
+def test_cli_legacy_intersection_rejects_invalid_scope_before_store(
+    monkeypatch, capsys, tmp_path, options
+):
+    constructed = False
+
+    def unexpected_store(**_kwargs):
+        nonlocal constructed
+        constructed = True
+        raise AssertionError("invalid intersection scope must not construct CouchDB store")
+
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", unexpected_store)
+
+    rc = main(_cli_args(tmp_path, **options))
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 2
+    assert report["status"] == "blocked"
+    assert report["error"] == "invalid_bounds"
+    assert constructed is False
+
+
+def test_cli_legacy_intersection_parser_error_blocks_before_legacy_snapshot(
+    monkeypatch, capsys, tmp_path
+):
+    collection = temporal_repair._collection_counts(
+        source_entry_limit=1,
+        source_entry_count=1,
+        discovered_source_file_count=1,
+        source_file_count=1,
+        source_scan_complete=True,
+        source_tree_scan_complete=True,
+        required_target_scan_satisfied=True,
+        parser_error_count=1,
+    )
+    store = InMemoryCouchDBSourceStore()
+    find_calls = 0
+
+    def unexpected_snapshot(*_args, **_kwargs):
+        nonlocal find_calls
+        find_calls += 1
+        raise AssertionError("parser error must block before the legacy snapshot")
+
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+    monkeypatch.setattr(
+        temporal_repair,
+        "collect_historical_candidates",
+        lambda **_kwargs: ([], collection, False),
+    )
+    store.find_by_type = unexpected_snapshot  # type: ignore[method-assign]
+
+    rc = main(_intersection_legacy_cli_args(tmp_path))
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["status"] == "blocked"
+    assert report["error"] == "historical_source_parse_error"
+    assert report["mutation_performed"] is False
+    assert "plan_digest" not in report
+    assert find_calls == 0
+
+
+def test_cli_legacy_intersection_excluded_temporal_candidate_blocks_before_snapshot(
+    monkeypatch, capsys, tmp_path
+):
+    store, candidate = _seed_store(source_locator_hash="")
+    candidate["source_locator_hash"] = SOURCE_LOCATOR_HASH
+    collection = temporal_repair._collection_counts(
+        source_entry_limit=1,
+        source_entry_count=1,
+        discovered_source_file_count=1,
+        source_file_count=1,
+        source_scan_complete=True,
+        source_tree_scan_complete=True,
+        required_target_scan_satisfied=True,
+        parsed_source_count=1,
+        excluded_temporal_candidate_count=1,
+    )
+    find_calls = 0
+
+    def unexpected_snapshot(*_args, **_kwargs):
+        nonlocal find_calls
+        find_calls += 1
+        raise AssertionError("excluded temporal candidate must block before snapshot")
+
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+    monkeypatch.setattr(
+        temporal_repair,
+        "collect_historical_candidates",
+        lambda **_kwargs: ([candidate], collection, False),
+    )
+    monkeypatch.setattr(
+        temporal_repair,
+        "repair_historical_temporal_gaps",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("planner must not run")),
+    )
+    store.find_by_type = unexpected_snapshot  # type: ignore[method-assign]
+
+    rc = main(_intersection_legacy_cli_args(tmp_path))
+
+    report = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert report["status"] == "blocked"
+    assert report["error"] == "legacy_intersection_excluded_temporal_candidate"
+    assert report["excluded_temporal_candidate_count"] == 1
+    assert report["mutation_performed"] is False
+    assert "plan_digest" not in report
+    assert find_calls == 0
+
+
+def test_direct_legacy_intersection_rejects_caller_supplied_normal_locator_snapshot():
+    store, candidate = _seed_store()
+    normal_target = store.get(candidate["_id"])
+    assert normal_target is not None
+
+    with pytest.raises(
+        ValueError,
+        match="legacy_targeted_intersection_snapshot_documents_forbidden",
+    ):
+        repair_historical_temporal_gaps(
+            source_store=store,
+            provider=PROVIDER,
+            project=PROJECT,
+            historical_documents=[candidate],
+            target_document_limit=1,
+            patch_limit=1,
+            batch_limit=1,
+            source_file_limit=1,
+            source_entry_limit=1,
+            max_runtime_seconds=30,
+            snapshot_documents=[normal_target],
+            legacy_identity_match=True,
+            legacy_identity_targeted_intersection=True,
+        )
+
+    current = store.get(candidate["_id"])
+    assert current is not None
+    assert not current.get("observed_at_start")
+    assert not current.get("observed_at_end")
+
+
+def test_cli_legacy_intersection_execute_binds_selected_target_scope_and_snapshot(
+    monkeypatch, capsys, tmp_path
+):
+    store, candidate = _seed_store(source_locator_hash="")
+    candidate["source_locator_hash"] = SOURCE_LOCATOR_HASH
+    _add_gap_chunk(
+        store,
+        chunk_id="legacy-intersection-unmatched-target",
+        text="legacy intersection unmatched target",
+        source_locator_hash="",
+    )
+    collection = temporal_repair._collection_counts(
+        source_entry_limit=1,
+        source_entry_count=1,
+        discovered_source_file_count=1,
+        source_file_count=1,
+        source_scan_complete=True,
+        source_tree_scan_complete=True,
+        required_target_scan_satisfied=True,
+        parsed_source_count=1,
+    )
+    target = temporal_repair._resolve_target({"COUCHDB_URL": "https://repair-test.invalid"})
+    selectors: list[dict] = []
+    approval_argv: list[list[str]] = []
+    original_find_by_type = store.find_by_type
+
+    def record_legacy_snapshot(*args, **kwargs):
+        selectors.append(dict(kwargs["selector"]))
+        return original_find_by_type(*args, **kwargs)
+
+    def approve(*_args, command_argv, **_kwargs):
+        approval_argv.append(command_argv)
+        return {
+            "target": {"target_fingerprints": target.target_fingerprints},
+            "timeout_seconds": 30,
+        }
+
+    monkeypatch.setenv("COUCHDB_URL", "https://repair-test.invalid")
+    monkeypatch.setattr(temporal_repair, "CouchDBHttpSourceStore", lambda **_kwargs: store)
+    monkeypatch.setattr(
+        temporal_repair,
+        "collect_historical_candidates",
+        lambda **_kwargs: ([candidate], collection, False),
+    )
+    monkeypatch.setattr(temporal_repair, "validate_memory_enqueue_approval", approve)
+    store.find_by_type = record_legacy_snapshot  # type: ignore[method-assign]
+
+    plan_args = _intersection_legacy_cli_args(tmp_path, target_document_limit=2)
+    assert main(plan_args) == 0
+    plan = json.loads(capsys.readouterr().out)
+
+    execute_args = _intersection_legacy_cli_args(
+        tmp_path,
+        target_document_limit=2,
+        execute=True,
+        expected_plan_digest=plan["plan_digest"],
+        approval="approved-for-test",
+    )
+    assert main(execute_args) == 0
+    report = json.loads(capsys.readouterr().out)
+
+    assert report["status"] == "completed_batch_complete"
+    assert report["updated_count"] == 1
+    assert report["postcheck_snapshot_document_count"] == 1
+    assert report["postcheck_gap_count"] == 0
+    assert report["legacy_intersection_count"] == 1
+    assert report["legacy_intersection_snapshot_fingerprint"] == plan[
+        "legacy_intersection_snapshot_fingerprint"
+    ]
+    assert selectors == [
+        {"project": PROJECT, "provider": PROVIDER, "source_locator_hash": ""},
+        {"project": PROJECT, "provider": PROVIDER, "source_locator_hash": ""},
+    ]
+    assert "--legacy-identity-targeted-intersection" in approval_argv[-1]
 
 
 def test_cli_legacy_parser_error_without_an_exact_target_fails_closed(
