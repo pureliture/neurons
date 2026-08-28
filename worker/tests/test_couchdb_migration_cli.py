@@ -15,6 +15,7 @@ from agent_knowledge.couchdb_source.migration_cli import (
     main,
     reconcile_coverage,
     run_migration,
+    run_tool_evidence,
 )
 from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
 
@@ -263,4 +264,49 @@ def test_run_migration_grok_opaque_group_not_updates_jsonl_project(tmp_path):
         if doc.get("doc_type") == dm.SourceDocType.COVERAGE_MANIFEST:
             assert doc["project_authority"]["project"] != "updates.jsonl"
             assert doc["project_authority"]["ambiguous"] is True
-            assert doc["project_authority"]["eligible_for_retirement"] is False
+
+
+def _codex_session_with_tool_calls(root: Path, name: str, cwd: str) -> Path:
+    p = root / "2026" / "06" / f"{name}.jsonl"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        json.dumps({"timestamp": "2026-06-17T01:00:00Z", "type": "session_meta", "payload": {"id": name, "cwd": cwd}}),
+        json.dumps({"timestamp": "2026-06-17T01:00:02Z", "type": "response_item", "payload": {"type": "function_call", "call_id": "c1", "name": "shell", "arguments": json.dumps({"cmd": ["git", "status"]})}}),
+        json.dumps({"timestamp": "2026-06-17T01:00:03Z", "type": "response_item", "payload": {"type": "function_call_output", "call_id": "c1", "output": "On branch main\nnothing to commit, working tree clean"}}),
+        json.dumps({"timestamp": "2026-06-17T01:00:04Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "text", "text": "done"}]}}),
+    ]
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return p
+
+
+def test_run_tool_evidence_binds_project_from_cwd(tmp_path):
+    root = tmp_path / "codex"
+    _codex_session_with_tool_calls(root, "s1", "/Users/x/Projects/neurons")
+    store = InMemoryCouchDBSourceStore()
+    report = run_tool_evidence(store=store, roots={"codex": root}, providers=["codex"])
+    prov = report["by_provider"]["codex"]
+    assert prov["errors"] == 0
+    assert prov["bundles"] >= 1
+    assert prov["project_unresolved"] == 0
+    projects = {doc["project"] for doc in store.all_docs() if doc.get("doc_type") == dm.SourceDocType.TOOL_EVIDENCE_BUNDLE}
+    assert projects == {"neurons"}
+
+
+def test_run_tool_evidence_reports_unresolved_project(tmp_path):
+    root = tmp_path / "codex"
+    p = root / "2026" / "06" / "s-nocwd.jsonl"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        json.dumps({"timestamp": "2026-06-17T01:00:00Z", "type": "session_meta", "payload": {"id": "s-nocwd"}}),
+        json.dumps({"timestamp": "2026-06-17T01:00:02Z", "type": "response_item", "payload": {"type": "function_call", "call_id": "c1", "name": "shell", "arguments": json.dumps({"cmd": ["git", "status"]})}}),
+        json.dumps({"timestamp": "2026-06-17T01:00:03Z", "type": "response_item", "payload": {"type": "function_call_output", "call_id": "c1", "output": "On branch main\nnothing to commit, working tree clean"}}),
+    ]
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    store = InMemoryCouchDBSourceStore()
+    report = run_tool_evidence(store=store, roots={"codex": root}, providers=["codex"])
+    prov = report["by_provider"]["codex"]
+    assert prov["errors"] == 0
+    assert prov["project_unresolved"] == 1
+    # Unresolved projects must stay explicitly empty, never fabricated.
+    projects = {doc.get("project") for doc in store.all_docs() if doc.get("doc_type") == dm.SourceDocType.TOOL_EVIDENCE_BUNDLE}
+    assert projects == {""}

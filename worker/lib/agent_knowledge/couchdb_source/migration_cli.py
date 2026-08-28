@@ -291,20 +291,39 @@ def run_tool_evidence(
     roots = roots if roots is not None else default_source_roots()
     providers = providers or list(MIGRATION_PROVIDERS)
     runtime_dir = runtime_dir or (Path.home() / ".config" / "neurons" / "gemini-normalized")
-    report: dict = {"by_provider": {}, "bundles": 0, "sessions_with_evidence": 0, "errors": 0}
+    report: dict = {"by_provider": {}, "bundles": 0, "sessions_with_evidence": 0, "errors": 0, "project_unresolved": 0}
     for provider in providers:
         root = roots.get(provider)
         files = enumerate_provider_files(provider, Path(root)) if root else []
         if limit is not None:
             files = files[: max(limit, 0)]
-        prov = {"found": len(files), "bundles": 0, "sessions": 0, "errors": 0}
+        prov = {"found": len(files), "bundles": 0, "sessions": 0, "errors": 0, "project_unresolved": 0}
         for path in files:
             try:
                 source_path = path
+                gemini_project = _gemini_project_from_path(path) if provider == "gemini" else ""
                 if provider == "gemini" and path.suffix == ".json":
                     source_path = convert_gemini_json_to_fixture(path, runtime_dir)
                 slh = build_source_locator_hash(str(source_path))
-                records = extract_tool_evidence(provider, str(source_path), project="", source_locator_hash=slh)
+                # Tool evidence bundles must carry the session's authoritative
+                # project, matching the transcript-session parent the import pass
+                # derives from the same source (cwd wins, then the provider's
+                # path-based capture tier). An empty project makes the bundle
+                # invisible to every project-scoped query (including the
+                # temporal evidence inventory), so the project must be bound
+                # here, at extraction time.
+                cwd = extract_cwd(provider, path)
+                project = cwd
+                if not project:
+                    if provider == "antigravity":
+                        project = "antigravity"
+                    elif provider == "gemini":
+                        project = gemini_project
+                    elif provider == "grok":
+                        project = _grok_project_from_path(path)
+                if not project:
+                    prov["project_unresolved"] += 1
+                records = extract_tool_evidence(provider, str(source_path), project=project, source_locator_hash=slh)
                 if not records:
                     continue
                 revs = store_tool_evidence_bundles(records, store=store)
@@ -316,6 +335,7 @@ def run_tool_evidence(
         report["bundles"] += prov["bundles"]
         report["sessions_with_evidence"] += prov["sessions"]
         report["errors"] += prov["errors"]
+        report["project_unresolved"] += prov["project_unresolved"]
     return report
 
 
