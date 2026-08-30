@@ -42,6 +42,21 @@ _TEMPORAL_CHILD_TYPES = (
     SourceDocType.TOOL_EVIDENCE_BUNDLE,
 )
 _CHILD_FIELDS = ["_id", "_rev", "session_id_hash", "observed_at_start", "observed_at_end", "content_hash"]
+_REVISION_SCOPE_FIELDS = ["source_snapshot_schema_version", "current_source_scope"]
+_SNAPSHOT_MARKER_FIELDS = frozenset(_REVISION_SCOPE_FIELDS)
+
+
+def _is_revision_scoped_copy(document: Mapping[str, object]) -> bool:
+    """Whether a fetched family doc is an immutable revision-scoped copy.
+
+    Mirrors ``source_store._is_revision_scoped_source_copy`` without importing
+    the private helper: same field set, tolerant of field projection.
+    """
+
+    return bool(
+        str(document.get("source_snapshot_schema_version") or "")
+        or str(document.get("current_source_scope") or "")
+    )
 _CHUNK_INTEGRITY_FIELDS = [
     "turn_start_index",
     "turn_end_index",
@@ -509,13 +524,13 @@ def inventory_temporal_evidence(
     execution_stats = {"total_docs_examined": 0, "total_keys_examined": 0}
     for doc_type in _FAMILY_TYPES:
         if doc_type == SourceDocType.TRANSCRIPT_SESSION:
-            fields = _SESSION_FIELDS
+            fields = [*_SESSION_FIELDS, *_REVISION_SCOPE_FIELDS]
         elif doc_type == SourceDocType.COVERAGE_MANIFEST:
             fields = _COVERAGE_FIELDS
         elif doc_type == SourceDocType.CONVERSATION_CHUNK:
-            fields = [*_CHILD_FIELDS, *_CHUNK_INTEGRITY_FIELDS]
+            fields = [*_CHILD_FIELDS, *_CHUNK_INTEGRITY_FIELDS, *_REVISION_SCOPE_FIELDS]
         else:
-            fields = [*_CHILD_FIELDS, *_BUNDLE_INTEGRITY_FIELDS]
+            fields = [*_CHILD_FIELDS, *_BUNDLE_INTEGRITY_FIELDS, *_REVISION_SCOPE_FIELDS]
         selector = {"project": project, "doc_type": doc_type}
         _require_indexed_preflight(
             source_store,
@@ -535,6 +550,16 @@ def inventory_temporal_evidence(
             index_name=index_name,
             index_design_document=index_design_document,
         )
+        # Immutable revision-scoped copies (full-generation replacement snapshots)
+        # share the session identity of their originals by design. The inventory
+        # is a *logical source* scanner: it must not count copies as family
+        # members or the canonical originals trip duplicate/consistency gates
+        # that only apply to distinct live documents.
+        documents = [
+            document
+            for document in documents
+            if not _is_revision_scoped_copy(document)
+        ]
         families[doc_type] = documents
         for field, value in family_stats.items():
             execution_stats[field] += value
