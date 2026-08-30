@@ -715,3 +715,35 @@ def test_http_store_sends_explicit_index_and_disables_mango_fallback_without_wri
     assert calls[2][2]["allow_fallback"] is False
     assert calls[2][2]["execution_stats"] is True
     assert calls[2][2]["selector"]["doc_type"] == "conversation_chunk"
+
+
+def test_snapshot_copies_are_not_counted_as_family_documents() -> None:
+    documents = _source_documents()
+    session_hash = documents[0]["session_id_hash"]
+
+    snapshot_copy = {
+        **{k: v for k, v in documents[0].items() if k not in {"_id", "_rev"}},
+        "_id": f"transcript_session:snapshot:{session_hash[-24:]}",
+        "_rev": "2-snapshot-revision-marker",
+        "source_snapshot_schema_version": "source_snapshot.v1",
+        "current_source_scope": json.dumps({"session_id_hash": session_hash}),
+    }
+    chunk_snapshot_copy = {
+        **{k: v for k, v in documents[1].items() if k not in {"_id", "_rev"}},
+        "_id": f"conversation_chunk:snapshot:{session_hash[-24:]}",
+        "_rev": "4-chunk-snapshot-revision-marker",
+        "source_snapshot_schema_version": "source_snapshot.v1",
+    }
+    with_dupes = [*documents, snapshot_copy, chunk_snapshot_copy]
+
+    report = inventory_temporal_evidence(
+        source_store=_FakeCouchSource(with_dupes),
+        project="neurons",
+        limit=10,
+        max_runtime_seconds=10,
+        require_complete_scan=True,
+    )
+
+    assert report["duplicate_transcript_session_count"] == 0
+    assert report["gap_count"] == 0
+    assert report["temporal_complete"] is True
