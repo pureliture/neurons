@@ -16,8 +16,17 @@ from agent_knowledge.couchdb_source.document_model import (
     build_source_revision_token,
     observed_time_bounds,
     sha256_hash,
+    active_source_revision_pointer_doc_id,
+    source_revision_manifest_doc_id,
+    source_revision_member_doc_id,
 )
 from agent_knowledge.couchdb_source.couchdb_http_store import CouchDBHttpSourceStore
+from agent_knowledge.couchdb_source.source_revision import (
+    _manifest_hash,
+    _member_hash,
+    _source_member_descriptor,
+    _source_revision,
+)
 from agent_knowledge.couchdb_source.temporal_evidence_inventory import (
     DEFAULT_INDEX_DESIGN_DOCUMENT,
     DEFAULT_INDEX_NAME,
@@ -230,8 +239,8 @@ def test_cli_reports_complete_only_for_direct_valid_source_evidence_and_redacts_
     assert report["per_family_limit"] == 10
     assert report["global_document_limit"] == 40
     assert report["execution_stats_summary"] == {
-        "total_docs_examined": 4,
-        "total_keys_examined": 4,
+        "total_docs_examined": 6,
+        "total_keys_examined": 6,
     }
     assert report["source_update_seq_start_hash"] == report["source_update_seq_end_hash"]
     assert report["source_update_seq_start_hash"].startswith("sha256:")
@@ -364,7 +373,7 @@ def test_limit_is_per_family_and_global_bound_is_four_families() -> None:
 
 
 def test_inventory_request_timeout_reserves_the_bounded_run_budget() -> None:
-    assert _per_request_timeout_seconds(100) == 10
+    assert _per_request_timeout_seconds(100) == 100 / 16
     assert _per_request_timeout_seconds(600) == 30
 
 
@@ -725,16 +734,35 @@ def test_snapshot_copies_are_not_counted_as_family_documents() -> None:
         **{k: v for k, v in documents[0].items() if k not in {"_id", "_rev"}},
         "_id": f"transcript_session:snapshot:{session_hash[-24:]}",
         "_rev": "2-snapshot-revision-marker",
-        "source_snapshot_schema_version": "source_snapshot.v1",
-        "current_source_scope": json.dumps({"session_id_hash": session_hash}),
+        "source_snapshot_schema_version": "couchdb_source_revision_snapshot.v1",
+        "source_snapshot_scope": sha256_hash("snapshot-scope"),
+        "source_snapshot_origin_id": documents[0]["_id"],
+        "source_hash": sha256_hash("session-source:snapshot"),
     }
     chunk_snapshot_copy = {
         **{k: v for k, v in documents[1].items() if k not in {"_id", "_rev"}},
         "_id": f"conversation_chunk:snapshot:{session_hash[-24:]}",
         "_rev": "4-chunk-snapshot-revision-marker",
-        "source_snapshot_schema_version": "source_snapshot.v1",
+        "source_snapshot_schema_version": "couchdb_source_revision_snapshot.v1",
+        "source_snapshot_scope": sha256_hash("snapshot-scope"),
+        "source_snapshot_origin_id": documents[1]["_id"],
     }
-    with_dupes = [*documents, snapshot_copy, chunk_snapshot_copy]
+    bundle_snapshot_copy = {
+        **{k: v for k, v in documents[2].items() if k not in {"_id", "_rev"}},
+        "_id": f"tool_evidence_bundle:snapshot:{session_hash[-24:]}",
+        "_rev": "5-bundle-snapshot-revision-marker",
+        "source_snapshot_schema_version": "couchdb_source_revision_snapshot.v1",
+        "source_snapshot_scope": sha256_hash("snapshot-scope"),
+        "source_snapshot_origin_id": documents[2]["_id"],
+    }
+    _refresh_manifest_hashes([snapshot_copy, chunk_snapshot_copy, bundle_snapshot_copy, documents[3]])
+    control_documents = _active_controls(
+        session_hash,
+        [snapshot_copy, chunk_snapshot_copy, bundle_snapshot_copy],
+        documents[3]["source_hash"],
+    )
+    documents[3]["active_source_manifest_id"] = control_documents[1]["_id"]
+    with_dupes = [*documents, snapshot_copy, chunk_snapshot_copy, bundle_snapshot_copy, *control_documents]
 
     report = inventory_temporal_evidence(
         source_store=_FakeCouchSource(with_dupes),
@@ -747,3 +775,413 @@ def test_snapshot_copies_are_not_counted_as_family_documents() -> None:
     assert report["duplicate_transcript_session_count"] == 0
     assert report["gap_count"] == 0
     assert report["temporal_complete"] is True
+
+
+def _marked_copy(document: dict, *, scope: str, suffix: str) -> dict:
+    copied = {key: value for key, value in document.items() if key not in {"_id", "_rev"}}
+    copied.update(
+        {
+            "_id": f"{document['doc_type']}:snapshot:{suffix}",
+            "_rev": f"2-{suffix}",
+            "source_snapshot_schema_version": "couchdb_source_revision_snapshot.v1",
+            "source_snapshot_scope": scope,
+            "source_snapshot_origin_id": document["_id"],
+        }
+    )
+    if document["doc_type"] == SourceDocType.TRANSCRIPT_SESSION:
+        copied["source_hash"] = sha256_hash(f"session-source:{suffix}")
+    return copied
+
+
+def _active_controls(session_hash: str, source_documents: list[dict], source_hash: str) -> list[dict]:
+    descriptors = [
+        _source_member_descriptor(source, session_id_hash=session_hash)
+        for source in source_documents
+    ]
+    revision = _source_revision(descriptors)
+    manifest_id = source_revision_manifest_doc_id(session_hash, revision)
+    memberships = []
+    member_documents = []
+    for source, descriptor in zip(source_documents, descriptors, strict=True):
+        member_id = source_revision_member_doc_id(session_hash, revision, source["_id"])
+        membership = {
+            "member_id": member_id,
+            **descriptor,
+            "member_hash": _member_hash(
+                session_id_hash=session_hash,
+                source_revision=revision,
+                descriptor=descriptor,
+                member_id=member_id,
+            ),
+        }
+        memberships.append(membership)
+        member_documents.append(
+            {
+                "_id": member_id,
+                "doc_type": SourceDocType.SOURCE_REVISION_MEMBER,
+                "project": "neurons",
+                "session_id_hash": session_hash,
+                "source_revision": revision,
+                **membership,
+            }
+        )
+    manifest_hash = _manifest_hash(
+        session_id_hash=session_hash,
+        source_revision=revision,
+        source_hash=source_hash,
+        members=memberships,
+        provenance={},
+    )
+    return [
+        {
+            "_id": active_source_revision_pointer_doc_id(session_hash),
+            "doc_type": SourceDocType.ACTIVE_SOURCE_REVISION,
+            "project": "neurons",
+            "session_id_hash": session_hash,
+            "active_revision": revision,
+            "manifest_id": manifest_id,
+            "manifest_hash": manifest_hash,
+            "source_hash": source_hash,
+        },
+        {
+            "_id": manifest_id,
+            "doc_type": SourceDocType.SOURCE_REVISION_MANIFEST,
+            "project": "neurons",
+            "session_id_hash": session_hash,
+            "source_revision": revision,
+            "manifest_hash": manifest_hash,
+            "source_hash": source_hash,
+            "provenance": {},
+            "members": memberships,
+        },
+        *member_documents,
+    ]
+
+
+def test_partial_active_snapshot_is_blocked() -> None:
+    documents = _source_documents()
+    session_hash = documents[0]["session_id_hash"]
+    scope = sha256_hash("partial-scope")
+    snapshot_session = _marked_copy(documents[0], scope=scope, suffix="partial-session")
+    snapshot_chunk = _marked_copy(documents[1], scope=scope, suffix="partial-chunk")
+    source_hash = documents[3]["source_hash"]
+    missing_bundle = _marked_copy(documents[2], scope=scope, suffix="missing-bundle")
+    controls = _active_controls(
+        session_hash,
+        [snapshot_session, snapshot_chunk, missing_bundle],
+        source_hash,
+    )
+
+    report = inventory_temporal_evidence(
+        source_store=_FakeCouchSource([*documents, snapshot_session, snapshot_chunk, *controls]),
+        project="neurons",
+        limit=10,
+        max_runtime_seconds=10,
+        require_complete_scan=True,
+    )
+
+    assert report["gap_count"] > 0
+    assert report["temporal_complete"] is False
+
+
+def test_marked_document_without_session_id_is_not_dropped() -> None:
+    documents = _source_documents()
+    marked = _marked_copy(
+        documents[1],
+        scope=sha256_hash("empty-session-scope"),
+        suffix="empty-session-chunk",
+    )
+    marked["session_id_hash"] = ""
+
+    report = inventory_temporal_evidence(
+        source_store=_FakeCouchSource([*documents, marked]),
+        project="neurons",
+        limit=10,
+        max_runtime_seconds=10,
+        require_complete_scan=True,
+    )
+
+    assert report["missing_chunk_session_id_count"] > 0
+    assert report["gap_count"] > 0
+    assert report["temporal_complete"] is False
+
+
+def test_active_pointer_selects_one_generation_when_old_scope_coexists() -> None:
+    documents = _source_documents()
+    session_hash = documents[0]["session_id_hash"]
+    active_scope = sha256_hash("active-scope")
+    old_scope = sha256_hash("old-scope")
+    active = [
+        _marked_copy(documents[index], scope=active_scope, suffix=f"active-{index}")
+        for index in range(3)
+    ]
+    old = [
+        _marked_copy(documents[index], scope=old_scope, suffix=f"old-{index}")
+        for index in range(3)
+    ]
+    _refresh_manifest_hashes([*active, documents[3]])
+    controls = _active_controls(
+        session_hash,
+        active,
+        documents[3]["source_hash"],
+    )
+    documents[3]["active_source_manifest_id"] = controls[1]["_id"]
+
+    report = inventory_temporal_evidence(
+        source_store=_FakeCouchSource([*documents, *active, *old, *controls]),
+        project="neurons",
+        limit=10,
+        max_runtime_seconds=10,
+        require_complete_scan=True,
+    )
+
+    assert report["duplicate_transcript_session_count"] == 0
+    assert report["gap_count"] == 0
+    assert report["temporal_complete"] is True
+
+
+def test_current_copy_wrapped_in_generic_snapshot_is_valid() -> None:
+    documents = _source_documents()
+    session_hash = documents[0]["session_id_hash"]
+    scope = sha256_hash("nested-snapshot-scope")
+    active = [
+        _marked_copy(documents[index], scope=scope, suffix=f"nested-{index}")
+        for index in range(3)
+    ]
+    for row in active:
+        row["current_source_scope"] = sha256_hash(f"current:{row['_id']}")
+        row["supersedes_source_document_hash"] = sha256_hash(str(row["source_snapshot_origin_id"]))
+    _refresh_manifest_hashes([*active, documents[3]])
+    controls = _active_controls(session_hash, active, documents[3]["source_hash"])
+    documents[3]["active_source_manifest_id"] = controls[1]["_id"]
+
+    report = inventory_temporal_evidence(
+        source_store=_FakeCouchSource([*documents, *active, *controls]),
+        project="neurons",
+        limit=10,
+        max_runtime_seconds=10,
+        require_complete_scan=True,
+    )
+
+    assert report["gap_count"] == 0
+    assert report["temporal_complete"] is True
+
+
+def test_missing_revision_member_is_blocked() -> None:
+    documents = _source_documents()
+    session_hash = documents[0]["session_id_hash"]
+    active = [
+        _marked_copy(documents[index], scope=sha256_hash("missing-member-scope"), suffix=f"missing-{index}")
+        for index in range(3)
+    ]
+    _refresh_manifest_hashes([*active, documents[3]])
+    controls = _active_controls(session_hash, active, documents[3]["source_hash"])
+    documents[3]["active_source_manifest_id"] = controls[1]["_id"]
+
+    report = inventory_temporal_evidence(
+        source_store=_FakeCouchSource([*documents, *active, *controls[:-1]]),
+        project="neurons",
+        limit=10,
+        max_runtime_seconds=10,
+        require_complete_scan=True,
+    )
+
+    assert report["gap_count"] > 0
+    assert report["temporal_complete"] is False
+
+
+def test_invalid_pointer_identity_is_blocked() -> None:
+    documents = _source_documents()
+    session_hash = documents[0]["session_id_hash"]
+    active = [
+        _marked_copy(documents[index], scope=sha256_hash("invalid-pointer-scope"), suffix=f"pointer-{index}")
+        for index in range(3)
+    ]
+    _refresh_manifest_hashes([*active, documents[3]])
+    controls = _active_controls(session_hash, active, documents[3]["source_hash"])
+    documents[3]["active_source_manifest_id"] = controls[1]["_id"]
+    controls[0]["_id"] = "active_source_revision:wrong"
+
+    report = inventory_temporal_evidence(
+        source_store=_FakeCouchSource([*documents, *active, *controls]),
+        project="neurons",
+        limit=10,
+        max_runtime_seconds=10,
+        require_complete_scan=True,
+    )
+
+    assert report["gap_count"] > 0
+    assert report["temporal_complete"] is False
+
+
+def test_marked_coverage_manifest_is_not_silently_accepted() -> None:
+    documents = _source_documents()
+    documents[3].update(
+        {
+            "source_snapshot_schema_version": "couchdb_source_revision_snapshot.v1",
+            "source_snapshot_scope": sha256_hash("coverage-marker-scope"),
+            "source_snapshot_origin_id": documents[3]["_id"],
+        }
+    )
+
+    report = inventory_temporal_evidence(
+        source_store=_FakeCouchSource(documents),
+        project="neurons",
+        limit=10,
+        max_runtime_seconds=10,
+        require_complete_scan=True,
+    )
+
+    assert report["gap_count"] > 0
+    assert report["temporal_complete"] is False
+
+
+def test_mutually_rehashed_pointer_and_manifest_is_blocked_by_source_hash() -> None:
+    documents = _source_documents()
+    session_hash = documents[0]["session_id_hash"]
+    active = [
+        _marked_copy(documents[index], scope=sha256_hash("forged-source-scope"), suffix=f"forged-{index}")
+        for index in range(3)
+    ]
+    _refresh_manifest_hashes([*active, documents[3]])
+    controls = _active_controls(session_hash, active, sha256_hash("forged-source-hash"))
+    documents[3]["active_source_manifest_id"] = controls[1]["_id"]
+
+    report = inventory_temporal_evidence(
+        source_store=_FakeCouchSource([*documents, *active, *controls]),
+        project="neurons",
+        limit=10,
+        max_runtime_seconds=10,
+        require_complete_scan=True,
+    )
+
+    assert report["gap_count"] > 0
+    assert report["temporal_complete"] is False
+
+
+def test_document_hash_generation_is_not_accepted_without_body_proof() -> None:
+    documents = _source_documents()
+    session_hash = documents[0]["session_id_hash"]
+    active_session = _marked_copy(
+        documents[0],
+        scope=sha256_hash("document-hash-scope"),
+        suffix="document-hash-session",
+    )
+    active_session.pop("source_hash", None)
+    active_session["body"] = "tampered body"
+    active = [active_session, _marked_copy(documents[1], scope=sha256_hash("document-hash-scope"), suffix="document-hash-chunk"), _marked_copy(documents[2], scope=sha256_hash("document-hash-scope"), suffix="document-hash-bundle")]
+    _refresh_manifest_hashes([*active, documents[3]])
+    controls = _active_controls(session_hash, active, documents[3]["source_hash"])
+    documents[3]["active_source_manifest_id"] = controls[1]["_id"]
+
+    report = inventory_temporal_evidence(
+        source_store=_FakeCouchSource([*documents, *active, *controls]),
+        project="neurons",
+        limit=10,
+        max_runtime_seconds=10,
+        require_complete_scan=True,
+    )
+
+    assert report["gap_count"] > 0
+    assert report["temporal_complete"] is False
+
+
+def test_snapshot_origin_binding_is_verified() -> None:
+    documents = _source_documents()
+    session_hash = documents[0]["session_id_hash"]
+    scope = sha256_hash("origin-binding-scope")
+    active = [
+        _marked_copy(documents[index], scope=scope, suffix=f"origin-{index}")
+        for index in range(3)
+    ]
+    active[1]["source_snapshot_origin_id"] = "conversation_chunk:missing-origin"
+    _refresh_manifest_hashes([*active, documents[3]])
+    controls = _active_controls(session_hash, active, documents[3]["source_hash"])
+    documents[3]["active_source_manifest_id"] = controls[1]["_id"]
+
+    report = inventory_temporal_evidence(
+        source_store=_FakeCouchSource([*documents, *active, *controls]),
+        project="neurons",
+        limit=10,
+        max_runtime_seconds=10,
+        require_complete_scan=True,
+    )
+
+    assert report["gap_count"] > 0
+    assert report["temporal_complete"] is False
+
+
+def test_oversized_session_membership_is_blocked() -> None:
+    """A manifest with more members than the per-session ceiling is malformed, not a query oracle."""
+
+    documents = _source_documents()
+    session_hash = documents[0]["session_id_hash"]
+    active = [
+        _marked_copy(documents[index], scope=sha256_hash("bound-scope"), suffix=f"bound-{index}")
+        for index in range(3)
+    ]
+    _refresh_manifest_hashes([*active, documents[3]])
+    controls = _active_controls(session_hash, active, documents[3]["source_hash"])
+    manifest = controls[1]
+    descriptors = [
+        _source_member_descriptor(source, session_id_hash=session_hash)
+        for source in active
+    ]
+    revision = _source_revision(descriptors)
+    # limit=2 -> per-session ceiling = 2*2+1 = 5; the fixture holds 3, so add
+    # 3 forged memberships to reach 6 > 5.
+    memberships = list(manifest["members"])
+    for forged_index in range(3):
+        forged_source_id = f"conversation_chunk:forged-overflow-{forged_index}"
+        forged_member_id = source_revision_member_doc_id(session_hash, revision, forged_source_id)
+        forged_descriptor = {**descriptors[1], "source_document_id": forged_source_id}
+        memberships.append(
+            {
+                "member_id": forged_member_id,
+                **forged_descriptor,
+                "member_hash": _member_hash(
+                    session_id_hash=session_hash,
+                    source_revision=revision,
+                    descriptor=forged_descriptor,
+                    member_id=forged_member_id,
+                ),
+            }
+        )
+    manifest_hash = _manifest_hash(
+        session_id_hash=session_hash,
+        source_revision=revision,
+        source_hash=documents[3]["source_hash"],
+        members=memberships,
+        provenance={},
+    )
+    manifest["members"] = memberships
+    manifest["manifest_hash"] = manifest_hash
+    pointer = controls[0]
+    pointer["manifest_hash"] = manifest_hash
+
+    store = _FakeCouchSource(documents + active + controls)
+    # Materialize the forged members so only the bound check, not a missing
+    # member document, can be the reason for blocking.
+    forged_member_docs = [
+        {
+            "_id": m["member_id"],
+            "doc_type": SourceDocType.SOURCE_REVISION_MEMBER,
+            "project": "neurons",
+            "session_id_hash": session_hash,
+            "source_revision": revision,
+            **m,
+        }
+        for m in memberships[3:]
+    ]
+    store.documents = [*store.documents, *forged_member_docs]
+
+    report = inventory_temporal_evidence(
+        source_store=store,
+        project="neurons",
+        limit=2,
+        max_runtime_seconds=10,
+        require_complete_scan=True,
+    )
+
+    assert report["gap_count"] > 0
+    assert report["temporal_complete"] is False
