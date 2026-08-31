@@ -20,11 +20,15 @@ from datetime import datetime, timezone
 
 from .document_model import (
     SourceDocType,
+    active_source_revision_pointer_doc_id,
     build_coverage_hash,
     build_source_hash,
     build_source_revision_token,
     observed_time_bounds,
+    source_revision_manifest_doc_id,
+    source_revision_member_doc_id,
 )
+from .source_revision import _member_hash, _parse_manifest, _source_hash, _source_revision
 
 
 INVENTORY_SCHEMA_VERSION = "couchdb_temporal_evidence_inventory.v1"
@@ -41,22 +45,516 @@ _TEMPORAL_CHILD_TYPES = (
     SourceDocType.CONVERSATION_CHUNK,
     SourceDocType.TOOL_EVIDENCE_BUNDLE,
 )
-_CHILD_FIELDS = ["_id", "_rev", "session_id_hash", "observed_at_start", "observed_at_end", "content_hash"]
-_REVISION_SCOPE_FIELDS = ["source_snapshot_schema_version", "current_source_scope"]
-_SNAPSHOT_MARKER_FIELDS = frozenset(_REVISION_SCOPE_FIELDS)
+_CHILD_FIELDS = ["_id", "_rev", "doc_type", "session_id_hash", "observed_at_start", "observed_at_end", "content_hash"]
+_REVISION_SCOPE_FIELDS = [
+    "source_snapshot_schema_version",
+    "source_snapshot_scope",
+    "source_snapshot_origin_id",
+    "current_source_scope",
+    "supersedes_source_document_hash",
+]
+_SOURCE_SNAPSHOT_SCHEMA_VERSION = "couchdb_source_revision_snapshot.v1"
+
+
+def _revision_generation(document: Mapping[str, object]) -> tuple[str, str]:
+    """Return ``(state, generation_key)`` for one source document.
+
+    ``valid`` is emitted only for the exact immutable-copy contracts owned by
+    ``source_revision.py``. Any partially-present or malformed marker is
+    ``invalid`` so it can never silently disappear from inventory accounting.
+    """
+
+    marker_present = any(field in document for field in _REVISION_SCOPE_FIELDS)
+    if not marker_present:
+        return "legacy", ""
+
+    snapshot_fields_present = any(
+        field in document
+        for field in (
+            "source_snapshot_schema_version",
+            "source_snapshot_scope",
+            "source_snapshot_origin_id",
+        )
+    )
+    current_fields_present = any(
+        field in document
+        for field in ("current_source_scope", "supersedes_source_document_hash")
+    )
+    if snapshot_fields_present:
+        schema = str(document.get("source_snapshot_schema_version") or "")
+        scope = str(document.get("source_snapshot_scope") or "")
+        origin_id = str(document.get("source_snapshot_origin_id") or "")
+        if (
+            schema != _SOURCE_SNAPSHOT_SCHEMA_VERSION
+            or _SHA256_RE.fullmatch(scope) is None
+            or not origin_id
+        ):
+            return "invalid", ""
+        if current_fields_present:
+            current_scope = str(document.get("current_source_scope") or "")
+            superseded_hash = str(document.get("supersedes_source_document_hash") or "")
+            if (
+                _SHA256_RE.fullmatch(current_scope) is None
+                or _SHA256_RE.fullmatch(superseded_hash) is None
+            ):
+                return "invalid", ""
+        return "valid", f"snapshot:{scope}"
+
+    scope = str(document.get("current_source_scope") or "")
+    superseded_hash = str(document.get("supersedes_source_document_hash") or "")
+    if _SHA256_RE.fullmatch(scope) is None or _SHA256_RE.fullmatch(superseded_hash) is None:
+        return "invalid", ""
+    return "valid", f"current:{scope}"
 
 
 def _is_revision_scoped_copy(document: Mapping[str, object]) -> bool:
-    """Whether a fetched family doc is an immutable revision-scoped copy.
+    state, _generation = _revision_generation(document)
+    return state == "valid"
 
-    Mirrors ``source_store._is_revision_scoped_source_copy`` without importing
-    the private helper: same field set, tolerant of field projection.
+
+def _load_active_generation_controls(
+    source_store: object,
+    *,
+    project: str,
+    limit: int,
+    index_name: str,
+    index_design_document: str,
+) -> tuple[
+    dict[str, dict[str, dict[str, str]]],
+    dict[str, str],
+    dict[str, str],
+    set[str],
+    dict[str, int],
+]:
+    """Load active source-revision controls with exact bounded membership.
+
+    Pointer and revision-manifest documents are read first. Their validated
+    member IDs then form the selector for the single member query, so the
+    control scan is bounded by the actual active generation rather than an
+    unrelated fixed global ceiling.
     """
 
-    return bool(
-        str(document.get("source_snapshot_schema_version") or "")
-        or str(document.get("current_source_scope") or "")
+    pointer_fields = [
+        "_id", "doc_type", "session_id_hash", "project", "active_revision",
+        "manifest_id", "manifest_hash", "source_hash",
+    ]
+    manifest_fields = [
+        "_id", "doc_type", "session_id_hash", "project", "source_revision",
+        "manifest_hash", "source_hash", "members", "provenance",
+    ]
+    member_fields = [
+        "_id", "doc_type", "session_id_hash", "project", "source_revision",
+        "member_id", "source_document_id", "source_doc_type",
+        "material_hash_field", "material_hash", "member_revision_hash",
+        "source_document_hash", "member_hash",
+    ]
+    selector = {"project": project}
+    for doc_type, fields in (
+        (SourceDocType.ACTIVE_SOURCE_REVISION, pointer_fields),
+        (SourceDocType.SOURCE_REVISION_MANIFEST, manifest_fields),
+    ):
+        _require_indexed_preflight(
+            source_store,
+            selector={**selector, "doc_type": doc_type},
+            fields=fields,
+            bounded_limit=limit + 1,
+            index_name=index_name,
+            index_design_document=index_design_document,
+        )
+
+    pointer_documents, pointer_stats = _bounded_docs(
+        source_store,
+        doc_type=SourceDocType.ACTIVE_SOURCE_REVISION,
+        project=project,
+        fields=pointer_fields,
+        limit=limit,
+        index_name=index_name,
+        index_design_document=index_design_document,
     )
+    manifest_documents, manifest_stats = _bounded_docs(
+        source_store,
+        doc_type=SourceDocType.SOURCE_REVISION_MANIFEST,
+        project=project,
+        fields=manifest_fields,
+        limit=limit,
+        index_name=index_name,
+        index_design_document=index_design_document,
+    )
+
+    manifests_by_id = {
+        str(document.get("_id") or ""): document
+        for document in manifest_documents
+    }
+    pointers_by_sid: dict[str, list[dict[str, object]]] = {}
+    blocked: set[str] = set()
+    for pointer in pointer_documents:
+        sid = str(pointer.get("session_id_hash") or "")
+        if not sid or str(pointer.get("_id") or "") != active_source_revision_pointer_doc_id(sid):
+            blocked.add(sid)
+            continue
+        pointers_by_sid.setdefault(sid, []).append(pointer)
+
+    pending: list[
+        tuple[
+            str,
+            dict[str, object],
+            str,
+            str,
+            list[dict[str, object]],
+            list[dict[str, object]],
+        ]
+    ] = []
+    member_ids: set[str] = set()
+    active_manifest_ids: dict[str, str] = {}
+    active_source_hashes: dict[str, str] = {}
+    # Membership is bounded by the same ceilings as the family scans: a
+    # session can reference at most every scanned transcript/chunk/bundle
+    # (2 * limit + 1), and the whole project's active membership can never
+    # exceed the global document ceiling (4 * limit) because every member
+    # must resolve to a distinct scanned source document to be selectable.
+    # Anything beyond those bounds is a malformed control set, and honouring
+    # it would let one manifest dictate an unbounded `$in` query.
+    max_members_per_session = 2 * limit + 1
+    max_total_members = limit * 4
+    for sid, candidates in pointers_by_sid.items():
+        if len(candidates) != 1:
+            blocked.add(sid)
+            continue
+        pointer = candidates[0]
+        active_revision = str(pointer.get("active_revision") or "")
+        manifest_id = str(pointer.get("manifest_id") or "")
+        pointer_manifest_hash = str(pointer.get("manifest_hash") or "")
+        pointer_source_hash = str(pointer.get("source_hash") or "")
+        if (
+            _SHA256_RE.fullmatch(active_revision) is None
+            or _SHA256_RE.fullmatch(pointer_manifest_hash) is None
+            or _SHA256_RE.fullmatch(pointer_source_hash) is None
+            or manifest_id != source_revision_manifest_doc_id(sid, active_revision)
+        ):
+            blocked.add(sid)
+            continue
+        manifest = manifests_by_id.get(manifest_id)
+        try:
+            parsed_members = _parse_manifest(
+                manifest or {},
+                session_id_hash=sid,
+                active_revision=active_revision,
+                expected_manifest_hash=pointer_manifest_hash,
+                expected_source_hash=pointer_source_hash,
+            )
+        except Exception:
+            blocked.add(sid)
+            continue
+        descriptors: list[dict[str, object]] = []
+        valid = len(parsed_members) <= max_members_per_session
+        for membership in parsed_members:
+            source_id = str(membership.get("source_document_id") or "")
+            member_id = str(membership.get("member_id") or "")
+            source_type = str(membership.get("source_doc_type") or "")
+            material_field = str(membership.get("material_hash_field") or "")
+            if (
+                source_type not in {
+                    SourceDocType.TRANSCRIPT_SESSION,
+                    SourceDocType.CONVERSATION_CHUNK,
+                    SourceDocType.TOOL_EVIDENCE_BUNDLE,
+                }
+                or not source_id
+                or member_id != source_revision_member_doc_id(sid, active_revision, source_id)
+                or material_field not in {"content_hash", "coverage_hash", "source_hash", "document_hash"}
+                or any(
+                    _SHA256_RE.fullmatch(str(membership.get(field) or "")) is None
+                    for field in ("material_hash", "member_revision_hash", "source_document_hash", "member_hash")
+                )
+            ):
+                valid = False
+                break
+            descriptor = {
+                key: membership.get(key)
+                for key in (
+                    "source_document_id",
+                    "source_doc_type",
+                    "material_hash_field",
+                    "material_hash",
+                    "member_revision_hash",
+                    "source_document_hash",
+                )
+            }
+            descriptors.append(descriptor)
+            member_ids.add(member_id)
+        if not valid or not descriptors or _source_revision(descriptors) != active_revision:
+            blocked.add(sid)
+            continue
+        pending.append((sid, pointer, active_revision, manifest_id, parsed_members, descriptors))
+        active_manifest_ids[sid] = manifest_id
+        active_source_hashes[sid] = pointer_source_hash
+
+    member_documents: list[dict[str, object]] = []
+    member_stats = {"total_docs_examined": 0, "total_keys_examined": 0}
+    if not member_ids:
+        pass
+    elif len(member_ids) > max_total_members:
+        # The aggregate control set already exceeds the global document
+        # ceiling; fail closed instead of issuing an unbounded `$in` query.
+        raise _InventoryBlocked("membership_bound_exceeded")
+    else:
+        _require_indexed_preflight(
+            source_store,
+            selector={**selector, "doc_type": SourceDocType.SOURCE_REVISION_MEMBER, "_id": {"$in": sorted(member_ids)}},
+            fields=member_fields,
+            bounded_limit=len(member_ids) + 1,
+            index_name=index_name,
+            index_design_document=index_design_document,
+        )
+        member_documents, member_stats = _bounded_docs(
+            source_store,
+            doc_type=SourceDocType.SOURCE_REVISION_MEMBER,
+            project=project,
+            fields=member_fields,
+            limit=len(member_ids),
+            index_name=index_name,
+            index_design_document=index_design_document,
+            selector_extra={"_id": {"$in": sorted(member_ids)}},
+        )
+    members_by_id = {str(document.get("_id") or ""): document for document in member_documents}
+    controls: dict[str, dict[str, dict[str, str]]] = {}
+    for sid, _pointer, active_revision, _manifest_id, parsed_members, _descriptors in pending:
+        details: dict[str, dict[str, str]] = {}
+        valid = True
+        for membership in parsed_members:
+            member_id = str(membership.get("member_id") or "")
+            member = members_by_id.get(member_id)
+            if member is None:
+                valid = False
+                break
+            member_fields_for_hash = {
+                key: membership.get(key)
+                for key in (
+                    "source_document_id",
+                    "source_doc_type",
+                    "material_hash_field",
+                    "material_hash",
+                    "member_revision_hash",
+                    "source_document_hash",
+                )
+            }
+            if (
+                str(member.get("doc_type") or "") != SourceDocType.SOURCE_REVISION_MEMBER
+                or str(member.get("session_id_hash") or "") != sid
+                or str(member.get("project") or "") != project
+                or str(member.get("source_revision") or "") != active_revision
+                or any(member.get(key) != value for key, value in membership.items())
+                or str(member.get("member_hash") or "") != _member_hash(
+                    session_id_hash=sid,
+                    source_revision=active_revision,
+                    descriptor=member_fields_for_hash,
+                    member_id=member_id,
+                )
+            ):
+                valid = False
+                break
+            source_id = str(membership.get("source_document_id") or "")
+            details[source_id] = {
+                "source_doc_type": str(membership.get("source_doc_type") or ""),
+                "material_hash_field": str(membership.get("material_hash_field") or ""),
+                "material_hash": str(membership.get("material_hash") or ""),
+                "member_revision_hash": str(membership.get("member_revision_hash") or ""),
+                "source_document_hash": str(membership.get("source_document_hash") or ""),
+            }
+        if not valid:
+            blocked.add(sid)
+            active_manifest_ids.pop(sid, None)
+            active_source_hashes.pop(sid, None)
+            continue
+        controls[sid] = details
+
+    stats = {
+        "total_docs_examined": (
+            pointer_stats["total_docs_examined"]
+            + manifest_stats["total_docs_examined"]
+            + member_stats["total_docs_examined"]
+        ),
+        "total_keys_examined": (
+            pointer_stats["total_keys_examined"]
+            + manifest_stats["total_keys_examined"]
+            + member_stats["total_keys_examined"]
+        ),
+    }
+    return controls, active_manifest_ids, active_source_hashes, blocked, stats
+
+
+
+def _select_logical_family_documents(
+    families: Mapping[str, list[dict[str, object]]],
+    *,
+    active_member_ids: Mapping[str, Mapping[str, Mapping[str, str]]],
+    active_manifest_ids: Mapping[str, str],
+    active_source_hashes: Mapping[str, str],
+    blocked_sessions: set[str],
+) -> tuple[dict[str, list[dict[str, object]]], int]:
+    """Select only a verified active generation, otherwise legacy documents.
+
+    A snapshot is selected only when its exact document-id set equals the active
+    source-revision manifest membership. Partial snapshots, multiple scopes, and
+    malformed markers are counted as blocked and never reported complete.
+    """
+
+    source_families = {
+        doc_type: documents
+        for doc_type, documents in families.items()
+        if doc_type != SourceDocType.COVERAGE_MANIFEST
+    }
+    groups: dict[str, dict[str, list[dict[str, object]]]] = {}
+    invalid_sessions: set[str] = set()
+    for documents in source_families.values():
+        for document in documents:
+            sid = str(document.get("session_id_hash") or "")
+            state, generation = _revision_generation(document)
+            if state == "invalid":
+                invalid_sessions.add(sid)
+            elif state == "valid" and sid:
+                groups.setdefault(sid, {}).setdefault(generation, []).append(document)
+
+    selected: dict[str, list[dict[str, object]]] = {}
+    blocked_count = len(blocked_sessions) + len(invalid_sessions)
+    valid_snapshot_sessions = set(groups)
+    blocked_count += len(valid_snapshot_sessions - set(active_member_ids))
+    source_by_id = {
+        str(document.get("_id") or ""): document
+        for documents in source_families.values()
+        for document in documents
+        if str(document.get("_id") or "")
+    }
+    selected_generation: dict[str, str] = {}
+    for sid, expected_details in active_member_ids.items():
+        expected_types = {
+            source_id: str(details.get("source_doc_type") or "")
+            for source_id, details in expected_details.items()
+        }
+        matching_generations = [
+            (generation, group)
+            for generation, group in groups.get(sid, {}).items()
+            if {str(row.get("_id") or "") for row in group} == set(expected_types)
+        ]
+        if len(matching_generations) != 1:
+            blocked_count += 1
+            continue
+        generation, group = matching_generations[0]
+        source_valid = True
+        for source_id, source_type in expected_types.items():
+            source = source_by_id.get(source_id)
+            detail = expected_details[source_id]
+            material_field = str(detail.get("material_hash_field") or "")
+            if (
+                source is None
+                or str(source.get("doc_type") or "") != source_type
+                or str(source.get("session_id_hash") or "") != sid
+                or material_field not in {"content_hash", "coverage_hash", "source_hash", "document_hash"}
+            ):
+                source_valid = False
+                break
+            snapshot_origin_id = str(source.get("source_snapshot_origin_id") or "")
+            if snapshot_origin_id:
+                # Production contract (source_revision.py
+                # build_revision_scoped_source_documents) stores the origin
+                # document's raw `_id` here, not a typed copy id, so the
+                # binding is an origin-resolvability contract rather than a
+                # prefix one. The snapshot copy is only trusted when its
+                # origin is actually visible in this scanned family view,
+                # shares the session and type, and is itself not another
+                # marked copy (generic-over-generic chains are not an
+                # active-source contract, mirroring
+                # _validated_immediate_snapshot_origin_id).
+                origin = source_by_id.get(snapshot_origin_id)
+                if (
+                    origin is None
+                    or str(origin.get("session_id_hash") or "") != sid
+                    or str(origin.get("doc_type") or "") != source_type
+                    or _revision_generation(origin)[0] == "valid"
+                ):
+                    source_valid = False
+                    break
+            current_scope = str(source.get("current_source_scope") or "")
+            superseded_hash = str(source.get("supersedes_source_document_hash") or "")
+            if current_scope and not superseded_hash:
+                source_valid = False
+                break
+            if not current_scope and superseded_hash:
+                source_valid = False
+                break
+            if material_field != "document_hash":
+                try:
+                    source_valid = (
+                        str(source.get(material_field) or "") == str(detail.get("material_hash") or "")
+                        and build_source_revision_token(
+                            source,
+                            material_hash_field=material_field,
+                        )
+                        == str(detail.get("member_revision_hash") or "")
+                    )
+                except (TypeError, ValueError):
+                    source_valid = False
+            else:
+                # The inventory deliberately does not project private bodies.
+                # A document-hash source cannot be proven from this redacted
+                # view, so it remains blocked rather than being accepted on an
+                # incomplete descriptor.
+                source_valid = False
+            if not source_valid:
+                break
+        if source_valid:
+            try:
+                canonical_source_hash = _source_hash(group)
+                source_valid = canonical_source_hash == active_source_hashes.get(sid)
+            except (TypeError, ValueError):
+                source_valid = False
+        if not source_valid:
+            blocked_count += 1
+            continue
+        selected_generation[sid] = generation
+
+    for doc_type, documents in families.items():
+        if doc_type == SourceDocType.COVERAGE_MANIFEST:
+            manifest_rows: list[dict[str, object]] = []
+            for document in documents:
+                state, _generation = _revision_generation(document)
+                if state != "legacy":
+                    blocked_count += 1
+                sid = str(document.get("session_id_hash") or "")
+                expected_manifest_id = active_manifest_ids.get(sid)
+                actual_manifest_id = str(document.get("active_source_manifest_id") or "")
+                if (
+                    expected_manifest_id is not None
+                    and actual_manifest_id != expected_manifest_id
+                ) or (
+                    expected_manifest_id is None
+                    and actual_manifest_id
+                ):
+                    blocked_count += 1
+                manifest_rows.append(document)
+            selected[doc_type] = manifest_rows
+            continue
+        rows: list[dict[str, object]] = []
+        for document in documents:
+            sid = str(document.get("session_id_hash") or "")
+            state, generation = _revision_generation(document)
+            if not sid and state != "legacy":
+                # Preserve malformed marked documents so the existing missing
+                # session-id counters observe them instead of dropping them.
+                rows.append(document)
+                continue
+            if sid in blocked_sessions or sid in invalid_sessions:
+                # Keep both generations visible so a blocked control state cannot
+                # accidentally look complete; the explicit blocked count below
+                # also handles the single-partial-generation case.
+                rows.append(document)
+                continue
+            if sid in selected_generation:
+                if state == "valid" and generation == selected_generation[sid]:
+                    rows.append(document)
+            elif state == "legacy":
+                rows.append(document)
+        selected[doc_type] = rows
+    return selected, blocked_count
 _CHUNK_INTEGRITY_FIELDS = [
     "turn_start_index",
     "turn_end_index",
@@ -75,6 +573,7 @@ _BUNDLE_INTEGRITY_FIELDS = [
 _COVERAGE_FIELDS = [
     "_id",
     "_rev",
+    "doc_type",
     "session_id_hash",
     "observed_at_start",
     "observed_at_end",
@@ -83,18 +582,21 @@ _COVERAGE_FIELDS = [
     "conversation_coverage_hash",
     "tool_evidence_coverage_hash",
     "source_hash",
+    "active_source_manifest_id",
 ]
 _EXECUTION_SCAN_MULTIPLIER = 2
-_EXPECTED_INVENTORY_REQUEST_COUNT = 2 + (2 * len(_FAMILY_TYPES))
+_EXPECTED_INVENTORY_REQUEST_COUNT = 2 + (2 * (len(_FAMILY_TYPES) + 3))
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SESSION_FIELDS = [
     "_id",
     "_rev",
+    "doc_type",
     "session_id_hash",
     "observed_at_start",
     "observed_at_end",
     "started_at",
     "ended_at",
+    "source_hash",
 ]
 _CONFIGURATION_ERRORS = frozenset(
     {
@@ -186,7 +688,7 @@ def _index_field_names(index: Mapping[str, object]) -> set[str]:
 def _require_indexed_preflight(
     store: object,
     *,
-    selector: Mapping[str, str],
+    selector: Mapping[str, object],
     fields: list[str],
     bounded_limit: int,
     index_name: str,
@@ -258,6 +760,7 @@ def _bounded_docs(
     limit: int,
     index_name: str,
     index_design_document: str,
+    selector_extra: Mapping[str, object] | None = None,
 ) -> tuple[list[dict[str, object]], dict[str, int]]:
     find_by_type = getattr(store, "find_by_type_with_execution_stats", None)
     if not callable(find_by_type):
@@ -266,7 +769,7 @@ def _bounded_docs(
         payload = find_by_type(
             doc_type,
             fields=fields,
-            selector={"project": project},
+            selector={"project": project, **dict(selector_extra or {})},
             limit=limit + 1,
             use_index=[index_design_document, index_name],
             allow_fallback=False,
@@ -526,7 +1029,7 @@ def inventory_temporal_evidence(
         if doc_type == SourceDocType.TRANSCRIPT_SESSION:
             fields = [*_SESSION_FIELDS, *_REVISION_SCOPE_FIELDS]
         elif doc_type == SourceDocType.COVERAGE_MANIFEST:
-            fields = _COVERAGE_FIELDS
+            fields = [*_COVERAGE_FIELDS, *_REVISION_SCOPE_FIELDS]
         elif doc_type == SourceDocType.CONVERSATION_CHUNK:
             fields = [*_CHILD_FIELDS, *_CHUNK_INTEGRITY_FIELDS, *_REVISION_SCOPE_FIELDS]
         else:
@@ -550,20 +1053,28 @@ def inventory_temporal_evidence(
             index_name=index_name,
             index_design_document=index_design_document,
         )
-        # Immutable revision-scoped copies (full-generation replacement snapshots)
-        # share the session identity of their originals by design. The inventory
-        # is a *logical source* scanner: it must not count copies as family
-        # members or the canonical originals trip duplicate/consistency gates
-        # that only apply to distinct live documents.
-        documents = [
-            document
-            for document in documents
-            if not _is_revision_scoped_copy(document)
-        ]
         families[doc_type] = documents
         for field, value in family_stats.items():
             execution_stats[field] += value
         _check_deadline(started=started, max_runtime_seconds=max_runtime_seconds, monotonic=monotonic)
+    _check_deadline(started=started, max_runtime_seconds=max_runtime_seconds, monotonic=monotonic)
+    active_member_ids, active_manifest_ids, active_source_hashes, blocked_sessions, control_stats = _load_active_generation_controls(
+        source_store,
+        project=project,
+        limit=limit,
+        index_name=index_name,
+        index_design_document=index_design_document,
+    )
+    for field, value in control_stats.items():
+        execution_stats[field] += value
+    families, generation_blocked_count = _select_logical_family_documents(
+        families,
+        active_member_ids=active_member_ids,
+        active_manifest_ids=active_manifest_ids,
+        active_source_hashes=active_source_hashes,
+        blocked_sessions=blocked_sessions,
+    )
+    _check_deadline(started=started, max_runtime_seconds=max_runtime_seconds, monotonic=monotonic)
     global_document_limit = limit * len(_FAMILY_TYPES)
     if sum(len(documents) for documents in families.values()) > global_document_limit:
         raise _InventoryBlocked("scope_limit_exceeded")
@@ -694,6 +1205,7 @@ def inventory_temporal_evidence(
         + missing_chunk_session_id_count
         + missing_bundle_session_id_count
         + missing_manifest_session_id_count
+        + generation_blocked_count
         + sum(manifest_integrity.values())
         + sum(canonical_input_integrity.values())
     )
