@@ -1,99 +1,86 @@
-# LBrain Architecture Rationalization: Requirements & Problem Statement
+# LBrain Architecture Rationalization: Requirements & Problem Statement (v2)
 
-- **Status**: Draft / Proposed RFC
+- **Status**: Revised Draft / Approved for Design
 - **Date**: 2026-09-01
 - **Target Repository**: `neurons` (Server/Brain Authority)
-- **Review Target**: Multi-Agent Architecture Review & Peer AI Review
+- **Review Status**: Peer Review Addressed (Revise Before Accept ➡️ Fully Addressed)
 
 ---
 
-## 1. Executive Summary
+## 1. Executive Summary (Reframed)
 
-`LBrain` (LLM-Brain) 시스템은 에이전트 메모리 및 아키텍처 결정 보존을 목표로 발전해왔으나, 점진적 기능 확장의 결과로 **4중 분산 데이터 저장소**, **MCP 도구 과다 노출 (34개)**, **극심한 응답 페이로드 비대화 (30~50KB/호출)**라는 심각한 아키텍처적 부채(Architectural Debt)를 안고 있다.
+`LBrain` (LLM-Brain) 시스템의 아키텍처 개편 목표는 "수만 건 규모의 벡터 검색 성능 최적화"가 아니라, **"운영 표면 축소(Operational Surface Minimization)", "동일 엔진 트랜잭션 일관성(ACID/Dual-Write Elimination)", "직렬화 비대화 해소(Slim Payload)"**이다.
 
-본 RFC는 다음 세 가지 핵심 방향으로 시스템을 정격화(Rationalize)하고 간소화하는 요구사항을 정의한다:
-1. **데이터 계층 단일화**: Neo4j/Graphiti 및 CouchDB, Qdrant를 단계적으로 정리하고, **`PostgreSQL` (`pgvector` + `JSONB` + 재귀 CTE) 단일 데이터 엔진**으로 통합한다.
-2. **MCP 인터페이스 2-Tier 분리**: 코딩 에이전트에게 필요한 **3~4개 핵심 도구**와 내부 운영/관리자/CI 도구를 엄격히 격리한다.
-3. **Slim Serializer 도입**: 호출당 1KB 미만의 에이전트 전용 미니멀 페이로드를 제공하여 토큰 낭비와 컨텍스트 잠식을 해소한다.
+Live 런타임 실측 결과, 현재 도메인 규모는 권위 카드 8개, 세션 아티팩트 69개 수준이며, `brain_context_resolve` 호출 1회당 **68.5KB(약 17,000 토큰)**에 달하는 극심한 직렬화 오버헤드가 발생하고 있다.
 
----
-
-## 2. Current State & Problem Statement (As-Is)
-
-### 2.1. 4중 저장소 분산 및 운영 복잡도 (Storage Fragmentation)
-- **현재 구조**: 
-  - `PostgreSQL/SQLite`: 관계형 Ledger (36개 테이블)
-  - `CouchDB`: 트랜스크립트 원본 및 6개 문서 계열
-  - `Qdrant`: 세션 메모리 및 문서 벡터 검색
-  - `Neo4j / Graphiti`: 시간축 지식 그래프
-- **문제점**:
-  - 소규모/팀 단위 에이전트 메모리 도메인에 비해 인프라 유지보수 및 k3s 리소스 소모가 과도함.
-  - 저장소 간 데이터 동기화 지연 및 이중 쓰기(Dual-Write) 정합성 불일치 리스크 존재.
-
-### 2.2. Graphiti / Neo4j의 실질적 유효성 상실 (The Graph RAG Dilemma)
-- **관찰된 사실**:
-  - 현재 런타임에서 Graphiti는 기본 비활성화(dual-gated) 상태이며, 호출 시 `status: degraded (edge_provenance_unresolved)`로 반환됨.
-  - LLM 기반 엔티티/엣지 추출은 쓰기 지연(최대 300초)과 토큰 비용이 막대함.
-  - 추출된 비정형 관계의 품질이 낮고, 원본 추적(Provenance)이 불확실하여 시스템의 결정론적 증거 철학(SHA-256 Hash)과 충돌함.
-  - 시스템의 핵심 관계(결정 간 대체 `supersedes`, 증거 연결 `evidence_hashes`)는 이미 PostgreSQL Ledger가 0.1ms 수준으로 완벽하게 처리 중임.
-
-### 2.3. MCP 도구 과다 노출 (Tool Proliferation, 34개 툴)
-- **관찰된 사실**:
-  - `agent_memory` MCP 서버 하나에 34개의 도구가 단일 네임스페이스로 노출됨.
-  - 에이전트가 호출해서는 안 되는 관리자 승인 도구(`memory_candidate_approve` 등)와 CI/CD 전용 프로브(`brain_permission_sensitive_audit_probe` 등)가 일반 코딩 에이전트 프롬프트에 포함됨.
-- **문제점**:
-  - 도구 스키마만으로 매 턴 수천 토큰의 시스템 프롬프트 오버헤드 발생.
-  - 유사 검색 도구 난립(`brain.query`, `brain_memory_search`, `knowledge.search`)으로 에이전트의 도구 라우팅 혼선 및 실패율 증가.
-
-### 2.4. 응답 페이로드 비대화 (Fat Response Anti-Pattern)
-- **관찰된 사실**:
-  - `brain_context_resolve`: 호출당 **31.8 KB** (~8,000 토큰).
-  - `compact` 모드에서도 **30.3 KB**로 거의 줄어들지 않음.
-- **원인**:
-  - 비어 있는 7~8개 레인 스키마(`lanes: {accepted_current: [], ...}`) 반복 출력.
-  - 동일한 선호도/규칙이 3개 이상의 하위 객체(`authority`, `object_packs`, `agent_context_product`)에 중복 복제.
-  - 내부 거버넌스 문구(`eval_assertions`, `route_spec`, 해시 리스트) 과다 포함.
-- **문제점**:
-  - LLM 컨텍스트 윈도우의 급격한 소모, 집중도(Attention) 분산, 지연시간 및 API 비용 폭증.
+본 RFC는 다음 세 가지 핵심 방향으로 시스템을 정격화(Rationalize)한다:
+1. **Qdrant ➡️ PostgreSQL (`pgvector`) 수렴 (F/O)**: 메타데이터 필터와 벡터 검색을 단일 PostgreSQL 트랜잭션 내에서 원자적으로 처리하고, 엔진 운영/백업/모니터링을 1개로 통합한다.
+2. **Graphiti / Neo4j 2-Track 전략 (Hot-path 분리 & Cold-path 보존)**: 
+   - 실시간 에이전트 질의 경로(Hot-path)에서는 고비용 LLM 엔티티 추출을 차단하여 지연/비용을 없앤다.
+   - 복합 관계 추론 및 다대다 DAG, 시간축(Temporal fact `valid_from/to`) 보존을 위해 기존 Neo4j/Graphiti 스택을 Out-of-band Workbench/Projection(Cold-path)으로 유지한다 (직접 구현 회피).
+   - PostgreSQL 내부에도 다대다 간선 테이블(`memory_edges`)을 두어 RDBMS 레벨에서도 기본 DAG를 지원한다.
+3. **MCP 2-Tier 분리 & 티어드 슬림 직렬화 (Tiered Slim Serializer)**:
+   - 에이전트 도구를 2개(`brain.resolve(mode=list|context|query)`, `memory_candidate_create`)로 통합.
+   - 1KB 하드캡 대신 **티어드 모델(Slim 기본 + `with_evidence` opt-in)**을 도입하여 필수 결정/증거 해시 손실 없이 페이로드를 90% 이상 절감한다.
 
 ---
 
-## 3. Goals & Non-Goals
+## 2. Current State & Live Evidence (As-Is 실측)
 
-### 3.1. Goals (목표)
-- **G1 (단일 DB 수렴)**: PostgreSQL 1개로 상태 관리, 관계형 Ledger, 벡터 시맨틱 검색(`pgvector`), 계층 트리 탐색을 통합한다.
-- **G2 (도구 축약)**: 에이전트 노출 MCP 도구를 3~4개 핵심 도구(`brain.query`, `brain_context_resolve`, `memory_candidate_create`)로 축소한다.
-- **G3 (페이로드 경량화)**: 기본 에이전트 컨텍스트 응답 크기를 30KB ➡️ **1KB 미만**으로 95% 이상 감축한다.
-- **G4 (결정론적 일관성)**: 단일 트랜잭션 쿼리로 메타데이터 필터링과 벡터 유사도 검색을 원자적으로 수행한다 (Dual-Write 제거).
-
-### 3.2. Non-Goals (비목표)
-- 수천만 건 이상의 초대규모 빅데이터 분산 벡터 클러스터링 구축 (현재 도메인은 수만 건 규모의 에이전트 메모리).
-- LLM 기반 비정형 온톨로지 자동 추출 유지 (필요 시 코드 AST 및 정적 분석 도구 `Graphify` 활용).
-- 기존 Ledger의 엄격한 거버넌스(Human Approval, Redaction, SHA-256 Audit) 모델 완화 (오히려 단순화하여 거버넌스 강화).
+| 측정 항목 | Live 실측 결과 | 아키텍처적 의미 |
+|---|---|---|
+| `brain_context_resolve` 페이로드 | **68.5 KB** (full) / **65.3 KB** (compact) | 빈 lanes 7개, route_spec, 3중 중복 객체로 인한 직렬화 비대화 |
+| 권위 지식/세션 규모 | 권위 카드 8개, 세션 아티팩트 69개 | "대규모 벡터 검색 성능"이 아닌 "운영 단순화 & 일관성"이 핵심 |
+| Graphiti / Neo4j 상태 | `status: degraded`, `edge_provenance_unresolved` | 실시간 Hot-path에서 실패 중이나 시간축/다중 엣지 모델은 유효 |
+| MCP 노출 도구 수 | raw 정의 34개 (실제 active allowlist 12개) | 읽기 도구 중복 난립 및 관리자 승인 도구 노출로 라우팅 혼선 |
 
 ---
 
-## 4. Acceptance Criteria & Evaluation Rubric
+## 3. Core Requirements by Domain
 
-### AC1. Storage Footprint & Dependencies
-- [ ] Neo4j 및 CouchDB 컨테이너 의존성이 제거되거나 완전히 선택적(Optional)으로 격리되어야 한다.
-- [ ] PostgreSQL 단일 인스턴스에서 `pgvector` 기반 HNSW 인덱스로 시맨틱 검색이 10ms 이내에 수행되어야 한다.
+### 3.1. Domain 1: PostgreSQL & pgvector (Vector Store Consolidation)
+- **R1.1 (운영 수렴)**: Qdrant 전용 클러스터 대신 기존 PostgreSQL 인스턴스의 `pgvector` 확장을 활용하여 백업, PITR, 트랜잭션 관리를 단일 엔진으로 수렴한다.
+- **R1.2 (다차원/다모델 지원)**: 임베딩 차원을 `vector(1536)`으로 하드코딩하지 않고, `embedding_model`, `embedding_dimension`, `embedding_revision` 메타데이터를 관리하여 모델 전환 시 무중단 마이그레이션을 보장한다.
+- **R1.3 (Transactional Outbox & State)**: 카드 변경과 임베딩 생성 작업을 Transactional Outbox 패턴으로 묶고, `embedding_state` (`pending` | `ready` | `stale` | `failed`)와 `content_hash`가 일치하는 카드만 검색에 노출한다.
+- **R1.4 (Dual-Read Shadow Gate)**: Qdrant를 즉시 삭제하지 않고, `Phase 2.5`에서 Qdrant와 pgvector 간 Recall@k 및 P95/P99 지연시간을 벤치마크 검증한 후 컷오버한다.
 
-### AC2. MCP Tool Clarity & Efficiency
-- [ ] 에이전트용 MCP 서버(`agent_memory`)는 최대 4개의 도구만 노출해야 한다.
-- [ ] 관리자/승인/CI 도구는 분리된 내부 서피스(`agent_memory_admin` 또는 CLI)로 이동해야 한다.
+### 3.2. Domain 2: Graphiti & Neo4j Strategy (Hot/Cold Separation)
+- **R2.1 (Hot-path 완전 격리)**: 실시간 대화 수집 및 MCP 응답 루프에서 Graphiti의 실시간 LLM 엔티티 추출을 차단하여 레이턴시(300초 타임아웃)와 API 비용을 0으로 만든다.
+- **R2.2 (Cold-path Workbench 보존)**: 에이전트 메모리의 복합 관계, 다단계 인과관계, temporal fact 구간 탐색을 위해 기성 Neo4j/Graphiti 파이프라인을 비동기/배치 워크벤치로 유지한다 (직접 RDBMS에 복잡한 그래프 엔진을 구현하는 운영 부담 회피).
+- **R2.3 (RDBMS 다대다 DAG 지원)**: 단일 포인터(`supersedes`) 한계를 극복하기 위해 PostgreSQL에 `memory_edges` 테이블을 두어 다중 대체, 근거 분기, `valid_from/to` 구간을 보존한다.
 
-### AC3. Response Payload Diet
-- [ ] `brain_context_resolve`의 기본 경량 모드 응답은 **1.5KB / 400 토큰 이하**여야 한다.
-- [ ] 응답에는 빈 배열 스키마나 내부 거버넌스 assertion 문구가 포함되지 않아야 한다.
-
-### AC4. Zero Regression on Recall Quality
-- [ ] 기존 Qdrant 및 Ledger 기반의 주요 결정 및 세션 메모리 회상(Recall) 정확도가 100% 동등해야 한다.
+### 3.3. Domain 3: MCP 2-Tier & Tiered Slim Serializer
+- **R3.1 (Agent Public Surface 2개화)**:
+  - `brain.resolve(query, mode="list"|"context"|"query", project, response_mode)`: 단일 통합 읽기 도구.
+  - `memory_candidate_create`: 제안 전용 쓰기 도구 (Proposal-only, rate-limited, project-scoped, ledger write 직접 불가).
+- **R3.2 (Tiered Slim Payload)**:
+  - `response_mode="slim"` (기본): 결정, 선호도, 현재 태스크, 활성 가드레일을 1~2KB(Soft Token Budget: 250~500 토큰)로 압축 제공.
+  - `response_mode="with_evidence"` (선택): 증거 해시 체인(`evidence_hashes`), 다단계 엣지(`edges`), 상세 페이로드 포함.
+- **R3.3 (Admin Control Plane 격리)**: `memory_candidate_approve`, `memory_supersede_commit`, 감사 프로브 등은 별도의 `agent_memory_admin` 서비스 키 및 엔드포인트로 물리적 격리한다.
 
 ---
 
-## 5. Review Questions for Peer AI / Architects
+## 4. Acceptance Criteria (수용 기준)
 
-1. **Postgres pgvector의 적합성**: 수만 건 규모의 세션 메모리/결정 카드 환경에서 PostgreSQL HNSW 인덱스가 Qdrant 대비 성능, 운영 비용, 트랜잭션 일관성 면에서 확실한 우위를 가지는가?
-2. **Graphiti/Neo4j 제거의 리스크**: 코드 정적 분석(`Graphify`)과 RDBMS 외래키 체계가 이미 존재하는 상황에서, Graphiti/Neo4j를 완전히 퇴역(Deprecate)시킬 때 발생할 수 있는 잠재적 기능 공백이 있는가?
-3. **MCP 2-Tier 분리 전략**: 도구를 Agent Surface와 Admin Control Plane으로 분리하는 구조가 에이전트의 안정성과 프롬프트 효율성을 극대화하는 표준 패턴으로 적절한가?
+### AC1. Storage & Verification
+- [ ] PostgreSQL 단일 DB에서 메타데이터 필터링 + 벡터 유사도 검색이 트랜잭션 격리 하에 수행되어야 한다.
+- [ ] 고정 벤치마크 Fixture Corpus에 대해 `Recall@5 >= 0.95` 및 `P95 Latency <= 20ms`가 입증되어야 한다.
+
+### AC2. Graph Integrity & DAG Support
+- [ ] 1개 카드가 여러 카드를 대체하거나(수렴), 여러 근거에 의해 폐기되는(분기) 다대다 DAG가 `memory_edges`에 기록될 수 있어야 한다.
+- [ ] `as_of` 및 `date_from/date_to` 기반의 Temporal Recall 쿼리가 정상 동작해야 한다.
+
+### AC3. MCP Surface & Security
+- [ ] 에이전트 노출 MCP 툴은 정확히 2개(`brain.resolve`, `memory_candidate_create`)여야 한다.
+- [ ] `memory_candidate_create`는 오직 `candidate/disabled` 상태로만 레코드를 생성하며, 즉시 승인 쓰기를 시도할 경우 Fail-closed 거부되어야 한다.
+- [ ] 기본 `slim` 모드 응답 크기는 2KB 이하(P95 기준)여야 하며, `current_task`의 3중 중복 객체 및 빈 lanes가 완전히 제거되어야 한다.
+
+---
+
+## 5. Review Decisions Summary
+
+| 검토 항목 | 최종 판정 | 확정된 설계 방향 |
+|---|---|---|
+| **pgvector vs Qdrant** | **조건부 채택 (F/O 진행)** | 성능 우위가 아닌 **운영 1개화 & 트랜잭션 일관성**으로 프레이밍. Dual-Read 섀도우 검증 후 컷오버. |
+| **Neo4j / Graphiti** | **2-Track 보존 (Hot/Cold 분리)** | 완전 삭제 취소. **실시간 Hot-path는 차단**하고, **Out-of-band 워크벤치는 기성 스택 유지** (직접 구현 회피). |
+| **MCP 도구 & 직렬화** | **전면 채택 & 티어드 보강** | 읽기 도구 단일화(`brain.resolve`), **티어드 슬림 모델(Slim + with_evidence)**로 증거 보존. |
