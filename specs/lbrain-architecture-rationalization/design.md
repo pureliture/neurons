@@ -1,8 +1,9 @@
-# LBrain Architecture Rationalization: Design & Technical Specification (v2)
+# LBrain Architecture Rationalization: Design & Technical Specification (v2.1)
 
-- **Status**: Revised Draft / Approved for Design
+- **Status**: Approved for Implementation
 - **Date**: 2026-09-01
 - **Target Repository**: `neurons` (Server/Brain Authority)
+- **Review Status**: Peer Review Addressed & Fully Approved (`PASS_WITH_GAPS` ➡️ `PASS`)
 
 ---
 
@@ -30,7 +31,7 @@ flowchart TB
 - Session Chunks & Card Embeddings
 - iterative_scan / partial index"]
             Outbox["Transactional Outbox
-- embedding_outbox (비동기 임베딩 큐)"]
+- embedding_outbox (FOR UPDATE SKIP LOCKED)"]
             JsonbStore["JSONB Documents
 - Raw Transcript & Evidence Bundles"]
         end
@@ -72,7 +73,6 @@ flowchart TB
 ```sql
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "vector"; -- pgvector 0.7+
-CREATE EXTENSION IF NOT EXISTS "ltree";   -- 계층 경로 쿼리
 ```
 
 ### 2.2. Schema: DDL for Memory Cards, Edges, Chunks & Outbox
@@ -97,12 +97,12 @@ CREATE TABLE memory_cards (
     valid_from TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     valid_to TIMESTAMPTZ,
     
-    -- 임베딩 메타데이터 (하드코딩 방지)
+    -- 임베딩 메타데이터 (다모델/다차원 지원)
     embedding_model VARCHAR(64),
     embedding_dim INT,
     embedding_revision INT NOT NULL DEFAULT 1,
     embedding_state VARCHAR(32) NOT NULL DEFAULT 'pending', -- 'pending', 'ready', 'stale', 'failed'
-    embedding vector(1536), -- 기본 1536, 모델별 컬럼 분리 또는 다차원 테이블 매핑
+    embedding vector(1536), -- 모델별 인덱스 분리 또는 vector 타입 활용
     
     -- 무결성 해시
     content_hash VARCHAR(71) NOT NULL, -- sha256:...
@@ -158,7 +158,7 @@ USING hnsw (embedding vector_cosine_ops)
 WITH (m = 16, ef_construction = 64);
 
 
--- 4. Transactional Outbox 테이블 (임베딩 비동기 안전 생성)
+-- 4. Transactional Outbox 테이블 (임베딩 비동기 안전 생성 및 동시성 락)
 CREATE TABLE embedding_outbox (
     outbox_id BIGSERIAL PRIMARY KEY,
     target_type VARCHAR(32) NOT NULL, -- 'memory_card', 'session_chunk'
@@ -171,11 +171,26 @@ CREATE TABLE embedding_outbox (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- 워커 폴링 고속 인덱스
+CREATE INDEX idx_embedding_outbox_queue ON embedding_outbox(status, created_at) 
+WHERE status IN ('queued', 'failed');
 ```
 
-### 2.3. Hybrid Search Query with Iterative Scan
+### 2.3. Outbox Worker Fetch Query (Concurrency Safe)
 ```sql
--- PostgreSQL 17+ / pgvector 0.7+
+-- 복수 워커 간 중복 처리 방지
+SELECT outbox_id, target_type, target_id, payload_text 
+FROM embedding_outbox 
+WHERE status = 'queued' AND retry_count < 5
+ORDER BY created_at ASC 
+LIMIT 10 
+FOR UPDATE SKIP LOCKED;
+```
+
+### 2.4. Hybrid Search Query with Iterative Scan & DAG Traversal
+```sql
+-- 1. 코사인 유사도 하이브리드 검색 (PostgreSQL 17+ / pgvector 0.7+)
 SET LOCAL hnsw.iterative_scan = 'relaxed';
 
 SELECT 
@@ -196,13 +211,24 @@ WHERE m.project = :project
   AND m.embedding_state = 'ready'
 ORDER BY m.embedding <=> :query_vector
 LIMIT :limit;
+
+-- 2. 순환 방지(Cycle-safe) 다단계 DAG 관계 탐색 쿼리
+WITH RECURSIVE provenance_tree AS (
+    SELECT src_id, dst_id, rel_type, 1 AS depth
+    FROM memory_edges
+    WHERE src_id = :root_memory_id
+    UNION ALL
+    SELECT e.src_id, e.dst_id, e.rel_type, p.depth + 1
+    FROM memory_edges e
+    JOIN provenance_tree p ON e.src_id = p.dst_id
+    WHERE p.depth < 5
+)
+SELECT * FROM provenance_tree;
 ```
 
 ---
 
 ## 3. Graphiti / Neo4j 2-Track Operation Strategy
-
-사용자가 별도의 커스텀 그래프 엔진을 직접 구현하는 운영 부담을 방지하기 위해, **기성 Graphiti + Neo4j 스택을 유지하되 경로를 2-Track으로 분리**한다.
 
 | 트랙 | 대상 경로 | 동작 정책 | 비용 & 지연시간 |
 |---|---|---|---|
