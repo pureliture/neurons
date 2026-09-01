@@ -1,9 +1,9 @@
-# LBrain Architecture Rationalization: Design & Technical Specification (v2.1)
+# LBrain Architecture Rationalization: Design & Technical Specification (v2.2)
 
-- **Status**: Approved for Implementation
+- **Status**: Formally Approved for Implementation (Clean PASS)
 - **Date**: 2026-09-01
 - **Target Repository**: `neurons` (Server/Brain Authority)
-- **Review Status**: Peer Review Addressed & Fully Approved (`PASS_WITH_GAPS` ➡️ `PASS`)
+- **Review Status**: Round 1 & Round 2 Peer Reviews Fully Addressed (`review.md` 참조)
 
 ---
 
@@ -22,21 +22,21 @@ flowchart TB
         Ingress["Ingress API / NATS JetStream"]
         Worker["Python Worker (Ingress & Recall)"]
         
-        subgraph PostgresStorage ["🐘 Core Authority Engine: PostgreSQL 17+"]
+        subgraph PostgresStorage ["🐘 Core Authority Engine: PostgreSQL 17+ (pgvector >= 0.8.0)"]
             Relational["Ledger Entities (36 Core)
 - status & authorization_status"]
             Edges["DAG & Temporal Graph
 - memory_edges (다대다 DAG, valid_from/to)"]
             PgVector["pgvector (HNSW Index)
 - Session Chunks & Card Embeddings
-- iterative_scan / partial index"]
+- iterative_scan = 'relaxed_order'"]
             Outbox["Transactional Outbox
-- embedding_outbox (FOR UPDATE SKIP LOCKED)"]
+- embedding_outbox (Lease & CAS Update)"]
             JsonbStore["JSONB Documents
 - Raw Transcript & Evidence Bundles"]
         end
 
-        subgraph GraphWorkbench ["🕸️ 2-Track: Neo4j / Graphiti (Cold-Path Workbench)"]
+        subgraph GraphWorkbench ["🕸️ 2-Track: Neo4j / Graphiti (Cold-Path 1-Way Derived Projection)"]
             Neo4j["Neo4j Graph Store"]
             Graphiti["Graphiti Extraction Pipeline (Batch / On-Demand)"]
             Graphiti <--> Neo4j
@@ -44,19 +44,19 @@ flowchart TB
 
         Ingress --> Worker
         Worker <--> PostgresStorage
-        PostgresStorage -. "Out-of-band Projection (Async)" .-> GraphWorkbench
+        PostgresStorage -. "1-Way Async Projection (Eventual)" .-> GraphWorkbench
     end
 
     subgraph MCPSurface ["3. Rationalized MCP Interface (2-Tier)"]
         AgentMCP["agent_memory (Agent Public Surface - 2 Tools)
 1. brain.resolve (mode=list | context | query)
 2. memory_candidate_create (Proposal-only)
-* Tiered Serializer: slim (<1.5KB) | with_evidence"]
+* Tiered Serializer: slim (~1.2KB) | with_evidence"]
         
         AdminMCP["agent_memory_admin (Admin Surface - Auth Gated)
 - approve / reject / supersede_commit / stale_commit
 - audit probes / corpus management
-- key: lbrain_admin (별도 격리 엔드포인트)"]
+- key: lbrain_admin (독립 프로세스/엔드포인트)"]
     end
 
     Worker <--> AgentMCP
@@ -72,7 +72,7 @@ flowchart TB
 ### 2.1. Extension Configuration
 ```sql
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-CREATE EXTENSION IF NOT EXISTS "vector"; -- pgvector 0.7+
+CREATE EXTENSION IF NOT EXISTS "vector"; -- pgvector >= 0.8.0 required
 ```
 
 ### 2.2. Schema: DDL for Memory Cards, Edges, Chunks & Outbox
@@ -97,12 +97,11 @@ CREATE TABLE memory_cards (
     valid_from TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     valid_to TIMESTAMPTZ,
     
-    -- 임베딩 메타데이터 (다모델/다차원 지원)
-    embedding_model VARCHAR(64),
-    embedding_dim INT,
+    -- 임베딩 메타데이터 (단일 고정 1536 차원 기준, 모델 교체 시 마이그레이션 정책 적용)
+    embedding_model VARCHAR(64) NOT NULL DEFAULT 'text-embedding-3-small',
     embedding_revision INT NOT NULL DEFAULT 1,
     embedding_state VARCHAR(32) NOT NULL DEFAULT 'pending', -- 'pending', 'ready', 'stale', 'failed'
-    embedding vector(1536), -- 모델별 인덱스 분리 또는 vector 타입 활용
+    embedding vector(1536),
     
     -- 무결성 해시
     content_hash VARCHAR(71) NOT NULL, -- sha256:...
@@ -125,9 +124,9 @@ WITH (m = 16, ef_construction = 64);
 -- 2. 다대다 DAG 및 관계 간선 테이블 (Graphiti/Neo4j의 관계 역량 RDBMS 수용)
 CREATE TABLE memory_edges (
     edge_id BIGSERIAL PRIMARY KEY,
-    src_id VARCHAR(64) NOT NULL REFERENCES memory_cards(memory_id) ON DELETE CASCADE,
+    src_id VARCHAR(64) NOT NULL REFERENCES memory_cards(memory_id) ON DELETE RESTRICT,
     rel_type VARCHAR(32) NOT NULL, -- 'supersedes', 'derived_from', 'contradicts', 'supports'
-    dst_id VARCHAR(64) NOT NULL REFERENCES memory_cards(memory_id) ON DELETE CASCADE,
+    dst_id VARCHAR(64) NOT NULL REFERENCES memory_cards(memory_id) ON DELETE RESTRICT,
     provenance_hash VARCHAR(71) NOT NULL, -- 관계 근거 해시
     confidence NUMERIC(3,2) NOT NULL DEFAULT 1.0,
     valid_from TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -165,7 +164,10 @@ CREATE TABLE embedding_outbox (
     target_id VARCHAR(64) NOT NULL,
     content_hash VARCHAR(71) NOT NULL,
     payload_text TEXT NOT NULL,
-    status VARCHAR(32) NOT NULL DEFAULT 'queued', -- 'queued', 'processing', 'completed', 'failed'
+    status VARCHAR(32) NOT NULL DEFAULT 'queued', -- 'queued', 'processing', 'completed', 'failed', 'dead_letter'
+    claimed_at TIMESTAMPTZ,
+    lease_until TIMESTAMPTZ,
+    worker_id VARCHAR(64),
     retry_count INT NOT NULL DEFAULT 0,
     last_error TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -175,23 +177,59 @@ CREATE TABLE embedding_outbox (
 -- 워커 폴링 고속 인덱스
 CREATE INDEX idx_embedding_outbox_queue ON embedding_outbox(status, created_at) 
 WHERE status IN ('queued', 'failed');
+
+-- 중복 인큐 방지 유니크 부분 인덱스
+CREATE UNIQUE INDEX idx_embedding_outbox_dedup ON embedding_outbox(target_type, target_id, content_hash)
+WHERE status IN ('queued', 'processing');
 ```
 
-### 2.3. Outbox Worker Fetch Query (Concurrency Safe)
+### 2.3. Outbox Worker Concurrency & CAS Write-Back Pattern
+
+#### ① Worker Lease Claim Query (동시성 락)
 ```sql
--- 복수 워커 간 중복 처리 방지
-SELECT outbox_id, target_type, target_id, payload_text 
-FROM embedding_outbox 
-WHERE status = 'queued' AND retry_count < 5
-ORDER BY created_at ASC 
-LIMIT 10 
-FOR UPDATE SKIP LOCKED;
+-- 복수 워커 간 중복 처리 방지 및 리스 획득
+UPDATE embedding_outbox
+   SET status = 'processing',
+       worker_id = :worker_id,
+       claimed_at = NOW(),
+       lease_until = NOW() + INTERVAL '30 seconds',
+       updated_at = NOW()
+ WHERE outbox_id IN (
+     SELECT outbox_id
+       FROM embedding_outbox
+      WHERE (status = 'queued' OR (status = 'failed' AND retry_count < 5))
+        AND (lease_until IS NULL OR lease_until < NOW())
+      ORDER BY created_at ASC
+      LIMIT 10
+      FOR UPDATE SKIP LOCKED
+ )
+ RETURNING outbox_id, target_type, target_id, content_hash, payload_text;
 ```
 
-### 2.4. Hybrid Search Query with Iterative Scan & DAG Traversal
+#### ② Worker Write-Back with Compare-And-Swap (CAS Update)
+큐 생성 시점의 `content_hash`와 현재 DB의 `content_hash`가 정확히 일치할 때만 임베딩을 반영하여 스텔(Stale) 임베딩 덮어쓰기 레이스를 차단:
 ```sql
--- 1. 코사인 유사도 하이브리드 검색 (PostgreSQL 17+ / pgvector 0.7+)
-SET LOCAL hnsw.iterative_scan = 'relaxed';
+-- CAS 기반 임베딩 반영
+UPDATE memory_cards
+   SET embedding = :vector,
+       embedding_state = 'ready',
+       embedding_revision = embedding_revision + 1,
+       updated_at = NOW()
+ WHERE memory_id = :target_id
+   AND content_hash = :enqueued_content_hash; -- ★ 핵심 CAS 가드: 카드가 중간에 수정되었으면 No-op
+
+-- Outbox 완료 처리
+UPDATE embedding_outbox
+   SET status = 'completed', updated_at = NOW()
+ WHERE outbox_id = :outbox_id;
+```
+
+### 2.4. Hybrid Search Query with Iterative Scan & Cycle-Safe DAG Traversal
+
+#### ① 코사인 유사도 하이브리드 검색 (PostgreSQL 17+ / pgvector >= 0.8.0)
+```sql
+-- GUC 파라미터: relaxed_order (공식 pgvector 0.8.0+ 표준)
+SET LOCAL hnsw.iterative_scan = 'relaxed_order';
 
 SELECT 
     m.memory_id,
@@ -211,17 +249,22 @@ WHERE m.project = :project
   AND m.embedding_state = 'ready'
 ORDER BY m.embedding <=> :query_vector
 LIMIT :limit;
+```
 
--- 2. 순환 방지(Cycle-safe) 다단계 DAG 관계 탐색 쿼리
+#### ② 순환 방지(Cycle-Safe) 다단계 DAG 관계 탐색 쿼리
+```sql
 WITH RECURSIVE provenance_tree AS (
-    SELECT src_id, dst_id, rel_type, 1 AS depth
+    SELECT src_id, dst_id, rel_type, 1 AS depth, ARRAY[src_id]::varchar[] AS visited_path
     FROM memory_edges
     WHERE src_id = :root_memory_id
+    
     UNION ALL
-    SELECT e.src_id, e.dst_id, e.rel_type, p.depth + 1
+    
+    SELECT e.src_id, e.dst_id, e.rel_type, p.depth + 1, p.visited_path || e.src_id
     FROM memory_edges e
     JOIN provenance_tree p ON e.src_id = p.dst_id
-    WHERE p.depth < 5
+    WHERE p.depth < 5 -- 깊이 상한 가드
+      AND NOT (e.src_id = ANY(p.visited_path)) -- 순환(Cycle) 무한 루프 차단
 )
 SELECT * FROM provenance_tree;
 ```
@@ -233,7 +276,7 @@ SELECT * FROM provenance_tree;
 | 트랙 | 대상 경로 | 동작 정책 | 비용 & 지연시간 |
 |---|---|---|---|
 | **Hot-Path** (실시간 에이전트 루프) | Ingress Enqueue, MCP `brain.resolve` | **Graphiti 실시간 LLM 추출 완전 차단** (Ledger + pgvector로 즉시 응답) | **0초 지연 / 0 토큰 비용** |
-| **Cold-Path** (비동기 워크벤치) | 백그라운드 크론, 개발자 온톨로지 뷰어 | CouchDB/Postgres 데이터를 읽어 **비동기 배치로 Neo4j에 투영** | 실시간 요청에 무영향 |
+| **Cold-Path** (비동기 워크벤치) | 백그라운드 크론, 개발자 온톨로지 뷰어 | PostgreSQL 데이터를 읽어 **비동기 단방향(1-Way Eventual)으로 Neo4j에 투영** | 실시간 요청에 무영향 |
 
 ---
 
@@ -255,10 +298,10 @@ SELECT * FROM provenance_tree;
 - **Parameters**: `card_type`, `project`, `title`, `summary`, `typed_payload`, `content_hash`, `source_ref`
 - **보안 가드**:
   - `authorization_status`는 무조건 `disabled` / `lifecycle_state`는 `candidate`로만 생성.
-  - Rate-limit 및 프로젝트 범위 강제.
+  - Rate-limit 및 프로젝트 범위 강제 (직접 ledger 승인 쓰기 원천 불가).
 
 ### 4.2. Tier 2: `agent_memory_admin` (Admin Control Plane)
-- **접근 통제**: 별도의 서비스 키(`lbrain_admin`), 내부망/TLS 통신, CI/CD 전용.
+- **접근 통제**: 별도의 서비스 키(`lbrain_admin`), 내부망/TLS 통신, CI/CD 전용 (전역 managed allowlist 독립 등록).
 - **도구 목록**:
   - `memory_candidate_approve`, `memory_candidate_reject`
   - `memory_supersede_commit`, `memory_stale_commit`
@@ -269,7 +312,7 @@ SELECT * FROM provenance_tree;
 
 ## 5. Tiered Slim Serializer Specification
 
-### 5.1. `response_mode="slim"` (기본 모드, ~1.2 KB / ~300 토큰)
+### 5.1. `response_mode="slim"` (기본 모드, ~1.2 KB / ~300 토큰, Hard Max: 3KB)
 ```json
 {
   "schema_version": "lbrain_slim_context.v1",
@@ -281,7 +324,8 @@ SELECT * FROM provenance_tree;
       "title": "OCI is primary app plane while HomeLab remains stateful backend",
       "decision": "OCI is the primary operating plane; HomeLab remains stateful backend.",
       "rationale": "Production verification report defines architecture split.",
-      "currentness": "current"
+      "currentness": "current",
+      "content_hash": "sha256:535e3239d1a332b53841f7df7bcbfeca2fca795331b0550ca0a96a937e2f14b5"
     }
   ],
   "preferences": [
@@ -295,7 +339,8 @@ SELECT * FROM provenance_tree;
     "ledger_is_single_authority"
   ],
   "gaps": ["graph_edge_degraded"],
-  "has_more": false
+  "has_more": false,
+  "next_cursor": null
 }
 ```
 
@@ -315,10 +360,10 @@ Phase 1: MCP Refactoring & Tiered Slim Serializer (Zero DB Risk)
 Phase 2: PostgreSQL pgvector Dual-Read Shadow (검증 단계)
 ├── Step 2.1: PostgreSQL 인스턴스에 pgvector 확장 활성화 및 HNSW 테이블/Outbox 생성
 ├── Step 2.2: Qdrant 기존 세션 벡터 데이터를 PostgreSQL로 1회성 마이그레이션
-└── Step 2.3: Phase 2.5 Dual-Read Shadow 검증 (Qdrant vs pgvector Recall@k & Latency 비교 벤치마크)
+└── Step 2.3: Phase 2.5 Dual-Read Shadow 검증 (Qdrant vs pgvector Recall@5 >= 0.95 & P95 <= 20ms 비교 벤치마크)
 
 Phase 3: Hot-Path Cutover & 2-Track Alignment
 ├── Step 3.1: Python Worker의 Search Backend를 SEARCH_BACKEND=postgres_pgvector로 공식 전환
-├── Step 3.2: Graphiti/Neo4j를 Hot-path에서 완전 비활성화하고 배치 워크벤치로 격리
+├── Step 3.2: Graphiti/Neo4j를 Hot-path에서 완전 비활성화하고 비동기 단방향 배치 워크벤치로 격리
 └── Step 3.3: Qdrant 컨테이너 퇴역 및 Compose/k3s 리소스 회수
 ```
