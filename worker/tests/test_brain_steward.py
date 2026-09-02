@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -42,11 +43,22 @@ def _ledger(tmp_path: Path) -> Ledger:
     return Ledger(private / "ledger.sqlite")
 
 
+def _h(tag: str) -> str:
+    return "sha256:" + hashlib.sha256(tag.encode("utf-8")).hexdigest()
+
+
 def _span(**overrides) -> dict:
+    raw_hash = overrides.pop("content_hash", None)
+    if raw_hash is None:
+        chash = _h("steward-card")
+    elif isinstance(raw_hash, str) and (len(raw_hash) != 71 or not raw_hash.startswith("sha256:")):
+        chash = _h(raw_hash)
+    else:
+        chash = raw_hash
     span = {
         "source_ref": {"source_id": "src_steward"},
         "span_ref": {"span_id": "span_steward"},
-        "content_hash": "sha256:steward-card",
+        "content_hash": chash,
         "card_type": "preference",
         "scope": "project",
         "project": PROJECT,

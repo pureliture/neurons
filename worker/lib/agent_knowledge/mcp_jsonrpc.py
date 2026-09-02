@@ -53,6 +53,8 @@ from .mcp_tools import (
     MEMORY_SUPERSEDE_COMMIT_TOOL_NAME,
     MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME,
     STEWARD_RESTRICTED_TOOL_NAMES,
+    ADMIN_TOOL_NAMES,
+    PUBLIC_AGENT_TOOL_NAMES,
     TOOL_NAME,
     ToolContract,
     list_tools,
@@ -101,7 +103,22 @@ class ToolRuntimeContract:
         return self.tool_contract.to_tool()
 
 
-def handle_jsonrpc_message(message: dict, service: KnowledgeSearchService) -> dict | None:
+ADMIN_AUTH_IDENTITY = "lbrain_admin"
+
+
+def handle_jsonrpc_message(
+    message: dict,
+    service: KnowledgeSearchService,
+    *,
+    surface: str = "agent",
+    tier: str | None = None,
+    auth_token: str | None = None,
+) -> dict | None:
+    if tier in ("public", "agent"):
+        surface = "agent"
+    elif tier == "admin":
+        surface = "admin"
+
     request_id = message.get("id")
     method = message.get("method")
     try:
@@ -111,15 +128,37 @@ def handle_jsonrpc_message(message: dict, service: KnowledgeSearchService) -> di
                 {
                     "protocolVersion": "2025-06-18",
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "neurons", "version": "0.1.0"},
+                    "serverInfo": {"name": "neurons", "version": "0.2.0"},
                 },
             )
         if method == "notifications/initialized":
             return None
         if method == "tools/list":
-            return _success(request_id, {"tools": list_tools()})
+            if surface == "admin":
+                if auth_token != ADMIN_AUTH_IDENTITY:
+                    return _error(request_id, -32000, "unauthorized: lbrain_admin identity required")
+                return _success(request_id, {"tools": list_tools(surface="admin")})
+            if surface == "agent":
+                return _success(request_id, {"tools": list_tools(surface="agent")})
+            return _success(request_id, {"tools": list_tools(surface=surface)})
+
         if method == "tools/call":
-            return _success(request_id, dispatch_tool_call(message.get("params") or {}, service))
+            params = message.get("params") or {}
+            tool_name = str(params.get("name") or "")
+
+            # Security Guard: public/agent surface only allows PUBLIC_AGENT_TOOL_NAMES
+            if surface == "agent":
+                if tool_name not in PUBLIC_AGENT_TOOL_NAMES:
+                    return _error(request_id, -32601, f"unknown tool: {tool_name}")
+
+            if surface == "admin":
+                if auth_token != ADMIN_AUTH_IDENTITY:
+                    return _error(request_id, -32000, "unauthorized: lbrain_admin identity required")
+
+            return _success(
+                request_id,
+                dispatch_tool_call(params, service, surface=surface, auth_token=auth_token),
+            )
         return _error(request_id, -32601, f"method not found: {method}")
     except (TypeError, ValueError) as exc:
         # Never echo the raw exception message: it can carry caller-supplied
@@ -128,6 +167,15 @@ def handle_jsonrpc_message(message: dict, service: KnowledgeSearchService) -> di
         return _error(request_id, -32602, f"invalid params: {type(exc).__name__}")
     except Exception:
         return _error(request_id, -32603, "internal error")
+
+
+def handle_admin_jsonrpc_message(
+    message: dict,
+    service: KnowledgeSearchService,
+    *,
+    auth_token: str | None = None,
+) -> dict | None:
+    return handle_jsonrpc_message(message, service, surface="admin", auth_token=auth_token)
 
 
 def run_stdio_server(
@@ -154,9 +202,22 @@ def run_stdio_server(
         stdout.flush()
 
 
-def dispatch_tool_call(params: dict, service: KnowledgeSearchService) -> dict:
-    tool_name = params.get("name")
+def dispatch_tool_call(
+    params: dict,
+    service: KnowledgeSearchService,
+    *,
+    surface: str = "all",
+    auth_token: str | None = None,
+) -> dict:
+    tool_name = str(params.get("name") or "")
     arguments = params.get("arguments") or {}
+
+    if surface == "agent" and tool_name not in PUBLIC_AGENT_TOOL_NAMES:
+        raise ValueError(f"unknown tool: {tool_name}")
+
+    if surface == "admin" and auth_token != ADMIN_AUTH_IDENTITY:
+        raise PermissionError("unauthorized: lbrain_admin identity required")
+
     registry = tool_handler_registry()
     handler = registry.get(tool_name)
     if handler is None:
@@ -952,8 +1013,189 @@ def _dispatch_brain_query_tool(tool_name: str, arguments: dict, service: Knowled
 
 
 def _dispatch_brain_resolve_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
-    _ = tool_name
-    result = service.brain_resolve(query=str(arguments.get("query") or ""))
+    project = _project_arg(arguments)
+    query = str(arguments.get("query") or "")
+    mode = str(arguments.get("mode") or "context").strip().lower()
+    response_mode = str(arguments.get("response_mode") or "slim").strip().lower()
+    limit = _bounded_limit(arguments.get("limit"), default=5, maximum=20)
+    as_of = str(arguments.get("as_of") or "")
+
+    if not project:
+        if "project" not in arguments and "mode" not in arguments and hasattr(service, "brain_resolve"):
+            return _tool_result(service.brain_resolve(query=query))
+        raise ValueError(f"{tool_name} requires project or repository")
+
+    cards = service.ledger.list_llm_brain_memory_cards(
+        project=project,
+        accepted_only=True,
+        current_only=True,
+        limit=100,
+    )
+
+    if as_of:
+        from datetime import datetime
+        try:
+            as_of_dt = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+        except Exception:
+            as_of_dt = None
+
+        if as_of_dt is not None:
+            filtered_cards = []
+            for c in cards:
+                vf = c.get("valid_from")
+                vt = c.get("valid_to")
+                include = True
+                if vf:
+                    try:
+                        vf_dt = datetime.fromisoformat(str(vf).replace("Z", "+00:00")) if isinstance(vf, str) else vf
+                        if vf_dt > as_of_dt:
+                            include = False
+                    except Exception:
+                        pass
+                if vt:
+                    try:
+                        vt_dt = datetime.fromisoformat(str(vt).replace("Z", "+00:00")) if isinstance(vt, str) else vt
+                        if vt_dt < as_of_dt:
+                            include = False
+                    except Exception:
+                        pass
+                if include:
+                    filtered_cards.append(c)
+            cards = filtered_cards
+
+    decisions = []
+    preferences = []
+    tasks = []
+    for c in cards:
+        card_type = str(c.get("card_type") or "")
+        tp = c.get("typed_payload") or {}
+        item = {
+            "id": c.get("memory_id"),
+            "title": c.get("title"),
+            "summary": c.get("summary"),
+            "content_hash": c.get("content_hash"),
+            "card_type": card_type,
+            "typed_payload": tp,
+        }
+        if card_type == "decision":
+            if "decision" in tp:
+                item["decision"] = tp["decision"]
+            decisions.append(item)
+        elif card_type == "preference":
+            if "preference" in tp or "rule" in tp:
+                item["rule"] = tp.get("preference") or tp.get("rule")
+            preferences.append(item)
+        elif card_type == "task":
+            if "task_name" in tp:
+                item["task_name"] = tp["task_name"]
+            tasks.append(item)
+        else:
+            decisions.append(item)
+
+    cursor = arguments.get("cursor")
+
+    if mode == "context":
+        from .llm_brain_core.slim_serializer import SlimSerializer
+
+        active_guardrails = [
+            p.get("summary") or p.get("title") or p.get("rule") for p in preferences
+        ] or ["Follow project guidelines and verified memory constraints."]
+
+        if response_mode == "with_evidence":
+            evidence_hashes = []
+            source_refs = []
+            edges = []
+            for c in cards:
+                for h in (c.get("evidence_hashes") or []):
+                    evidence_hashes.append(h)
+                if c.get("content_hash"):
+                    evidence_hashes.append(c["content_hash"])
+                for s in (c.get("source_refs") or []):
+                    source_refs.append(s)
+                if c.get("source_ref"):
+                    if isinstance(c["source_ref"], list):
+                        source_refs.extend(c["source_ref"])
+                    else:
+                        source_refs.append(c["source_ref"])
+                for e in (c.get("edges") or []):
+                    edges.append(e)
+
+            result = SlimSerializer.serialize_with_evidence(
+                project=project,
+                decisions=decisions,
+                preferences=preferences,
+                guardrails=active_guardrails,
+                edges=edges,
+                evidence_hashes=evidence_hashes,
+                source_refs=source_refs,
+                recent_context=f"Active memory context for {project}",
+                gaps=[],
+                limit=limit,
+                cursor=cursor,
+            )
+        else:
+            result = SlimSerializer.serialize_slim(
+                project=project,
+                decisions=decisions,
+                preferences=preferences,
+                guardrails=active_guardrails,
+                recent_context=f"Active memory context for {project}",
+                gaps=[],
+                limit=limit,
+                cursor=cursor,
+            )
+
+
+    elif mode == "query":
+        if not query.strip():
+            raise ValueError(f"{tool_name} mode='query' requires non-empty query")
+        q_lower = query.lower()
+        matched_decisions = [
+            d for d in decisions
+            if q_lower in (str(d.get("title") or "") + " " + str(d.get("summary") or "") + " " + str(d.get("decision") or "")).lower()
+        ]
+        matched_prefs = [
+            p for p in preferences
+            if q_lower in (str(p.get("title") or "") + " " + str(p.get("summary") or "") + " " + str(p.get("rule") or "")).lower()
+        ]
+        matched_all = matched_decisions + matched_prefs
+        result = {
+            "schema_version": "lbrain_slim_context.v1",
+            "project": project,
+            "query": query,
+            "count": len(matched_all),
+            "decisions": matched_decisions[:limit],
+            "preferences": matched_prefs[:limit],
+            "results": matched_all[:limit],
+            "items": matched_all[:limit],
+            "has_more": len(matched_all) > limit,
+            "next_cursor": None,
+        }
+
+    elif mode == "list":
+        all_items = [
+            {
+                "id": c.get("memory_id"),
+                "title": c.get("title"),
+                "summary": c.get("summary"),
+                "card_type": c.get("card_type"),
+                "content_hash": c.get("content_hash"),
+            }
+            for c in cards
+        ]
+        result = {
+            "schema_version": "lbrain_slim_context.v1",
+            "project": project,
+            "count": len(all_items),
+            "decisions": decisions[:limit],
+            "preferences": preferences[:limit],
+            "items": all_items[:limit],
+            "has_more": len(all_items) > limit,
+            "next_cursor": None,
+        }
+    else:
+        raise ValueError(f"unsupported mode: {mode}")
+
     return _tool_result(result)
 
 
@@ -1232,7 +1474,7 @@ def _project_arg(arguments: dict) -> str:
 
 def _tool_result(result: dict) -> dict:
     text = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
-    return {"content": [{"type": "text", "text": text}], "structuredContent": result}
+    return {"content": [{"type": "text", "text": text}], "structuredContent": result, "isError": False}
 
 
 def _success(request_id, result: dict) -> dict:

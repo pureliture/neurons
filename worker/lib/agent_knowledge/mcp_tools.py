@@ -48,6 +48,47 @@ STEWARD_RESTRICTED_TOOL_NAMES = (
     MEMORY_SUPERSEDE_COMMIT_TOOL_NAME,
     MEMORY_STALE_COMMIT_TOOL_NAME,
 )
+
+PUBLIC_AGENT_TOOL_NAMES = frozenset({
+    BRAIN_RESOLVE_TOOL_NAME,
+    MEMORY_CANDIDATE_CREATE_TOOL_NAME,
+})
+
+ADMIN_TOOL_NAMES = frozenset({
+    TOOL_NAME,
+    BRAIN_QUERY_TOOL_NAME,
+    BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
+    BRAIN_MEMORY_SEARCH_TOOL_NAME,
+    BRAIN_INCIDENT_SEARCH_TOOL_NAME,
+    BRAIN_DRIFT_EXPLAIN_TOOL_NAME,
+    BRAIN_PERSONA_GET_TOOL_NAME,
+    BRAIN_PERSONA_CHECK_TOOL_NAME,
+    BRAIN_EVIDENCE_GET_TOOL_NAME,
+    BRAIN_OBJECTS_QUERY_TOOL_NAME,
+    BRAIN_ARTIFACT_PREFERENCE_EVALUATE_TOOL_NAME,
+    BRAIN_OBJECT_EXPLAIN_TOOL_NAME,
+    BRAIN_CORPUS_STATUS_TOOL_NAME,
+    BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME,
+    BRAIN_SOURCE_TO_CANDIDATE_GRAPH_TOOL_NAME,
+    BRAIN_CANDIDATE_REVIEW_EDIT_TOOL_NAME,
+    BRAIN_APPROVAL_BOARD_DECIDE_TOOL_NAME,
+    BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
+    BRAIN_RUNTIME_BUILD_IDENTITY_TOOL_NAME,
+    BRAIN_PERMISSION_SENSITIVE_AUDIT_PROBE_TOOL_NAME,
+    BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
+    BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+    BRAIN_REVIEW_PROPOSALS_TOOL_NAME,
+    MEMORY_AUTHORITY_PACK_READ_TOOL_NAME,
+    MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME,
+    MEMORY_STALE_MARK_TOOL_NAME,
+    MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME,
+    MEMORY_CANDIDATE_APPROVE_TOOL_NAME,
+    MEMORY_CANDIDATE_REJECT_TOOL_NAME,
+    MEMORY_CANDIDATE_AUTO_ACCEPT_TOOL_NAME,
+    MEMORY_SUPERSEDE_COMMIT_TOOL_NAME,
+    MEMORY_STALE_COMMIT_TOOL_NAME,
+})
+
 _TOOL_REGISTRY_CACHE: dict[str, dict] | None = None
 
 
@@ -151,7 +192,109 @@ _PRODUCTION_GATE_PROPERTY = {
 }
 
 
-def list_tools() -> list[dict]:
+def list_public_agent_tools() -> list[dict]:
+    return [
+        {
+            "name": BRAIN_RESOLVE_TOOL_NAME,
+            "description": (
+                "통합 LLM-Brain 읽기 도구. 프로젝트 활성 컨텍스트(mode='context'), "
+                "시맨틱/키워드 질의(mode='query'), 또는 카드 목록(mode='list')을 조회한다."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": {
+                        "type": "string",
+                        "description": "대상 프로젝트 이름 (필수)",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "검색 질의어 (context/list 모드에서는 선택, query 모드에서는 필수)",
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["context", "query", "list"],
+                        "default": "context",
+                        "description": "조회 모드: context (활성 컨텍스트), query (시맨틱/키워드 검색), list (카드 목록)",
+                    },
+                    "response_mode": {
+                        "type": "string",
+                        "enum": ["slim", "with_evidence"],
+                        "default": "slim",
+                        "description": "직렬화 모드: slim (~1.2KB 기본 압축) 또는 with_evidence (증거 해시 및 DAG 포함)",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 20,
+                        "default": 5,
+                        "description": "최대 반환 항목 수",
+                    },
+                    "as_of": {
+                        "type": "string",
+                        "description": "Temporal Recall용 ISO-8601 일시 또는 UTC 날짜",
+                    },
+                },
+                "required": ["project"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": MEMORY_CANDIDATE_CREATE_TOOL_NAME,
+            "description": (
+                "[proposal-only] 새 MemoryCard 제안을 생성한다. 항상 lifecycle_state='candidate' 및 "
+                "authorization_status='disabled'로 생성되며 직접적인 권한 변경 쓰기는 불가하다."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "card_type": {
+                        "type": "string",
+                        "enum": ["decision", "preference", "task", "evidence", "drift", "status"],
+                        "description": "생성할 카드 타입",
+                    },
+                    "project": {"type": "string", "description": "대상 프로젝트"},
+                    "title": {"type": "string", "description": "카드 제목"},
+                    "summary": {"type": "string", "description": "카드 요약"},
+                    "typed_payload": {"type": "object", "description": "카드 타입별 구조화 페이로드"},
+                    "content_hash": {
+                        "type": "string",
+                        "pattern": r"^sha256:[0-9a-f]{64}$",
+                        "description": "SHA-256 무결성 해시",
+                    },
+                    "source_ref": {"type": "object", "description": "출처 레퍼런스"},
+                    "span_ref": {"type": "object", "description": "구간 레퍼런스"},
+                    "proposer": {
+                        "type": "string",
+                        "enum": ["unspecified", "codex", "claude-code", "gemini", "hermes"],
+                        "default": "unspecified",
+                        "description": "제안 에이전트 식별자",
+                    },
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1, "default": 1.0},
+                    "confidence_basis": {"type": "string"},
+                    "governance_tier": {"type": "string", "enum": ["low", "medium", "high"], "default": "medium"},
+                    "mark_needs_review": {"type": "boolean", "default": False},
+                    "review_reason": {"type": "string"},
+                },
+                "required": [
+                    "card_type",
+                    "project",
+                    "title",
+                    "summary",
+                    "typed_payload",
+                    "content_hash",
+                ],
+                "additionalProperties": False,
+            },
+        },
+    ]
+
+
+def list_public_tools() -> list[dict]:
+    return list_public_agent_tools()
+
+
+def list_admin_tools() -> list[dict]:
     return [
         {
             "name": TOOL_NAME,
@@ -183,15 +326,6 @@ def list_tools() -> list[dict]:
                     "limit": {"type": "integer", "minimum": 1, "maximum": 10, "default": 8},
                 },
                 "required": ["brain_id", "query"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            "name": BRAIN_RESOLVE_TOOL_NAME,
-            "description": "사용 가능한 /project/<project> brain_id 후보를 찾는다.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {"query": {"type": "string"}},
                 "additionalProperties": False,
             },
         },
@@ -752,21 +886,6 @@ def list_tools() -> list[dict]:
             },
         },
         {
-            "name": MEMORY_CANDIDATE_CREATE_TOOL_NAME,
-            "description": "[steward/proposal] 새 MemoryCard 후보를 만든다. accepted가 아니라 candidate(또는 needs_review)로만 남으며 authoritative memory를 만들지 않는다.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    **_STEWARD_SOURCE_SPAN_PROPERTIES,
-                    **_STEWARD_PROPOSER_PROPERTY,
-                    "mark_needs_review": {"type": "boolean", "default": False},
-                    "review_reason": {"type": "string"},
-                },
-                "required": _STEWARD_SOURCE_SPAN_REQUIRED,
-                "additionalProperties": False,
-            },
-        },
-        {
             "name": MEMORY_STALE_MARK_TOOL_NAME,
             "description": "[steward/proposal] 특정 MemoryCard가 근거 변경으로 stale하다는 proposal을 남긴다. 대상 memory를 즉시 삭제하거나 수정하지 않는다.",
             "inputSchema": {
@@ -868,9 +987,19 @@ def list_tools() -> list[dict]:
     ]
 
 
-def _build_tool_registry() -> dict[str, dict]:
+def list_tools(surface: str = "all") -> list[dict]:
+    if surface in ("agent", "public"):
+        return list_public_agent_tools()
+    if surface == "admin":
+        return list_admin_tools()
+    if surface == "all":
+        return list_public_agent_tools() + list_admin_tools()
+    raise ValueError(f"unknown surface: {surface}")
+
+
+def _build_tool_registry(surface: str = "all") -> dict[str, dict]:
     registry: dict[str, dict] = {}
-    for tool in list_tools():
+    for tool in list_tools(surface=surface):
         name = str(tool.get("name") or "")
         if not name:
             raise ValueError("MCP tool is missing a name")
@@ -880,15 +1009,17 @@ def _build_tool_registry() -> dict[str, dict]:
     return registry
 
 
-def tool_registry() -> dict[str, dict]:
+def tool_registry(surface: str = "all") -> dict[str, dict]:
     global _TOOL_REGISTRY_CACHE
-    if _TOOL_REGISTRY_CACHE is None:
-        _TOOL_REGISTRY_CACHE = _build_tool_registry()
-    return dict(_TOOL_REGISTRY_CACHE)
+    if surface == "all":
+        if _TOOL_REGISTRY_CACHE is None:
+            _TOOL_REGISTRY_CACHE = _build_tool_registry("all")
+        return dict(_TOOL_REGISTRY_CACHE)
+    return _build_tool_registry(surface)
 
 
-def tool_names() -> frozenset[str]:
-    return frozenset(tool_registry())
+def tool_names(surface: str = "all") -> frozenset[str]:
+    return frozenset(tool_registry(surface=surface))
 
 
 def _validate_dispatch_owner_metadata(tool_names: set[str], dispatch_owner_names: set[str]) -> None:
@@ -901,10 +1032,11 @@ def _validate_dispatch_owner_metadata(tool_names: set[str], dispatch_owner_names
         raise ValueError(f"MCP dispatch owner metadata is stale: {stale_dispatch_owners}")
 
 
-def tool_contract_registry() -> dict[str, ToolContract]:
-    registry = tool_registry()
+def tool_contract_registry(surface: str = "all") -> dict[str, ToolContract]:
+    registry = tool_registry(surface=surface)
     owners = dict(_DISPATCH_OWNER_BY_TOOL_NAME)
-    _validate_dispatch_owner_metadata(set(registry), set(owners))
+    if surface == "all":
+        _validate_dispatch_owner_metadata(set(registry), set(owners))
     return {
         name: ToolContract(
             name=name,
@@ -914,3 +1046,11 @@ def tool_contract_registry() -> dict[str, ToolContract]:
         )
         for name, tool in registry.items()
     }
+
+
+def public_tool_contract_registry() -> dict[str, ToolContract]:
+    return tool_contract_registry(surface="agent")
+
+
+def admin_tool_contract_registry() -> dict[str, ToolContract]:
+    return tool_contract_registry(surface="admin")
