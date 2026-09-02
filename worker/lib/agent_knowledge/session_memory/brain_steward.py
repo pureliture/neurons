@@ -530,6 +530,8 @@ class BrainStewardService:
         card["memory_id"] = STEWARD_PROPOSAL_PREFIX + _sha16(
             idempotency_key, kind, target_memory_id
         )
+        card["lifecycle_state"] = "candidate"
+        card["authorization_status"] = "disabled"
         card["steward_proposal_kind"] = kind
         card["steward_proposed_by"] = canonicalize_provider(proposer) or "unspecified"
         if target_memory_id:
@@ -561,7 +563,13 @@ class BrainStewardService:
             "proposal_kind": kind,
             "accepted": False,
             "write_performed": True,
+            "proposal_write_performed": True,
             "authoritative_memory_changed": False,
+            "memory_id": card.get("memory_id"),
+            "lifecycle_state": "candidate",
+            "authorization_status": "disabled",
+            "approval_state": str(card.get("approval_state") or "suggested"),
+            "currentness": str(card.get("currentness") or "current"),
             "proposal": self._review_item(card),
         }
         if target_memory_id:

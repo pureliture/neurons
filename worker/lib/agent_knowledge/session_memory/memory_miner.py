@@ -9,6 +9,7 @@ from .memory_card import (
     CANDIDATE_TYPES,
     MEMORY_CARD_TYPES,
     build_memory_candidate,
+    validate_content_hash,
     validate_judgment_basis_bundle,
     validate_memory_card_envelope,
     validate_source_locator,
@@ -214,6 +215,7 @@ def build_memory_card_candidate_from_source_span(
         "summary": normalized["summary"],
         "render_text": normalized["render_text"],
         "lifecycle_state": "candidate",
+        "authorization_status": "disabled",
         "judgment_state": "none",
         "status": "candidate",
         "approval_state": "suggested",
@@ -222,6 +224,7 @@ def build_memory_card_candidate_from_source_span(
         "currentness": "unknown",
         "confidence": float(normalized["confidence"]),
         "confidence_basis": normalized["confidence_basis"],
+        "content_hash": normalized["content_hash"],
         "source_refs": [source_ref],
         "evidence_refs": [source_ref],
         "evidence_hashes": evidence_hashes,
@@ -319,22 +322,22 @@ def _normalize_candidate_source_span(source_span: Mapping[str, Any]) -> dict:
     if not isinstance(source_span, Mapping):
         raise ValueError("source span must be an object")
     _assert_no_raw_transcript_input(source_span)
-    source_ref = _normalize_locator(_required(source_span, "source_ref"), "source_ref")
-    span_ref = _normalize_locator(_required(source_span, "span_ref"), "span_ref")
+    source_ref_raw = source_span.get("source_ref") or {"source_id": "agent_proposal"}
+    span_ref_raw = source_span.get("span_ref") or {"span_id": "agent_proposal_span"}
+    source_ref = _normalize_locator(source_ref_raw, "source_ref")
+    span_ref = _normalize_locator(span_ref_raw, "span_ref")
     source_ref.setdefault("source_owner", "transcript_memory_canonical_store")
     source_ref.setdefault("source_kind", "session_memory_refresh")
     source_ref.setdefault("access_mode", "source_ref_only")
     span_ref.setdefault("source_owner", source_ref["source_owner"])
     span_ref.setdefault("source_kind", "session_memory_span")
     span_ref.setdefault("access_mode", "span_ref_only")
-    content_hash = str(_required(source_span, "content_hash"))
-    if not content_hash.startswith("sha256:"):
-        raise ValueError("source span content_hash must be sha256")
+    content_hash = validate_content_hash(str(_required(source_span, "content_hash")), "source span content_hash")
     card_type = str(_required(source_span, "card_type"))
     if card_type not in MEMORY_CARD_TYPES:
         raise ValueError("source span card_type must be a MemoryCard card_type")
     project = str(_required(source_span, "project"))
-    provider = str(_required(source_span, "provider"))
+    provider = str(source_span.get("provider") or source_span.get("proposer") or "unspecified")
     summary = str(source_span.get("redacted_summary") or source_span.get("summary") or "").strip()
     if not summary:
         raise ValueError("source span requires redacted_summary")

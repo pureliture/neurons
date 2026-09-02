@@ -51,6 +51,8 @@ APPROVAL_STATES = ("suggested", "approved", "rejected", "auto_accepted", "needs_
 GOVERNANCE_TIERS = ("low", "medium", "high")
 FRESHNESS_VALUES = ("current", "recent", "historical", "unknown")
 CURRENTNESS_VALUES = ("current", "stale", "superseded", "conflicted", "unknown")
+AUTHORIZATION_STATUSES = ("active", "disabled")
+SHA256_HEX_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 # 검토 대기(pending review) lifecycle. Brain Steward review queue 조회(ledger)와
 # approve/reject 적격성(service)이 공유하는 단일 정의. accepted/rejected lane 제외.
 REVIEW_LIFECYCLE_STATES = frozenset({"candidate", "suggested_accept", "needs_review"})
@@ -266,6 +268,10 @@ def validate_memory_card_envelope(card: Mapping[str, Any]) -> dict:
     _require_enum(normalized, "governance_tier", GOVERNANCE_TIERS)
     _require_enum(normalized, "freshness", FRESHNESS_VALUES)
     _require_enum(normalized, "currentness", CURRENTNESS_VALUES)
+    if "authorization_status" in normalized and normalized["authorization_status"] is not None:
+        _require_enum(normalized, "authorization_status", AUTHORIZATION_STATUSES)
+    if "content_hash" in normalized and normalized["content_hash"] is not None:
+        validate_content_hash(str(normalized["content_hash"]), "content_hash")
     _require_number(normalized.get("confidence"), "confidence")
     _ensure_no_forbidden_content(normalized.get("summary"), "summary")
     _ensure_no_forbidden_content(normalized.get("render_text"), "render_text")
@@ -290,6 +296,12 @@ def validate_memory_card_envelope(card: Mapping[str, Any]) -> dict:
     if reason_required:
         validate_reason_capsule(normalized.get("reason_capsule"))
     return normalized
+
+
+def validate_content_hash(hash_val: str, field_name: str = "content_hash") -> str:
+    if not isinstance(hash_val, str) or not SHA256_HEX_PATTERN.fullmatch(hash_val):
+        raise ValueError(f"{field_name} must be a sha256 string matching ^sha256:[0-9a-f]{{64}}$")
+    return hash_val
 
 
 def validate_typed_payload(card_type: str, payload: Mapping[str, Any], *, field_name: str = "payload") -> dict:
@@ -410,12 +422,13 @@ def _safe_evidence_refs(evidence_refs: list[dict]) -> list[dict]:
     for ref in evidence_refs:
         knowledge_id = str(ref.get("knowledge_id") or "")
         content_hash = str(ref.get("content_hash") or "")
-        if not knowledge_id or not content_hash.startswith("sha256:"):
+        if not knowledge_id or not (SHA256_HEX_PATTERN.fullmatch(content_hash) or content_hash.startswith("sha256:")):
             raise ValueError("memory evidence refs require knowledge_id and sha256 content_hash")
         safe_refs.append({"knowledge_id": knowledge_id, "content_hash": content_hash})
     if not safe_refs:
         raise ValueError("memory candidate requires at least one evidence ref")
     return safe_refs
+
 
 
 def _title_for_type(candidate_type: str) -> str:
@@ -477,8 +490,8 @@ def _validate_locator_list(value: Any, field_name: str) -> list:
 def _validate_hash_list(value: Any, field_name: str) -> None:
     _require_list(value, field_name)
     for item in value:
-        if not isinstance(item, str) or not item.startswith("sha256:"):
-            raise ValueError(f"{field_name} entries must be sha256 strings")
+        if not isinstance(item, str) or not SHA256_HEX_PATTERN.fullmatch(item):
+            raise ValueError(f"{field_name} entries must be sha256 strings matching ^sha256:[0-9a-f]{{64}}$")
 
 
 def _ensure_no_forbidden_content(value: Any, field_name: str) -> None:

@@ -58,6 +58,9 @@ from .models import (
     EvidenceRequest,
     EvidenceResponse,
     GraphMemoryResult,
+)
+from .slim_serializer import SlimSerializer
+from .models import (
     OntologyEpisode,
     SessionMemoryArtifact,
     SourceRefRecord,
@@ -126,6 +129,7 @@ __all__ = [
     "REPO_STYLE_PROFILE_SCHEMA",
     "SessionMemoryArtifact",
     "SkillEvolutionCard",
+    "SlimSerializer",
     "SourceRefRecord",
     "SourceRefResolver",
     "UnavailableGraphMemoryAdapter",
