@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from typing import Any, Callable
 
@@ -171,6 +172,16 @@ class QdrantToPostgresMigrator:
         return checkpoint
 
     @staticmethod
+    def _reason_code(exc: Exception) -> str:
+        # Quarantine reports carry closed-vocabulary reason codes only.
+        # Raw exception text can echo payload-derived values, so pass through
+        # just explicitly raised snake_case codes and mask everything else.
+        message = exc.args[0] if exc.args and isinstance(exc.args[0], str) else ""
+        if re.fullmatch(r"[a-z][a-z0-9_]*", message or ""):
+            return message
+        return f"{type(exc).__name__.lower()}_record_rejected"
+
+    @staticmethod
     def _quarantine(result: MigrationResult, point_id: object | None, reason: str) -> None:
         result.total_quarantined += 1
         result.quarantined_records.append({"point_digest": _digest(point_id) if point_id is not None else "unknown", "reason_code": reason})
@@ -206,7 +217,7 @@ class QdrantToPostgresMigrator:
                             result.outbox_enqueued += 1
                     result.total_migrated += 1
                 except (TypeError, ValueError, OverflowError) as exc:
-                    self._quarantine(result, point_id, str(exc))
+                    self._quarantine(result, point_id, self._reason_code(exc))
                 except Exception:
                     logger.exception("migration_record_failed reason_code=target_write_failed")
                     self._quarantine(result, point_id, "target_write_failed")
