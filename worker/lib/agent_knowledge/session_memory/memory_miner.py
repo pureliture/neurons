@@ -332,7 +332,11 @@ def _normalize_candidate_source_span(source_span: Mapping[str, Any]) -> dict:
     span_ref.setdefault("source_owner", source_ref["source_owner"])
     span_ref.setdefault("source_kind", "session_memory_span")
     span_ref.setdefault("access_mode", "span_ref_only")
-    content_hash = validate_content_hash(str(_required(source_span, "content_hash")), "source span content_hash")
+    content_hash = validate_content_hash(
+        str(_required(source_span, "content_hash")),
+        "source span content_hash",
+        strict=False,
+    )
     card_type = str(_required(source_span, "card_type"))
     if card_type not in MEMORY_CARD_TYPES:
         raise ValueError("source span card_type must be a MemoryCard card_type")

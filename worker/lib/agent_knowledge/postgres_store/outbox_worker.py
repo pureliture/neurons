@@ -13,12 +13,13 @@ import threading
 import time
 from typing import Callable, Any
 
+from ..model_connectors import DEFAULT_EMBEDDING_DIM
 from .pgvector_store import PgVectorStore, OutboxJob, make_dummy_vector
 
 logger = logging.getLogger(__name__)
 
 
-def generate_deterministic_embedding(text: str, dim: int = 1536) -> list[float]:
+def generate_deterministic_embedding(text: str, dim: int = DEFAULT_EMBEDDING_DIM) -> list[float]:
     """Generate deterministic normalized vector from text content (safe for empty text)."""
     if not text:
         # Default unit vector for empty text
@@ -48,7 +49,12 @@ class OutboxWorker:
         self.batch_size = batch_size
         self.lease_seconds = lease_seconds
         self.poll_interval = poll_interval_seconds
-        self.embedding_fn = embedding_fn or generate_deterministic_embedding
+        if embedding_fn is None:
+            raise ValueError(
+                "embedding_fn is required; inject the configured Embedding Provider "
+                "(generate_deterministic_embedding is test-only)"
+            )
+        self.embedding_fn = embedding_fn
         self.max_retries = max_retries
         self._stop_event = threading.Event()
 
@@ -72,11 +78,22 @@ class OutboxWorker:
                     f"[{self.worker_id}] Error processing outbox job {job.outbox_id}: {e}",
                     exc_info=True,
                 )
-                self.store.mark_outbox_failed(
-                    job.outbox_id,
-                    error_message=str(e),
-                    max_retries=self.max_retries,
-                )
+                try:
+                    self.store.mark_outbox_failed(
+                        job.outbox_id,
+                        error_message=str(e),
+                        max_retries=self.max_retries,
+                        worker_id=self.worker_id,
+                    )
+                except ValueError as lease_error:
+                    # Another worker may have reclaimed an expired lease. Do
+                    # not overwrite its retry/terminal state.
+                    logger.warning(
+                        "[%s] outbox job %s was not owned while recording failure: %s",
+                        self.worker_id,
+                        job.outbox_id,
+                        lease_error,
+                    )
                 processed_count += 1
 
         return processed_count
@@ -90,7 +107,7 @@ class OutboxWorker:
         """
         # 1. Compute embedding vector
         vector = self.embedding_fn(job.payload_text)
-        if not vector or len(vector) != 1536:
+        if not vector or len(vector) != DEFAULT_EMBEDDING_DIM:
             raise ValueError(f"Embedding function returned invalid vector length {len(vector) if vector else 0}")
 
         # 2. CAS write-back
@@ -100,20 +117,17 @@ class OutboxWorker:
             enqueued_content_hash=job.content_hash,
             vector=vector,
             outbox_id=job.outbox_id,
+            worker_id=self.worker_id,
         )
         return success
 
     def renew_lease(self, outbox_id: int, lease_seconds: int = 30) -> bool:
         """Renew active lease for a long-running job."""
-        if outbox_id in self.store.outbox:
-            job = self.store.outbox[outbox_id]
-            if job.worker_id == self.worker_id and job.status == "processing":
-                from datetime import datetime, timezone, timedelta
-                now = datetime.now(timezone.utc)
-                job.lease_until = now + timedelta(seconds=lease_seconds)
-                job.updated_at = now
-                return True
-        return False
+        return self.store.renew_outbox_lease(
+            outbox_id=outbox_id,
+            worker_id=self.worker_id,
+            lease_seconds=lease_seconds,
+        )
 
     def run_loop(
         self,

@@ -6,7 +6,11 @@ from dataclasses import replace
 
 from .specs import EmbeddingSpec, ModelConnectionConfig, ModelEndpointSpec, RerankerSpec
 
-DEFAULT_EMBEDDING_DIM = 1024
+DEFAULT_EMBEDDING_MODEL = "gemini-embedding-2"
+DEFAULT_EMBEDDING_DIM = 3072
+DEFAULT_EMBEDDING_PROFILE_ID = "lbrain-memory-gemini-embedding-2-v1"
+_OLLAMA_DEFAULT_EMBEDDING_MODEL = "nomic-embed-text"
+_OLLAMA_DEFAULT_EMBEDDING_DIM = 768
 
 
 def resolve_model_connection_config(
@@ -19,10 +23,19 @@ def resolve_model_connection_config(
     llm_model = _value(env, "LLM_BRAIN_LLM_MODEL", "MODEL_NAME")
     llm_base_url = _value(env, "LLM_BRAIN_LLM_BASE_URL", "OPENAI_BASE_URL")
     embedding = resolve_embedding_spec(env)
+    embedding_model_is_explicit = _has_value(env, "LLM_BRAIN_EMBEDDING_MODEL", "EMBEDDING_MODEL")
+    embedding_dim_is_explicit = _has_value(env, "LLM_BRAIN_EMBEDDING_DIM")
     if not _has_value(env, "LLM_BRAIN_EMBEDDING_PROVIDER", "EMBEDDING_PROVIDER") and not _has_value(
         env, "LLM_BRAIN_EMBEDDING_BASE_URL"
     ):
         embedding = replace(embedding, provider=provider)
+        if not embedding_model_is_explicit:
+            embedding = replace(embedding, model=_default_embedding_model(provider))
+        if not embedding_dim_is_explicit:
+            embedding = replace(
+                embedding,
+                dim=_default_embedding_dim(provider, embedding.model),
+            )
     if not _has_value(env, "LLM_BRAIN_EMBEDDING_BASE_URL"):
         embedding = replace(embedding, base_url=llm_base_url)
     return ModelConnectionConfig(
@@ -53,11 +66,21 @@ def resolve_embedding_spec(environ: Mapping[str, str] | None = None) -> Embeddin
     """Resolve the shared non-secret embedding spec; API keys stay at build edges."""
 
     env = os.environ if environ is None else environ
+    provider = _value(env, "LLM_BRAIN_EMBEDDING_PROVIDER", "EMBEDDING_PROVIDER", default="openai").lower()
+    model = _value(
+        env,
+        "LLM_BRAIN_EMBEDDING_MODEL",
+        "EMBEDDING_MODEL",
+        default=_default_embedding_model(provider),
+    )
     return EmbeddingSpec(
-        provider=_value(env, "LLM_BRAIN_EMBEDDING_PROVIDER", "EMBEDDING_PROVIDER", default="openai").lower(),
-        model=_value(env, "LLM_BRAIN_EMBEDDING_MODEL", "EMBEDDING_MODEL"),
+        provider=provider,
+        model=model,
         base_url=_value(env, "LLM_BRAIN_EMBEDDING_BASE_URL", "OPENAI_BASE_URL"),
-        dim=_positive_int(_value(env, "LLM_BRAIN_EMBEDDING_DIM"), default=DEFAULT_EMBEDDING_DIM),
+        dim=_positive_int(
+            _value(env, "LLM_BRAIN_EMBEDDING_DIM"),
+            default=_default_embedding_dim(provider, model),
+        ),
     )
 
 
@@ -91,6 +114,18 @@ def _value(env: Mapping[str, str], primary: str, fallback: str | None = None, *,
 
 def _has_value(env: Mapping[str, str], *names: str) -> bool:
     return any(str(env.get(name) or "").strip() for name in names)
+
+
+def _default_embedding_model(provider: str) -> str:
+    return _OLLAMA_DEFAULT_EMBEDDING_MODEL if provider == "ollama" else DEFAULT_EMBEDDING_MODEL
+
+
+def _default_embedding_dim(provider: str, model: str) -> int:
+    if provider == "ollama" and model.strip().lower() == _OLLAMA_DEFAULT_EMBEDDING_MODEL:
+        return _OLLAMA_DEFAULT_EMBEDDING_DIM
+    if model.strip().lower() == DEFAULT_EMBEDDING_MODEL:
+        return DEFAULT_EMBEDDING_DIM
+    return DEFAULT_EMBEDDING_DIM
 
 
 def _positive_int(value: str, *, default: int) -> int:

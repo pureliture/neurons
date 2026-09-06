@@ -1,9 +1,9 @@
 # LBrain Architecture Rationalization: Peer Review & Implementation Audit History
 
-- **Spec Version**: v2.3 (Post-Implementation Audit & Gap Resolution)
-- **Date**: 2026-09-02
+- **Spec Version**: v2.5 (Post-Implementation Audit, Multi-Agent Review & Remediation)
+- **Date**: 2026-09-03
 - **Target Worktree**: `/Users/ddalkak/Projects/neurons/.worktrees/lbrain-architecture-rationalization-spec`
-- **Status**: Audit Findings Documented & Production Requirements Hardened
+- **Status**: Review Findings Applied; Graph-first Cutover Still Blocked by Explicit Residual Milestones
 
 ---
 
@@ -42,13 +42,18 @@ flowchart TD
   4) brain.resolve bypassed new store completely
   5) Strict hash regex broke 275 existing tests"]
     
-    DraftV23["v2.3 Hardened Spec (Current)
+    DraftV23["v2.3 Hardened Spec (Prior Hardened Baseline)
 - Prohibit in-memory simulation in production
 - Enforce Fail-Closed DB connection
 - Mandate real psycopg SQL execution
 - Add session_chunk CAS & Zero-regression hash compatibility"]
 
-    Draft --> Review1 --> DraftV2 --> Review2 --> DraftV22 --> Teamwork --> Audit3 --> DraftV23
+    Review4["v2.5 Multi-Agent Alignment Review (Current)
+- Apply runtime/default/CAS/shadow-evidence fixes
+- Normalize document contracts
+- Keep Graph-first cutover as explicit follow-up"]
+
+    Draft --> Review1 --> DraftV2 --> Review2 --> DraftV22 --> Teamwork --> Audit3 --> DraftV23 --> Review4
 ```
 
 ---
@@ -78,3 +83,49 @@ flowchart TD
    - `session_chunks` 테이블에도 `content_hash` 및 `UPDATE session_memory_chunks SET embedding=:vec WHERE chunk_id=:id AND content_hash=:hash` CAS 쿼리를 동일하게 강제한다.
 4. **기존 테스트 하위 호환성 (Zero Regression)**:
    - 레거시 픽스처(`sha256:x`, 빈 해시)를 수용할 수 있도록 해시 유효성 검사기에 레거시 허용 모드를 두어 275개 기존 테스트 회귀를 0건으로 복구한다.
+
+---
+
+## 4. 4차 멀티에이전트 정합성 리뷰 및 반영 (2026-09-03)
+
+서로 다른 관점의 read-only 리뷰 스트림을 병렬로 실행해 아키텍처·runtime/defaults·storage/MCP/운영·문서/계약을 대조했다. 최종 판정은 단순한 “테스트 수”가 아니라 문서의 목표, 실제 기본값, SQL/Compose 실행 경로가 같은 사실을 가리키는지를 기준으로 했다.
+
+### 반영한 항목
+
+| 항목 | 반영 내용 |
+|---|---|
+| PostgreSQL runtime | plain `postgres:17-alpine` 대신 `pgvector/pgvector:pg17`을 기본 image로 지정하고 vector extension availability healthcheck를 추가했다. |
+| Graphiti runtime | `graphiti-core==0.30.1`을 `pyproject.toml`/`uv.lock`/README/HTML/설계에 exact pin했다. Neo4j는 `5.26-community`를 유지한다. |
+| Graph cold lane | graph trigger는 `--extract-entities`를 기본으로 전달하고, projection 실패를 `echo`로 삼키지 않고 재시작 가능한 non-zero 종료로 처리한다. bulk semantic lane의 episodic-only 예외는 별도로 유지한다. |
+| Outbox 정합성 | `renew_lease()`를 실제 SQL adapter로 연결하고, `worker_id`·활성 lease를 CAS target/outbox 양쪽에 적용했다. hash 불일치는 `cas_skipped`로 구분하고 card/chunk dead-letter 상태를 모두 갱신한다. |
+| Embedding profile / chunk transaction | `lbrain-memory-gemini-embedding-2-v1` shared default를 추가했다. `session_memory_chunks`도 authority row와 embedding outbox를 같은 PostgreSQL transaction에서 보장하고, `token_count NOT NULL` upgrade를 명시했다. |
+| Worker safety | production `OutboxWorker`가 deterministic dummy embedding을 암묵적으로 선택하지 않도록 명시적 provider callback을 요구한다. terminal outbox CAS도 활성 lease까지 fence한다. |
+| Runtime/document boundary | graph trigger가 PostgreSQL/Neo4j healthy 상태를 기다리도록 하고, README/HTML에서 legacy compatibility path와 Graph-first target/cutover pending 상태를 분리했다. |
+| Shadow evidence | backend 예외를 빈 결과로 바꾸지 않고 error/discrepancy로 기록한다. 빈 fixture는 거부하며 cutover gate는 최소 50 query를 요구한다. |
+| 문서 계약 | `graph_status`, `retrieval_path`, `authority_join_status`, `projection_lag_ms`의 허용값·단위를 통일하고 Graph-to-authority canonical key를 명시했다. |
+
+### 남은 차단 항목
+
+다음은 이번 정합성 리뷰에서 **완료로 표시하지 않은** 항목이다.
+
+1. `mcp_jsonrpc`의 `brain.resolve`와 `KnowledgeSearchService.brain_query`는 아직 legacy ledger/mirror 경로를 포함한다. 실제 Graphiti/Neo4j-first 후보 검색과 PostgreSQL authority join은 별도 실행 milestone이다.
+2. `graph_projection_outbox` DDL 계약은 추가했지만, 현재 graph trigger의 SQLite ledger-backed projection cursor를 PG writer/consumer로 전환하지 않았다.
+3. 실제 PostgreSQL/Neo4j/Qdrant를 사용한 live benchmark와 Graphiti index/read regression은 이 로컬 정합성 작업의 증거가 아니다. Docker Compose plugin과 live DSN이 없는 환경에서는 통과를 주장하지 않는다.
+
+### 추가 리뷰에서 보류한 항목
+
+- `dual_read_shadow`는 `evidence_class=test_harness|live_cutover`를 기록하고 dict Qdrant double을 live mode에서 거부하도록 보정했다. Qdrant migrator의 in-memory seam과 실제 backend/profile preflight는 여전히 live migration milestone에서 닫아야 한다.
+- 현재 레거시 테스트 중 `PgVectorStore(use_in_memory=True)`, 1536차원, 암묵적 dummy worker를 전제로 하는 묶음은 새 authority 계약과 충돌한다. 이를 한 번에 대량 수정하거나 “전건 통과”로 포장하지 않고, 실제 SQL integration test와 legacy compatibility inventory로 분리한다.
+- public `brain.resolve` 응답에 graph/authority metadata를 연결하는 일은 Graph-first router 구현과 함께 처리해야 한다. 현재 legacy route에 임의의 `graph_neo4j` 성공 상태를 추가하지 않았다.
+
+## 5. M3·M4 구현 재검토 (2026-09-06)
+
+위 3·4차 감사는 당시 상태의 기록이며 다음 결과와 구분한다.
+
+- M3: 공개 `brain.resolve`는 Graphiti 후보를 PostgreSQL 권위 데이터와 join한다. graph 정상 후보를 보존하며 장애·미투영 시에만 명시적 PG fallback을 사용한다. HTTP agent는 두 도구만 노출하고 admin은 별도 프로세스·Bearer 인증을 요구한다. Sol 독립 재검토 PASS.
+- M4: SQL에서 명시적 edge의 프로젝트·현재 권한·승인·유효기간을 검사하고 경로 순환·깊이를 제한한다. 과거 `as_of`에서는 당시 유효한 superseded 기록만 추가 허용한다. 같은 SQL snapshot의 root hash로 조회 사이 변경을 감지한다.
+- 응답 초과 시 추가 근거부터 줄인 뒤 카드 페이지, 마지막으로 표시 텍스트를 줄인다. decision·실제 edge·다음 cursor가 함께 남고 전체 MCP tool-result가 3072바이트 이하인 실제 PG 검증을 추가했다.
+- M3·M4 관련 로컬 묶음: **170 passed, 1 skipped**. 리뷰 후 보완한 실제 PG 근거 묶음: **5 passed**. 지정 역할의 고정 모델 사용량 제한으로 역할 지침을 적용한 Sol 검토자가 대체했으며 M4는 PASS_WITH_GAPS다.
+- 남은 gap은 live Neo4j 검증이다. 실제 PG와 Graphiti adapter 테스트가 실제 Neo4j/LLM 실행이나 운영 배포를 증명하지 않는다. 전체 worker 회귀, 이관 gate, PG graph outbox producer/consumer도 아직 완료하지 않았다.
+
+M5는 진행 중이다. vector 비교가 성공해도 backend preflight·공통 10분 관찰·graph 정확도·승인된 rate 상한이 연결되기 전에는 `overall_gate_passed=false`와 차단 이유를 반환한다. 이 임시 fail-closed 경계는 완성된 cutover 평가기를 뜻하지 않는다.

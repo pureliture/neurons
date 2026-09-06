@@ -1,31 +1,49 @@
-"""One-shot migration & backfill script from Qdrant to PostgreSQL (Milestone 4).
-
-Migrates session_memory_chunks and memory_cards with dry-run support,
-JSON checkpointing, payload validation/quarantine, and outbox enqueueing
-for unvectorized records.
-"""
+"""Fail-closed Qdrant-to-PostgreSQL migration sidecar (M5)."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+import hashlib
 import json
 import logging
 import os
 import time
 from typing import Any, Callable
 
-from .pgvector_store import (
-    PgVectorStore,
-    MemoryCard,
-    SessionChunk,
-)
+from ..model_connectors import DEFAULT_EMBEDDING_DIM, DEFAULT_EMBEDDING_MODEL
+from .pgvector_store import MemoryCard, PgVectorStore, SessionChunk
 
 logger = logging.getLogger(__name__)
+_VERSION = 1
+_DISTANCE = "cosine"
+
+
+def _digest(value: object) -> str:
+    return "sha256:" + hashlib.sha256(str(value).encode()).hexdigest()
+
+
+def _value(source: object, name: str, default: object = None) -> object:
+    return source.get(name, default) if isinstance(source, dict) else getattr(source, name, default)
+
+
+def _timestamp(value: object, required: bool) -> datetime | None:
+    if value is None:
+        if required:
+            raise ValueError("authority_valid_from_missing")
+        return None
+    if not isinstance(value, str):
+        raise ValueError("authority_timestamp_invalid")
+    value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if value.tzinfo is None:
+        raise ValueError("authority_timestamp_invalid")
+    return value
 
 
 @dataclass
 class MigrationResult:
+    """Redacted report: no source payload, source ID, or exception text."""
+
     collection_name: str
     total_scanned: int = 0
     total_migrated: int = 0
@@ -34,7 +52,8 @@ class MigrationResult:
     outbox_enqueued: int = 0
     elapsed_seconds: float = 0.0
     dry_run: bool = False
-    quarantined_records: list[dict[str, Any]] = field(default_factory=list)
+    preflight: dict[str, object] = field(default_factory=dict)
+    quarantined_records: list[dict[str, str]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -55,307 +74,188 @@ class FullMigrationSummary:
     success: bool = True
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "started_at": self.started_at,
-            "completed_at": self.completed_at,
-            "dry_run": self.dry_run,
-            "total_migrated": self.total_migrated,
-            "total_quarantined": self.total_quarantined,
-            "total_outbox_enqueued": self.total_outbox_enqueued,
-            "total_elapsed_seconds": self.total_elapsed_seconds,
-            "success": self.success,
-            "session_chunks": self.session_chunks_result.to_dict(),
-            "memory_cards": self.memory_cards_result.to_dict(),
-        }
+        return {"started_at": self.started_at, "completed_at": self.completed_at, "dry_run": self.dry_run,
+                "total_migrated": self.total_migrated, "total_quarantined": self.total_quarantined,
+                "total_outbox_enqueued": self.total_outbox_enqueued, "total_elapsed_seconds": self.total_elapsed_seconds,
+                "success": self.success, "session_chunks": self.session_chunks_result.to_dict(),
+                "memory_cards": self.memory_cards_result.to_dict()}
 
 
 class QdrantToPostgresMigrator:
-    """Migrates records and vectors from Qdrant source into PostgreSQL PgVectorStore."""
+    """Use only Qdrant ``get_collection``/``scroll`` and a real PG store seam."""
 
-    def __init__(
-        self,
-        qdrant_client: Any,
-        target_store: PgVectorStore,
-        batch_size: int = 100,
-        dry_run: bool = False,
-        checkpoint_file: str | None = None,
-    ):
-        self.qdrant = qdrant_client
-        self.target_store = target_store
-        self.batch_size = batch_size
-        self.dry_run = dry_run
-        self.checkpoint_file = checkpoint_file
-        self.checkpoints: dict[str, Any] = self._load_checkpoints()
+    def __init__(self, qdrant_client: Any, target_store: PgVectorStore, batch_size: int = 100,
+                 dry_run: bool = False, checkpoint_file: str | None = None) -> None:
+        if batch_size <= 0:
+            raise ValueError("batch_size_invalid")
+        if not all(callable(getattr(qdrant_client, name, None)) for name in ("get_collection", "scroll")):
+            raise ValueError("qdrant_api_seam_required")
+        self.qdrant, self.target_store = qdrant_client, target_store
+        self.batch_size, self.dry_run, self.checkpoint_file = batch_size, dry_run, checkpoint_file
+        self.checkpoints = self._load_checkpoints()
 
     def _load_checkpoints(self) -> dict[str, Any]:
-        if self.checkpoint_file and os.path.exists(self.checkpoint_file):
-            try:
-                with open(self.checkpoint_file, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception as e:
-                logger.warning(f"Could not load checkpoint file {self.checkpoint_file}: {e}")
-        return {}
+        if not self.checkpoint_file or not os.path.exists(self.checkpoint_file):
+            return {"version": _VERSION, "collections": {}}
+        try:
+            with open(self.checkpoint_file, encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("checkpoint_invalid") from exc
+        if not isinstance(data, dict) or data.get("version") != _VERSION or not isinstance(data.get("collections"), dict):
+            raise ValueError("checkpoint_invalid")
+        for key, record in data["collections"].items():
+            offset = record.get("next_offset") if isinstance(record, dict) else object()
+            if not isinstance(key, str) or not isinstance(record, dict) or record.get("collection_digest") != key or not isinstance(record.get("completed"), bool) or not isinstance(record.get("preflight"), dict) or (offset is not None and not isinstance(offset, (str, int))):
+                raise ValueError("checkpoint_invalid")
+        return data
 
-    def _save_checkpoints(self) -> None:
-        if self.checkpoint_file:
-            try:
-                os.makedirs(os.path.dirname(os.path.abspath(self.checkpoint_file)), exist_ok=True)
-                with open(self.checkpoint_file, "w", encoding="utf-8") as f:
-                    json.dump(self.checkpoints, f, indent=2)
-            except Exception as e:
-                logger.warning(f"Could not save checkpoint file {self.checkpoint_file}: {e}")
+    def _save(self) -> None:
+        if self.dry_run or not self.checkpoint_file:
+            return
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(self.checkpoint_file)), exist_ok=True)
+            with open(self.checkpoint_file, "w", encoding="utf-8") as handle:
+                json.dump(self.checkpoints, handle, sort_keys=True)
+        except OSError as exc:
+            raise RuntimeError("checkpoint_write_failed") from exc
 
-    def _fetch_qdrant_points(self, collection_name: str, offset: Any = None) -> tuple[list[Any], Any]:
-        """Fetch a page of points from Qdrant client or in-memory dict."""
-        # Check collections dict first (collection-scoped in-memory store)
-        if hasattr(self.qdrant, "collections") and isinstance(self.qdrant.collections, dict):
-            coll = self.qdrant.collections.get(collection_name, {})
-            items = list(coll.items())
-            start_idx = int(offset) if offset is not None else 0
-            end_idx = start_idx + self.batch_size
-            page = items[start_idx:end_idx]
-            next_offset = end_idx if end_idx < len(items) else None
-            return page, next_offset
+    def _preflight(self, name: str) -> dict[str, object]:
+        collection = self.qdrant.get_collection(collection_name=name)
+        vectors = _value(_value(_value(collection, "config"), "params"), "vectors")
+        if isinstance(vectors, dict) and "size" not in vectors:
+            vectors = next(iter(vectors.values())) if len(vectors) == 1 else None
+        size, distance = _value(vectors, "size"), _value(vectors, "distance")
+        distance = str(_value(distance, "value", distance)).lower()
+        return {"collection_digest": _digest(name), "dimension": size if isinstance(size, int) else None,
+                "distance": distance or None, "expected_dimension": DEFAULT_EMBEDDING_DIM,
+                "expected_distance": _DISTANCE, "expected_model": DEFAULT_EMBEDDING_MODEL,
+                "compatible": size == DEFAULT_EMBEDDING_DIM and distance == _DISTANCE}
 
-        # Check if in-memory test store has vectors dict
-        if hasattr(self.qdrant, "vectors") and isinstance(self.qdrant.vectors, dict):
-            # Dict mapping point_id -> (vector, payload)
-            items = list(self.qdrant.vectors.items())
-            start_idx = int(offset) if offset is not None else 0
-            end_idx = start_idx + self.batch_size
-            page = items[start_idx:end_idx]
-            next_offset = end_idx if end_idx < len(items) else None
-            return page, next_offset
+    def _fetch_qdrant_points(self, name: str, offset: Any = None) -> tuple[list[Any], Any]:
+        points, next_offset = self.qdrant.scroll(collection_name=name, limit=self.batch_size, offset=offset,
+                                                 with_payload=True, with_vectors=True)
+        return list(points), next_offset
 
-        # Check official QdrantClient (scroll API)
-        if hasattr(self.qdrant, "scroll"):
-            records, next_offset = self.qdrant.scroll(
-                collection_name=collection_name,
-                limit=self.batch_size,
-                offset=offset,
-                with_payload=True,
-                with_vectors=True,
-            )
-            return records, next_offset
+    @staticmethod
+    def _require(payload: dict[str, Any], key: str) -> Any:
+        value = payload.get(key)
+        if value is None or value == "":
+            raise ValueError(f"required_{key}_missing")
+        return value
 
-        return [], None
+    def _unpack(self, item: object) -> tuple[object, list[float] | None, dict[str, Any]]:
+        point_id, vector, payload = _value(item, "id"), _value(item, "vector"), _value(item, "payload")
+        if point_id is None or not isinstance(payload, dict):
+            raise ValueError("point_shape_invalid")
+        if vector is not None and (not isinstance(vector, list) or any(not isinstance(v, (int, float)) for v in vector)):
+            raise ValueError("vector_shape_invalid")
+        return point_id, vector, payload
 
-    def migrate_session_chunks(
-        self,
-        collection_name: str = "session_chunks",
-        project: str | None = None,
-    ) -> MigrationResult:
-        """Migrate conversation session chunks from Qdrant into PostgreSQL."""
-        start_time = time.time()
-        result = MigrationResult(collection_name=collection_name, dry_run=self.dry_run)
-        current_offset = self.checkpoints.get(f"{collection_name}_offset", None)
+    def _copyable(self, vector: list[float] | None, payload: dict[str, Any]) -> bool:
+        if vector is None:
+            return False
+        if len(vector) != DEFAULT_EMBEDDING_DIM:
+            raise ValueError("vector_dimension_mismatch")
+        if payload.get("embedding_model") != DEFAULT_EMBEDDING_MODEL:
+            raise ValueError("embedding_profile_mismatch")
+        return True
 
+    def _checkpoint(self, name: str, preflight: dict[str, object]) -> dict[str, Any]:
+        key = _digest(name)
+        checkpoint = self.checkpoints["collections"].get(key)
+        if checkpoint is None:
+            return {"collection_digest": key, "next_offset": None, "completed": False, "preflight": preflight}
+        if checkpoint["preflight"] != preflight:
+            raise ValueError("checkpoint_preflight_mismatch")
+        return checkpoint
+
+    @staticmethod
+    def _quarantine(result: MigrationResult, point_id: object | None, reason: str) -> None:
+        result.total_quarantined += 1
+        result.quarantined_records.append({"point_digest": _digest(point_id) if point_id is not None else "unknown", "reason_code": reason})
+
+    def _migrate(self, name: str, project: str | None, build: Callable[..., Any], write: Callable[[Any], Any]) -> MigrationResult:
+        started, preflight = time.time(), self._preflight(name)
+        result = MigrationResult(collection_name=_digest(name), dry_run=self.dry_run, preflight=preflight)
+        checkpoint = self._checkpoint(name, preflight)
+        if checkpoint["completed"]:
+            result.elapsed_seconds = round(time.time() - started, 4)
+            return result
+        if not preflight["compatible"]:
+            result.errors.append("collection_profile_mismatch")
+            result.elapsed_seconds = round(time.time() - started, 4)
+            return result
+        offset = checkpoint["next_offset"]
         while True:
-            points, next_offset = self._fetch_qdrant_points(collection_name, offset=current_offset)
+            points, next_offset = self._fetch_qdrant_points(name, offset)
             if not points:
                 break
-
             for item in points:
+                point_id = None
                 result.total_scanned += 1
                 try:
-                    # Unpack point
-                    if isinstance(item, tuple) and len(item) == 2:
-                        point_id, point_data = item
-                        if isinstance(point_data, tuple):
-                            vector, payload = point_data
-                        elif isinstance(point_data, dict):
-                            vector = point_data.get("vector")
-                            payload = point_data.get("payload", point_data)
-                        else:
-                            vector = None
-                            payload = {}
-                    elif hasattr(item, "id") and hasattr(item, "payload"):
-                        point_id = str(item.id)
-                        vector = item.vector
-                        payload = item.payload or {}
-                    else:
-                        point_id = str(item)
-                        vector = None
-                        payload = {}
-
-                    # Project filter
-                    item_project = payload.get("project", "default")
-                    if project and item_project != project:
+                    point_id, vector, payload = self._unpack(item)
+                    if project is not None and payload.get("project") != project:
                         result.total_skipped += 1
                         continue
-
-                    # Validate vector dimensions
-                    if vector is not None and len(vector) != 1536:
-                        result.total_quarantined += 1
-                        result.quarantined_records.append({
-                            "id": str(point_id),
-                            "reason": f"Invalid vector dimension: {len(vector)} != 1536",
-                            "payload": payload,
-                        })
-                        continue
-
-                    chunk = SessionChunk(
-                        chunk_id=str(payload.get("chunk_id", point_id)),
-                        session_id_hash=str(payload.get("session_id_hash", f"sha256:{point_id}")),
-                        project=item_project,
-                        provider=str(payload.get("provider", "unspecified")),
-                        chunk_index=int(payload.get("chunk_index", 0)),
-                        content_markdown=str(payload.get("content_markdown", payload.get("text", ""))),
-                        token_count=int(payload.get("token_count", 0)),
-                        embedding_model=str(payload.get("embedding_model", "text-embedding-3-small")),
-                        embedding=list(vector) if vector else None,
-                    )
-
+                    record = build(point_id, vector, payload)
                     if not self.dry_run:
-                        self.target_store.insert_chunk(chunk)
-                    result.total_migrated += 1
-
-                except Exception as e:
-                    logger.error(f"Error migrating session chunk: {e}", exc_info=True)
-                    result.total_quarantined += 1
-                    result.quarantined_records.append({
-                        "id": str(item),
-                        "reason": str(e),
-                    })
-
-            current_offset = next_offset
-            self.checkpoints[f"{collection_name}_offset"] = current_offset
-            self._save_checkpoints()
-            if next_offset is None:
-                break
-
-        result.elapsed_seconds = round(time.time() - start_time, 4)
-        return result
-
-    def migrate_memory_cards(
-        self,
-        collection_name: str = "memory_cards",
-        project: str | None = None,
-    ) -> MigrationResult:
-        """Migrate authoritative memory cards from Qdrant into PostgreSQL."""
-        start_time = time.time()
-        result = MigrationResult(collection_name=collection_name, dry_run=self.dry_run)
-        current_offset = self.checkpoints.get(f"{collection_name}_offset", None)
-
-        while True:
-            points, next_offset = self._fetch_qdrant_points(collection_name, offset=current_offset)
-            if not points:
-                break
-
-            for item in points:
-                result.total_scanned += 1
-                try:
-                    # Unpack point
-                    if isinstance(item, tuple) and len(item) == 2:
-                        point_id, point_data = item
-                        if isinstance(point_data, tuple):
-                            vector, payload = point_data
-                        elif isinstance(point_data, dict):
-                            vector = point_data.get("vector")
-                            payload = point_data.get("payload", point_data)
-                        else:
-                            vector = None
-                            payload = {}
-                    elif hasattr(item, "id") and hasattr(item, "payload"):
-                        point_id = str(item.id)
-                        vector = item.vector
-                        payload = item.payload or {}
-                    else:
-                        point_id = str(item)
-                        vector = None
-                        payload = {}
-
-                    # Project filter
-                    item_project = payload.get("project", "default")
-                    if project and item_project != project:
-                        result.total_skipped += 1
-                        continue
-
-                    # Validate vector dimensions
-                    if vector is not None and len(vector) != 1536:
-                        result.total_quarantined += 1
-                        result.quarantined_records.append({
-                            "id": str(point_id),
-                            "reason": f"Invalid vector dimension: {len(vector)} != 1536",
-                            "payload": payload,
-                        })
-                        continue
-
-                    memory_id = str(payload.get("memory_id", point_id))
-                    content_hash = str(payload.get("content_hash", f"sha256:{point_id}"))
-                    if not content_hash.startswith("sha256:"):
-                        content_hash = f"sha256:{content_hash}"
-
-                    card = MemoryCard(
-                        memory_id=memory_id,
-                        project=item_project,
-                        card_type=str(payload.get("card_type", "decision")),
-                        title=str(payload.get("title", f"Card {memory_id}")),
-                        summary=str(payload.get("summary", payload.get("text", ""))),
-                        typed_payload=payload.get("typed_payload", {}),
-                        lifecycle_state=str(payload.get("lifecycle_state", "candidate")),
-                        authorization_status=str(payload.get("authorization_status", "disabled")),
-                        currentness=str(payload.get("currentness", "current")),
-                        confidence=float(payload.get("confidence", 1.0)),
-                        embedding_model=str(payload.get("embedding_model", "text-embedding-3-small")),
-                        embedding=list(vector) if vector else None,
-                        embedding_state="ready" if vector is not None else "pending",
-                        content_hash=content_hash,
-                        source_ref=payload.get("source_ref", []),
-                    )
-
-                    if not self.dry_run:
-                        self.target_store.insert_card(card)
-                        # If card lacks vector, enqueue outbox job
-                        if card.embedding is None:
-                            payload_text = card.summary or card.title
-                            self.target_store.enqueue_outbox(
-                                target_type="memory_card",
-                                target_id=card.memory_id,
-                                content_hash=card.content_hash,
-                                payload_text=payload_text,
-                            )
+                        write(record)
+                        if record.embedding is None:
                             result.outbox_enqueued += 1
-
                     result.total_migrated += 1
-
-                except Exception as e:
-                    logger.error(f"Error migrating memory card: {e}", exc_info=True)
-                    result.total_quarantined += 1
-                    result.quarantined_records.append({
-                        "id": str(item),
-                        "reason": str(e),
-                    })
-
-            current_offset = next_offset
-            self.checkpoints[f"{collection_name}_offset"] = current_offset
-            self._save_checkpoints()
-            if next_offset is None:
+                except (TypeError, ValueError, OverflowError) as exc:
+                    self._quarantine(result, point_id, str(exc))
+                except Exception:
+                    logger.exception("migration_record_failed reason_code=target_write_failed")
+                    self._quarantine(result, point_id, "target_write_failed")
+            offset = next_offset
+            if not self.dry_run:
+                checkpoint.update(next_offset=offset, completed=offset is None)
+                self.checkpoints["collections"][_digest(name)] = checkpoint
+                self._save()
+            if offset is None:
                 break
-
-        result.elapsed_seconds = round(time.time() - start_time, 4)
+        result.elapsed_seconds = round(time.time() - started, 4)
         return result
+
+    @staticmethod
+    def _content_hash(payload: dict[str, Any]) -> str:
+        value = QdrantToPostgresMigrator._require(payload, "content_hash")
+        if not isinstance(value, str) or not value.startswith("sha256:"):
+            raise ValueError("content_hash_invalid")
+        return value
+
+    def migrate_session_chunks(self, collection_name: str = "session_chunks", project: str | None = None) -> MigrationResult:
+        def build(_id: object, vector: list[float] | None, payload: dict[str, Any]) -> SessionChunk:
+            copied = self._copyable(vector, payload)
+            return SessionChunk(chunk_id=str(self._require(payload, "chunk_id")), session_id_hash=str(self._require(payload, "session_id_hash")),
+                project=str(self._require(payload, "project")), provider=str(self._require(payload, "provider")), chunk_index=int(self._require(payload, "chunk_index")),
+                content_markdown=str(self._require(payload, "content_markdown")), token_count=int(self._require(payload, "token_count")), content_hash=self._content_hash(payload),
+                embedding_model=DEFAULT_EMBEDDING_MODEL, embedding_state="ready" if copied else "pending", embedding=list(vector) if copied else None)
+        return self._migrate(collection_name, project, build, self.target_store.insert_chunk)
+
+    def migrate_memory_cards(self, collection_name: str = "memory_cards", project: str | None = None) -> MigrationResult:
+        def build(_id: object, vector: list[float] | None, payload: dict[str, Any]) -> MemoryCard:
+            copied, valid_from, valid_to = self._copyable(vector, payload), _timestamp(payload.get("valid_from"), True), _timestamp(payload.get("valid_to"), False)
+            typed_payload, source_ref = self._require(payload, "typed_payload"), self._require(payload, "source_ref")
+            if valid_to is not None and valid_to < valid_from:
+                raise ValueError("authority_validity_invalid")
+            if not isinstance(typed_payload, dict) or not isinstance(source_ref, list):
+                raise ValueError("authority_shape_invalid")
+            return MemoryCard(memory_id=str(self._require(payload, "memory_id")), project=str(self._require(payload, "project")), card_type=str(self._require(payload, "card_type")),
+                title=str(self._require(payload, "title")), summary=str(self._require(payload, "summary")), typed_payload=typed_payload,
+                lifecycle_state=str(self._require(payload, "lifecycle_state")), authorization_status=str(self._require(payload, "authorization_status")),
+                currentness=str(self._require(payload, "currentness")), confidence=float(self._require(payload, "confidence")), valid_from=valid_from, valid_to=valid_to,
+                embedding_model=DEFAULT_EMBEDDING_MODEL, embedding_state="ready" if copied else "pending", embedding=list(vector) if copied else None,
+                content_hash=self._content_hash(payload), source_ref=source_ref)
+        # Store-owned card+outbox transaction; never enqueue again in this sidecar.
+        return self._migrate(collection_name, project, build, self.target_store.upsert_card)
 
     def run_full_migration(self, project: str | None = None) -> FullMigrationSummary:
-        """Execute complete migration sequence for chunks and cards."""
-        started_at = datetime.now(timezone.utc).isoformat()
-        start_time = time.time()
-
-        chunks_res = self.migrate_session_chunks(collection_name="session_chunks", project=project)
-        cards_res = self.migrate_memory_cards(collection_name="memory_cards", project=project)
-
-        completed_at = datetime.now(timezone.utc).isoformat()
-        total_elapsed = round(time.time() - start_time, 4)
-
-        return FullMigrationSummary(
-            started_at=started_at,
-            completed_at=completed_at,
-            dry_run=self.dry_run,
-            session_chunks_result=chunks_res,
-            memory_cards_result=cards_res,
-            total_migrated=chunks_res.total_migrated + cards_res.total_migrated,
-            total_quarantined=chunks_res.total_quarantined + cards_res.total_quarantined,
-            total_outbox_enqueued=cards_res.outbox_enqueued,
-            total_elapsed_seconds=total_elapsed,
-            success=(len(chunks_res.errors) == 0 and len(cards_res.errors) == 0),
-        )
+        started_at, started = datetime.now(timezone.utc).isoformat(), time.time()
+        chunks, cards = self.migrate_session_chunks(project=project), self.migrate_memory_cards(project=project)
+        return FullMigrationSummary(started_at, datetime.now(timezone.utc).isoformat(), self.dry_run, chunks, cards,
+            chunks.total_migrated + cards.total_migrated, chunks.total_quarantined + cards.total_quarantined,
+            chunks.outbox_enqueued + cards.outbox_enqueued, round(time.time() - started, 4), not chunks.errors and not cards.errors)

@@ -38,6 +38,7 @@ x-llm-brain-worker-env: &llm-brain-worker-env
   LLM_BRAIN_EMBEDDING_BASE_URL: http://llm-brain-vertex-wrapper:${LLM_BRAIN_VERTEX_WRAPPER_CONTAINER_PORT:-8080}/v1
   LLM_BRAIN_EMBEDDING_MODEL: ${LLM_BRAIN_EMBEDDING_MODEL:-gemini-embedding-2}
   LLM_BRAIN_EMBEDDING_DIM: ${LLM_BRAIN_EMBEDDING_DIM:-3072}
+  LLM_BRAIN_EMBEDDING_PROFILE_ID: ${LLM_BRAIN_EMBEDDING_PROFILE_ID:-lbrain-memory-gemini-embedding-2-v1}
   LLM_BRAIN_GRAPH_EXTRACT_ENTITIES: ${LLM_BRAIN_GRAPH_EXTRACT_ENTITIES:-false}
   LLM_BRAIN_GRAPH_WRITE_TIMEOUT_SECONDS: ${LLM_BRAIN_GRAPH_WRITE_TIMEOUT_SECONDS:-1200}
 
@@ -155,11 +156,12 @@ services:
       QDRANT_URL: ${QDRANT_URL:-}
       QDRANT_COLLECTION: ${QDRANT_COLLECTION:-}
       # Embedding endpoint reused from the graph adapter (LLM_BRAIN_EMBEDDING_*).
-      # Empty by default -> dual-write stays inert.
-      LLM_BRAIN_EMBEDDING_MODEL: ${LLM_BRAIN_EMBEDDING_MODEL:-}
+      # QDRANT_URL and MIRROR_DUAL_WRITE remain empty/off by default, so this
+      # profile does not activate a Qdrant write merely by resolving the model.
+      LLM_BRAIN_EMBEDDING_MODEL: ${LLM_BRAIN_EMBEDDING_MODEL:-gemini-embedding-2}
       LLM_BRAIN_EMBEDDING_BASE_URL: ${LLM_BRAIN_EMBEDDING_BASE_URL:-}
       LLM_BRAIN_EMBEDDING_API_KEY: ${LLM_BRAIN_EMBEDDING_API_KEY:-}
-      LLM_BRAIN_EMBEDDING_DIM: ${LLM_BRAIN_EMBEDDING_DIM:-1024}
+      LLM_BRAIN_EMBEDDING_DIM: ${LLM_BRAIN_EMBEDDING_DIM:-3072}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     security_opt:
@@ -174,14 +176,20 @@ services:
     # Searchable-mirror store (M6 dual-write target). Profile-gated so a bare
     # `compose up` does NOT start it. Opt-in:
     #   docker compose --profile searchable-mirror up -d qdrant
-    # Loopback-only bind; pin QDRANT_IMAGE to a tested tag for production.
+    # Loopback-only bind. Keep the shadow source on a tested, explicit tag;
+    # production may override this only after the migration compatibility gate.
     profiles: ["searchable-mirror"]
-    image: ${QDRANT_IMAGE:-qdrant/qdrant:latest}
+    image: ${QDRANT_IMAGE:-qdrant/qdrant:v1.19.0}
     restart: unless-stopped
     ports:
       - "127.0.0.1:6333:6333"
     volumes:
       - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:6333/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
 
   llm-brain-couchdb:
     profiles: ["llm-brain-core"]
@@ -203,8 +211,11 @@ services:
       - llm-brain-couchdb-data:/opt/couchdb/data
 
   llm-brain-ledger-postgres:
-    profiles: ["llm-brain-core"]
-    image: postgres:17-alpine
+    profiles: ["llm-brain-core", "llm-brain-mcp"]
+    # The plain postgres image has no pgvector extension. The image tag is
+    # overridable for a separately qualified build, but never silently falls
+    # back to an image without the vector extension.
+    image: ${LLM_BRAIN_LEDGER_POSTGRES_IMAGE:-pgvector/pgvector:pg17}
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${LLM_BRAIN_LEDGER_POSTGRES_DB:-neurons_ledger}
@@ -214,7 +225,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "pg_isready -U ${LLM_BRAIN_LEDGER_POSTGRES_USER:-neurons} -d ${LLM_BRAIN_LEDGER_POSTGRES_DB:-neurons_ledger}",
+          "pg_isready -U ${LLM_BRAIN_LEDGER_POSTGRES_USER:-neurons} -d ${LLM_BRAIN_LEDGER_POSTGRES_DB:-neurons_ledger} && test \"$$(psql -U ${LLM_BRAIN_LEDGER_POSTGRES_USER:-neurons} -d ${LLM_BRAIN_LEDGER_POSTGRES_DB:-neurons_ledger} -tAc \"SELECT 1 FROM pg_available_extensions WHERE name='vector'\")\" = 1",
         ]
       interval: 30s
       timeout: 5s
@@ -276,7 +287,11 @@ services:
         mkdir -p /var/lib/agent-knowledge/llm-brain/graph-trigger
         echo "[llm-brain-graph-trigger] scheduler start"
         while true; do
-          neuron-knowledge couchdb-graph-trigger \
+          graph_extract_args=""
+          if [ "$${LLM_BRAIN_GRAPH_TRIGGER_EXTRACT_ENTITIES:-true}" = "true" ]; then
+            graph_extract_args="--extract-entities"
+          fi
+          if ! neuron-knowledge couchdb-graph-trigger \
             --ledger "$${LLM_BRAIN_LEDGER_PATH:-/var/lib/agent-knowledge/llm-brain/ledger.sqlite}" \
             --runtime-dir /var/lib/agent-knowledge/llm-brain/graph-trigger \
             --limit "$${LLM_BRAIN_GRAPH_TRIGGER_LIMIT:-25}" \
@@ -285,7 +300,10 @@ services:
             --execute \
             --graph-required \
             --report-every "$${LLM_BRAIN_GRAPH_TRIGGER_REPORT_EVERY:-25}" \
-            || echo "[llm-brain-graph-trigger] rc=$$?"
+            $$graph_extract_args; then
+            echo "[llm-brain-graph-trigger] projection failed; stopping for restart/recovery" >&2
+            exit 1
+          fi
           sleep "$${LLM_BRAIN_GRAPH_TRIGGER_INTERVAL_SECONDS:-300}"
         done
     environment:
@@ -295,11 +313,18 @@ services:
       LLM_BRAIN_GRAPH_TRIGGER_PROJECT: ${LLM_BRAIN_GRAPH_TRIGGER_PROJECT:-}
       LLM_BRAIN_GRAPH_TRIGGER_PROVIDER: ${LLM_BRAIN_GRAPH_TRIGGER_PROVIDER:-}
       LLM_BRAIN_GRAPH_TRIGGER_REPORT_EVERY: ${LLM_BRAIN_GRAPH_TRIGGER_REPORT_EVERY:-25}
+      # This is a cold projection lane, so entity/relation extraction is on by
+      # default. Set false only for an explicitly episodic-only maintenance run.
+      LLM_BRAIN_GRAPH_TRIGGER_EXTRACT_ENTITIES: ${LLM_BRAIN_GRAPH_TRIGGER_EXTRACT_ENTITIES:-true}
     depends_on:
-      - llm-brain-couchdb
-      - llm-brain-ledger-postgres
-      - llm-brain-neo4j
-      - llm-brain-vertex-wrapper
+      llm-brain-couchdb:
+        condition: service_started
+      llm-brain-ledger-postgres:
+        condition: service_healthy
+      llm-brain-neo4j:
+        condition: service_healthy
+      llm-brain-vertex-wrapper:
+        condition: service_started
     security_opt:
       - no-new-privileges:true
     volumes:
@@ -326,7 +351,7 @@ services:
         mkdir -p /var/lib/agent-knowledge/llm-brain/graph-trigger
         echo "[llm-brain-bulk-semantic-trigger] scheduler start"
         while true; do
-          neuron-knowledge couchdb-bulk-semantic-trigger \
+          if ! neuron-knowledge couchdb-bulk-semantic-trigger \
             --ledger "$${LLM_BRAIN_LEDGER_PATH:-/var/lib/agent-knowledge/llm-brain/ledger.sqlite}" \
             --runtime-dir /var/lib/agent-knowledge/llm-brain/graph-trigger \
             --limit "$${LLM_BRAIN_BULK_SEMANTIC_TRIGGER_LIMIT:-100}" \
@@ -334,8 +359,10 @@ services:
             --project "$${LLM_BRAIN_BULK_SEMANTIC_TRIGGER_PROJECT:-}" \
             --provider "$${LLM_BRAIN_BULK_SEMANTIC_TRIGGER_PROVIDER:-}" \
             --execute \
-            --report-every "$${LLM_BRAIN_BULK_SEMANTIC_TRIGGER_REPORT_EVERY:-25}" \
-            || echo "[llm-brain-bulk-semantic-trigger] rc=$$?"
+            --report-every "$${LLM_BRAIN_BULK_SEMANTIC_TRIGGER_REPORT_EVERY:-25}"; then
+            echo "[llm-brain-bulk-semantic-trigger] semantic projection failed; stopping for restart/recovery" >&2
+            exit 1
+          fi
           sleep "$${LLM_BRAIN_BULK_SEMANTIC_TRIGGER_INTERVAL_SECONDS:-900}"
         done
     environment:
@@ -365,7 +392,7 @@ services:
       - llm-brain-runtime:/var/lib/agent-knowledge/llm-brain
 
   llm-brain-neo4j:
-    profiles: ["llm-brain-graph", "llm-brain-core"]
+    profiles: ["llm-brain-graph", "llm-brain-core", "llm-brain-mcp"]
     image: neo4j:5.26-community
     restart: unless-stopped
     environment:
@@ -380,7 +407,11 @@ services:
       NEO4J_server_memory_pagecache_size: ${LLM_BRAIN_NEO4J_PAGECACHE:-512m}
       NEO4J_dbms_security_procedures_unrestricted: ${LLM_BRAIN_NEO4J_UNRESTRICTED_PROCEDURES:-}
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:7474 || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q --spider http://127.0.0.1:7474 && cypher-shell -a bolt://127.0.0.1:7687 -u \"$${LLM_BRAIN_NEO4J_USER}\" -p \"$${LLM_BRAIN_NEO4J_PASSWORD}\" \"RETURN 1\" >/dev/null",
+        ]
       interval: 30s
       timeout: 5s
       retries: 10
@@ -403,6 +434,8 @@ services:
     profiles: ["llm-brain-mcp"]
     depends_on:
       llm-brain-neo4j:
+        condition: service_healthy
+      llm-brain-ledger-postgres:
         condition: service_healthy
     build:
       context: ./worker

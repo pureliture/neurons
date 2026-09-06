@@ -12,23 +12,40 @@ from datetime import datetime, timezone
 import logging
 import statistics
 import time
+import hashlib
+import json
 from typing import Any
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from qdrant_client import QdrantClient, models
+from ..model_connectors import DEFAULT_EMBEDDING_DIM
 
-from .pgvector_store import PgVectorStore, make_dummy_vector
+from .pgvector_store import PgVectorStore
 
 logger = logging.getLogger(__name__)
 
+# M5c shadow-gate premises (requirements §3 item 4, design §8 Phase 3).
+MIN_CUTOVER_QUERIES = 50
+OBSERVATION_WINDOW_SECONDS = 600.0
+RELATION_TEMPORAL_GATE = 0.95
 
-@dataclass
-class BenchmarkQuery:
+
+class BenchmarkQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
     query_id: str
-    query_vector: list[float]
-    project: str = "neurons"
-    limit: int = 5
+    query_vector: list[float] = Field(min_length=DEFAULT_EMBEDDING_DIM, max_length=DEFAULT_EMBEDDING_DIM)
+    project: str = Field(default="neurons", min_length=1, max_length=64)
+    limit: int = Field(default=5, ge=1, le=100)
     query_text: str | None = None
     authorization_status: str | None = "active"
     currentness: str | None = "current"
     as_of: str | None = None
+
+    @field_validator("as_of")
+    @classmethod
+    def validate_as_of(cls, value):
+        if value is not None:
+            _reference_time(value)
+        return value
 
 
 @dataclass
@@ -42,6 +59,8 @@ class DualReadComparisonResult:
     qdrant_latency_ms: float
     pgvector_latency_ms: float
     discrepancies: list[str] = field(default_factory=list)
+    qdrant_error: str | None = None
+    pgvector_error: str | None = None
 
 
 @dataclass
@@ -70,7 +89,21 @@ class BenchmarkSummary:
     overall_gate_passed: bool
     
     discrepancy_count: int
+    error_count: int
+    sample_size_gate_passed: bool
+    benchmark_valid: bool
     details: list[DualReadComparisonResult] = field(default_factory=list)
+    evidence_class: str = "test_harness"
+    cutover_blockers: list[str] = field(default_factory=list)
+    # M5c gate inputs: graph correctness + measured/approved rate bounds +
+    # shared 10-minute observation window. None/unverified keeps gate closed.
+    relation_temporal_correctness: float | None = None
+    false_positive_rate: float | None = None
+    fallback_rate: float | None = None
+    approved_false_positive_upper: float | None = None
+    approved_fallback_rate_upper: float | None = None
+    observation_window_seconds: float = 0.0
+    observation_window_verified: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -91,6 +124,18 @@ class BenchmarkSummary:
             "latency_gate_passed": self.latency_gate_passed,
             "overall_gate_passed": self.overall_gate_passed,
             "discrepancy_count": self.discrepancy_count,
+            "error_count": self.error_count,
+            "sample_size_gate_passed": self.sample_size_gate_passed,
+            "benchmark_valid": self.benchmark_valid,
+            "evidence_class": self.evidence_class,
+            "cutover_blockers": self.cutover_blockers,
+            "relation_temporal_correctness": self.relation_temporal_correctness,
+            "false_positive_rate": self.false_positive_rate,
+            "fallback_rate": self.fallback_rate,
+            "approved_false_positive_upper": self.approved_false_positive_upper,
+            "approved_fallback_rate_upper": self.approved_fallback_rate_upper,
+            "observation_window_seconds": round(self.observation_window_seconds, 3),
+            "observation_window_verified": self.observation_window_verified,
         }
 
 
@@ -115,12 +160,39 @@ class DualReadShadowHarness:
         default_limit: int = 5,
         recall_gate_threshold: float = 0.95,
         p95_latency_gate_ms: float = 20.0,
+        minimum_queries_for_cutover: int = 50,
+        evidence_class: str = "test_harness",
+        backend_preflight_verified: bool = False,
+        approved_false_positive_upper: float | None = None,
+        approved_fallback_rate_upper: float | None = None,
     ):
         self.qdrant = qdrant_client
         self.pg_store = pg_store
         self.default_limit = default_limit
         self.recall_gate_threshold = recall_gate_threshold
         self.p95_latency_gate_ms = p95_latency_gate_ms
+        if minimum_queries_for_cutover < 1:
+            raise ValueError("minimum_queries_for_cutover must be positive")
+        if evidence_class not in {"test_harness", "live_cutover"}:
+            raise ValueError("evidence_class must be test_harness or live_cutover")
+        for bound_name, bound in (
+            ("approved_false_positive_upper", approved_false_positive_upper),
+            ("approved_fallback_rate_upper", approved_fallback_rate_upper),
+        ):
+            if bound is not None and not 0.0 <= bound <= 1.0:
+                raise ValueError(f"{bound_name} must be within [0, 1]")
+        if evidence_class == "live_cutover":
+            if _is_qdrant_test_double(qdrant_client):
+                raise ValueError("live_cutover evidence cannot use an in-memory Qdrant client or mock double")
+            if _is_pgvector_test_double(pg_store):
+                raise ValueError("live_cutover evidence cannot use a dict-scan/mock pgvector double")
+            if not backend_preflight_verified:
+                raise ValueError("live_cutover requires verified backend preflight")
+        self.minimum_queries_for_cutover = minimum_queries_for_cutover
+        self.evidence_class = evidence_class
+        self.backend_preflight_verified = backend_preflight_verified
+        self.approved_false_positive_upper = approved_false_positive_upper
+        self.approved_fallback_rate_upper = approved_fallback_rate_upper
 
     def _query_qdrant(
         self,
@@ -128,49 +200,34 @@ class DualReadShadowHarness:
         project: str,
         limit: int,
         collection_name: str = "memory_cards",
-    ) -> tuple[list[str], float]:
+        authorization_status: str | None = "active",
+        currentness: str | None = "current",
+        as_of: str | None = None,
+    ) -> tuple[list[str], float, str | None]:
         """Query Qdrant client and return top IDs with elapsed time."""
         t0 = time.perf_counter()
         top_ids: list[str] = []
+        error_type: str | None = None
 
         try:
-            if hasattr(self.qdrant, "search") and callable(self.qdrant.search):
-                # Check signature of search
-                try:
-                    res = self.qdrant.search(
-                        collection_name=collection_name,
-                        query_vector=query_vector,
-                        limit=limit,
-                    )
-                except TypeError:
-                    # In-memory test store with signature search(query_vector, limit)
-                    res = self.qdrant.search(query_vector, limit=limit)
-
-                for item in res:
-                    if isinstance(item, dict):
-                        top_ids.append(str(item.get("id", item.get("memory_id", ""))))
-                    elif hasattr(item, "id"):
-                        top_ids.append(str(item.id))
-                    else:
-                        top_ids.append(str(item))
-
-            elif hasattr(self.qdrant, "vectors") and isinstance(self.qdrant.vectors, dict):
-                from .pgvector_store import compute_cosine_similarity
-                scored = []
-                for pid, (vec, payload) in self.qdrant.vectors.items():
-                    if project and payload.get("project") and payload.get("project") != project:
-                        continue
-                    sim = compute_cosine_similarity(query_vector, vec)
-                    actual_id = payload.get("memory_id", pid)
-                    scored.append((sim, actual_id))
-                scored.sort(key=lambda x: (-x[0], str(x[1])))
-                top_ids = [s[1] for s in scored[:limit]]
-
-        except Exception as e:
-            logger.error(f"Error querying Qdrant: {e}", exc_info=True)
+            response = self.qdrant.query_points(
+                collection_name=collection_name, query=query_vector, limit=limit,
+                query_filter=_authority_query_filter(project, authorization_status, currentness, as_of),
+                with_payload=["memory_id"], with_vectors=False,
+            )
+            for item in response.points:
+                memory_id = (item.payload or {}).get("memory_id")
+                if not isinstance(memory_id, str) or not memory_id:
+                    raise ValueError("canonical_memory_id_missing")
+                if memory_id in top_ids:
+                    raise ValueError("duplicate_canonical_memory_id")
+                top_ids.append(memory_id)
+        except Exception:
+            error_type = "qdrant_query_failed"
+            logger.warning("Qdrant shadow query failed")
 
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        return top_ids, elapsed_ms
+        return top_ids, elapsed_ms, error_type
 
     def _query_pgvector(
         self,
@@ -180,10 +237,11 @@ class DualReadShadowHarness:
         authorization_status: str | None = "active",
         currentness: str | None = "current",
         as_of: str | None = None,
-    ) -> tuple[list[str], float]:
+    ) -> tuple[list[str], float, str | None]:
         """Query PgVectorStore and return top IDs with elapsed time."""
         t0 = time.perf_counter()
         top_ids: list[str] = []
+        error_type: str | None = None
 
         try:
             results = self.pg_store.hybrid_search(
@@ -195,11 +253,12 @@ class DualReadShadowHarness:
                 as_of=as_of,
             )
             top_ids = [str(r["memory_id"]) for r in results]
-        except Exception as e:
-            logger.error(f"Error querying pgvector: {e}", exc_info=True)
+        except Exception:
+            error_type = "pgvector_query_failed"
+            logger.warning("PostgreSQL shadow query failed")
 
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        return top_ids, elapsed_ms
+        return top_ids, elapsed_ms, error_type
 
     def execute_query(
         self,
@@ -212,7 +271,7 @@ class DualReadShadowHarness:
             b_query = query
         elif isinstance(query, dict):
             b_query = BenchmarkQuery(
-                query_id=query.get("query_id", f"q_{int(time.time()*1000)}"),
+                query_id=query.get("query_id", "fixture"),
                 query_vector=query["query_vector"],
                 project=query.get("project", project),
                 limit=query.get("limit", limit),
@@ -223,7 +282,7 @@ class DualReadShadowHarness:
         else:
             # list[float] vector
             b_query = BenchmarkQuery(
-                query_id=f"q_{int(time.time()*1000)}",
+                query_id="fixture",
                 query_vector=query,
                 project=project,
                 limit=limit,
@@ -231,13 +290,7 @@ class DualReadShadowHarness:
 
         k = b_query.limit
 
-        qdrant_ids, qdrant_latency = self._query_qdrant(
-            query_vector=b_query.query_vector,
-            project=b_query.project,
-            limit=k,
-        )
-
-        pg_ids, pg_latency = self._query_pgvector(
+        qdrant_ids, qdrant_latency, qdrant_error = self._query_qdrant(
             query_vector=b_query.query_vector,
             project=b_query.project,
             limit=k,
@@ -246,13 +299,29 @@ class DualReadShadowHarness:
             as_of=b_query.as_of,
         )
 
-        # Compute recall
-        if not qdrant_ids and not pg_ids:
-            # Both empty -> perfect recall
+        pg_ids, pg_latency, pgvector_error = self._query_pgvector(
+            query_vector=b_query.query_vector,
+            project=b_query.project,
+            limit=k,
+            authorization_status=b_query.authorization_status,
+            currentness=b_query.currentness,
+            as_of=b_query.as_of,
+        )
+
+        # Compute recall. An empty result is only a perfect match when both
+        # backends completed successfully and returned empty. A backend error
+        # is never converted into an empty result.
+        errors = [item for item in (qdrant_error, pgvector_error) if item]
+        if errors:
+            recall = 0.0
+            overlap = 0
+        elif not qdrant_ids and not pg_ids:
             recall = 1.0
             overlap = 0
         elif not qdrant_ids and pg_ids:
-            recall = 1.0
+            # The source side has no reference hit while the target produced
+            # one: treat it as a divergence, not an unmeasurable success.
+            recall = 0.0
             overlap = 0
         else:
             q_set = set(qdrant_ids)
@@ -262,37 +331,61 @@ class DualReadShadowHarness:
             recall = overlap / min(k, len(q_set)) if q_set else 1.0
 
         discrepancies = []
+        if qdrant_error:
+            discrepancies.append(f"Qdrant query failed: {qdrant_error}")
+        if pgvector_error:
+            discrepancies.append(f"PgVector query failed: {pgvector_error}")
         if recall < self.recall_gate_threshold:
             discrepancies.append(
-                f"Recall {recall:.3f} below threshold {self.recall_gate_threshold:.3f}. "
-                f"Qdrant: {qdrant_ids[:3]}, PgVector: {pg_ids[:3]}"
+                f"Recall {recall:.3f} below threshold {self.recall_gate_threshold:.3f}."
             )
 
         return DualReadComparisonResult(
             query_id=b_query.query_id,
             qdrant_top_ids=qdrant_ids,
             pgvector_top_ids=pg_ids,
-            recall_at_k=round(recall, 4),
+            recall_at_k=recall,
             overlap_count=overlap,
             k=k,
             qdrant_latency_ms=round(qdrant_latency, 3),
             pgvector_latency_ms=round(pg_latency, 3),
             discrepancies=discrepancies,
+            qdrant_error=qdrant_error,
+            pgvector_error=pgvector_error,
         )
 
     def run_benchmark(
         self,
         query_fixtures: list[BenchmarkQuery | dict[str, Any] | list[float]],
         project: str = "neurons",
+        relation_temporal_correctness: float | None = None,
+        false_positive_rate: float | None = None,
+        fallback_rate: float | None = None,
+        shared_window_verified: bool = False,
     ) -> BenchmarkSummary:
         """Run benchmark across list of query fixtures."""
+        if not query_fixtures:
+            raise ValueError("dual-read benchmark requires at least one query fixture")
+        for rate_name, rate in (
+            ("false_positive_rate", false_positive_rate),
+            ("fallback_rate", fallback_rate),
+        ):
+            if rate is not None and not 0.0 <= rate <= 1.0:
+                raise ValueError(f"{rate_name} must be within [0, 1]")
+        if relation_temporal_correctness is not None and not 0.0 <= relation_temporal_correctness <= 1.0:
+            raise ValueError("relation_temporal_correctness must be within [0, 1]")
         started_at = datetime.now(timezone.utc).isoformat()
         results: list[DualReadComparisonResult] = []
         pg_latencies: list[float] = []
         qdrant_latencies: list[float] = []
         recalls: list[float] = []
+        unique_fixtures: set[str] = set()
 
         for q in query_fixtures:
+            fixture = q.model_dump(exclude={"query_id"}) if isinstance(q, BenchmarkQuery) else (
+                {key: value for key, value in q.items() if key != "query_id"} if isinstance(q, dict) else q
+            )
+            unique_fixtures.add(hashlib.sha256(json.dumps(fixture, sort_keys=True).encode()).hexdigest())
             res = self.execute_query(q, project=project, limit=self.default_limit)
             results.append(res)
             recalls.append(res.recall_at_k)
@@ -302,9 +395,9 @@ class DualReadShadowHarness:
         completed_at = datetime.now(timezone.utc).isoformat()
         total_queries = len(results)
 
-        mean_recall = statistics.mean(recalls) if recalls else 1.0
-        min_recall = min(recalls) if recalls else 1.0
-        max_recall = max(recalls) if recalls else 1.0
+        mean_recall = statistics.mean(recalls)
+        min_recall = min(recalls)
+        max_recall = max(recalls)
 
         p50_pg = _percentile(pg_latencies, 50)
         p95_pg = _percentile(pg_latencies, 95)
@@ -314,11 +407,68 @@ class DualReadShadowHarness:
         p95_qd = _percentile(qdrant_latencies, 95)
         p99_qd = _percentile(qdrant_latencies, 99)
 
-        recall_passed = mean_recall >= self.recall_gate_threshold
-        latency_passed = p95_pg <= self.p95_latency_gate_ms
-        overall_passed = recall_passed and latency_passed
-
         discrepancy_count = sum(1 for r in results if r.discrepancies)
+        error_count = sum(
+            1
+            for r in results
+            if r.qdrant_error is not None or r.pgvector_error is not None
+        )
+        sample_size_gate_passed = len(unique_fixtures) >= max(MIN_CUTOVER_QUERIES, self.minimum_queries_for_cutover)
+        benchmark_valid = error_count == 0
+        recall_passed = benchmark_valid and mean_recall >= self.recall_gate_threshold
+        latency_passed = benchmark_valid and p95_pg <= self.p95_latency_gate_ms
+        # 벡터 두 저장소만 비교해서 Graph-first cutover를 승인할 수 없다.
+        # M7의 실제 graph 관찰 수집기 연결 전에는 명시적으로 닫아 둔다.
+        try:
+            window_seconds = max(
+                0.0,
+                (datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds(),
+            )
+        except ValueError:
+            window_seconds = 0.0
+        observation_window_verified = bool(shared_window_verified) and window_seconds <= OBSERVATION_WINDOW_SECONDS
+        graph_observation_ok = (
+            relation_temporal_correctness is not None
+            and relation_temporal_correctness >= RELATION_TEMPORAL_GATE
+        )
+        rate_bounds_ok = (
+            false_positive_rate is not None
+            and self.approved_false_positive_upper is not None
+            and false_positive_rate <= self.approved_false_positive_upper
+            and fallback_rate is not None
+            and self.approved_fallback_rate_upper is not None
+            and fallback_rate <= self.approved_fallback_rate_upper
+        )
+        all_recall_at_5 = all(r.k == 5 for r in results)
+        blockers = []
+        if not graph_observation_ok:
+            blockers.append("graph_observation_not_connected")
+        if not self.backend_preflight_verified:
+            blockers.append("backend_preflight_not_verified")
+        if not observation_window_verified:
+            blockers.append("shared_10_minute_window_not_verified")
+        if not rate_bounds_ok:
+            blockers.append("approved_rate_bounds_not_verified")
+        if self.evidence_class != "live_cutover":
+            blockers.append("test_harness_not_cutover_evidence")
+        if not sample_size_gate_passed:
+            blockers.append("insufficient_unique_queries")
+        if not all_recall_at_5:
+            blockers.append("recall_at_5_required")
+        if not (benchmark_valid and recall_passed and latency_passed):
+            blockers.append("vector_metrics_failed")
+        overall_passed = (
+            self.evidence_class == "live_cutover"
+            and benchmark_valid
+            and recall_passed
+            and latency_passed
+            and sample_size_gate_passed
+            and observation_window_verified
+            and self.backend_preflight_verified
+            and graph_observation_ok
+            and rate_bounds_ok
+            and all_recall_at_5
+        )
 
         return BenchmarkSummary(
             started_at=started_at,
@@ -340,7 +490,12 @@ class DualReadShadowHarness:
             latency_gate_passed=latency_passed,
             overall_gate_passed=overall_passed,
             discrepancy_count=discrepancy_count,
+            error_count=error_count,
+            sample_size_gate_passed=sample_size_gate_passed,
+            benchmark_valid=benchmark_valid,
             details=results,
+            evidence_class=self.evidence_class,
+            cutover_blockers=blockers,
         )
 
     def generate_report(self, summary: BenchmarkSummary) -> str:
@@ -349,6 +504,7 @@ class DualReadShadowHarness:
         return f"""# Dual-Read Shadow Benchmark Report (Phase 2.5)
 
 - **Execution Date**: {summary.started_at}
+- **Evidence Class**: `{summary.evidence_class}`
 - **Gate Status**: **{status_icon}**
 - **Total Queries Executed**: {summary.total_queries}
 - **Top-K Parameter**: K = {summary.k}
@@ -367,4 +523,76 @@ class DualReadShadowHarness:
 
 ## 3. Discrepancies & Divergences
 - **Total Discrepancies**: {summary.discrepancy_count}
+- **Backend Errors**: {summary.error_count}
+- **Sample-size Gate**: {'PASS' if summary.sample_size_gate_passed else 'FAIL'} (minimum {self.minimum_queries_for_cutover})
+- **Cutover blockers**: {', '.join(summary.cutover_blockers)}
 """
+
+
+def _has_in_memory_qdrant_state(client: Any) -> bool:
+    """Detect the explicit dict seams used by unit-test Qdrant doubles."""
+
+    from qdrant_client.local.qdrant_local import QdrantLocal
+
+    return isinstance(getattr(client, "_client", None), QdrantLocal) or any(
+        isinstance(getattr(client, attribute, None), dict)
+        for attribute in ("vectors", "collections")
+    )
+
+
+def _is_qdrant_test_double(client: Any) -> bool:
+    """True for in-memory Qdrant state, mocks, and hand-rolled doubles.
+
+    live_cutover evidence requires a real QdrantClient over a real backend;
+    anything else must fail closed at construction time.
+    """
+    if _has_in_memory_qdrant_state(client):
+        return True
+    if not isinstance(client, QdrantClient):
+        return True
+    module = type(client).__module__
+    return module.split(".")[0] in {"unittest", "mock", "pytest_mock"} or "mock" in module
+
+
+def _is_pgvector_test_double(store: Any) -> bool:
+    """True unless the store is the real SQL-backed PgVectorStore.
+
+    Production PgVectorStore never keeps cards in a process-local dict;
+    dict-scan doubles (e.g. a ``cards`` dict) are unit-test-only evidence.
+    """
+    if not isinstance(store, PgVectorStore):
+        return True
+    return any(
+        isinstance(getattr(store, attribute, None), dict)
+        for attribute in ("cards", "store", "memory", "vectors")
+    )
+
+
+def _reference_time(as_of: str | None) -> datetime:
+    if as_of is None:
+        return datetime.now(timezone.utc)
+    value = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+    if len(as_of) == 10:
+        value = value.replace(tzinfo=timezone.utc)
+    if value.tzinfo is None:
+        raise ValueError("as_of requires timezone")
+    return value
+
+
+def _authority_query_filter(project, authorization_status, currentness, as_of):
+    reference = _reference_time(as_of)
+    conditions = [
+        models.FieldCondition(key="project", match=models.MatchValue(value=project)),
+        models.FieldCondition(key="lifecycle_state", match=models.MatchAny(any=["accepted", "human_accepted", "auto_accepted"])),
+        models.FieldCondition(key="valid_from", range=models.DatetimeRange(lte=reference)),
+        models.Filter(should=[
+            models.FieldCondition(key="valid_to", range=models.DatetimeRange(gt=reference)),
+            models.IsEmptyCondition(is_empty=models.PayloadField(key="valid_to")),
+        ]),
+    ]
+    if authorization_status is not None:
+        conditions.append(models.FieldCondition(key="authorization_status", match=models.MatchValue(value=authorization_status)))
+    if currentness is not None:
+        values = ["current", "superseded"] if as_of and currentness == "current" else [currentness]
+        conditions.append(models.FieldCondition(key="currentness", match=models.MatchAny(any=values)))
+    return models.Filter(must=conditions)

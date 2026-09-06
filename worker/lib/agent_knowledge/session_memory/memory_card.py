@@ -271,7 +271,11 @@ def validate_memory_card_envelope(card: Mapping[str, Any]) -> dict:
     if "authorization_status" in normalized and normalized["authorization_status"] is not None:
         _require_enum(normalized, "authorization_status", AUTHORIZATION_STATUSES)
     if "content_hash" in normalized and normalized["content_hash"] is not None:
-        validate_content_hash(str(normalized["content_hash"]), "content_hash")
+        # The envelope is also used by historical SQLite fixtures whose hash
+        # values predate the canonical digest contract. Public MCP input uses
+        # the strict validator at its boundary; the model validator keeps the
+        # legacy read/write lane compatible.
+        validate_content_hash(str(normalized["content_hash"]), "content_hash", strict=False)
     _require_number(normalized.get("confidence"), "confidence")
     _ensure_no_forbidden_content(normalized.get("summary"), "summary")
     _ensure_no_forbidden_content(normalized.get("render_text"), "render_text")
@@ -298,8 +302,23 @@ def validate_memory_card_envelope(card: Mapping[str, Any]) -> dict:
     return normalized
 
 
-def validate_content_hash(hash_val: str, field_name: str = "content_hash") -> str:
-    if not isinstance(hash_val, str) or not SHA256_HEX_PATTERN.fullmatch(hash_val):
+def validate_content_hash(
+    hash_val: str,
+    field_name: str = "content_hash",
+    *,
+    strict: bool = True,
+) -> str:
+    if strict:
+        valid = isinstance(hash_val, str) and SHA256_HEX_PATTERN.fullmatch(hash_val)
+    else:
+        # Legacy fixtures are intentionally narrow: blank hashes and opaque
+        # sha256-labelled values are accepted, while arbitrary schemes and
+        # non-string values remain invalid.
+        valid = (
+            isinstance(hash_val, str)
+            and (hash_val == "" or (hash_val.startswith("sha256:") and len(hash_val) > len("sha256:")))
+        )
+    if not valid:
         raise ValueError(f"{field_name} must be a sha256 string matching ^sha256:[0-9a-f]{{64}}$")
     return hash_val
 

@@ -134,6 +134,22 @@ def _count(card: Mapping[str, Any], key: str) -> int:
     return len(card.get(key) or [])
 
 
+def _parse_timestamp(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    else:
+        parsed = datetime.now(timezone.utc)
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _parse_optional_timestamp(value: Any) -> datetime | None:
+    if value in (None, ""):
+        return None
+    return _parse_timestamp(value)
+
+
 def assert_public_safe(payload: Any, field_name: str = "steward_response") -> Any:
     """projection 결과가 raw/private/secret 을 담고 있지 않은지 fail-closed 로 검증한다.
 
@@ -166,10 +182,16 @@ class BrainStewardService:
         self,
         ledger,
         *,
+        pgvector_store=None,
         allow_restricted: bool = False,
         allow_auto_accept: bool = False,
     ) -> None:
         self.ledger = ledger
+        # When supplied, the rationalized candidate path uses PostgreSQL as
+        # its sole proposal store. The legacy ledger path remains available
+        # only for callers that have not opted into the new store yet; this is
+        # an explicit cutover seam, not a silent dual-write.
+        self.pgvector_store = pgvector_store
         # restricted 권한을 capability 별로 분리한다. review_commit 은 approve/reject/
         # supersede_commit/stale_commit 을, auto_accept 는 가장 위험한 자동수락을 연다.
         # auto_accept 는 review_commit 허용만으로는 열리지 않는다(별도 flag, 기본 False).
@@ -549,6 +571,43 @@ class BrainStewardService:
         # 망가뜨리지(DoS) 않는다.
         assert_public_safe(self._review_item(card), "proposal_persist")
         memory_id = str(card["memory_id"])
+        if self.pgvector_store is not None:
+            from ..postgres_store.pgvector_store import MemoryCard
+
+            existing = self.pgvector_store.get_card(memory_id)
+            if existing is not None and existing.lifecycle_state in {
+                "accepted",
+                "human_accepted",
+                "auto_accepted",
+            }:
+                raise ValueError("proposal memory_id collides with an accepted card")
+            pg_card = MemoryCard(
+                memory_id=memory_id,
+                project=str(card["project"]),
+                card_type=str(card["card_type"]),
+                title=str(card["title"]),
+                summary=str(card["summary"]),
+                typed_payload=dict(card.get("typed_payload") or {}),
+                lifecycle_state=str(card.get("lifecycle_state") or "candidate"),
+                authorization_status=str(card.get("authorization_status") or "disabled"),
+                currentness=str(card.get("currentness") or "unknown"),
+                confidence=float(card.get("confidence") or 0.0),
+                valid_from=_parse_timestamp(card.get("valid_from")),
+                valid_to=_parse_optional_timestamp(card.get("valid_to")),
+                embedding_state="pending",
+                content_hash=str(card["content_hash"]),
+                source_ref=[
+                    dict(ref) for ref in (card.get("source_refs") or []) if isinstance(ref, Mapping)
+                ],
+            )
+            # upsert_card owns both INSERT/UPDATE and embedding_outbox enqueue
+            # in one transaction. Readback proves the committed row exists in
+            # PostgreSQL before the public proposal response is returned.
+            self.pgvector_store.upsert_card(pg_card)
+            stored = self.pgvector_store.get_card(memory_id)
+            if stored is None or stored.content_hash != pg_card.content_hash:
+                raise RuntimeError("PostgreSQL proposal readback failed")
+            return card
         existing = self.ledger.get_llm_brain_memory_card(memory_id)
         if existing is not None and _is_accepted(existing):
             # 안전망: accepted card 를 proposal 로 덮어쓰지 않는다.

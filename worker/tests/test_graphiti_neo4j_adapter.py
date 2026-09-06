@@ -56,6 +56,38 @@ def test_graphiti_adapter_upserts_public_safe_json_episode():
     assert "/Users/" not in added_episode["episode_body"]
 
 
+@pytest.mark.parametrize("as_of", [None, "2026-01-15"])
+def test_graphiti_as_of_filters_relationship_candidates_before_top_k(as_of):
+    from graphiti_core.search.search_filters import ComparisonOperator
+
+    observed = {}
+
+    async def search(query, **kwargs):
+        observed.update(kwargs)
+        return []
+
+    async def retrieve(**kwargs):
+        observed["reference_time"] = kwargs["reference_time"]
+        return []
+
+    runner = _AsyncLoopRunner()
+    try:
+        adapter = GraphitiNeo4jGraphMemoryAdapter(
+            SimpleNamespace(search=search, retrieve_episodes=retrieve), runner=runner,
+        )
+        assert adapter.search_context(brain_id="/project/neurons", query="past", as_of=as_of, limit=5).status == "available"
+        filters = observed["search_filter"]
+        if as_of:
+            assert filters.valid_at[0][0].date == datetime(2026, 1, 15, tzinfo=timezone.utc)
+        assert filters.valid_at[0][0].comparison_operator == ComparisonOperator.less_than_equal
+        assert filters.invalid_at[0][0].comparison_operator == ComparisonOperator.greater_than
+        assert filters.invalid_at[1][0].comparison_operator == ComparisonOperator.is_null
+        assert observed["reference_time"] == filters.valid_at[0][0].date
+        assert observed["num_results"] == 5
+    finally:
+        runner.shutdown()
+
+
 def test_graphiti_adapter_default_path_inserts_then_reports_duplicate_on_reupsert():
     # Production default (extract_entities=False) MERGEs on episode_id. The first
     # upsert saves a node; a second upsert of the same episode_id is a duplicate,
@@ -779,7 +811,7 @@ def test_graphiti_adapter_bounds_slow_provenance_hydration_to_read_deadline(monk
         ]
     )
 
-    async def _slow_search(query, *, group_ids=None, num_results=10):
+    async def _slow_search(query, *, group_ids=None, num_results=10, search_filter=None):
         _ = (query, group_ids, num_results)
         await asyncio.sleep(0.12)
         return list(graphiti.edges)
@@ -1387,13 +1419,13 @@ def test_graphiti_datetime_conversion_does_not_fabricate_missing_times():
 
 
 def test_resolve_embedding_dim_matches_nomic_native_dim_by_default():
-    # #1: nomic-embed-text (the ollama default) is natively 768-dim; the generic
-    # 1024 default must not be paired with it (index/query dimension mismatch).
-    assert _resolve_embedding_dim("nomic-embed-text", 1024) == 768
+    # #1: nomic-embed-text (the ollama default) is natively 768-dim; the shared
+    # Gemini Embedding 2 default is 3072 and must not be paired with it.
+    assert _resolve_embedding_dim("nomic-embed-text", 3072) == 768
     # An explicit non-default dim is always honored.
     assert _resolve_embedding_dim("nomic-embed-text", 384) == 384
-    # Unknown / openai default models keep the configured dim untouched.
-    assert _resolve_embedding_dim("text-embedding-3-small", 1024) == 1024
+    # Unknown / openai models keep the configured dim untouched.
+    assert _resolve_embedding_dim("text-embedding-3-small", 1536) == 1536
 
 
 def test_is_list_annotation_recognizes_builtin_and_typing_list():
@@ -1647,7 +1679,7 @@ class _FakeGraphiti:
         self.episodes.append(SimpleNamespace(content=kwargs["episode_body"]))
         return SimpleNamespace(uuid=f"graph:{kwargs['name']}", nodes=[], edges=[])
 
-    async def search(self, query, *, group_ids=None, num_results=10):
+    async def search(self, query, *, group_ids=None, num_results=10, search_filter=None):
         self.search_calls.append({"query": query, "group_ids": group_ids, "num_results": num_results})
         if self.raise_on_search is not None:
             raise self.raise_on_search
@@ -1691,7 +1723,7 @@ class _SlowGraphiti:
         await asyncio.sleep(self._delay)
         return SimpleNamespace(uuid="never")
 
-    async def search(self, query, *, group_ids=None, num_results=10):
+    async def search(self, query, *, group_ids=None, num_results=10, search_filter=None):
         await asyncio.sleep(self._delay)
         return []
 

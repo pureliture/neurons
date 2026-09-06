@@ -1,66 +1,111 @@
-# LBrain Architecture Rationalization: Requirements & Problem Statement (v2.3)
+# LBrain Architecture Rationalization: Requirements & Problem Statement (v2.5)
 
-- **Status**: Hardened After Implementation Audit (v2.3)
-- **Date**: 2026-09-02
+- **Status**: Decision-aligned target architecture; multi-agent review remediation (v2.5)
+- **Date**: 2026-09-03
 - **Target Repository**: `neurons` (Server/Brain Authority)
 - **Worktree**: `/Users/ddalkak/Projects/neurons/.worktrees/lbrain-architecture-rationalization-spec`
 - **Review & Audit History**: `specs/lbrain-architecture-rationalization/review.md` 참조
 
 ---
 
-## 1. Executive Summary (Precision Reframed & Hardened)
+## 1. 최종 결정 요약
 
-`LBrain` (LLM-Brain) 시스템의 아키텍처 개편 목표는 "수만 건 규모의 벡터 검색 성능 최적화"가 아니라, **"운영 표면 축소(Operational Surface Minimization)", "동일 엔진 트랜잭션 일관성(ACID/Dual-Write Elimination)", "직렬화 비대화 해소(Slim Payload)"**이다.
+이번 결정은 모든 것을 PostgreSQL 하나로 합치는 결정이 아니다. **관계형 권위 저장소와 그래프 우선 조회를 분리하되, 임베딩 벡터의 운영 경로만 Qdrant에서 PostgreSQL로 수렴**하는 결정이다.
 
-Live 런타임 실측 결과, 현재 도메인 규모는 권위 카드 8개, 세션 아티팩트 69개 수준이며, `brain_context_resolve` 호출 1회당 **68.5KB(약 17,000 토큰)**에 달하는 극심한 직렬화 오버헤드가 발생하고 있다.
+| 책임 | 정본/주요 경로 | 역할 |
+|---|---|---|
+| 승인·권한·currentness·content hash·명시적 근거 | PostgreSQL | 변경과 권위의 정본(SoT) |
+| 엔티티·관계·시간·다단계 경로 | Graphiti → Neo4j | Graph-first 조회와 temporal graph |
+| 카드·세션 청크의 의미 벡터 | PostgreSQL `halfvec(3072)` | 그래프 미투영 데이터와 graph 장애 시 명시적 fallback |
+| 기존 벡터 색인 | Qdrant | 이관 및 dual-read shadow 기간에만 사용, 공개 조회 경로에서는 제거 |
+| 코드 구조 분석 | 사용하지 않음 | AST/Graphify는 제품 런타임 범위에서 제외 |
 
-**[v2.3 핵심 반성 및 보강 조치]**:
-커밋 `165e56f`에 대한 사후 감사 결과, `PgVectorStore`가 실제 SQL이 아닌 Python 딕셔너리(`self.cards = {}`)로 시뮬레이션되었고, DB 연결 실패 시 조용히 메모리 모드로 빠지는 치명적인 Fail-silent 결함이 확인되었다. 또한 섀도우 벤치마크 역시 `MockQdrantClient` + 더미 벡터 기반의 하니스 단위 검증에 불과했다.
-본 v2.3 명세는 이러한 **"인메모리 모의(Mocking) 및 허위 컷오버 증거"를 원천 금지**하고, **실제 `psycopg` 기반 SQL 실행, Fail-Closed 원칙, 실제 백엔드 벤치마크, 기존 275개 테스트 무회귀(Zero Regression)**를 엄격히 강제한다.
+중요한 원칙은 **조회 우선순위와 데이터 권위는 다른 축**이라는 점이다. Neo4j가 먼저 후보를 찾더라도 승인 여부, currentness, 프로젝트 범위, content hash는 PostgreSQL을 다시 확인한다. 반대로 PostgreSQL은 권위 저장소이지만 모든 일반 조회의 첫 번째 검색 엔진은 아니다.
 
----
-
-## 2. Core Requirements by Domain
-
-### 2.1. Domain 1: PostgreSQL & pgvector (Real SQL & Fail-Closed)
-- **R1.1 (운영 수렴)**: Qdrant 전용 클러스터 대신 기존 PostgreSQL 인스턴스의 `pgvector >= 0.8.0` 확장을 활용하여 백업, PITR, 트랜잭션 관리를 단일 엔진으로 수렴한다.
-- **R1.2 (No In-Memory Mocking & Fail-Closed)**: `PgVectorStore` 내부에서 Python 딕셔너리로 DB 동작을 흉내 내는 시뮬레이션을 원천 금지하며, 실제 `psycopg` SQL 쿼리(`INSERT`, `SELECT`, `UPDATE`)를 실행해야 한다. DB 연결 실패 시 조용히 메모리 모드로 전환(Fail-silent)하지 않고 **즉시 예외를 발생(Fail-Closed)**시켜야 한다.
-- **R1.3 (Dual CAS Write-Back Protection)**: 
-  - `memory_cards` 및 `session_memory_chunks` 양쪽 모두에 대해, 비동기 워커가 임베딩을 반영할 때 큐 생성 시점의 `content_hash`와 일치할 때만 업데이트하는 **CAS (Compare-And-Swap)** 가드를 적용하여 스텔(Stale) 덮어쓰기 레이스를 차단한다.
-- **R1.4 (Outbox Lease & Idempotency)**: `embedding_outbox`에 중복 인큐 방지 유니크 인덱스를 두고, 다중 워커의 안전한 처리를 위해 `claimed_at`, `lease_until`, `worker_id`, `retry_count` 기반의 리스(Lease) 메커니즘을 적용한다.
-- **R1.5 (Real Backend Dual-Read Shadow Gate)**: 컷오버 증거는 모의 클라이언트(Mock)나 더미 벡터가 아닌, 실제 PostgreSQL 인스턴스(포트 15432)와 실제 Qdrant를 대상으로 한 벤치마크에서 `Recall@5 >= 0.95` 및 `P95 Latency <= 20ms`를 달성해야만 유효하다.
-
-### 2.2. Domain 2: Graphiti & Neo4j Strategy (Hot/Cold Separation)
-- **R2.1 (Hot-path 완전 격리)**: 실시간 대화 수집 및 MCP 응답 루프에서 Graphiti의 실시간 LLM 엔티티 추출을 차단하여 레이턴시(300초 타임아웃)와 API 비용을 0으로 만든다.
-- **R2.2 (Cold-path 단방향 파생 워크벤치)**: 에이전트 메모리의 복합 관계, 다단계 인과관계, temporal fact 구간 탐색을 위해 기성 Neo4j/Graphiti 파이프라인을 PostgreSQL의 변경을 비동기로 수신하는 단방향(Eventual-consistent) 파생 워크벤치로 유지한다.
-- **R2.3 (RDBMS 다대다 DAG 및 순환 방지)**: PostgreSQL에 `memory_edges` 테이블을 두어 다중 대체, 근거 분기, `valid_from/to` 구간을 보존하며, 재귀 조회 시 깊이 제한(`depth < 5`) 및 순환 방지(`CYCLE`) 가드를 적용한다.
-
-### 2.3. Domain 3: MCP 2-Tier & Real Search Engine Wiring
-- **R3.1 (Agent Public Surface 2개화)**:
-  - `brain.resolve (query, mode="list"|"context"|"query", project, response_mode, as_of)`: 단일 통합 읽기 도구.
-  - `memory_candidate_create`: 제안 전용 쓰기 도구 (Proposal-only, rate-limited, project-scoped, ledger write 직접 불가).
-- **R3.2 (Actual Semantic Search Wiring)**: `brain.resolve(mode=query)`는 기존 ledger의 문자열 `in` 검색이 아니라, 반드시 `PgVectorStore.hybrid_search()`를 직접 호출하여 실제 pgvector 시맨틱/하이브리드 검색을 수행해야 한다.
-- **R3.3 (Tiered Slim Payload & Hard Limit)**:
-  - `response_mode="slim"` (기본): 결정, 선호도, 현재 태스크, 활성 가드레일을 ~1.2KB(Soft Token Budget: 250~500 토큰, Hard Max: 3KB)로 압축 제공하며 초과 시 deterministic truncation 및 `has_more: true` 반환.
-  - `response_mode="with_evidence"` (선택): 증거 해시 체인(`evidence_hashes`), 다단계 엣지(`edges`), 상세 페이로드 포함.
-- **R3.4 (Zero Regression & Hash Compatibility)**: 엄격한 SHA-256 검증기 도입으로 인해 기존 275개 테스트가 깨지지 않도록, 레거시 테스트 픽스처를 수용하는 하위 호환 처리로 전체 worker 테스트 무회귀(Zero Regression)를 보장한다.
-- **R3.5 (Admin Control Plane 물리 격리)**: `memory_candidate_approve`, `memory_supersede_commit`, 감사 프로브 등은 별도의 `agent_memory_admin` 서비스 키(`lbrain_admin`) 및 독립 엔드포인트/프로세스로 물리적 격리한다.
+현재 문서와 기본값은 이 목표 아키텍처에 맞춘다. M3에서 project-scoped `brain.resolve`의 Graph-first 라우터를 구현하고 실제 로컬 PostgreSQL·Graphiti adapter 변환으로 검증했다. 다만 Neo4j live 검증, graph projection writer/consumer와 실데이터 cutover는 별도의 실행 마일스톤이며, 로컬 검증이 운영 완료를 뜻하지 않는다.
 
 ---
 
-## 3. Acceptance Criteria (수용 기준)
+## 2. 핵심 요구사항
 
-### AC1. Real Database & Concurrency
-- [ ] `PgVectorStore`의 모든 CRUD 및 검색이 실제 `psycopg` SQL 경로를 거쳐야 하며, 내부 dict 시뮬레이션이 없어야 한다.
-- [ ] DB 연결 실패 시 in-memory fallback 없이 즉시 Fail-Closed 예외를 던져야 한다.
-- [ ] `memory_cards` 및 `session_memory_chunks` 양쪽 모두 CAS update가 동작하여 해시 불일치 시 No-op 되어야 한다.
-- [ ] `SET LOCAL hnsw.iterative_scan = 'relaxed_order';`가 `pgvector >= 0.8.0` 인스턴스에서 정상 실행되어야 한다.
+### 2.1. R1 — PostgreSQL 권위 저장소와 임베딩 계약
 
-### AC2. Real Dual-Read Benchmark
-- [ ] 실제 PostgreSQL(포트 15432) 인스턴스에서 DDL이 정상 실행되고 테이블이 생성되어야 한다.
-- [ ] 실제 DB 기반 하이브리드 검색에서 `Recall@5 >= 0.95` 및 `P95 Latency <= 20ms`가 실측되어야 한다.
+- **R1.1 (권위 경계)**: PostgreSQL은 `lifecycle_state`, `authorization_status`, `currentness`, `content_hash`, 승인 기록, 프로젝트 범위, `memory_edges`의 명시적 관계를 보유한다. Neo4j/Graphiti는 이 값을 임의로 승인하거나 변경하는 두 번째 권위가 될 수 없다.
+- **R1.2 (고정 임베딩 profile)**: 일반 LBrain 메모리 벡터의 정식 profile은 `lbrain-memory-gemini-embedding-2-v1`이다.
+  - model: `gemini-embedding-2`
+  - dimension: `3072`
+  - distance: cosine
+  - PostgreSQL type: `halfvec(3072)`
+  - HNSW operator class: `halfvec_cosine_ops`
+- **R1.3 (실제 SQL·Fail-Closed)**: `PgVectorStore`의 CRUD와 fallback 검색은 실제 `psycopg` SQL을 사용한다. 연결 실패나 schema 불일치를 Python dict, 임시 메모리 저장소, 빈 결과로 숨기지 않고 호출자에게 예외와 명시적 degraded 상태를 전달한다.
+- **R1.4 (Dual CAS)**: `memory_cards`와 `session_memory_chunks`의 임베딩 write-back은 outbox 생성 당시 `content_hash`와 현재 행의 hash가 일치할 때만 반영한다. 불일치는 성공으로 위장하지 않는 CAS no-op으로 기록한다.
+- **R1.5 (Outbox 안전성)**: `embedding_outbox`는 active job 중복을 막는 unique index, `FOR UPDATE SKIP LOCKED`, `claimed_at`, `lease_until`, `worker_id`, `retry_count`, dead-letter를 사용한다. 임베딩 생성 책임자는 Embedding Worker 하나로 고정한다.
+- **R1.6 (pgai 범위)**: `pgai`는 첫 cutover의 임베딩 owner나 숨은 비동기 실행기가 아니다. 필요하면 별도 ADR과 성능·재현성 검증 뒤 도입하며, 첫 cutover에서는 Embedding Worker의 명시적 호출만 허용한다.
+- **R1.7 (Temporal read 의미 명확화)**: `as_of`가 없으면 `currentness=current`만 반환한다. 명시적 `as_of`에서는 해당 시점의 validity를 만족하는 `current` 또는 `superseded` 기록을 허용한다. 두 경우 모두 **현재** `authorization_status=active`와 accepted lifecycle을 요구한다. `stale`, `conflicted`, `unknown`, `disabled`는 공개 과거 조회에서도 제외한다. 과거 권한을 재구성하거나 현재의 권한 회수를 우회하는 기능이 아니다.
 
-### AC3. MCP Interface & Zero Regression
-- [ ] `brain.resolve(mode=query)`가 `PgVectorStore`를 직접 호출해야 한다.
-- [ ] 기본 `slim` 모드 응답 크기는 2.0 KB 이하(Hard Max: 3.0 KB)여야 한다.
-- [ ] 기존 worker 테스트 전체(`cd worker && uv run pytest -q`)가 단 1건의 실패도 없이 100% Pass 되어야 한다.
+### 2.2. R2 — Graphiti와 Neo4j 유지 및 Graph-first 조회
+
+- **R2.1 (구성 유지)**: Graphiti와 Neo4j를 퇴역시키지 않는다. Graphiti는 비정형 episode에서 엔티티, 관계, temporal fact, provenance를 추출·검색하는 애플리케이션 계층이고, Neo4j는 그 결과를 저장·탐색하는 그래프 DB이다.
+- **R2.2 (Graph-first query)**: `brain.resolve(mode="query")`의 목표 실행 순서는 Graphiti adapter → Neo4j 검색 → PostgreSQL 권위 join → slim serializer이다. `PgVectorStore.hybrid_search()`는 그래프가 아직 투영되지 않았거나 graph plane이 명시적으로 degraded일 때만 fallback으로 사용한다.
+- **R2.3 (Hot/Cold 분리)**: MCP hot path는 Graphiti의 LLM entity extraction을 기다리지 않는다. episode 수신과 권위 write는 빠르게 끝내고, Graphiti extraction과 Neo4j projection은 비동기 cold worker가 수행한다. 이미 투영된 Neo4j graph read는 hot path에서 허용한다.
+- **R2.4 (단방향 파생)**: write flow는 `PostgreSQL transaction → graph_projection_outbox → Graph Projection Worker → Graphiti → Neo4j`이다. PostgreSQL commit과 Neo4j write 사이에는 분산 ACID를 주장하지 않고 projection lag를 관찰한다.
+- **R2.5 (두 종류의 관계)**: PostgreSQL `memory_edges`는 승인된 명시적 관계와 법적·운영적 lineage를 보존한다. Graphiti/Neo4j의 inferred entity/relationship graph는 재생성 가능한 파생 색인이다. 양쪽의 edge를 조용히 합치지 말고 provenance와 source revision을 구분한다.
+- **R2.6 (장애 의미와 공개 상태 계약)**: 공개 응답의 `graph_status`는 `available`, `degraded`, `unavailable`, `projection_lag` 중 하나로 고정한다. 내부 예외 문자열(`error`)을 외부 상태로 그대로 노출하지 않는다. `retrieval_path`는 `graph_neo4j`, `pgvector_fallback`, `none` 중 하나이고, `authority_join_status`는 `verified`, `mismatch`, `unavailable` 중 하나이다. 지연은 `projection_lag_ms`(0 이상의 정수 또는 `null`)로만 표현한다. PG fallback을 선택하면 `fallback_used=true`를 반환하며 Qdrant로 자동 우회하지 않는다.
+- **R2.7 (버전 고정)**: Graphiti는 부동 범위(`>=`)만으로 최신화를 주장하지 않는다. 호환성 검증을 통과한 정확한 `graphiti-core` lock version과 Neo4j image/major version을 함께 고정하고, 업그레이드 때 Graphiti schema/index/retrieval 회귀를 검증한다.
+
+### 2.3. R3 — MCP 2-Tier와 Slim Payload
+
+- **R3.1 (Agent public surface)**: Agent 공개 도구는 두 개로 고정한다.
+  - `brain.resolve(query, mode="list"|"context"|"query", project, response_mode, as_of)` — 단일 읽기 라우터
+  - `memory_candidate_create` — project-scoped proposal-only 쓰기
+- **R3.2 (검색 경로 공개)**: `brain.resolve(mode="query")`는 결과 metadata에 R2.6의 `retrieval_path`, `graph_status`, `authority_join_status`, `fallback_used`, `projection_lag_ms`를 포함한다. 호출자가 그래프 결과를 PG 결과로 오해할 수 없어야 한다.
+- **R3.3 (Slim 기본값)**: `response_mode="slim"`은 기본값이며 결정, 선호, 현재 task, 활성 guardrail과 최소 provenance만 반환한다. soft budget은 약 250~500 tokens, 목표 크기는 약 1.2KB, hard max는 3KB이다. 초과하면 deterministic truncation, stable pagination token, `has_more=true`를 반환한다.
+- **R3.4 (Evidence 선택 모드)**: `response_mode="with_evidence"`에서만 evidence hash chain, edge 요약, authority join 세부사항을 확장한다. 원문 transcript나 private path를 Agent payload에 넣지 않는다.
+- **R3.5 (Admin 격리)**: approve/reject/supersede/stale commit, 감사 probe, corpus 관리 작업은 `agent_memory_admin`의 별도 인증·endpoint·process에서만 수행한다. Agent key는 승인 권한을 가질 수 없다.
+
+### 2.4. R4 — 운영·배포 범위
+
+- **R4.1 (Thin client)**: Client PC는 Neo4j, PostgreSQL, Graphiti를 필수 설치하지 않는다. 기본 배포는 중앙 brain endpoint를 사용하고, 개발용 local graph profile은 선택 사항으로만 둔다.
+- **R4.2 (재구축 가능성)**: Neo4j graph는 PostgreSQL 권위 데이터와 원본 episode reference로 재투영할 수 있어야 한다. projection cursor, source revision, 실패·재시도 상태를 durable하게 남긴다.
+- **R4.3 (범위 제외)**: AST/Graphify는 제품 메모리 검색·projection·정합성 경로에 사용하지 않는다. 코드 구조 graph가 필요해지는 경우 별도 요구사항과 별도 저장·수명주기 결정을 만든다.
+
+---
+
+## 3. Qdrant 이관 및 cutover 요구사항
+
+1. **Preflight**: 각 Qdrant collection의 실제 `dimension`, distance, model, point 수, payload schema, 삭제·중복 상태를 운영 read-only probe로 확인한다. 문서의 `3072` 기본값만으로 기존 데이터 차원을 추정하지 않는다.
+2. **Vector migration**: source vector가 `gemini-embedding-2 / 3072 / cosine`과 일치하면 PostgreSQL `halfvec(3072)` fallback 색인으로 복사할 수 있다. 차원이 다르면 zero-padding이나 임의 projection으로 섞지 말고 quarantine 후 동일 profile로 re-embed한다.
+3. **Graph migration**: Qdrant point를 PG로 복사하는 것만으로 Graphiti의 entity, relation, temporal validity, provenance가 복원되지 않는다. 원본 episode 또는 권위 card를 replay하여 Graphiti가 Neo4j graph를 다시 만든다.
+4. **Dual-read shadow**: 실제 PostgreSQL과 실제 Qdrant를 비교하되, vector Recall@5뿐 아니라 Neo4j relation/temporal fact correctness, PG authority false-positive rate, p50/p95 latency, projection lag, fallback rate를 함께 기록한다. cutover 판정은 실제 양쪽 backend, 최소 50개 query fixture, 동일한 10분 관찰 창을 사용한다. `mean Recall@5 >= 0.95`, relation/temporal correctness `>= 0.95`, backend error `0건`, PG p95 `<= 20ms`를 기본 gate로 삼고, false-positive와 fallback rate는 측정값과 승인된 상한을 함께 기록한다. 실행 결과에는 `evidence_class`를 `test_harness` 또는 `live_cutover`로 명시하며, `live_cutover`는 실제 backend preflight를 통과해야 한다. Mock client, dummy vector, Python dict scan은 cutover 증거로 인정하지 않는다.
+5. **Cutover**: Graph-first query의 품질·지연·권위 join·장애 표기가 모두 통과한 뒤에만 공개 read path를 전환한다. 전환 전까지 Qdrant는 rollback/shadow용으로 보존하되, 정상 Agent 조회의 기본 경로로 남겨두지 않는다.
+
+---
+
+## 4. Acceptance Criteria
+
+### AC1. 데이터·임베딩 계약
+
+- [ ] 신규 schema가 `gemini-embedding-2`, `halfvec(3072)`, `halfvec_cosine_ops`를 사용한다.
+- [ ] 카드와 세션 청크의 vector/query/worker/migration dimension이 하나의 shared constant와 profile을 따른다.
+- [ ] `pgvector/pgvector:pg17` 또는 동등하게 검증된 image에서 `pgvector >= 0.8.0`, extension 설치/활성화, HNSW, `hnsw.iterative_scan` 설정을 실제 PostgreSQL로 검증한다.
+- [ ] 기존 Qdrant collection의 실제 차원·distance·model preflight 결과와 quarantine/re-embed 결과가 남는다.
+
+### AC2. 정합성과 graph read
+
+- [ ] PgVectorStore의 CRUD·fallback search는 실제 `psycopg` SQL이며 DB 실패를 in-memory fallback으로 숨기지 않는다.
+- [ ] 양쪽 CAS write-back과 outbox lease/idempotency가 실제 DB concurrency test에서 확인된다. worker_id와 활성 lease를 잃은 작업은 write-back하지 않으며, hash 불일치는 `cas_skipped` terminal state로 관찰된다.
+- [ ] `brain.resolve(mode="query")`가 Graphiti/Neo4j를 먼저 조회하고 PostgreSQL authority join을 수행한다.
+- [ ] graph 장애나 미투영 상태에서만 PG fallback을 사용하고, `retrieval_path`와 `fallback_used`를 명시한다.
+- [ ] Graphiti LLM extraction은 async/bulk cold lane에서만 실행되며 Neo4j graph read는 hot path에서 가능하다.
+
+### AC3. MCP와 운영
+
+- [ ] Agent public tool은 `brain.resolve`와 `memory_candidate_create`만 노출되고 admin mutation은 별도 control plane에 있다.
+- [ ] 기본 slim 응답이 목표 1.2KB에 가깝고 hard max 3KB를 넘지 않으며 pagination이 deterministic하다.
+- [ ] graph projection replay로 Neo4j를 재구축할 수 있고 PG graph outbox의 projection lag/dead-letter를 관찰할 수 있다. 현재 SQLite ledger-backed trigger는 이 기준을 충족하는 최종 경로가 아니다.
+- [ ] AST/Graphify는 product runtime dependency가 아니다.
+- [ ] 전체 worker 테스트는 동작 회귀를 검증하되, 테스트 개수 자체를 품질 지표로 사용하지 않는다. obsolete mock/in-memory 테스트는 별도 inventory에서 제거·축소하며 실패를 숨기기 위해 skip/xfail을 추가하지 않는다.
+
+### AC4. 현재 구현과의 경계
+
+- [ ] 문서·기본값 정합화만으로 운영 완료를 주장하지 않는다. 공개 `brain.resolve`의 로컬 Graph-first 라우터 검증과 달리, legacy `KnowledgeSearchService.brain_query`, PG graph outbox writer/consumer, live PostgreSQL/Neo4j benchmark는 후속 milestone의 별도 증거가 필요하다.
