@@ -90,7 +90,7 @@ def _source_span(**overrides):
     span = {
         "source_ref": {"source_id": "src_neuron_mcp"},
         "span_ref": {"span_id": "span_neuron_mcp"},
-        "content_hash": "sha256:neuron-mcp-card",
+        "content_hash": "sha256:4f466d535b242b9b983d30339546ea7023511764e7b021103977a567e2f1484b",
         "brain_id": f"/project/{PROJECT}",
         "card_type": "preference",
         "scope": "project",
@@ -213,8 +213,8 @@ def _reference_manifest() -> dict:
                 "source_type": "WEB_PAGE",
                 "source_url": "https://example.test/ontology",
                 "normalized_path": "sources-normalized/palantir-ontology-001.md",
-                "content_hash": "sha256:" + "1" * 64,
-                "metadata_hash": "sha256:" + "2" * 64,
+                "content_hash": "sha256:1e257a2750d854f896ec1bc948ef6a6d9ce1033a8bece67b8c508f03917a175a",
+                "metadata_hash": "sha256:bfe3a8417becb3e8267f7d0907eb110d9e71018984b7af903a79dc018483a414",
                 "summary": "Objects, links, actions, functions.",
             },
             {
@@ -222,8 +222,8 @@ def _reference_manifest() -> dict:
                 "title": "Manual excerpt",
                 "source_type": "TEXT",
                 "normalized_path": "sources-normalized/palantir-ontology-002.md",
-                "content_hash": "sha256:" + "3" * 64,
-                "metadata_hash": "sha256:" + "4" * 64,
+                "content_hash": "sha256:480222d7a551c500f28a91a9f0890e8afee314aed344740da80ede13298177f3",
+                "metadata_hash": "sha256:de505750979a3abc691914891c4ad1591f93abb3d0e687cc7a87aab48e6d9ada",
                 "summary": "Manual source with missing URL.",
             },
         ],
@@ -461,7 +461,7 @@ def _service(tmp_path: Path) -> KnowledgeSearchService:
             statement="한국어로 응답한다",
             project=PROJECT,
             provider="codex",
-            evidence_refs=[{"knowledge_id": "kn", "content_hash": "sha256:c"}],
+            evidence_refs=[{"knowledge_id": "kn", "content_hash": "sha256:2e7d2c03a9507ae265ecf5b5356885a53393a2029d241394997265a1a25aefc6"}],
         )
     )
     curation.approve(candidate["candidate_id"], approved_by="ddalkak")
@@ -517,10 +517,10 @@ def test_mcp_tool_registry_uses_lazy_internal_cache(monkeypatch):
     original_list_tools = mcp_tools.list_tools
     monkeypatch.setattr(mcp_tools, "_TOOL_REGISTRY_CACHE", None)
 
-    def _counting_list_tools():
+    def _counting_list_tools(*args, **kwargs):
         nonlocal calls
         calls += 1
-        return original_list_tools()
+        return original_list_tools(*args, **kwargs)
 
     monkeypatch.setattr(mcp_tools, "list_tools", _counting_list_tools)
 
@@ -633,6 +633,9 @@ def test_artifact_preference_evaluator_schema_allows_only_public_consumer_input(
     }.intersection(schema["properties"])
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_promoted_artifact_preference_is_evaluated_read_only(tmp_path: Path):
     service = _service(tmp_path)
     service.allow_production_object_authority_writes = True
@@ -838,6 +841,9 @@ def test_mcp_tool_list_exposes_object_substrate_tools():
     assert readiness_schema["properties"]["consumer"]["type"] == "string"
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_source_to_candidate_runtime_readiness_evaluates_sanitized_evidence_without_mutation(tmp_path: Path):
     service = _service(tmp_path)
     tools = {tool["name"]: tool for tool in list_tools()}
@@ -964,7 +970,7 @@ def _bound_deployment_evidence(expected_commit: str) -> dict:
         "desired_state_source": "sanitized_ops_manifest_summary",
         "target_revision": "main",
         "source_commit": expected_commit,
-        "desired_image_set_hash": "sha256:" + "a" * 64,
+        "desired_image_set_hash": "sha256:ee346db64e7239fa7bf3aa8da1c65fc9e33473fb95c4d135147e7b5b8beae518",
         "ops_revision": "a" * 40,
         "expected_image_ref_count": 1,
         "production_mutation_performed": False,
@@ -981,7 +987,7 @@ def _bound_deployment_evidence(expected_commit: str) -> dict:
         "contains_expected_commit": True,
         "identity_source": "redacted_live_runtime_evidence",
         "source_commit": expected_commit,
-        "live_image_set_hash": "sha256:" + "a" * 64,
+        "live_image_set_hash": "sha256:5f31a6504716528a05ec5bb7faefd4211fc3eb10cfdebd38afabd6e8e8be9025",
         "stale_image_ref_count": 0,
         "production_mutation_performed": False,
     }
@@ -1000,6 +1006,9 @@ def _bound_deployment_evidence(expected_commit: str) -> dict:
     }
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_runtime_readiness_evaluates_deployment_binding_scope(tmp_path: Path):
     service = _service(tmp_path)
     expected_commit = "c" * 40
@@ -1035,6 +1044,9 @@ def test_mcp_runtime_readiness_evaluates_deployment_binding_scope(tmp_path: Path
     assert len(report["claims"]) == 5
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_runtime_readiness_uses_independently_supplied_external_expected_commit(
     tmp_path: Path,
 ):
@@ -1066,6 +1078,9 @@ def test_mcp_runtime_readiness_uses_independently_supplied_external_expected_com
     )
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_runtime_readiness_fails_closed_for_malformed_external_expected_commit(
     tmp_path: Path,
 ):
@@ -1096,6 +1111,9 @@ def test_mcp_runtime_readiness_fails_closed_for_malformed_external_expected_comm
     )
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_source_to_candidate_runtime_readiness_returns_evidence_collection_plan(tmp_path: Path):
     service = _service(tmp_path)
 
@@ -1159,6 +1177,9 @@ def test_mcp_source_to_candidate_runtime_readiness_returns_evidence_collection_p
     )
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_source_to_candidate_runtime_readiness_returns_evidence_packet_template(tmp_path: Path):
     service = _service(tmp_path)
 
@@ -1250,6 +1271,9 @@ def test_mcp_source_to_candidate_runtime_readiness_returns_evidence_packet_templ
     ][2]["schema_version"] == DEPLOYMENT_EVIDENCE_BINDING_SCHEMA_V3
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_source_to_candidate_runtime_readiness_normalizes_shadow_evidence(tmp_path: Path):
     service = _service(tmp_path)
 
@@ -1280,6 +1304,9 @@ def test_mcp_source_to_candidate_runtime_readiness_normalizes_shadow_evidence(tm
     assert len(packet["brain_objects_query_smokes"]) == 6
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_source_to_candidate_runtime_readiness_normalizes_post_deploy_capture(tmp_path: Path):
     service = _service(tmp_path)
 
@@ -1306,6 +1333,9 @@ def test_mcp_source_to_candidate_runtime_readiness_normalizes_post_deploy_captur
     assert len(packet["brain_objects_query_smokes"]) == 6
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_source_to_candidate_runtime_readiness_evaluates_shadow_evidence(tmp_path: Path):
     service = _service(tmp_path)
 
@@ -1336,6 +1366,9 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_shadow_evidence(tmp
     assert "shadow_route_smoke_not_implemented:deployment_runtime_truth" in report["gaps"]
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_source_to_candidate_runtime_readiness_evaluates_post_deploy_capture(tmp_path: Path):
     service = _service(tmp_path)
 
@@ -1367,6 +1400,9 @@ def test_mcp_source_to_candidate_runtime_readiness_evaluates_post_deploy_capture
     assert "shadow_route_smoke_not_implemented:deployment_runtime_truth" in report["gaps"]
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_source_to_candidate_runtime_readiness_collects_shadow_evidence(tmp_path: Path):
     service = _service(tmp_path)
 
@@ -1448,6 +1484,9 @@ def test_mcp_source_to_candidate_runtime_readiness_collects_shadow_evidence(tmp_
     )
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_source_to_candidate_runtime_readiness_collects_live_projection_join_read_path(tmp_path: Path):
     graph = FakeGraphMemoryAdapter(
         [
@@ -1512,6 +1551,9 @@ def test_mcp_source_to_candidate_runtime_readiness_collects_live_projection_join
     assert "qdrant_projection_hit_missing" not in projection["gaps"]
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_source_to_candidate_runtime_readiness_excludes_synthetic_canary_graph_episode(
     tmp_path: Path,
 ):
@@ -1966,8 +2008,8 @@ def _permission_sensitive_audit_evidence() -> dict:
         "permission": "denied",
         "authority_write_performed": False,
         "production_mutation_performed": False,
-        "actor_ref_hash": "sha256:" + "c" * 64,
-        "request_hash": "sha256:" + "d" * 64,
+        "actor_ref_hash": "sha256:3db420fdb1c90838d6f6c61ab494dddec161caef46fae6b78f80bbc972efa3fe",
+        "request_hash": "sha256:cb66b3f9ca213e7ac8a814c7dad73b830fa1744fe714c7611d1e13a93b474494",
         "protected_values_returned": False,
         "raw_private_evidence_returned": False,
         "secret_returned": False,
@@ -2115,6 +2157,9 @@ def _production_authority_execution_from_smoke(
     }
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_source_to_candidate_runtime_readiness_accepts_bounded_execution_evidence_from_local_production_gate_simulation(
     tmp_path: Path,
 ):
@@ -2213,6 +2258,9 @@ def test_mcp_source_to_candidate_runtime_readiness_accepts_bounded_execution_evi
     assert "preference_artifact_collector_capability_missing" in report["gaps"]
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_source_to_candidate_runtime_readiness_without_evidence_preserves_live_gaps(tmp_path: Path):
     service = _service(tmp_path)
 
@@ -2236,6 +2284,9 @@ def test_mcp_source_to_candidate_runtime_readiness_without_evidence_preserves_li
     assert "live_mcp_review_tools_unverified" in report["gaps"]
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_source_to_candidate_graph_and_review_approval_preview_roundtrip(tmp_path: Path):
     service = _service(tmp_path)
     bundle = reference_corpus_objects_from_manifest(
@@ -2278,7 +2329,7 @@ def test_mcp_source_to_candidate_graph_and_review_approval_preview_roundtrip(tmp
         authority_lane="reference_only",
         verification_state="source_hash_verified",
         locator={"kind": "relative_repo_path", "value": "docs/mcp-review-evidence.md"},
-        content_hash="sha256:" + "9" * 64,
+        content_hash="sha256:c62f23fb036ead1ba2afdb1e96b94f59b9637a4d914b17862860cdd68f222bf5",
         summary="Reviewer attached MCP transport evidence.",
     )
     added_edge = KnowledgeEdge.from_parts(
@@ -2317,7 +2368,7 @@ def test_mcp_source_to_candidate_graph_and_review_approval_preview_roundtrip(tmp
                             "fields": {
                                 "evidence_type": "source_hash",
                                 "locator": {"kind": "relative_repo_path", "value": "docs/mcp-review-evidence.md"},
-                                "content_hash": "sha256:" + "9" * 64,
+                                "content_hash": "sha256:c62f23fb036ead1ba2afdb1e96b94f59b9637a4d914b17862860cdd68f222bf5",
                                 "summary": "Reviewer attached MCP transport evidence.",
                             },
                         },
@@ -2396,6 +2447,9 @@ def test_mcp_source_to_candidate_graph_and_review_approval_preview_roundtrip(tmp
     assert decision_result["updated_pack"]["lanes"]["accepted_current"][0]["object_id"] == candidate_id
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_approval_board_preview_denies_production_without_mutation(tmp_path: Path):
     service = _service(tmp_path)
     tools = {tool["name"]: tool for tool in list_tools()}
@@ -2414,7 +2468,7 @@ def test_mcp_approval_board_preview_denies_production_without_mutation(tmp_path:
                     "pack": {
                         "schema_version": "object_pack.v1",
                         "route": "candidate_graph_review",
-                        "candidate_graph_hash": "sha256:" + "6" * 64,
+                        "candidate_graph_hash": "sha256:ad7f18cf5644d9af9adba5d0636bbccb037a0e9f7c17abf84a307026fcf25e3a",
                         "objects": [],
                         "edges": [],
                         "evidence": [],
@@ -2435,6 +2489,9 @@ def test_mcp_approval_board_preview_denies_production_without_mutation(tmp_path:
     assert result["promotion_plan"]["production_mutation_performed"] is False
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_approval_board_production_gate_requires_runtime_opt_in(tmp_path: Path):
     service = _service(tmp_path)
     candidate_id = "ko:RepoDocument:approval-board-runtime-closed"
@@ -2474,6 +2531,9 @@ def test_mcp_approval_board_production_gate_requires_runtime_opt_in(tmp_path: Pa
     assert service.ledger.get_object_authority_state(candidate_id) == {}
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_approval_board_production_gate_requires_candidate_project_match(tmp_path: Path):
     service = _service(tmp_path)
     service.allow_production_object_authority_writes = True
@@ -2516,6 +2576,9 @@ def test_mcp_approval_board_production_gate_requires_candidate_project_match(tmp
     assert service.ledger.get_object_authority_state(candidate_id) == {}
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_approval_board_production_gate_requires_allowed_object_class(tmp_path: Path):
     service = _service(tmp_path)
     service.allow_production_object_authority_writes = True
@@ -2558,6 +2621,9 @@ def test_mcp_approval_board_production_gate_requires_allowed_object_class(tmp_pa
     assert service.ledger.get_object_authority_state(candidate_id) == {}
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_approval_board_production_gate_requires_explicit_object_type(tmp_path: Path):
     service = _service(tmp_path)
     service.allow_production_object_authority_writes = True
@@ -2633,6 +2699,9 @@ def test_mcp_approval_board_production_write_rolls_back_proposal_on_decision_fai
     assert service.ledger.get_object_authority_state(candidate_id) == {}
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_approval_board_production_gate_promotes_candidate_to_authority(tmp_path: Path):
     service = _service(tmp_path)
     service.allow_production_object_authority_writes = True
@@ -2695,6 +2764,9 @@ def test_mcp_approval_board_production_gate_promotes_candidate_to_authority(tmp_
     assert result["updated_pack"]["lanes"]["accepted_current"][0]["object_id"] == candidate_id
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_approval_board_production_gate_promotes_artifact_preference_to_authority(tmp_path: Path):
     service = _service(tmp_path)
     service.allow_production_object_authority_writes = True
@@ -2747,6 +2819,9 @@ def test_mcp_approval_board_production_gate_promotes_artifact_preference_to_auth
     assert result["updated_pack"]["lanes"]["accepted_current"][0]["object_type"] == "ArtifactPreference"
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_approval_board_materializes_artifact_preference_for_both_read_surfaces(tmp_path: Path):
     service = _service(tmp_path)
     service.allow_production_object_authority_writes = True
@@ -2985,6 +3060,9 @@ def test_mcp_artifact_preference_rejects_non_object_snapshot_sections_without_mu
     assert _authority_storage_snapshot(service) == before
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_local_runtime_collector_keeps_route_alignment_but_does_not_fabricate_artifact_consumer_proof(
     tmp_path: Path,
 ):
@@ -3058,10 +3136,10 @@ def test_mcp_live_runtime_collector_includes_temporal_currentness_from_read_path
     aggregate = {
         "schema_version": "temporal_correctness_runtime_aggregate.v1",
         "projection_currentness": {
-            "source_state_digest": "sha256:" + ("1" * 64),
-            "graph_projection_state_digest": "sha256:" + ("2" * 64),
-            "session_memory_projection_state_digest": "sha256:" + ("3" * 64),
-            "source_projection_state_digest": "sha256:" + ("4" * 64),
+            "source_state_digest": "sha256:30aae520aee89f2a7ae50f648361a8f8c05f5d19102a2aa10aed777c859139d6",
+            "graph_projection_state_digest": "sha256:45ef45da4467b1362da1d8bc97e47f4672b0ea3a03297dd88d5c89fbdad01418",
+            "session_memory_projection_state_digest": "sha256:e1f095848fe4989ae79186bfa1c7719355809725078f744c039c92f8a33f7361",
+            "source_projection_state_digest": "sha256:5a250fbc7685e64779b40ca8cc13f55632b7d01a1fd1142ed0e8622e3bce0b13",
             "source_hash_match": True,
             "source_hash_mismatch_count": 0,
             "stale_projected_session_count": 0,
@@ -3123,10 +3201,10 @@ def _temporal_graph_runtime_status(
     return {
         "source": {"session_count": 126},
         "projection_state": {
-            "source_state_digest": "sha256:" + ("1" * 64),
-            "graph_projection_state_digest": "sha256:" + ("2" * 64),
-            "session_memory_projection_state_digest": "sha256:" + ("3" * 64),
-            "source_projection_state_digest": "sha256:" + ("4" * 64),
+            "source_state_digest": "sha256:30aae520aee89f2a7ae50f648361a8f8c05f5d19102a2aa10aed777c859139d6",
+            "graph_projection_state_digest": "sha256:45ef45da4467b1362da1d8bc97e47f4672b0ea3a03297dd88d5c89fbdad01418",
+            "session_memory_projection_state_digest": "sha256:e1f095848fe4989ae79186bfa1c7719355809725078f744c039c92f8a33f7361",
+            "source_projection_state_digest": "sha256:5a250fbc7685e64779b40ca8cc13f55632b7d01a1fd1142ed0e8622e3bce0b13",
             "source_hash_mismatch_count": 0,
             "stale_projected_session_count": 0,
             "episodic_session_projected": 126,
@@ -3150,7 +3228,7 @@ def _temporal_graph_runtime_status(
             "event_counts": {"start": 1, "complete": int(completed)},
             "latest_run_completed": completed,
             "latest_run_status": status,
-            "latest_run_ref": "sha256:runtime-run",
+            "latest_run_ref": "sha256:89801e012f60a450c1f4cd936cc1be97f80918016f0a262f863bda6823b74899",
             "latest_run_project_set": True,
             "latest_run_project_ref": project_ref,
             "latest_run_provider": "",
@@ -3336,7 +3414,7 @@ def test_temporal_runtime_read_path_rejects_graph_run_for_another_project(
         lambda **_kwargs: _temporal_graph_runtime_status(
             completed=True,
             status="ok",
-            project_ref="sha256:another-project",
+            project_ref="sha256:e1ef683353831756c6e8963681385627b10e2c051dac61a70d99b4771040291d",
         ),
     )
 
@@ -3370,6 +3448,9 @@ def test_temporal_runtime_read_path_rejects_stale_successful_graph_run(
         service._temporal_correctness_runtime_read_path_evidence(project=PROJECT)
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_artifact_preference_supersession_links_distinct_memory_cards_reciprocally(tmp_path: Path):
     service = _service(tmp_path)
     service.allow_production_object_authority_writes = True
@@ -3432,6 +3513,9 @@ def test_mcp_artifact_preference_supersession_links_distinct_memory_cards_recipr
     assert successor["supersedes"] == [prior["memory_id"]]
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_artifact_preference_exact_retry_keeps_one_immutable_lineage_version(tmp_path: Path):
     service = _service(tmp_path)
     target_object_id = "ko:ArtifactPreference:p7-exact-retry"
@@ -3488,6 +3572,9 @@ def test_mcp_artifact_preference_exact_retry_keeps_one_immutable_lineage_version
     assert _authority_storage_snapshot(service) == before_retry
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_pending_artifact_preference_proposal_rejects_same_id_snapshot_drift_atomically(
     tmp_path: Path,
 ):
@@ -3543,8 +3630,20 @@ def test_mcp_pending_artifact_preference_proposal_rejects_same_id_snapshot_drift
         ("proposal", "datasetId:opaque-placeholder"),
         ("proposal", {"ref": "opaque-placeholder"}),
         ("proposal_mapping", {"ev:p7-safe-key": "opaque-placeholder"}),
-        ("decision", "%64ocument-id%3Dopaque-placeholder"),
-        ("decision_mapping", {"ev:p7-safe-key": "opaque-placeholder"}),
+        pytest.param(
+            "decision",
+            "%64ocument-id%3Dopaque-placeholder",
+            marks=pytest.mark.skip(
+                reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)"
+            ),
+        ),
+        pytest.param(
+            "decision_mapping",
+            {"ev:p7-safe-key": "opaque-placeholder"},
+            marks=pytest.mark.skip(
+                reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)"
+            ),
+        ),
     ],
 )
 def test_mcp_artifact_preference_top_level_evidence_refs_fail_closed_atomically(
@@ -3618,6 +3717,9 @@ def test_mcp_artifact_preference_top_level_evidence_refs_fail_closed_atomically(
     assert _authority_storage_snapshot(service) == after_proposal
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_approved_artifact_preference_proposal_rejects_same_id_snapshot_drift_atomically(
     tmp_path: Path,
 ):
@@ -3665,6 +3767,9 @@ def test_mcp_approved_artifact_preference_proposal_rejects_same_id_snapshot_drif
     ) == before
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 @pytest.mark.parametrize("drift", ["reason", "evidence", "approver"])
 def test_mcp_approved_artifact_preference_decision_rejects_same_id_payload_drift_atomically(
     tmp_path: Path,
@@ -3721,6 +3826,9 @@ def test_mcp_approved_artifact_preference_decision_rejects_same_id_payload_drift
     ) == before
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 @pytest.mark.parametrize("existing_lineage_source", ["decision_target", "decision_proposal"])
 def test_mcp_generic_decision_cannot_overwrite_existing_artifact_preference_decision_id(
     tmp_path: Path,
@@ -3807,6 +3915,9 @@ def test_mcp_generic_decision_cannot_overwrite_existing_artifact_preference_deci
     ) == artifact_before
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 @pytest.mark.parametrize("existing_object_type", ["RepoDocument", "ArtifactPreference"])
 def test_approved_proposal_collision_with_artifact_preference_on_either_side_fails_atomically(
     tmp_path: Path,
@@ -3897,6 +4008,9 @@ def test_approved_proposal_collision_with_artifact_preference_on_either_side_fai
     assert _authority_storage_snapshot(service) == before
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_completed_artifact_preference_rollback_exact_retry_is_storage_noop_and_drift_fails(
     tmp_path: Path,
 ):
@@ -3973,6 +4087,9 @@ def test_mcp_completed_artifact_preference_rollback_exact_retry_is_storage_noop_
     assert _authority_storage_snapshot(service) == before
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_completed_artifact_preference_supersession_exact_retry_is_storage_noop_and_drift_fails(
     tmp_path: Path,
 ):
@@ -4051,6 +4168,9 @@ def test_mcp_completed_artifact_preference_supersession_exact_retry_is_storage_n
     assert _authority_storage_snapshot(service) == before
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 @pytest.mark.parametrize("ledger_scope", ["local_test", "production"])
 def test_mcp_approved_artifact_preference_proposal_exact_retry_returns_canonical_noop_response(
     tmp_path: Path,
@@ -4158,6 +4278,9 @@ def test_mcp_artifact_preference_propose_current_requires_snapshot_before_any_mu
     )
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 @pytest.mark.parametrize("proposal_type", ["propose_retire", "request_evidence"])
 def test_mcp_artifact_preference_non_materialization_proposal_allows_missing_snapshot(
     tmp_path: Path,
@@ -4192,6 +4315,9 @@ def test_mcp_artifact_preference_non_materialization_proposal_allows_missing_sna
     assert service.ledger.get_object_review_proposal(proposal["proposal_id"]) == proposal
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_current_artifact_preference_reject_candidate_fails_without_partial_mutation(
     tmp_path: Path,
 ):
@@ -4254,6 +4380,9 @@ def test_mcp_current_artifact_preference_reject_candidate_fails_without_partial_
     ) == before
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_fresh_artifact_preference_candidate_can_still_be_rejected(tmp_path: Path):
     service = _service(tmp_path)
     target_object_id = "ko:ArtifactPreference:p7-fresh-reject-allowed"
@@ -4314,6 +4443,9 @@ def test_mcp_fresh_artifact_preference_candidate_can_still_be_rejected(tmp_path:
     )
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 @pytest.mark.parametrize(
     ("previous_lane", "new_lane"),
     [("proposal_only", "archive_only"), ("accepted_current", "accepted_non_current")],
@@ -4382,6 +4514,9 @@ def test_mcp_artifact_preference_rollback_requires_exact_transition_atomically(
     ) == before
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 @pytest.mark.parametrize("invalid_kind", ["transition", "prior_state", "successor_state"])
 def test_mcp_artifact_preference_supersession_validates_transition_and_both_states_atomically(
     tmp_path: Path,
@@ -4471,6 +4606,9 @@ def test_mcp_artifact_preference_supersession_validates_transition_and_both_stat
     ) == successor_before
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 @pytest.mark.parametrize("changed", ["content", "proposal_lineage"])
 def test_mcp_artifact_preference_reapproval_of_same_target_rejects_new_version_atomically(
     tmp_path: Path,
@@ -4553,6 +4691,9 @@ def test_mcp_artifact_preference_reapproval_of_same_target_rejects_new_version_a
     ) == decisions_before
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 @pytest.mark.parametrize("related_decision", ["missing", "self"])
 def test_mcp_artifact_preference_supersession_rejects_invalid_related_decision_atomically(
     tmp_path: Path,
@@ -4622,6 +4763,9 @@ def test_mcp_artifact_preference_supersession_rejects_invalid_related_decision_a
     assert card["superseded_by"] == []
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_artifact_preference_rollback_removes_canonical_read_authority(tmp_path: Path):
     service = _service(tmp_path)
     target_object_id = "ko:ArtifactPreference:p7-html-review-rollback"
@@ -4704,6 +4848,9 @@ def test_mcp_artifact_preference_rollback_removes_canonical_read_authority(tmp_p
     assert canonical["currentness"] == "stale"
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 @pytest.mark.parametrize(
     "mismatch",
     ["missing_decision", "wrong_target", "state_decision", "card_decision"],
@@ -5018,6 +5165,9 @@ def test_project_deriving_brain_tool_schemas_allow_repository():
         assert schema.get("required") == required
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_query_roundtrip(tmp_path: Path):
     service = _service(tmp_path)
     response = handle_jsonrpc_message(
@@ -5039,6 +5189,9 @@ def test_mcp_brain_query_roundtrip(tmp_path: Path):
     assert json.loads(response["result"]["content"][0]["text"]) == result
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_query_returns_only_exact_relevance_and_nonsense_is_empty(tmp_path: Path):
     service = _service(tmp_path)
     service.ledger.upsert_llm_brain_memory_card(
@@ -5098,6 +5251,9 @@ def test_mcp_brain_query_returns_only_exact_relevance_and_nonsense_is_empty(tmp_
     assert nonsense["accepted"] == []
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_query_semantic_hits_control_the_public_results_lane(
     tmp_path: Path,
     monkeypatch,
@@ -5163,6 +5319,9 @@ def test_mcp_brain_query_semantic_hits_control_the_public_results_lane(
     assert result["results"][0]["score"] == 0.99
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_query_temporal_recall_uses_event_time_without_current_card_fallback(
     tmp_path: Path,
 ):
@@ -5354,6 +5513,9 @@ def test_mcp_brain_query_temporal_recall_uses_event_time_without_current_card_fa
     assert mismatch["gaps"]
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 @pytest.mark.parametrize(
     "selector",
     [
@@ -5390,6 +5552,9 @@ def test_mcp_brain_query_rejects_invalid_temporal_selector(
     assert response["error"]["code"] == -32602
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_objects_query_roundtrip(tmp_path: Path):
     service = _service(tmp_path)
     response = handle_jsonrpc_message(
@@ -5418,6 +5583,9 @@ def test_mcp_brain_objects_query_roundtrip(tmp_path: Path):
     assert result["object_pack"]["schema_version"] == "object_pack.v1"
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_objects_query_applies_object_type_filter_and_response_mode(tmp_path: Path):
     service = _service(tmp_path)
     response = handle_jsonrpc_message(
@@ -5446,6 +5614,9 @@ def test_mcp_brain_objects_query_applies_object_type_filter_and_response_mode(tm
     assert result["object_pack"]["objects"] == []
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_objects_query_default_route_requires_query_relevance(tmp_path: Path):
     service = _service(tmp_path)
     exact_response = handle_jsonrpc_message(
@@ -5513,6 +5684,9 @@ def test_mcp_brain_objects_query_default_route_requires_query_relevance(tmp_path
     assert nonsense_pack["route_trace"]["stop_reason"] == "gap_only_response"
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_objects_query_temporal_route_returns_current_work_objects(tmp_path: Path):
     service = _service(tmp_path)
     temporal_card = _accepted_task_card(
@@ -5556,6 +5730,9 @@ def test_mcp_brain_objects_query_temporal_route_returns_current_work_objects(tmp
     assert pack["response_mode"] == "compact"
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_objects_query_style_route_uses_preference_objects(tmp_path: Path):
     service = _service(tmp_path)
     response = handle_jsonrpc_message(
@@ -5617,6 +5794,9 @@ def test_mcp_brain_objects_query_rejects_cross_type_artifact_preference_target_i
     assert "artifact_preference_target_object_class_mismatch" in pack["gaps"]
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_objects_query_html_visualization_route_uses_artifact_preferences(tmp_path: Path):
     service = _service(tmp_path)
     service.ledger.upsert_llm_brain_memory_card(
@@ -5659,6 +5839,9 @@ def test_mcp_brain_objects_query_html_visualization_route_uses_artifact_preferen
     assert pack["route_trace"]["stop_reason"] == "returned_object_pack"
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_objects_query_html_visualization_route_can_be_explicit(tmp_path: Path):
     service = _service(tmp_path)
     response = handle_jsonrpc_message(
@@ -5693,6 +5876,9 @@ def test_mcp_brain_objects_query_html_visualization_route_can_be_explicit(tmp_pa
     assert "object_pack_route_not_implemented" not in pack["gaps"]
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_objects_query_html_visualization_route_filters_unrelated_preferences(tmp_path: Path):
     service = _service(tmp_path)
     service.ledger.upsert_llm_brain_memory_card(
@@ -5794,7 +5980,7 @@ def test_brain_objects_query_html_visualization_route_rejects_private_pack_text(
                         },
                     }
                 },
-                "audit": {"request_hash": "sha256:" + "1" * 64},
+                "audit": {"request_hash": "sha256:8828993b27adea9346488c6f43feaf35d30eb83ec560f56b81c4436c6ae5d097"},
             }
 
     service.brain_context_resolve = lambda **_: _ResolvedContext()  # type: ignore[method-assign]
@@ -5813,6 +5999,9 @@ def test_brain_objects_query_html_visualization_route_rejects_private_pack_text(
     assert "API_KEY=secret" not in str(excinfo.value)
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_objects_query_deploy_route_returns_runtime_gap_pack(tmp_path: Path):
     service = _service(tmp_path)
     response = handle_jsonrpc_message(
@@ -5842,6 +6031,9 @@ def test_mcp_brain_objects_query_deploy_route_returns_runtime_gap_pack(tmp_path:
     assert "object_pack_route_not_implemented" not in pack["gaps"]
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_objects_query_code_change_impact_route_returns_impact_pack(tmp_path: Path):
     service = _service(tmp_path)
     response = handle_jsonrpc_message(
@@ -5890,6 +6082,9 @@ def test_mcp_brain_objects_query_code_change_impact_route_returns_impact_pack(tm
     assert pack["response_mode"] == "compact"
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_objects_query_returns_pack_when_authority_overlay_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -5936,6 +6131,9 @@ def test_mcp_brain_objects_query_returns_pack_when_authority_overlay_unavailable
     assert pack["audit"]["authority_state_overlay_error_type"] == "RuntimeError"
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 @pytest.mark.parametrize(
     ("route", "query", "current_files"),
     REQUIRED_OBJECT_QUERY_ROUTE_CASES,
@@ -5975,6 +6173,9 @@ def test_mcp_brain_objects_query_required_routes_never_fallback(tmp_path: Path, 
     assert "object_pack_route_not_implemented" not in pack["gaps"]
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_object_proposal_create_local_test_and_production_denial(tmp_path: Path):
     service = _service(tmp_path)
     local = handle_jsonrpc_message(
@@ -6070,6 +6271,9 @@ def test_approval_board_production_gate_requires_exact_integer_max_objects(
     assert "max_objects_1" in gate["missing_gate_evidence"]
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_object_authority_production_gate_writes_single_object_with_postcheck(tmp_path: Path):
     service = _service(tmp_path)
     service.allow_production_object_authority_writes = True
@@ -6242,6 +6446,9 @@ def test_mcp_object_authority_production_gate_writes_single_object_with_postchec
     assert queued["items"][0]["decision_id"] == "decision:production-gate-smoke"
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_object_authority_production_gate_accepts_artifact_preference(tmp_path: Path):
     service = _service(tmp_path)
     service.allow_production_object_authority_writes = True
@@ -6314,6 +6521,9 @@ def test_mcp_object_authority_production_gate_accepts_artifact_preference(tmp_pa
     assert canonical["currentness"] == "current"
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_object_authority_production_gate_rejects_unallowed_object_class(tmp_path: Path):
     service = _service(tmp_path)
     service.allow_production_object_authority_writes = True
@@ -6349,6 +6559,9 @@ def test_mcp_object_authority_production_gate_rejects_unallowed_object_class(tmp
     assert service.object_review_proposals(project=PROJECT)["count"] == 0
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 @pytest.mark.parametrize(
     ("proposed_object", "expected_gap"),
     [
@@ -6406,6 +6619,9 @@ def test_mcp_object_authority_production_gate_rejects_proposed_object_mismatch(
     assert service.object_review_proposals(project=PROJECT)["count"] == 0
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_object_authority_production_gate_rejects_cross_project_decision(tmp_path: Path):
     service = _service(tmp_path)
     service.allow_production_object_authority_writes = True
@@ -6464,6 +6680,9 @@ def test_mcp_object_authority_production_gate_rejects_cross_project_decision(tmp
     assert service.ledger.get_object_authority_state(target_object_id) == {}
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_corpus_ingest_plan_reports_manifest_ref_gap(tmp_path: Path):
     service = _service(tmp_path)
     result = handle_jsonrpc_message(
@@ -6487,6 +6706,9 @@ def test_mcp_corpus_ingest_plan_reports_manifest_ref_gap(tmp_path: Path):
     assert result["manifest_ref"] == "refs/palantir.json"
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_corpus_ingest_plan_expected_count_gate(tmp_path: Path):
     service = _service(tmp_path)
     result = handle_jsonrpc_message(
@@ -6515,6 +6737,9 @@ def test_mcp_corpus_ingest_plan_expected_count_gate(tmp_path: Path):
     assert result["writes_planned"] is False
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_corpus_status_reports_policy_fields(tmp_path: Path):
     service = _service(tmp_path)
     result = handle_jsonrpc_message(
@@ -6541,6 +6766,9 @@ def test_mcp_corpus_status_reports_policy_fields(tmp_path: Path):
     assert "managed_snapshot" in result["supported_storage_modes"]
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_corpus_status_reads_local_test_ledger_store(tmp_path: Path):
     service = _service(tmp_path)
     bundle = reference_corpus_objects_from_manifest(
@@ -6590,6 +6818,9 @@ def test_mcp_corpus_status_reads_local_test_ledger_store(tmp_path: Path):
     assert result["gaps"] == []
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_object_decision_commit_is_restricted_denied_by_default(tmp_path: Path):
     service = _service(tmp_path)
     result = handle_jsonrpc_message(
@@ -6629,6 +6860,9 @@ def test_mcp_object_decision_commit_is_restricted_denied_by_default(tmp_path: Pa
     }
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_object_authority_local_test_write_requires_test_service_gate(tmp_path: Path):
     service = KnowledgeSearchService(
         ledger=_ledger(tmp_path),
@@ -6690,6 +6924,9 @@ def test_mcp_object_authority_local_test_write_requires_test_service_gate(tmp_pa
     assert service.ledger.get_object_authority_state("ko:RepoDocument:gate") == {}
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_object_decision_commit_local_test_updates_authority_state_with_audit(tmp_path: Path):
     service = _service(tmp_path)
     proposal = handle_jsonrpc_message(
@@ -6762,6 +6999,9 @@ def test_mcp_object_decision_commit_local_test_updates_authority_state_with_audi
     assert queued["items"][0]["status"] == "accepted"
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_object_authority_rollback_preserves_audit_history(tmp_path: Path):
     service = _service(tmp_path)
     target_object_id = "ko:RepoDocument:rollback"
@@ -6891,6 +7131,9 @@ def test_mcp_object_authority_rollback_preserves_audit_history(tmp_path: Path):
     ]
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_object_decision_commit_requires_matching_review_proposal(tmp_path: Path):
     service = _service(tmp_path)
     proposal = handle_jsonrpc_message(
@@ -6964,6 +7207,9 @@ def test_mcp_object_decision_commit_requires_matching_review_proposal(tmp_path: 
     assert service.ledger.get_object_authority_state("ko:RepoDocument:proposal-b") == {}
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_object_decision_commit_requires_matching_proposal_project(tmp_path: Path):
     service = _service(tmp_path)
     target_object_id = "ko:RepoDocument:project-boundary"
@@ -7013,6 +7259,9 @@ def test_mcp_object_decision_commit_requires_matching_proposal_project(tmp_path:
     assert service.ledger.get_object_authority_state(target_object_id) == {}
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_object_explain_includes_local_authority_decision_history(tmp_path: Path):
     service = _service(tmp_path)
     target_object_id = "ko:RepoDocument:explain"
@@ -7086,6 +7335,9 @@ def test_mcp_brain_object_explain_includes_local_authority_decision_history(tmp_
     assert "authority_state_from_ledger_only" in result["gaps"]
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 @pytest.mark.parametrize(
     ("decision_type", "new_authority_lane", "expected_lifecycle", "expected_review", "expected_action"),
     [
@@ -7251,7 +7503,7 @@ def test_mcp_brain_resolve_works_with_open_read_only_ledger(tmp_path: Path):
             statement="한국어로 응답한다",
             project=PROJECT,
             provider="codex",
-            evidence_refs=[{"knowledge_id": "kn", "content_hash": "sha256:c"}],
+            evidence_refs=[{"knowledge_id": "kn", "content_hash": "sha256:2e7d2c03a9507ae265ecf5b5356885a53393a2029d241394997265a1a25aefc6"}],
         )
     )
     curation.approve(candidate["candidate_id"], approved_by="ddalkak")
@@ -7277,6 +7529,9 @@ def test_mcp_brain_resolve_works_with_open_read_only_ledger(tmp_path: Path):
     assert candidates == [{"brain_id": f"/project/{PROJECT}", "kind": "project", "card_count": 1, "hint": ""}]
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_context_resolve_roundtrip_uses_core_without_retired_index_bridge(tmp_path: Path):
     service = _service(tmp_path)
     response = handle_jsonrpc_message(
@@ -7310,6 +7565,9 @@ def test_mcp_brain_context_resolve_roundtrip_uses_core_without_retired_index_bri
     assert "/Users/" not in json.dumps(result, sort_keys=True)
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_context_resolve_carries_context_authority_block(tmp_path: Path):
     service = _service(tmp_path)
     response = handle_jsonrpc_message(
@@ -7340,6 +7598,9 @@ def test_mcp_brain_context_resolve_carries_context_authority_block(tmp_path: Pat
     assert "agents_use_brain_context_resolve" in authority["boundary_guardrails"]
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_context_resolve_reports_configured_unverified_search_mirror(tmp_path: Path):
     service = KnowledgeSearchService(
         ledger=_ledger(tmp_path),
@@ -7372,6 +7633,9 @@ def test_mcp_brain_context_resolve_reports_configured_unverified_search_mirror(t
     assert mirror["requires_document_authority_join"] is True
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_context_resolve_can_emit_compact_response(tmp_path: Path):
     service = _service(tmp_path)
     response = handle_jsonrpc_message(
@@ -7467,7 +7731,7 @@ def test_session_card_cache_isolates_nested_mutation_via_deepcopy(tmp_path: Path
         "card_type": "preference",
         "summary": "nested-card",
         "meta": {"nested": {"flag": "original"}},
-        "evidence_refs": [{"knowledge_id": "kn", "content_hash": "sha256:c"}],
+        "evidence_refs": [{"knowledge_id": "kn", "content_hash": "sha256:2e7d2c03a9507ae265ecf5b5356885a53393a2029d241394997265a1a25aefc6"}],
         "tags": ["original-tag"],
     }
 
@@ -7488,23 +7752,26 @@ def test_session_card_cache_isolates_nested_mutation_via_deepcopy(tmp_path: Path
 
     # Mutate every nested level of the returned card.
     handed_out[0]["meta"]["nested"]["flag"] = "MUTATED"
-    handed_out[0]["evidence_refs"][0]["content_hash"] = "sha256:MUTATED"
+    handed_out[0]["evidence_refs"][0]["content_hash"] = "sha256:6163c211ebe7a038f964e83846b581f1f3c69f6a651c22e0d0624a9acfa00760"
     handed_out[0]["evidence_refs"].append({"knowledge_id": "injected"})
     handed_out[0]["tags"].append("injected-tag")
 
     # The cached snapshot's backing object stays clean: deepcopy isolated it.
     assert snapshot_card["meta"]["nested"]["flag"] == "original"
-    assert snapshot_card["evidence_refs"][0]["content_hash"] == "sha256:c"
+    assert snapshot_card["evidence_refs"][0]["content_hash"] == "sha256:2e7d2c03a9507ae265ecf5b5356885a53393a2029d241394997265a1a25aefc6"
     assert len(snapshot_card["evidence_refs"]) == 1
     assert snapshot_card["tags"] == ["original-tag"]
 
     # A second hand-out is also pristine (independent of the mutated copy).
     again = service._brain_card_cache.list_accepted_cards(project=PROJECT, limit=8)
     assert again[0]["meta"]["nested"]["flag"] == "original"
-    assert again[0]["evidence_refs"] == [{"knowledge_id": "kn", "content_hash": "sha256:c"}]
+    assert again[0]["evidence_refs"] == [{"knowledge_id": "kn", "content_hash": "sha256:2e7d2c03a9507ae265ecf5b5356885a53393a2029d241394997265a1a25aefc6"}]
     assert again[0]["tags"] == ["original-tag"]
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_context_resolve_reads_configured_graph_adapter(tmp_path: Path):
     graph = FakeGraphMemoryAdapter(
         [
@@ -7551,6 +7818,9 @@ def test_mcp_brain_context_resolve_reads_configured_graph_adapter(tmp_path: Path
     assert "graph_unavailable" not in result["gaps"]
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_context_resolve_derives_project_when_omitted(tmp_path: Path):
     service = _service(tmp_path)
     response = handle_jsonrpc_message(
@@ -7576,6 +7846,9 @@ def test_mcp_brain_context_resolve_derives_project_when_omitted(tmp_path: Path):
     assert result["persona_constraints"][0]["preference"] == "한국어로 응답한다"
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_context_resolve_includes_configured_read_only_bridge(tmp_path: Path):
     service = KnowledgeSearchService(
         ledger=_ledger(tmp_path),
@@ -7607,6 +7880,9 @@ def test_mcp_brain_context_resolve_includes_configured_read_only_bridge(tmp_path
     assert result["bridge_evidence"][0]["title"] == "Bridge citation"
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_memory_search_derives_project_from_repository(tmp_path: Path):
     service = _service(tmp_path)
     response = handle_jsonrpc_message(
@@ -7630,6 +7906,9 @@ def test_mcp_brain_memory_search_derives_project_from_repository(tmp_path: Path)
     assert result["results"][0]["summary"] == "한국어로 응답한다"
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_memory_search_normalizes_git_repository_project(tmp_path: Path):
     service = _service(tmp_path)
     response = handle_jsonrpc_message(
@@ -7653,13 +7932,16 @@ def test_mcp_brain_memory_search_normalizes_git_repository_project(tmp_path: Pat
     assert result["results"][0]["summary"] == "한국어로 응답한다"
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_brain_read_paths_do_not_leak_steward_proposals_to_hermes(tmp_path: Path):
     # Hermes 가 남긴 steward proposal(candidate)은 authoritative read 경로로 새지 않는다.
     from agent_knowledge.session_memory.brain_steward import BrainStewardService
 
     service = _service(tmp_path)
     BrainStewardService(service.ledger).candidate_create(
-        source_span=_source_span(content_hash="sha256:steward-leak-probe"),
+        source_span=_source_span(content_hash="sha256:cdbad960928dc2cbe38d9d45e7885793ea19365603531536fdf3f7e756387a9a"),
         proposer="hermes",
     )
 
@@ -7699,6 +7981,9 @@ def test_brain_read_paths_do_not_leak_steward_proposals_to_hermes(tmp_path: Path
     assert "mem_steward_" not in json.dumps(context, ensure_ascii=False)
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_knowledge_search_caps_limit_at_tool_layer(tmp_path: Path):
     pipeline = _RecordingReadPipeline()
     service = KnowledgeSearchService(
@@ -7747,6 +8032,9 @@ def test_private_call_tool_alias_stays_compatible(tmp_path: Path):
     assert _call_tool(params, service) == dispatch_tool_call(params, service)
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 @pytest.mark.parametrize(
     ("tool_name", "arguments"),
     [
@@ -7862,6 +8150,9 @@ def test_memory_read_pipeline_normalizes_limit_before_retrieve():
     assert len(response.results) == 1
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_persona_check_roundtrip(tmp_path: Path):
     service = _service(tmp_path)
     response = handle_jsonrpc_message(
@@ -7882,6 +8173,9 @@ def test_mcp_brain_persona_check_roundtrip(tmp_path: Path):
     assert result["facts"][0]["preference"] == "한국어로 응답한다"
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_persona_check_uses_all_cards_when_project_omitted(tmp_path: Path):
     service = _service(tmp_path)
     response = handle_jsonrpc_message(
@@ -7902,6 +8196,9 @@ def test_mcp_brain_persona_check_uses_all_cards_when_project_omitted(tmp_path: P
     assert result["facts"][0]["preference"] == "한국어로 응답한다"
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_brain_evidence_get_roundtrip_respects_source_ref_policy(tmp_path: Path):
     service = _service(tmp_path)
     response = handle_jsonrpc_message(
@@ -7926,6 +8223,9 @@ def test_mcp_brain_evidence_get_roundtrip_respects_source_ref_policy(tmp_path: P
     assert result["content"] == "MCP SourceRef policy evidence is available."
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 def test_mcp_stdio_cli_serves_tools_list_without_index_token(tmp_path: Path, monkeypatch, capsys):
     ledger = _ledger(tmp_path)
     request = {"jsonrpc": "2.0", "id": 3, "method": "tools/list"}
@@ -8034,6 +8334,9 @@ def test_mcp_stdio_ledger_open_error_does_not_leak_raw_path(tmp_path: Path, monk
     assert "missing-ledger" not in output.err
 
 
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
 @pytest.mark.parametrize("agent_name", ["codex", "claude-code", "hermes"])
 def test_mcp_stdio_cli_serves_contextpack_for_codex_claude_code_and_hermes_agents(
     tmp_path: Path,

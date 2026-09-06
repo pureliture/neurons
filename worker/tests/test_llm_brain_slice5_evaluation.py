@@ -19,7 +19,7 @@ def _source_span(**overrides):
     span = {
         "source_ref": {"source_id": "src_eval"},
         "span_ref": {"span_id": "span_eval"},
-        "content_hash": "sha256:evaluation",
+        "content_hash": "sha256:efe77b201dc216c0edf435a227df2b2898d3f6ea1ff16e5d4d0d4ec0cf593271",
         "brain_id": f"/project/{PROJECT}",
         "card_type": "decision",
         "scope": "project",
@@ -69,7 +69,7 @@ def _suggested_accept_candidate(**overrides):
         evidence={
             "evidence_kind": "commit",
             "decision_id": "decision_auto_accept",
-            "content_hash": "sha256:auto-evidence",
+            "content_hash": "sha256:75e8eaa2df7082e8c8e52d6e6f8c5d3bf8a8aedd6c21124fac937fad714351ae",
             "source_ref": {"evidence_id": "commit_auto_accept"},
         },
         decision_id="decision_auto_accept",
@@ -209,7 +209,7 @@ def test_conflict_high_impact_and_low_confidence_always_need_review():
         card_type="drift",
         title="High severity drift",
         typed_payload=_drift_payload(severity="high"),
-        content_hash="sha256:high-drift",
+        content_hash="sha256:8ba1737fa65ffa2d3b71e7948a011ab2aea1b07d2523d2f8b2e37fb240ec23eb",
     )
     assert (
         evaluate_candidate_for_auto_policy(high_drift, feedback_records=feedback)["reason"]

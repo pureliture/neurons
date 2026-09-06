@@ -37,7 +37,7 @@ def _candidate(**overrides):
     span = {
         "source_ref": {"source_id": "src"},
         "span_ref": {"span_id": "span"},
-        "content_hash": "sha256:x",
+        "content_hash": "sha256:2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
         "brain_id": f"/project/{PROJECT}",
         "card_type": "task",
         "scope": "project",
@@ -63,7 +63,7 @@ def test_run_autopilot_command_populates_ledger_and_returns_recall_snapshot(tmp_
     ledger = Ledger(tmp_path / "ledger.sqlite")
     candidates = [
         _candidate(),
-        _candidate(source_ref={"source_id": "s2"}, span_ref={"span_id": "p2"}, content_hash="sha256:2"),
+        _candidate(source_ref={"source_id": "s2"}, span_ref={"span_id": "p2"}, content_hash="sha256:d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35"),
     ]
 
     result = run_autopilot_command(
@@ -87,7 +87,7 @@ _ENVELOPE_COMPLETION = (
 
 def test_mine_live_candidates_then_run_command_end_to_end(tmp_path):
     retired_index_bridge = _FakeRetiredIndexBridge(
-        chunks=[{"redacted_text": "auth switched to OAuth", "knowledge_id": "k1", "content_hash": "sha256:c1", "provider": "codex"}],
+        chunks=[{"redacted_text": "auth switched to OAuth", "knowledge_id": "k1", "content_hash": "sha256:d0f631ca1ddba8db3bcfcb9e057cdc98d0379f1bee00e75a545147a27dadd982", "provider": "codex"}],
         completion=_ENVELOPE_COMPLETION,
     )
 
@@ -110,7 +110,7 @@ def test_mine_live_candidates_then_run_command_end_to_end(tmp_path):
 def test_main_reads_candidates_json_and_writes_ledger(tmp_path, capsys):
     candidates = [
         _candidate(),
-        _candidate(source_ref={"source_id": "s2"}, span_ref={"span_id": "p2"}, content_hash="sha256:2"),
+        _candidate(source_ref={"source_id": "s2"}, span_ref={"span_id": "p2"}, content_hash="sha256:d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35"),
     ]
     candidates_path = tmp_path / "candidates.json"
     candidates_path.write_text(json.dumps(candidates), encoding="utf-8")

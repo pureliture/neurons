@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Graphiti는 그래프 DB와 어떻게 작동하는가</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: light-dark(#f3f6fb, #0d1625);
+      --surface: light-dark(#ffffff, #152235);
+      --surface-2: light-dark(#eaf0f8, #1b2b41);
+      --fg: light-dark(#182333, #edf3fb);
+      --muted: light-dark(#5d6a7b, #aab9cc);
+      --line: light-dark(#d6dfeb, #31445d);
+      --blue: light-dark(#2563eb, #7da8ff);
+      --purple: light-dark(#7c3aed, #bd9cff);
+      --green: light-dark(#087f5b, #58d6aa);
+      --orange: light-dark(#b45309, #ffbd70);
+      --red: light-dark(#b42318, #ff958d);
+      --shadow: 0 16px 48px light-dark(rgb(30 56 90 / 10%), rgb(0 0 0 / 28%));
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.6;
+    }
+
+    main { max-width: 1120px; margin: 0 auto; padding: 42px 22px 72px; }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { max-width: 820px; margin-bottom: 14px; font-size: clamp(2rem, 5vw, 4.1rem); line-height: 1.05; letter-spacing: -0.045em; }
+    h2 { margin-bottom: 10px; font-size: clamp(1.35rem, 2.5vw, 2rem); letter-spacing: -0.025em; }
+    h3 { margin-bottom: 6px; font-size: 1rem; }
+    p { color: var(--muted); }
+    a { color: var(--blue); }
+    code { padding: 0.12em 0.35em; border-radius: 5px; background: var(--surface-2); color: var(--fg); }
+
+    .eyebrow { margin-bottom: 12px; color: var(--purple); font-size: 0.8rem; font-weight: 700; letter-spacing: 0.13em; text-transform: uppercase; }
+    .lead { max-width: 760px; font-size: 1.1rem; }
+    .hero-note { display: inline-flex; gap: 8px; align-items: center; margin-top: 8px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 0.9rem; }
+
+    .section { margin-top: 58px; }
+    .section-intro { max-width: 760px; }
+    .role-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-top: 22px; }
+    .role-card {
+      min-height: 190px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-top: 4px solid var(--line);
+      border-radius: 16px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+      transition: border-color 160ms ease, transform 160ms ease;
+    }
+    .role-card[data-role="graphiti"] { border-top-color: var(--purple); }
+    .role-card[data-role="graphdb"] { border-top-color: var(--orange); }
+    .role-card[data-role="embedding"] { border-top-color: var(--blue); }
+    .role-card[data-role="retriever"] { border-top-color: var(--green); }
+    .role-card.is-active { transform: translateY(-4px); border-color: var(--blue); }
+    .role-tag { margin-bottom: 9px; color: var(--muted); font-size: 0.78rem; font-weight: 700; }
+    .role-card p { margin-bottom: 0; font-size: 0.92rem; }
+
+    .mechanism {
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+    .flow-track { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr auto 1fr auto 1fr; align-items: center; gap: 10px; margin: 24px 0; }
+    .flow-node {
+      min-height: 94px;
+      padding: 13px 11px;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: var(--surface-2);
+      color: var(--fg);
+      font: inherit;
+      cursor: pointer;
+      text-align: left;
+      transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+    }
+    .flow-node:hover, .flow-node:focus-visible { border-color: var(--blue); }
+    .flow-node[aria-pressed="true"] { border-color: var(--blue); background: light-dark(#e1ebff, #213c67); transform: translateY(-3px); }
+    .flow-number { display: block; margin-bottom: 5px; color: var(--blue); font-size: 0.75rem; font-weight: 800; }
+    .flow-label { display: block; font-weight: 700; }
+    .flow-sub { display: block; margin-top: 4px; color: var(--muted); font-size: 0.76rem; }
+    .arrow { color: var(--muted); font-size: 1.35rem; text-align: center; }
+    .stage {
+      min-height: 132px;
+      padding: 18px;
+      border-left: 4px solid var(--blue);
+      border-radius: 0 12px 12px 0;
+      background: var(--surface-2);
+    }
+    .stage h3 { margin-bottom: 6px; }
+    .stage p { margin-bottom: 6px; color: var(--fg); }
+    .stage-meta { color: var(--muted); font-size: 0.84rem; }
+
+    .split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+    .architecture {
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--surface);
+    }
+    .architecture h3 { margin-bottom: 14px; }
+    .lane { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 9px; align-items: center; margin: 10px 0; }
+    .box { padding: 12px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface-2); text-align: center; }
+    .box strong { display: block; }
+    .box small { color: var(--muted); }
+    .lane-arrow { color: var(--muted); font-size: 1.25rem; }
+    .warning { margin-top: 16px; padding: 11px 12px; border-left: 3px solid var(--red); background: light-dark(#fff3f1, #3b2226); color: var(--fg); font-size: 0.87rem; }
+    .good { margin-top: 16px; padding: 11px 12px; border-left: 3px solid var(--green); background: light-dark(#ebfbf5, #15382f); color: var(--fg); font-size: 0.87rem; }
+
+    .matrix-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+    table { width: 100%; border-collapse: collapse; min-width: 680px; }
+    th, td { padding: 13px 15px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: var(--muted); font-size: 0.8rem; font-weight: 700; }
+    tr:last-child td { border-bottom: 0; }
+    .status { font-weight: 700; white-space: nowrap; }
+    .yes { color: var(--green); }
+    .conditional { color: var(--orange); }
+    .build { color: var(--purple); }
+
+    .dimension {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(260px, 0.7fr);
+      gap: 22px;
+      align-items: center;
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: linear-gradient(120deg, var(--surface), var(--surface-2));
+    }
+    .dimension-value { color: var(--blue); font-size: clamp(2.2rem, 6vw, 4.5rem); font-weight: 800; letter-spacing: -0.06em; }
+    .dimension-label { color: var(--muted); font-size: 0.92rem; }
+    .dimension ul { margin: 0; padding-left: 1.2rem; color: var(--muted); }
+    .dimension li + li { margin-top: 6px; }
+
+    .decision { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+    .decision-item { padding: 17px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+    .decision-item strong { display: block; margin-bottom: 6px; }
+    .decision-item p { margin-bottom: 0; font-size: 0.9rem; }
+    .sources { margin-top: 22px; color: var(--muted); font-size: 0.84rem; }
+    .sources ul { margin: 8px 0 0; padding-left: 1.2rem; }
+
+    @media (max-width: 820px) {
+      .role-grid, .decision { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .flow-track { grid-template-columns: 1fr; }
+      .arrow { transform: rotate(90deg); }
+      .dimension { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 520px) {
+      main { padding: 28px 15px 54px; }
+      .role-grid, .decision, .split { grid-template-columns: 1fr; }
+      .mechanism { padding: 16px; }
+      .lane { grid-template-columns: 1fr; }
+      .lane-arrow { transform: rotate(90deg); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <main id="graphiti-explainer">
+    <header>
+      <div class="eyebrow">LBrain architecture guide</div>
+      <h1>Graphiti는 그래프 DB가 아니라, 그래프를 만드는 사서다</h1>
+      <p class="lead">대화와 문서처럼 정리되지 않은 정보를 읽고, 엔티티·관계·시간·근거를 뽑아 그래프 DB에 저장한 뒤 검색 결과를 조립하는 과정을 단계별로 살펴봅니다.</p>
+      <div class="hero-note"><span aria-hidden="true">●</span> 목표 아키텍처: Graphiti 유지 · Neo4j 유지 · Graph-first 조회 · AST/Graphify 제외</div>
+      <div class="warning" role="status">이 페이지는 목표 운영 경로를 설명합니다. 현재 public <code>brain.resolve</code>의 Graph-first router, PostgreSQL authority join, <code>graph_projection_outbox</code> writer/consumer는 cutover milestone로 남아 있습니다.</div>
+    </header>
+
+    <section class="section" aria-labelledby="roles-title">
+      <h2 id="roles-title">각 부품은 무슨 일을 하나?</h2>
+      <p class="section-intro">가장 많이 생기는 오해는 Graphiti와 Neo4j를 같은 부품으로 생각하는 것입니다. 둘은 함께 작동하지만 담당하는 일이 다릅니다.</p>
+      <div class="role-grid">
+        <article class="role-card" data-role="graphiti">
+          <div class="role-tag">애플리케이션 계층</div>
+          <h3>Graphiti</h3>
+          <p>대화에서 “누가 무엇을 언제 말했는가”를 읽고 엔티티, 관계, validity, provenance를 만드는 사서입니다.</p>
+        </article>
+        <article class="role-card" data-role="graphdb">
+          <div class="role-tag">그래프 저장·질의 계층</div>
+          <h3>Neo4j</h3>
+          <p>Graphiti가 만든 노드와 엣지를 저장하고 “A에서 B까지 어떤 경로가 있는가?”를 찾는 그래프 창고입니다. 이번 결정에서는 Neo4j를 그대로 유지합니다.</p>
+        </article>
+        <article class="role-card" data-role="embedding">
+          <div class="role-tag">의미 검색 계층</div>
+          <h3>Gemini Embedding 2 + pgvector</h3>
+          <p>문장을 숫자 벡터로 바꾸고, 의미가 비슷한 메모리를 빠르게 찾습니다. Gemini Embedding 2의 full output 3072차원을 유지하고 PostgreSQL에는 <code>halfvec(3072)</code>로 저장합니다.</p>
+        </article>
+        <article class="role-card" data-role="retriever">
+          <div class="role-tag">검색 조립 계층</div>
+          <h3>Hybrid Retriever</h3>
+          <p>벡터 검색, 키워드 검색, 시간 필터, 그래프 경로, 권한과 근거를 합쳐 최종 답변 후보를 만듭니다.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="mechanism-title">
+      <div class="mechanism">
+        <h2 id="mechanism-title">Graphiti의 한 번의 기억 저장 과정</h2>
+        <p class="section-intro">아래 단계를 눌러보면 각 단계의 주체와 비용·정합성 주의점을 확인할 수 있습니다.</p>
+        <div class="flow-track" role="group" aria-label="Graphiti 처리 단계">
+          <button class="flow-node" type="button" data-step="1" aria-pressed="true">
+            <span class="flow-number">STEP 1</span><span class="flow-label">Episode 수집</span><span class="flow-sub">대화·문서 이벤트</span>
+          </button>
+          <div class="arrow" aria-hidden="true">→</div>
+          <button class="flow-node" type="button" data-step="2" aria-pressed="false">
+            <span class="flow-number">STEP 2</span><span class="flow-label">LLM 추출</span><span class="flow-sub">엔티티·관계·시간</span>
+          </button>
+          <div class="arrow" aria-hidden="true">→</div>
+          <button class="flow-node" type="button" data-step="3" aria-pressed="false">
+            <span class="flow-number">STEP 3</span><span class="flow-label">그래프 저장</span><span class="flow-sub">Neo4j</span>
+          </button>
+          <div class="arrow" aria-hidden="true">→</div>
+          <button class="flow-node" type="button" data-step="4" aria-pressed="false">
+            <span class="flow-number">STEP 4</span><span class="flow-label">임베딩 생성</span><span class="flow-sub">의미 검색용 벡터</span>
+          </button>
+          <div class="arrow" aria-hidden="true">→</div>
+          <button class="flow-node" type="button" data-step="5" aria-pressed="false">
+            <span class="flow-number">STEP 5</span><span class="flow-label">Hybrid 검색</span><span class="flow-sub">경로·벡터·근거 조립</span>
+          </button>
+        </div>
+        <div class="stage" aria-live="polite">
+          <h3 id="stage-title">1. Episode 수집 — 원본은 기억의 출발점</h3>
+          <p id="stage-copy">대화나 문서를 하나의 사건으로 등록합니다. 이때 원문 자체보다 안정적인 event id, content hash, project scope, reference time을 함께 보존하는 것이 중요합니다.</p>
+          <div class="stage-meta" id="stage-meta">주체: Worker / 입력: redacted episode / 실패 시: 원장에 기록하지 않음</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="backends-title">
+      <h2 id="backends-title">Graphiti와 그래프 DB의 관계</h2>
+      <p class="section-intro">Graphiti는 그래프 DB에 명령을 내리는 클라이언트·도메인 로직입니다. 그래프 DB를 바꾸면 Graphiti가 자동으로 그대로 작동하는 것이 아니라, 새 backend driver 또는 adapter가 필요합니다.</p>
+      <div class="split">
+        <article class="architecture">
+          <h3>목표 운영 경로: Graph-first (cutover pending)</h3>
+          <div class="lane"><div class="box"><strong>대화</strong><small>episode</small></div><div class="lane-arrow" aria-hidden="true">→</div><div class="box"><strong>Graphiti</strong><small>추출·검색 조립</small></div></div>
+          <div class="lane"><div class="box"><strong>Graphiti</strong><small>Cypher/driver 호출</small></div><div class="lane-arrow" aria-hidden="true">→</div><div class="box"><strong>Neo4j</strong><small>노드·엣지 저장</small></div></div>
+          <div class="good">Graphiti는 기억을 구조화하고 검색을 조립하는 애플리케이션입니다. Neo4j가 그래프를 저장하므로 대부분의 관계·multi-hop 조회는 이 경로를 먼저 탑니다.</div>
+        </article>
+        <article class="architecture">
+          <h3>권위 확인과 명시적 fallback</h3>
+          <div class="lane"><div class="box"><strong>Neo4j 후보</strong><small>관계·시간·경로</small></div><div class="lane-arrow" aria-hidden="true">→</div><div class="box"><strong>PostgreSQL</strong><small>권한·currentness 확인</small></div></div>
+          <div class="lane"><div class="box"><strong>Graph degraded</strong><small>미투영·timeout</small></div><div class="lane-arrow" aria-hidden="true">→</div><div class="box"><strong>PG halfvec</strong><small>3072 fallback</small></div></div>
+          <div class="warning">PostgreSQL은 승인과 상태의 정본이고 semantic fallback입니다. Graph 장애 때만 명시적으로 사용하며, Qdrant로 조용히 우회하지 않습니다.</div>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="replacement-title">
+      <h2 id="replacement-title">무엇이 무엇으로 대체되는가?</h2>
+      <div class="matrix-wrap">
+        <table>
+          <thead><tr><th>기존 책임</th><th>대체 위치</th><th>판정</th><th>주의할 점</th></tr></thead>
+          <tbody>
+            <tr><td>비정형 대화에서 엔티티·관계 추출</td><td>Graphiti 유지</td><td class="status yes">유지</td><td>hot path 동기 호출과 async/bulk 추출을 분리</td></tr>
+            <tr><td>노드·엣지 저장과 multi-hop 질의</td><td>Graphiti → Neo4j</td><td class="status yes">주요 경로</td><td>Graphiti extraction은 async cold lane, 이미 저장된 graph read는 hot path에서 허용</td></tr>
+            <tr><td>의미 유사도 검색</td><td>Gemini Embedding 2 + PostgreSQL <code>halfvec(3072)</code></td><td class="status yes">fallback</td><td>Graph-first가 우선이며 graph 미투영·장애 때만 PG vector를 사용</td></tr>
+            <tr><td>기존 Qdrant vector</td><td>Migration / dual-read shadow</td><td class="status conditional">퇴역 예정</td><td>정상 Agent 조회 경로에는 두지 않고 실제 source profile을 preflight로 검증</td></tr>
+            <tr><td>코드 구조 관계</td><td>사용하지 않음</td><td class="status conditional">제품 범위 제외</td><td>AST/Graphify는 product runtime dependency가 아님</td></tr>
+            <tr><td>승인·currentness·근거·권한</td><td>PostgreSQL ledger / relational tables</td><td class="status yes">SoT 유지</td><td>Neo4j graph는 파생 projection이며 권위 join 후 사용</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="dimension-title">
+      <h2 id="dimension-title">임베딩 차원 확인</h2>
+      <div class="dimension">
+        <div>
+          <div class="dimension-value">3072</div>
+          <div class="dimension-label">Gemini Embedding 2 / Graphiti·Neo4j·PG fallback 공통 profile</div>
+        </div>
+        <ul>
+          <li>모델명은 <strong>Gemma Embedding 2</strong>가 아니라 <strong>Gemini Embedding 2</strong>입니다.</li>
+          <li>이번 profile은 모델 full output인 3072차원을 줄이지 않습니다.</li>
+          <li>일반 pgvector <code>vector</code>는 2,000차원 제한이 있으므로 <code>vector(3072)</code>가 아니라 <code>halfvec(3072)</code>를 사용합니다.</li>
+          <li>Graphiti의 Neo4j 검색과 PG fallback은 같은 model revision·distance 계약을 공유하고, Qdrant source는 이관 전에 실제 dimension을 확인합니다.</li>
+          <li>3072와 다른 Qdrant vector는 임의 padding/projection하지 않고 quarantine 후 Embedding Worker가 re-embed합니다.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="decision-title">
+      <h2 id="decision-title">이번 방향에 대한 권장 결론</h2>
+      <div class="decision">
+        <article class="decision-item"><strong>Graphiti</strong><p><code>graphiti-core==0.30.1</code>을 lock하고 유지합니다. LLM extraction은 async/bulk cold lane에서만 실행하고, 이미 투영된 graph read는 hot path에서 사용합니다.</p></article>
+        <article class="decision-item"><strong>Neo4j</strong><p>Neo4j를 그대로 유지하며 Graphiti의 주 graph backend로 사용합니다. 대부분의 관계·multi-hop 조회는 Neo4j 후보에서 시작하고 PostgreSQL이 권위를 확인합니다.</p></article>
+        <article class="decision-item"><strong>Embedding</strong><p>Gemini Embedding 2 full 3072차원을 유지하고 PostgreSQL에는 <code>halfvec(3072)</code>로 저장합니다. Qdrant는 migration/shadow 전용이며 Embedding Worker만 생성 책임을 집니다.</p></article>
+      </div>
+      <div class="sources">
+        근거 문서
+        <ul>
+          <li><a href="https://github.com/getzep/graphiti" target="_blank" rel="noreferrer">Graphiti 공식 저장소와 지원 backend 목록</a></li>
+          <li><a href="https://github.com/pgvector/pgvector" target="_blank" rel="noreferrer">pgvector 차원 제한·HNSW와 필터링 동작</a></li>
+          <li><a href="https://ai.google.dev/gemini-api/docs/models/gemini-embedding-2" target="_blank" rel="noreferrer">Gemini Embedding 2 모델 차원 문서</a></li>
+        </ul>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const root = document.getElementById("graphiti-explainer");
+    const stageTitle = root.querySelector("#stage-title");
+    const stageCopy = root.querySelector("#stage-copy");
+    const stageMeta = root.querySelector("#stage-meta");
+    const stepButtons = [...root.querySelectorAll("[data-step]")];
+    const roleCards = [...root.querySelectorAll("[data-role]")];
+    const stages = {
+      "1": {
+        title: "1. Episode 수집 — 원본은 기억의 출발점",
+        copy: "대화나 문서를 하나의 사건으로 등록합니다. 이때 원문 자체보다 안정적인 event id, content hash, project scope, reference time을 함께 보존하는 것이 중요합니다.",
+        meta: "주체: Worker / 입력: redacted episode / 실패 시: 원장에 기록하지 않음",
+        role: "retriever"
+      },
+      "2": {
+        title: "2. LLM 추출 — Graphiti의 핵심 역할",
+        copy: "Graphiti가 LLM에게 구조화된 결과를 요청해 사람·도구·결정 같은 엔티티와 관계, 유효 시간, 출처를 만듭니다. 이 단계는 MCP 응답 안에서 기다리지 않고 비동기 cold worker에서 수행합니다.",
+        meta: "주체: Graphiti + LLM / 비용: 호출 비용·지연 / 권장: async 또는 bulk",
+        role: "graphiti"
+      },
+      "3": {
+        title: "3. 그래프 저장 — 창고는 Graphiti가 아닙니다",
+        copy: "추출된 노드와 엣지를 Neo4j에 저장합니다. Graphiti는 저장소가 아니므로 Graphiti가 Neo4j driver를 통해 graph index와 관계를 관리합니다.",
+        meta: "주체: Graphiti → Neo4j / 일관성: PostgreSQL 권위와 eventual projection",
+        role: "graphdb"
+      },
+      "4": {
+        title: "4. 임베딩 생성 — 그래프와 별도의 검색 색인",
+        copy: "엔티티명이나 관계 문장을 Gemini Embedding 2로 벡터화합니다. 이 벡터는 그래프 자체가 아니라 의미가 가까운 후보를 찾는 보조 색인입니다.",
+        meta: "주체: Embedding Worker 하나 / 기준: Gemini Embedding 2 · full 3072 / PG: halfvec(3072)",
+        role: "embedding"
+      },
+      "5": {
+        title: "5. Hybrid 검색 — 여러 결과를 안전하게 조립",
+        copy: "먼저 Neo4j에서 관계·시간·경로 후보를 찾고, PostgreSQL에서 권한과 currentness를 확인합니다. 그래프가 미투영되거나 장애일 때만 PG halfvec fallback을 사용하고 그 사실을 공개합니다.",
+        meta: "주체: Graph-first Router / 검증: Recall@5·p95·authority join·projection lag",
+        role: "retriever"
+      }
+    };
+
+    function selectStage(step) {
+      const stage = stages[step];
+      if (!stage) return;
+      stepButtons.forEach((button) => {
+        button.setAttribute("aria-pressed", String(button.dataset.step === step));
+      });
+      roleCards.forEach((card) => {
+        card.classList.toggle("is-active", card.dataset.role === stage.role);
+      });
+      stageTitle.textContent = stage.title;
+      stageCopy.textContent = stage.copy;
+      stageMeta.textContent = stage.meta;
+    }
+
+    stepButtons.forEach((button) => {
+      button.addEventListener("click", () => selectStage(button.dataset.step));
+    });
+    selectStage("1");
+  </script>
+</body>
+</html>

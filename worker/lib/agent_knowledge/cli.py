@@ -290,7 +290,27 @@ def _build_recall_service(
     # Additive -- the RetiredIndexBridge archive search is off in the live MCP (empty dataset_ids).
     from .rag_ingress.qdrant_recall import build_qdrant_brain_query_search_from_env
 
-    mirror_search = build_qdrant_brain_query_search_from_env(os.environ)
+    pgvector_store = None
+    pgvector_dsn = (
+        os.environ.get("NEURON_LBRAIN_PGVECTOR_DSN", "")
+        or os.environ.get("LLM_BRAIN_PGVECTOR_DSN", "")
+        or os.environ.get("NEURON_LEDGER_PG_DSN", "")
+    )
+    # PG authority 구성 시 Qdrant는 shadow/migration 전용이다.
+    mirror_search = None if pgvector_dsn else build_qdrant_brain_query_search_from_env(os.environ)
+    if pgvector_dsn:
+        try:
+            from .postgres_store.pgvector_store import PgVectorStore
+
+            pgvector_store = PgVectorStore(
+                dsn=pgvector_dsn,
+                pgvector_version=os.environ.get("LLM_BRAIN_PGVECTOR_VERSION", "0.8.0"),
+            )
+        except Exception as exc:
+            raise _ServiceWiringError(
+                2,
+                f"pgvector store wiring failed: {type(exc).__name__}",
+            ) from exc
     semantic_ranker = None
     if os.environ.get("LLM_BRAIN_EMBEDDING_BASE_URL") and os.environ.get(
         "LLM_BRAIN_EMBEDDING_MODEL"
@@ -352,6 +372,7 @@ def _build_recall_service(
         graph_adapter=graph_adapter,
         mirror_search=mirror_search,
         semantic_ranker=semantic_ranker,
+        pgvector_store=pgvector_store,
         allow_restricted_steward=bool(getattr(args, "allow_steward_review_commit", False)),
         allow_steward_auto_accept=False,
         allow_production_object_authority_writes=bool(
@@ -432,6 +453,7 @@ def _mcp_http_main(argv: list[str] | None = None) -> int:
     from . import mcp_http_server
 
     parser = argparse.ArgumentParser(prog="neuron-knowledge mcp-http")
+    parser.add_argument("--surface", choices=("agent", "admin"), default="agent")
     # 공통 인자: _mcp_stdio_main과 1:1 동일(service 구성 동일).
     _add_recall_service_arguments(parser)
     # HTTP transport 전용.
@@ -452,14 +474,20 @@ def _mcp_http_main(argv: list[str] | None = None) -> int:
     except _ServiceWiringError as exc:
         print(exc.message, file=sys.stderr)
         return exc.code
-    mcp_http_server.serve(
-        service,
-        host=args.host,
-        port=args.port,
-        allow_non_loopback=args.allow_non_loopback,
-        allow_kubernetes_pod_ip=args.allow_kubernetes_pod_ip,
-        allowed_hosts=allowed_hosts,
-    )
+    try:
+        mcp_http_server.serve(
+            service,
+            surface=args.surface,
+            admin_token=os.environ.get("LLM_BRAIN_ADMIN_TOKEN") if args.surface == "admin" else None,
+            host=args.host,
+            port=args.port,
+            allow_non_loopback=args.allow_non_loopback,
+            allow_kubernetes_pod_ip=args.allow_kubernetes_pod_ip,
+            allowed_hosts=allowed_hosts,
+        )
+    except ValueError:
+        print("invalid MCP HTTP configuration", file=sys.stderr)
+        return 2
     return 0
 
 

@@ -9,6 +9,7 @@ import pytest
 from agent_knowledge.model_connectors import (
     CandidateReranker,
     DEFAULT_EMBEDDING_DIM,
+    DEFAULT_EMBEDDING_PROFILE_ID,
     EmbeddingSpec,
     FunctionRerankerClient,
     GraphitiCrossEncoderAdapter,
@@ -164,6 +165,21 @@ def test_model_connection_config_inherits_llm_endpoint_for_embedding_when_embedd
 def test_embedding_dim_defaults_on_bad_values():
     assert resolve_embedding_spec({"LLM_BRAIN_EMBEDDING_DIM": "bad"}).dim == DEFAULT_EMBEDDING_DIM
     assert resolve_embedding_spec({"LLM_BRAIN_EMBEDDING_DIM": "-1"}).dim == DEFAULT_EMBEDDING_DIM
+
+
+def test_embedding_defaults_use_gemini_embedding_two_3072_profile():
+    embedding = resolve_embedding_spec({})
+
+    assert embedding.model == "gemini-embedding-2"
+    assert embedding.dim == 3072
+    assert DEFAULT_EMBEDDING_PROFILE_ID == "lbrain-memory-gemini-embedding-2-v1"
+
+
+def test_ollama_embedding_defaults_keep_native_nomic_profile():
+    embedding = resolve_embedding_spec({"LLM_BRAIN_EMBEDDING_PROVIDER": "ollama"})
+
+    assert embedding.model == "nomic-embed-text"
+    assert embedding.dim == 768
 
 
 def test_shared_reranker_client_feeds_qdrant_and_graphiti_consumers():

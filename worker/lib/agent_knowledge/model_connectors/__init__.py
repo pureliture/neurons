@@ -2,6 +2,8 @@
 
 from .env import (
     DEFAULT_EMBEDDING_DIM,
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_EMBEDDING_PROFILE_ID,
     resolve_embedding_spec,
     resolve_model_connection_config,
     resolve_reranker_spec,
@@ -23,6 +25,8 @@ from .specs import EmbeddingSpec, ModelConnectionConfig, ModelEndpointSpec, Rera
 __all__ = [
     "CandidateReranker",
     "DEFAULT_EMBEDDING_DIM",
+    "DEFAULT_EMBEDDING_MODEL",
+    "DEFAULT_EMBEDDING_PROFILE_ID",
     "EmbeddingSpec",
     "FunctionRerankerClient",
     "GraphitiCrossEncoderAdapter",

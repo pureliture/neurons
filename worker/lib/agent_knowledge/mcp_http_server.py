@@ -18,6 +18,7 @@ Streamable HTTP transport를 추가한다. tool 선언/디스패치/안전 기�
 
 from __future__ import annotations
 
+import hmac
 import ipaddress
 import logging
 import os
@@ -35,7 +36,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from .knowledge_search_service import KnowledgeSearchService
-from .mcp_jsonrpc import dispatch_tool_call
+from .mcp_jsonrpc import ADMIN_AUTH_IDENTITY, dispatch_tool_call
 from .mcp_tools import list_tools
 
 DEFAULT_PORT = 8765
@@ -240,7 +241,7 @@ def _redacted_traceback(exc: BaseException) -> str:
     return " > ".join(parts)
 
 
-def _to_sdk_tools() -> list[mcp_types.Tool]:
+def _to_sdk_tools(surface: str = "agent") -> list[mcp_types.Tool]:
     # list_tools() 리터럴의 inputSchema는 이미 MCP JSON Schema 형식이라 직매핑(변형 없음).
     return [
         mcp_types.Tool(
@@ -248,7 +249,7 @@ def _to_sdk_tools() -> list[mcp_types.Tool]:
             description=tool["description"],
             inputSchema=tool["inputSchema"],
         )
-        for tool in list_tools()
+        for tool in list_tools(surface=surface)
     ]
 
 
@@ -263,8 +264,34 @@ class _StreamableHTTPASGIApp:
         await self._session_manager.handle_request(scope, receive, send)
 
 
+class _AdminBearerAuthASGIApp:
+    """admin MCP process의 모든 HTTP method를 Bearer token으로 경계한다."""
+
+    def __init__(self, app, admin_token: str) -> None:
+        self._app = app
+        self._admin_token = admin_token
+
+    async def __call__(self, scope, receive, send) -> None:
+        authorization = dict(scope.get("headers") or []).get(b"authorization", b"")
+        expected = f"Bearer {self._admin_token}".encode("ascii")
+        if not hmac.compare_digest(authorization, expected):
+            response = JSONResponse(
+                {"error": "unauthorized"},
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+            await response(scope, receive, send)
+            return
+        await self._app(scope, receive, send)
+
+
 async def _dispatch_call_tool(
-    service: KnowledgeSearchService, name: str, arguments: dict[str, Any] | None
+    service: KnowledgeSearchService,
+    name: str,
+    arguments: dict[str, Any] | None,
+    *,
+    surface: str = "agent",
+    auth_token: str | None = None,
 ) -> mcp_types.CallToolResult:
     """tool 호출의 transport 측 단일 처리부. 동기 dispatcher를 워커 스레드로 위임하고
     (이벤트 루프 비블로킹) 결과/오류를 `CallToolResult`로 매핑한다."""
@@ -272,7 +299,9 @@ async def _dispatch_call_tool(
     try:
         # graph 경로가 최대 300s 블로킹(graphiti_adapter)해도 루프/healthz/동시 요청 무영향.
         # ledger 메서드는 per-call sqlite3 connection을 열어 스레드풀 실행이 안전하다.
-        result = await run_in_threadpool(dispatch_tool_call, args, service)
+        result = await run_in_threadpool(
+            dispatch_tool_call, args, service, surface=surface, auth_token=auth_token
+        )
     except (ValueError, TypeError) as exc:
         # raw 메시지는 caller-supplied 인자값/private context를 담을 수 있으므로 에코하지 않는다.
         # stdio handle_jsonrpc_message(-32602)와 동일하게 type name만 노출(redaction 대칭).
@@ -306,7 +335,7 @@ async def _dispatch_call_tool(
     return mcp_types.CallToolResult(
         content=content,
         structuredContent=result.get("structuredContent"),
-        isError=False,
+        isError=bool(result.get("isError", False)),
     )
 
 
@@ -324,7 +353,18 @@ def build_app(
     allow_kubernetes_pod_ip: bool = False,
     stateless_http: bool = True,
     allowed_hosts: Sequence[str] | None = None,
+    surface: str = "agent",
+    admin_token: str | None = None,
 ) -> Starlette:
+    if surface not in {"agent", "admin"}:
+        raise ValueError("mcp-http surface must be agent or admin")
+    if surface == "admin":
+        if admin_token == ADMIN_AUTH_IDENTITY:
+            raise ValueError("mcp-http fixed admin identity is not a credential")
+        if not isinstance(admin_token, str) or len(admin_token) < 32:
+            raise ValueError("mcp-http admin token must be at least 32 characters")
+        if not admin_token.isascii() or any(char.isspace() or ord(char) < 33 or ord(char) > 126 for char in admin_token):
+            raise ValueError("mcp-http admin token must use visible ASCII without whitespace")
     # bind 가드: 0.0.0.0은 무조건 거부(전 인터페이스 노출 차단). 비-loopback은
     # --allow-non-loopback + tailnet 대역일 때만 허용한다. k3s canary는 추가 플래그로
     # Pod IP bind만 열어 Kubernetes readiness/Service 라우팅을 통과시킨다.
@@ -347,14 +387,22 @@ def build_app(
 
     @server.list_tools()
     async def _handle_list_tools() -> list[mcp_types.Tool]:
-        return _to_sdk_tools()
+        return _to_sdk_tools(surface=surface)
 
     @server.call_tool(validate_input=False)
     async def _handle_call_tool(
         name: str, arguments: dict[str, Any] | None
     ) -> mcp_types.CallToolResult:
         service.invalidate_brain_card_cache()
-        return await _dispatch_call_tool(service, name, arguments)
+        return await _dispatch_call_tool(
+            service,
+            name,
+            arguments,
+            surface=surface,
+            # `lbrain_admin`은 credential가 아닌 내부 identity다. admin process의 Bearer
+            # ASGI 경계를 통과한 handler closure에서만 dispatcher에 전달한다.
+            auth_token=ADMIN_AUTH_IDENTITY if surface == "admin" else None,
+        )
 
     # DNS rebinding 보호는 loopback/tailnet 모두 활성화한다.
     security_settings = _transport_security_settings(
@@ -371,7 +419,14 @@ def build_app(
 
     routes = [
         Route("/healthz", endpoint=_healthz, methods=["GET"]),
-        Route("/mcp", endpoint=_StreamableHTTPASGIApp(session_manager)),
+        Route(
+            "/mcp",
+            endpoint=(
+                _AdminBearerAuthASGIApp(_StreamableHTTPASGIApp(session_manager), admin_token)
+                if surface == "admin"
+                else _StreamableHTTPASGIApp(session_manager)
+            ),
+        ),
     ]
 
     # session_manager.run()은 transport 수명 컨텍스트. Starlette lifespan으로 구동한다.
@@ -386,6 +441,8 @@ def serve(
     allow_non_loopback: bool = False,
     allow_kubernetes_pod_ip: bool = False,
     allowed_hosts: Sequence[str] | None = None,
+    surface: str = "agent",
+    admin_token: str | None = None,
 ) -> None:
     import uvicorn
 
@@ -397,5 +454,7 @@ def serve(
         allow_kubernetes_pod_ip=allow_kubernetes_pod_ip,
         stateless_http=True,
         allowed_hosts=allowed_hosts,
+        surface=surface,
+        admin_token=admin_token,
     )
     uvicorn.run(app, host=host, port=int(port), log_level="warning")

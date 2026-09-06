@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 from agent_knowledge.ledger import Ledger
 from agent_knowledge.session_memory.memory_miner import build_memory_card_candidate_from_source_span
 from agent_knowledge.session_memory.llm_brain_service import LLMBrainMemoryService
@@ -16,7 +18,7 @@ def _candidate(summary: str, sid: str):
     span = {
         "source_ref": {"source_id": f"src_{sid}"},
         "span_ref": {"span_id": f"span_{sid}"},
-        "content_hash": f"sha256:{sid}",
+        "content_hash": f"sha256:{hashlib.sha256(sid.encode()).hexdigest()}",
         "brain_id": f"/project/{PROJECT}",
         "card_type": "decision",
         "scope": "project",

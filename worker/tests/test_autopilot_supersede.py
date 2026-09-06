@@ -14,7 +14,7 @@ def _span(**overrides):
     span = {
         "source_ref": {"source_id": "src_old"},
         "span_ref": {"span_id": "span_old"},
-        "content_hash": "sha256:old",
+        "content_hash": "sha256:cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4",
         "brain_id": f"/project/{PROJECT}",
         "card_type": "task",
         "scope": "project",
@@ -53,7 +53,7 @@ def test_supersede_accepted_card_demotes_old_out_of_current_and_accepted(tmp_pat
     new_candidate = _candidate(
         source_ref={"source_id": "src_new"},
         span_ref={"span_id": "span_new"},
-        content_hash="sha256:new",
+        content_hash="sha256:11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437",
         redacted_summary="Auth now uses OAuth.",
     )
 

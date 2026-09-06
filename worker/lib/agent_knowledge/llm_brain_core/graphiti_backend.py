@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from agent_knowledge.model_connectors import (
+    DEFAULT_EMBEDDING_DIM,
+    DEFAULT_EMBEDDING_MODEL,
     EmbeddingSpec,
     ModelConnectionConfig,
     ModelEndpointSpec,
@@ -76,6 +78,13 @@ def build_graphiti_from_config(config: Any) -> Any:
 
 def model_connection_from_graphiti_config(config: Any) -> ModelConnectionConfig:
     provider = str(getattr(config, "llm_provider", "openai") or "openai").lower()
+    embedding_provider = str(getattr(config, "embedding_provider", "") or "").lower() or provider
+    embedding_model = str(getattr(config, "embedding_model", "") or "") or (
+        "nomic-embed-text" if embedding_provider == "ollama" else DEFAULT_EMBEDDING_MODEL
+    )
+    configured_embedding_dim = int(getattr(config, "embedding_dim", DEFAULT_EMBEDDING_DIM) or DEFAULT_EMBEDDING_DIM)
+    if embedding_model.casefold() == "nomic-embed-text" and configured_embedding_dim == DEFAULT_EMBEDDING_DIM:
+        configured_embedding_dim = 768
     llm_model = str(getattr(config, "llm_model", "") or "")
     llm_base_url = str(getattr(config, "llm_base_url", "") or "")
     return ModelConnectionConfig(
@@ -86,10 +95,10 @@ def model_connection_from_graphiti_config(config: Any) -> ModelConnectionConfig:
             base_url=llm_base_url,
         ),
         embedding=EmbeddingSpec(
-            provider=str(getattr(config, "embedding_provider", "") or "openai").lower(),
-            model=str(getattr(config, "embedding_model", "") or ""),
+            provider=embedding_provider,
+            model=embedding_model,
             base_url=str(getattr(config, "embedding_base_url", "") or ""),
-            dim=int(getattr(config, "embedding_dim", 1024) or 1024),
+            dim=configured_embedding_dim,
         ),
         reranker=RerankerSpec(
             provider=provider,
