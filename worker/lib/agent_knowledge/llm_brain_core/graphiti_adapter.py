@@ -486,7 +486,6 @@ class GraphitiNeo4jGraphMemoryAdapter:
             invalid_at=[[DateFilter(date=reference_time, comparison_operator=ComparisonOperator.greater_than)],
                         [DateFilter(comparison_operator=ComparisonOperator.is_null)]],
         )
-        group_ids = [group_id] if group_id else None
 
         async def _call() -> tuple[list[Any], list[Any], list[Any], list[str], bool]:
             loop = asyncio.get_running_loop()
