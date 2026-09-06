@@ -165,12 +165,14 @@ class DualReadShadowHarness:
         backend_preflight_verified: bool = False,
         approved_false_positive_upper: float | None = None,
         approved_fallback_rate_upper: float | None = None,
+        collection_name: str = "memory_cards",
     ):
         self.qdrant = qdrant_client
         self.pg_store = pg_store
         self.default_limit = default_limit
         self.recall_gate_threshold = recall_gate_threshold
         self.p95_latency_gate_ms = p95_latency_gate_ms
+        self.collection_name = collection_name
         if minimum_queries_for_cutover < 1:
             raise ValueError("minimum_queries_for_cutover must be positive")
         if evidence_class not in {"test_harness", "live_cutover"}:
@@ -199,29 +201,37 @@ class DualReadShadowHarness:
         query_vector: list[float],
         project: str,
         limit: int,
-        collection_name: str = "memory_cards",
+        collection_name: str | None = None,
         authorization_status: str | None = "active",
         currentness: str | None = "current",
         as_of: str | None = None,
     ) -> tuple[list[str], float, str | None]:
         """Query Qdrant client and return top IDs with elapsed time."""
+        effective_collection = collection_name or self.collection_name
         t0 = time.perf_counter()
         top_ids: list[str] = []
         error_type: str | None = None
 
         try:
+            if effective_collection == "memory_cards":
+                q_filter = _authority_query_filter(project, authorization_status, currentness, as_of)
+            else:
+                from qdrant_client import models
+                q_filter = models.Filter(must=[models.FieldCondition(key="project", match=models.MatchValue(value=project))]) if project else None
+
             response = self.qdrant.query_points(
-                collection_name=collection_name, query=query_vector, limit=limit,
-                query_filter=_authority_query_filter(project, authorization_status, currentness, as_of),
-                with_payload=["memory_id"], with_vectors=False,
+                collection_name=effective_collection, query=query_vector, limit=limit,
+                query_filter=q_filter,
+                with_payload=["memory_id", "chunk_id"], with_vectors=False,
             )
             for item in response.points:
-                memory_id = (item.payload or {}).get("memory_id")
-                if not isinstance(memory_id, str) or not memory_id:
+                memory_id = (item.payload or {}).get("memory_id") or (item.payload or {}).get("chunk_id") or getattr(item, "id", None)
+                if not memory_id:
                     raise ValueError("canonical_memory_id_missing")
-                if memory_id in top_ids:
+                memory_id_str = str(memory_id)
+                if memory_id_str in top_ids:
                     raise ValueError("duplicate_canonical_memory_id")
-                top_ids.append(memory_id)
+                top_ids.append(memory_id_str)
         except Exception:
             error_type = "qdrant_query_failed"
             logger.warning("Qdrant shadow query failed")
@@ -234,25 +244,35 @@ class DualReadShadowHarness:
         query_vector: list[float],
         project: str,
         limit: int,
+        collection_name: str | None = None,
         authorization_status: str | None = "active",
         currentness: str | None = "current",
         as_of: str | None = None,
     ) -> tuple[list[str], float, str | None]:
         """Query PgVectorStore and return top IDs with elapsed time."""
+        effective_collection = collection_name or self.collection_name
         t0 = time.perf_counter()
         top_ids: list[str] = []
         error_type: str | None = None
 
         try:
-            results = self.pg_store.hybrid_search(
-                project=project,
-                query_vector=query_vector,
-                limit=limit,
-                authorization_status=authorization_status,
-                currentness=currentness,
-                as_of=as_of,
-            )
-            top_ids = [str(r["memory_id"]) for r in results]
+            if effective_collection == "memory_cards":
+                results = self.pg_store.hybrid_search(
+                    project=project,
+                    query_vector=query_vector,
+                    limit=limit,
+                    authorization_status=authorization_status,
+                    currentness=currentness,
+                    as_of=as_of,
+                )
+                top_ids = [str(r["memory_id"]) for r in results]
+            else:
+                results = self.pg_store.search_session_chunks(
+                    query_vector=query_vector,
+                    project=project if project else None,
+                    limit=limit,
+                )
+                top_ids = [str(r["chunk_id"]) for r in results]
         except Exception:
             error_type = "pgvector_query_failed"
             logger.warning("PostgreSQL shadow query failed")
@@ -496,6 +516,13 @@ class DualReadShadowHarness:
             details=results,
             evidence_class=self.evidence_class,
             cutover_blockers=blockers,
+            relation_temporal_correctness=relation_temporal_correctness,
+            false_positive_rate=false_positive_rate,
+            fallback_rate=fallback_rate,
+            approved_false_positive_upper=self.approved_false_positive_upper,
+            approved_fallback_rate_upper=self.approved_fallback_rate_upper,
+            observation_window_seconds=window_seconds,
+            observation_window_verified=observation_window_verified,
         )
 
     def generate_report(self, summary: BenchmarkSummary) -> str:

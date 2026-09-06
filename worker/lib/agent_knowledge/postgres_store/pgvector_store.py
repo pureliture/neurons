@@ -128,6 +128,24 @@ class OutboxJob:
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+@dataclass
+class GraphOutboxJob:
+    projection_id: int
+    source_type: str
+    source_id: str
+    source_revision: str
+    content_hash: str
+    episode_payload: dict[str, Any]
+    status: str = "queued"
+    claimed_at: datetime | None = None
+    lease_until: datetime | None = None
+    worker_id: str | None = None
+    retry_count: int = 0
+    last_error: str | None = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class PgVectorStore:
     """Real PostgreSQL store for cards, chunks, edges, and embedding jobs.
 
@@ -261,7 +279,7 @@ class PgVectorStore:
         return card.memory_id
 
     def upsert_card(self, card: MemoryCard, conn: Any | None = None) -> str:
-        """Atomically upsert a card and its pending embedding job."""
+        """Atomically upsert a card, its pending embedding job, and graph projection outbox."""
 
         self._validate_card(card)
         with self._scope(conn=conn, write=conn is None and self.connection is None) as db:
@@ -279,6 +297,29 @@ class PgVectorStore:
                     content_hash=card.content_hash,
                     payload_text=_card_payload_text(card),
                 )
+            # M7: PG authority transaction writes graph_projection_outbox
+            episode = {
+                "source_type": "memory_card",
+                "source_id": card.memory_id,
+                "source_revision": card.content_hash,
+                "content_hash": card.content_hash,
+                "authority_memory_id": card.memory_id,
+                "project": card.project,
+                "card_type": card.card_type,
+                "title": card.title,
+                "summary": card.summary,
+                "typed_payload": card.typed_payload,
+                "lifecycle_state": card.lifecycle_state,
+                "currentness": card.currentness,
+            }
+            self._enqueue_graph_outbox_on(
+                db,
+                source_type="memory_card",
+                source_id=card.memory_id,
+                source_revision=card.content_hash,
+                content_hash=card.content_hash,
+                episode_payload=episode,
+            )
         return card.memory_id
 
     def get_card(self, memory_id: str, conn: Any | None = None) -> MemoryCard | None:
@@ -466,6 +507,42 @@ class PgVectorStore:
                 )
                 row = cur.fetchone()
         return _chunk_from_row(row) if row is not None else None
+
+    def search_session_chunks(
+        self,
+        query_vector: list[float],
+        project: str | None = None,
+        limit: int = 5,
+        conn: Any | None = None,
+    ) -> list[dict[str, Any]]:
+        """Run vector similarity search over session_memory_chunks."""
+        _validate_vector(query_vector)
+        vector_literal = _vector_literal(query_vector)
+        clauses = ["embedding IS NOT NULL"]
+        params: list[Any] = [vector_literal]
+        if project:
+            clauses.append("project = %s")
+            params.append(project)
+        params.extend([vector_literal, int(limit)])
+        with self._scope(conn=conn) as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT chunk_id, session_id_hash, project, provider, chunk_index,
+                           content_markdown, token_count, content_hash,
+                           embedding <=> %s::halfvec AS distance
+                      FROM session_memory_chunks
+                     WHERE {' AND '.join(clauses)}
+                     ORDER BY embedding <=> %s::halfvec, chunk_id
+                     LIMIT %s
+                    """,
+                    params,
+                )
+                names = [col.name for col in cur.description]
+                return [
+                    dict(row) if isinstance(row, Mapping) else dict(zip(names, row))
+                    for row in cur.fetchall()
+                ]
 
     def enqueue_outbox(
         self,
@@ -1206,6 +1283,218 @@ class PgVectorStore:
             raise RuntimeError("embedding outbox insert returned no id")
         return int(_row_value(row, "outbox_id", 0))
 
+    def _enqueue_graph_outbox_on(
+        self,
+        conn: Any,
+        *,
+        source_type: str,
+        source_id: str,
+        source_revision: str,
+        content_hash: str,
+        episode_payload: dict[str, Any],
+    ) -> int:
+        if source_type not in {"memory_card", "session_chunk"}:
+            raise ValueError("unsupported graph projection source type")
+        if not source_id or not source_revision or not content_hash:
+            raise ValueError("graph projection key fields are required")
+        payload_json = json.dumps(episode_payload) if not isinstance(episode_payload, str) else episode_payload
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT projection_id
+                  FROM graph_projection_outbox
+                 WHERE source_type = %s
+                   AND source_id = %s
+                   AND source_revision = %s
+                 LIMIT 1
+                """,
+                (source_type, source_id, source_revision),
+            )
+            existing = cur.fetchone()
+            if existing is not None:
+                return int(_row_value(existing, "projection_id", 0))
+            row = None
+            try:
+                cur.execute("SAVEPOINT graph_outbox_enqueue")
+                cur.execute(
+                    """
+                    INSERT INTO graph_projection_outbox (
+                        source_type, source_id, source_revision, content_hash,
+                        episode_payload, status
+                    ) VALUES (%s, %s, %s, %s, %s::jsonb, 'queued')
+                    RETURNING projection_id
+                    """,
+                    (source_type, source_id, source_revision, content_hash, payload_json),
+                )
+                row = cur.fetchone()
+            except Exception as exc:
+                if "UniqueViolation" not in type(exc).__name__:
+                    raise
+                cur.execute("ROLLBACK TO SAVEPOINT graph_outbox_enqueue")
+                cur.execute(
+                    """
+                    SELECT projection_id
+                      FROM graph_projection_outbox
+                     WHERE source_type = %s
+                       AND source_id = %s
+                       AND source_revision = %s
+                     LIMIT 1
+                    """,
+                    (source_type, source_id, source_revision),
+                )
+                row = cur.fetchone()
+            finally:
+                cur.execute("RELEASE SAVEPOINT graph_outbox_enqueue")
+        if row is None:
+            raise RuntimeError("graph projection outbox insert returned no id")
+        return int(_row_value(row, "projection_id", 0))
+
+    def claim_graph_projection_leases(
+        self,
+        worker_id: str,
+        batch_size: int = 10,
+        lease_seconds: int = 30,
+    ) -> list[GraphOutboxJob]:
+        """Claim graph projection outbox jobs with atomic FOR UPDATE SKIP LOCKED lease."""
+        if not worker_id or batch_size < 1 or lease_seconds < 1:
+            raise ValueError("invalid outbox lease arguments")
+        with self._scope(write=True) as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    """
+                    WITH candidates AS (
+                        SELECT projection_id
+                          FROM graph_projection_outbox
+                         WHERE (
+                                status = 'queued'
+                                OR (status = 'failed' AND retry_count < %s)
+                                OR (status = 'processing' AND retry_count < %s)
+                               )
+                           AND (lease_until IS NULL OR lease_until < NOW())
+                         ORDER BY created_at, projection_id
+                         LIMIT %s
+                         FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE graph_projection_outbox AS job
+                       SET status = 'processing',
+                           worker_id = %s,
+                           claimed_at = NOW(),
+                           lease_until = NOW() + (%s * INTERVAL '1 second'),
+                           updated_at = NOW()
+                      FROM candidates
+                     WHERE job.projection_id = candidates.projection_id
+                    RETURNING job.projection_id, job.source_type, job.source_id,
+                              job.source_revision, job.content_hash, job.episode_payload,
+                              job.status, job.claimed_at, job.lease_until,
+                              job.worker_id, job.retry_count, job.last_error,
+                              job.created_at, job.updated_at
+                    """,
+                    (
+                        OUTBOX_RETRY_LIMIT,
+                        OUTBOX_RETRY_LIMIT,
+                        int(batch_size),
+                        worker_id,
+                        int(lease_seconds),
+                    ),
+                )
+                rows = cur.fetchall()
+        return [_graph_outbox_from_row(row) for row in rows]
+
+    def mark_graph_projection_completed(
+        self,
+        projection_id: int,
+        worker_id: str,
+    ) -> None:
+        """Mark a graph projection job completed after successful projection."""
+        with self._scope(write=True) as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE graph_projection_outbox
+                       SET status = 'completed',
+                           updated_at = NOW()
+                     WHERE projection_id = %s
+                       AND worker_id = %s
+                       AND status = 'processing'
+                    """,
+                    (int(projection_id), str(worker_id)),
+                )
+                if cur.rowcount == 0:
+                    raise ValueError(f"graph projection job {projection_id} not owned or not processing")
+
+    def mark_graph_projection_failed(
+        self,
+        projection_id: int,
+        error_message: str,
+        max_retries: int = OUTBOX_RETRY_LIMIT,
+        *,
+        worker_id: str | None = None,
+    ) -> None:
+        """Record graph projection failure, schedule retry, or move to dead letter."""
+        if max_retries < 1:
+            raise ValueError("max_retries must be positive")
+        if not worker_id:
+            raise ValueError("outbox failure requires worker_id")
+        with self._scope(write=True) as db:
+            with db.cursor() as cur:
+                params: list[Any] = [
+                    error_message,
+                    int(max_retries),
+                    int(max_retries),
+                    int(projection_id),
+                    str(worker_id),
+                ]
+                cur.execute(
+                    """
+                    UPDATE graph_projection_outbox
+                       SET retry_count = retry_count + 1,
+                           last_error = %s,
+                           status = CASE
+                               WHEN retry_count + 1 >= %s THEN 'dead_letter'
+                               ELSE 'failed'
+                           END,
+                           lease_until = CASE
+                               WHEN retry_count + 1 >= %s THEN NULL
+                               ELSE NOW() + (LEAST(60, POWER(2, retry_count + 1)) * INTERVAL '1 second')
+                           END,
+                           updated_at = NOW()
+                     WHERE projection_id = %s
+                       AND worker_id = %s
+                       AND status = 'processing'
+                    """,
+                    params,
+                )
+                if cur.rowcount == 0:
+                    raise ValueError(f"graph projection job {projection_id} not owned or not processing")
+
+    def list_graph_projection_jobs(
+        self,
+        *,
+        status: str | None = None,
+        conn: Any | None = None,
+    ) -> list[GraphOutboxJob]:
+        params: list[Any] = []
+        where = ""
+        if status:
+            where = " WHERE status = %s"
+            params.append(status)
+        with self._scope(conn=conn) as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT projection_id, source_type, source_id, source_revision,
+                           content_hash, episode_payload, status, claimed_at,
+                           lease_until, worker_id, retry_count, last_error,
+                           created_at, updated_at
+                      FROM graph_projection_outbox
+                    """
+                    + where
+                    + " ORDER BY projection_id",
+                    params,
+                )
+                rows = cur.fetchall()
+        return [_graph_outbox_from_row(row) for row in rows]
+
     @staticmethod
     def _validate_card(card: MemoryCard) -> None:
         if not card.memory_id or not card.project or not card.card_type:
@@ -1474,6 +1763,33 @@ def _outbox_from_row(row: Any) -> OutboxJob:
         last_error=_optional_str(_row_value(row, "last_error", 10)),
         created_at=_as_aware_datetime(_row_value(row, "created_at", 11)),
         updated_at=_as_aware_datetime(_row_value(row, "updated_at", 12)),
+    )
+
+
+def _graph_outbox_from_row(row: Any) -> GraphOutboxJob:
+    payload = _row_value(row, "episode_payload", 5)
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            payload = {}
+    elif not isinstance(payload, dict):
+        payload = dict(payload) if payload else {}
+    return GraphOutboxJob(
+        projection_id=int(_row_value(row, "projection_id", 0)),
+        source_type=str(_row_value(row, "source_type", 1)),
+        source_id=str(_row_value(row, "source_id", 2)),
+        source_revision=str(_row_value(row, "source_revision", 3)),
+        content_hash=str(_row_value(row, "content_hash", 4)),
+        episode_payload=payload,
+        status=str(_row_value(row, "status", 6)),
+        claimed_at=_as_optional_datetime(_row_value(row, "claimed_at", 7)),
+        lease_until=_as_optional_datetime(_row_value(row, "lease_until", 8)),
+        worker_id=_optional_str(_row_value(row, "worker_id", 9)),
+        retry_count=int(_row_value(row, "retry_count", 10)),
+        last_error=_optional_str(_row_value(row, "last_error", 11)),
+        created_at=_as_aware_datetime(_row_value(row, "created_at", 12)),
+        updated_at=_as_aware_datetime(_row_value(row, "updated_at", 13)),
     )
 
 
