@@ -34,7 +34,10 @@ class ComposeConfigTest {
         assertThat(compose).contains("llm-brain-vertex-wrapper:");
         assertThat(compose).contains("llm-brain-tools:");
         assertThat(compose).contains("llm-brain-graph-trigger:");
-        assertThat(compose).contains("profiles: [\"llm-brain-graph\", \"llm-brain-core\"]");
+        // M1-M5 이후 neo4j는 MCP HTTP 경로에도 필요해 프로필이 3개로 확장됐다
+        // (compose.yaml: llm-brain-neo4j). 이 가드는 "llm-brain 서비스는 전부
+        // 프로필 게이트"라는 계약을 고정한다.
+        assertThat(compose).contains("profiles: [\"llm-brain-graph\", \"llm-brain-core\", \"llm-brain-mcp\"]");
         assertThat(compose).contains("profiles: [\"llm-brain-core\"]");
         assertThat(compose).contains("COUCHDB_URL: http://llm-brain-couchdb:5984");
         assertThat(compose).contains("NEURON_LEDGER_PG_DSN: postgresql://");

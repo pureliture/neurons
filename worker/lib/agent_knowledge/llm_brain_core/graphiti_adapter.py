@@ -637,6 +637,7 @@ class GraphitiNeo4jGraphMemoryAdapter:
                 continue
             converted.append(episode)
         edge_provenance_degraded = False
+        edge_relevance_filtered = 0
         for edge in edges:
             source_episodes = _resolved_edge_source_episodes(
                 edge,
@@ -655,18 +656,23 @@ class GraphitiNeo4jGraphMemoryAdapter:
             episode = _edge_to_ontology(edge, source_episodes=source_episodes)
             if wanted and episode.entity_type not in wanted:
                 continue
+            if terms and not _matches(episode.search_text(), terms):
+                edge_relevance_filtered += 1
+                continue
             converted.append(episode)
 
         converted.sort(key=lambda item: (item.observed_at, item.episode_id), reverse=True)
         # Edge (relationship) search failure with surviving episode reads is a
         # partial result, not a healthy 'available' one. Separate it so downstream
         # gates cannot read a false-healthy graph_status.
+        result_details = [*details]
+        if edge_provenance_degraded:
+            result_details.append("edge_provenance_unresolved")
+        if edge_degraded:
+            result_details.append("graph_edge_degraded")
+        if edge_relevance_filtered > 0:
+            result_details.append(f"edge_relevance_filtered:{edge_relevance_filtered}")
         if edge_degraded or edge_provenance_degraded:
-            result_details = [*details]
-            if edge_provenance_degraded:
-                result_details.append("edge_provenance_unresolved")
-            if edge_degraded:
-                result_details.append("graph_edge_degraded")
             return GraphMemoryResult(
                 status="degraded",
                 episodes=tuple(converted[:bounded]),
@@ -675,7 +681,7 @@ class GraphitiNeo4jGraphMemoryAdapter:
         return GraphMemoryResult(
             status="available",
             episodes=tuple(converted[:bounded]),
-            details=tuple(details),
+            details=tuple(result_details),
         )
 
     def get_episodes_by_ids(
