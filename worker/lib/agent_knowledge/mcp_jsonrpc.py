@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, TextIO
 
 from .knowledge_search_service import KnowledgeSearchService
+from .mcp_payload import tool_result as _tool_result
 from .llm_brain_core.context import project_from_repository
 from .llm_brain_core.context_builder import normalize_context_consumer
 from .llm_brain_core.models import EvidenceRequest
@@ -1014,189 +1015,19 @@ def _dispatch_brain_query_tool(tool_name: str, arguments: dict, service: Knowled
 
 def _dispatch_brain_resolve_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
     project = _project_arg(arguments)
-    query = str(arguments.get("query") or "")
-    mode = str(arguments.get("mode") or "context").strip().lower()
-    response_mode = str(arguments.get("response_mode") or "slim").strip().lower()
-    limit = _bounded_limit(arguments.get("limit"), default=5, maximum=20)
-    as_of = str(arguments.get("as_of") or "")
-
     if not project:
+        # 프로젝트 ID 탐색용 이전 계약만 유지한다. 메모리 검색 fallback은 아니다.
         if "project" not in arguments and "mode" not in arguments and hasattr(service, "brain_resolve"):
-            return _tool_result(service.brain_resolve(query=query))
+            return _tool_result(service.brain_resolve(query=str(arguments.get("query") or "")))
         raise ValueError(f"{tool_name} requires project or repository")
-
-    cards = service.ledger.list_llm_brain_memory_cards(
-        project=project,
-        accepted_only=True,
-        current_only=True,
-        limit=100,
-    )
-
-    if as_of:
-        from datetime import datetime
-        try:
-            as_of_dt = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
-        except Exception:
-            as_of_dt = None
-
-        if as_of_dt is not None:
-            filtered_cards = []
-            for c in cards:
-                vf = c.get("valid_from")
-                vt = c.get("valid_to")
-                include = True
-                if vf:
-                    try:
-                        vf_dt = datetime.fromisoformat(str(vf).replace("Z", "+00:00")) if isinstance(vf, str) else vf
-                        if vf_dt > as_of_dt:
-                            include = False
-                    except Exception:
-                        pass
-                if vt:
-                    try:
-                        vt_dt = datetime.fromisoformat(str(vt).replace("Z", "+00:00")) if isinstance(vt, str) else vt
-                        if vt_dt < as_of_dt:
-                            include = False
-                    except Exception:
-                        pass
-                if include:
-                    filtered_cards.append(c)
-            cards = filtered_cards
-
-    decisions = []
-    preferences = []
-    tasks = []
-    for c in cards:
-        card_type = str(c.get("card_type") or "")
-        tp = c.get("typed_payload") or {}
-        item = {
-            "id": c.get("memory_id"),
-            "title": c.get("title"),
-            "summary": c.get("summary"),
-            "content_hash": c.get("content_hash"),
-            "card_type": card_type,
-            "typed_payload": tp,
-        }
-        if card_type == "decision":
-            if "decision" in tp:
-                item["decision"] = tp["decision"]
-            decisions.append(item)
-        elif card_type == "preference":
-            if "preference" in tp or "rule" in tp:
-                item["rule"] = tp.get("preference") or tp.get("rule")
-            preferences.append(item)
-        elif card_type == "task":
-            if "task_name" in tp:
-                item["task_name"] = tp["task_name"]
-            tasks.append(item)
-        else:
-            decisions.append(item)
-
-    cursor = arguments.get("cursor")
-
-    if mode == "context":
-        from .llm_brain_core.slim_serializer import SlimSerializer
-
-        active_guardrails = [
-            p.get("summary") or p.get("title") or p.get("rule") for p in preferences
-        ] or ["Follow project guidelines and verified memory constraints."]
-
-        if response_mode == "with_evidence":
-            evidence_hashes = []
-            source_refs = []
-            edges = []
-            for c in cards:
-                for h in (c.get("evidence_hashes") or []):
-                    evidence_hashes.append(h)
-                if c.get("content_hash"):
-                    evidence_hashes.append(c["content_hash"])
-                for s in (c.get("source_refs") or []):
-                    source_refs.append(s)
-                if c.get("source_ref"):
-                    if isinstance(c["source_ref"], list):
-                        source_refs.extend(c["source_ref"])
-                    else:
-                        source_refs.append(c["source_ref"])
-                for e in (c.get("edges") or []):
-                    edges.append(e)
-
-            result = SlimSerializer.serialize_with_evidence(
-                project=project,
-                decisions=decisions,
-                preferences=preferences,
-                guardrails=active_guardrails,
-                edges=edges,
-                evidence_hashes=evidence_hashes,
-                source_refs=source_refs,
-                recent_context=f"Active memory context for {project}",
-                gaps=[],
-                limit=limit,
-                cursor=cursor,
-            )
-        else:
-            result = SlimSerializer.serialize_slim(
-                project=project,
-                decisions=decisions,
-                preferences=preferences,
-                guardrails=active_guardrails,
-                recent_context=f"Active memory context for {project}",
-                gaps=[],
-                limit=limit,
-                cursor=cursor,
-            )
-
-
-    elif mode == "query":
-        if not query.strip():
-            raise ValueError(f"{tool_name} mode='query' requires non-empty query")
-        q_lower = query.lower()
-        matched_decisions = [
-            d for d in decisions
-            if q_lower in (str(d.get("title") or "") + " " + str(d.get("summary") or "") + " " + str(d.get("decision") or "")).lower()
-        ]
-        matched_prefs = [
-            p for p in preferences
-            if q_lower in (str(p.get("title") or "") + " " + str(p.get("summary") or "") + " " + str(p.get("rule") or "")).lower()
-        ]
-        matched_all = matched_decisions + matched_prefs
-        result = {
-            "schema_version": "lbrain_slim_context.v1",
-            "project": project,
-            "query": query,
-            "count": len(matched_all),
-            "decisions": matched_decisions[:limit],
-            "preferences": matched_prefs[:limit],
-            "results": matched_all[:limit],
-            "items": matched_all[:limit],
-            "has_more": len(matched_all) > limit,
-            "next_cursor": None,
-        }
-
-    elif mode == "list":
-        all_items = [
-            {
-                "id": c.get("memory_id"),
-                "title": c.get("title"),
-                "summary": c.get("summary"),
-                "card_type": c.get("card_type"),
-                "content_hash": c.get("content_hash"),
-            }
-            for c in cards
-        ]
-        result = {
-            "schema_version": "lbrain_slim_context.v1",
-            "project": project,
-            "count": len(all_items),
-            "decisions": decisions[:limit],
-            "preferences": preferences[:limit],
-            "items": all_items[:limit],
-            "has_more": len(all_items) > limit,
-            "next_cursor": None,
-        }
-    else:
-        raise ValueError(f"unsupported mode: {mode}")
-
-    return _tool_result(result)
+    return _tool_result(service.brain_memory_resolve(
+        project=project, query=arguments.get("query", ""),
+        mode=arguments.get("mode", "context"),
+        response_mode=arguments.get("response_mode", "slim"),
+        as_of=arguments.get("as_of", ""),
+        limit=_bounded_limit(arguments.get("limit"), default=5, maximum=20),
+        cursor=arguments.get("cursor"),
+    ))
 
 
 def _dispatch_knowledge_search_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:
@@ -1292,6 +1123,11 @@ def _dispatch_steward_review_queue_list_tool(tool_name: str, arguments: dict, st
 
 def _dispatch_steward_candidate_create_tool(tool_name: str, arguments: dict, steward: object) -> dict:
     _ = tool_name
+    # The public wire contract remains strict even though the internal
+    # envelope validator accepts historical fixtures for zero-regression.
+    from .session_memory.memory_card import validate_content_hash
+
+    validate_content_hash(str(arguments.get("content_hash") or ""), "content_hash")
     return steward.candidate_create(
         source_span=steward.select_source_span(arguments),
         mark_needs_review=bool(arguments.get("mark_needs_review", False)),
@@ -1470,11 +1306,6 @@ def _project_arg(arguments: dict) -> str:
         return ""
     project = project_from_repository(repository.replace("\\", "/"))
     return "" if project == "unknown" else project
-
-
-def _tool_result(result: dict) -> dict:
-    text = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
-    return {"content": [{"type": "text", "text": text}], "structuredContent": result, "isError": False}
 
 
 def _success(request_id, result: dict) -> dict:

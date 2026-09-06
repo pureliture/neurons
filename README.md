@@ -68,10 +68,11 @@ Owned here:
 - `ledger.py`, transcript ingest worker, replay/reconcile/backfill server state
 - CouchDB transcript source plane and session/project-memory build/read surfaces
 - brain query, MemoryCard, native-memory mirror/sync/reconcile
-- optional Graphiti/Neo4j derived graph index (OFF by default)
-- user-level MCP stdio read surface:
-  `neuron-knowledge mcp-stdio` exposes `knowledge.search`, `brain.query`, and
-  `brain.resolve`
+- Graphiti/Neo4j derived graph index and the Graph-first target read plane
+  (public cutover status is recorded below)
+- 사용자 MCP surface: `mcp-stdio`와 기본 `mcp-http`는
+  `brain.resolve`, `memory_candidate_create`만 노출한다.
+  관리 도구는 별도 `mcp-http --surface admin` 프로세스에서 인증 후 제공한다.
 - GC safety planners and fail-closed GC command surfaces:
   `session-memory-gc`, `transcript-memory-gc`, `transcript-session-gc`,
   `transcript-volume-gc`, `session-memory-quarantine-terminal-skipped`, and
@@ -132,7 +133,7 @@ Public/private split:
 | **CouchDB transcript pipeline** | redacted transcript source(6 doc family) → builder → recall projection | neurons (worker) | 🟢 live |
 | **Session/project-memory** | session-memory build + RetiredIndexBridge recall projection | neurons (worker) | 🟢 live (project-memory는 deferred view) |
 | **Brain query · MemoryCard** | ledger의 accepted card를 canonical로 read; MCP read surface | neurons (worker) | 🟢 live (read-only) |
-| **Graph-memory** | Graphiti/Neo4j 파생 인덱스 (authority=derived_index) | neurons (worker) | ⚫ **OFF by default** (dual-gated) |
+| **Graph-memory** | Graphiti/Neo4j 파생 인덱스; 목표 조회는 Graph-first | neurons (worker) | 🟡 cold projection configured · public cutover pending |
 | **GC safety lane** | fail-closed GC/quarantine/repair planner | neurons (worker) | 🟡 dry-run 기본 · approval-gated |
 | **neuron-knowledge / MCP** | server-owned command router + read-only MCP stdio | neurons (worker) | 🟢 live |
 
@@ -144,7 +145,7 @@ Public/private split:
 
 `nats-jetstream` · `ingress-api`(127.0.0.1:18080) · Python `ingress-worker-py`
 (단, **SAFE shadow 모드** — 격리 stream, delivery OFF) · `neuron-knowledge`
-read/resolve · MCP stdio 10 tools(ledger read-only) · boundary guard.
+read/resolve · legacy MCP stdio 10 tools(ledger read-only) · boundary guard.
 
 </td>
 <td width="50%" valign="top">
@@ -152,8 +153,9 @@ read/resolve · MCP stdio 10 tools(ledger read-only) · boundary guard.
 #### 🟡 / ⚫ gate 뒤
 
 live queue consume(별도 compose project) · `INGRESS_DELIVERY_BACKEND`(retired_index_bridge|couchdb) ·
-ledger **PostgreSQL**(`NEURON_LEDGER_PG_DSN`) · **graph-memory**(`LLM_BRAIN_GRAPH_ENABLED`
-+ profile `llm-brain-graph`) · live write/GC(`--execute` + approval JSON + API key).
+ledger **PostgreSQL**(`NEURON_LEDGER_PG_DSN`) · **Graphiti/Neo4j cold projection**
+(`llm-brain-core`) · Graph-first public route/PG authority join(cutover pending) ·
+live write/GC(`--execute` + approval JSON + API key).
 
 </td>
 </tr>
@@ -464,8 +466,9 @@ builder cron이 per-session **session-memory**를 materialize한다
 
 ## 🧠 Brain query · MemoryCard · recall
 
-> read-side product surface다. canonical은 항상 **local ledger의 accepted/current MemoryCard**이고,
-> RetiredIndexBridge native-memory와 graph는 **second-class mirror**일 뿐이다(`winner=local_ledger`).
+> 현재 호환 read path는 **local ledger의 accepted/current MemoryCard**를 반환한다.
+> rationalization target에서는 PostgreSQL authority를 확인한 Graphiti/Neo4j 후보가
+> Graph-first가 되며, 그 cutover 전까지는 아래 legacy 경로를 운영 완료로 해석하지 않는다.
 
 - `brain.query` · `brain.resolve` + `BrainReadService`의 ContextPack tool이 ledger에서 카드를 서빙한다.
   MCP stdio server는 ledger를 **read-only**로 연다.
@@ -475,7 +478,7 @@ builder cron이 per-session **session-memory**를 materialize한다
   `--native-memory-id` / `RETIRED_INDEX_BRIDGE_NATIVE_MEMORY_ID`, graph는 enable 시에만.
 
 <details>
-<summary><b>🔌 MCP read surface — 10 tools 펼치기</b></summary>
+<summary><b>🔌 Legacy MCP read surface — 10 tools 펼치기</b></summary>
 
 ```text
 knowledge.search
@@ -488,6 +491,20 @@ brain_evidence_get
 모두 read-only. write/GC/migration subcommand는 flag+approval gate 뒤에 있고,
 8개 monolith subcommand는 `blocked_pending_server_extraction` stub이다.
 
+Agent public contract는 위 legacy 목록과 분리한다:
+
+```text
+brain.resolve
+memory_candidate_create
+```
+
+위 legacy 도구는 기본 stdio/HTTP endpoint에서 노출하지 않는다.
+관리 도구는 다른 포트의 `neuron-knowledge mcp-http --surface admin` 프로세스에서만 제공한다.
+`LLM_BRAIN_ADMIN_TOKEN`에 32자 이상의 무작위 ASCII secret을 주입해야 시작할 수 있고,
+모든 `/mcp` 요청에 `Authorization: Bearer …`가 필요하다. secret을 argv·로그·소스에 넣지 않는다.
+`lbrain_admin` 문자열은 인증된 서버 내부 identity이며 접속 credential이 아니다.
+인증 후에도 승인·GC·production write는 기존 권한 gate를 통과해야 한다.
+
 </details>
 
 <br/>
@@ -496,10 +513,10 @@ brain_evidence_get
 
 <br/>
 
-## 🕸️ Graph-memory (파생 인덱스 — 기본 OFF)
+## 🕸️ Graph-memory (파생 인덱스 — Graph-first 목표)
 
 <div align="center">
-<img src="https://img.shields.io/badge/⚫_OFF_by_default-dual_gated-64748b?style=for-the-badge" alt="off by default" />
+<img src="https://img.shields.io/badge/🟡_CUTOVER_PENDING-Graph--first-64748b?style=for-the-badge" alt="Graph-first cutover pending" />
 <img src="https://img.shields.io/badge/graphiti--core-0.30.1-8b5cf6?style=for-the-badge" alt="graphiti" />
 <img src="https://img.shields.io/badge/neo4j-driver_6.2.0-018BFF?style=for-the-badge&logo=neo4j&logoColor=white" alt="neo4j" />
 </div>
@@ -507,18 +524,21 @@ brain_evidence_get
 <br/>
 
 > Graphiti/Neo4j 기반 **파생 knowledge-graph 인덱스**다. `authority='derived_index'` —
-> **절대 권위가 아니다.** canonical memory 위의 보조 색인일 뿐이며 기본적으로 꺼져 있다.
+> **절대 권위가 아니다.** PostgreSQL authority 위에 놓인 Graph-first 조회 후보 색인이며,
+> public router와 authority join이 연결되기 전까지는 target architecture로 표시한다.
 
-**DUAL gate (둘 다 충족해야 가동):**
+**현재 runtime 계약:**
 
-1. **app gate** — `LLM_BRAIN_GRAPH_ENABLED` ∈ `{1,true,yes,on}`. 아니면
-   `build_graph_adapter_from_env`가 `NullGraphMemoryAdapter`를 돌려준다(무동작).
-2. **infra gate** — compose profile `llm-brain-graph`. 아니면 `llm-brain-neo4j` 컨테이너는
-   **아예 뜨지 않는다**. bare `compose up`은 Neo4j를 시작하지 않는다.
+1. `llm-brain-core`는 Neo4j와 cold graph trigger를 함께 구성하고,
+   `LLM_BRAIN_GRAPH_ENABLED=true`를 주입한다.
+2. `llm-brain-mcp`는 Neo4j/PG health gate 뒤에 graph-required MCP server를 시작한다.
+3. generic adapter의 `LLM_BRAIN_GRAPH_EXTRACT_ENTITIES=false` 기본값과 달리,
+   cold trigger는 `--extract-entities`를 기본으로 전달한다.
 
-enable되어도 Neo4j 연결 불가면 `UnavailableGraphMemoryAdapter`로 degrade한다. 기본 모드는
-LLM 추출 없는 단일 `EpisodicNode` JSON 저장이고, entity extraction은
-`LLM_BRAIN_GRAPH_EXTRACT_ENTITIES`로 한 번 더 gate된다.
+Neo4j 연결 불가 시 `UnavailableGraphMemoryAdapter`로 degrade한다. public
+`brain.resolve`의 Graphiti/Neo4j-first router, canonical PostgreSQL join,
+`graph_projection_outbox` writer/consumer는 별도 cutover milestone이며 아직 완료로
+표시하지 않는다.
 
 **Metadata-first hybrid transition:** `MetadataFirstHybridGraphAdapter`는 graph에
 opaque id, hash, lifecycle, scope 같은 metadata-first episode만 저장하고, 검색용 free
@@ -623,8 +643,9 @@ bash scripts/postcheck.sh --offline --timeout 30 \
 
 `nats-jetstream` + `ingress-api` + Python `ingress-worker-py`가 기본 가동.
 단 worker는 **SAFE shadow** 기본값(격리 stream, `ALLOW_LIVE_QUEUE=0`,
-delivery OFF). Java worker는 `profiles:["retired"]`, Neo4j는 profile
-`llm-brain-graph`로 opt-in. 모든 포트는 loopback 바인딩.
+delivery OFF). Java worker는 `profiles:["retired"]`; Graphiti/Neo4j cold
+projection은 `llm-brain-core`, MCP는 `llm-brain-mcp`로 분리한다. 모든 포트는
+loopback 바인딩.
 
 </td>
 <td width="50%" valign="top">
@@ -706,11 +727,13 @@ raw `dataset_id`·`document_id`·token은 예시·log·output에 나타나지 �
 ### 🧰 neuron-knowledge CLI · MCP
 
 `neuron-knowledge`는 server-owned command router다 — session-memory/brain/GC/migration subcommand로
-fan-out하고, read-only MCP stdio server를 띄운다.
+fan-out하고, 읽기·후보 제안용 MCP server를 띄운다.
 
 ```bash
 neuron-knowledge --show-boundary        # 서버 경계 자기기술 출력
-neuron-knowledge mcp-stdio              # read-only MCP server (10 tools)
+neuron-knowledge mcp-stdio              # Agent 도구 2개
+neuron-knowledge mcp-http               # 동일한 Agent 도구, 기본 loopback
+neuron-knowledge mcp-http --surface admin --port 8766  # 별도 secret 주입 필요
 ```
 
 > 🔐 **단일 토큰 규칙.** credential은 `RETIRED_INDEX_BRIDGE_API_KEY` **하나만** 쓴다.

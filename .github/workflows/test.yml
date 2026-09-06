@@ -64,6 +64,38 @@ jobs:
         # 같이 설치해 optional dependency 누락을 fail-closed로 드러낸다.
         run: uv run --group dev --extra mcp-http pytest -q
 
+  worker-lbrain-pgvector:
+    name: worker LBrain pgvector contract (uv)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: neurons_test
+          POSTGRES_PASSWORD: neurons_test
+          POSTGRES_DB: neurons_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U neurons_test -d neurons_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      LBRAIN_TEST_PG_DSN: postgresql://neurons_test:neurons_test@127.0.0.1:5432/neurons_test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: 실제 PostgreSQL 권위 저장 및 공개 Graph-first 조회 검증
+        working-directory: worker
+        run: uv run --group dev --extra mcp-http pytest -q tests/test_lbrain_pgvector_contract.py tests/test_graph_first_pg_integration.py tests/test_graph_first_resolver.py tests/test_pg_evidence.py
+
   worker-postgres-parity:
     name: worker PostgreSQL parity (uv)
     runs-on: ubuntu-latest

@@ -963,6 +963,7 @@ class KnowledgeSearchService:
         read_pipeline: AuthorizedMemoryReader | None = None,
         mirror_search=None,
         semantic_ranker=None,
+        pgvector_store=None,
         allow_restricted_steward: bool = False,
         allow_steward_auto_accept: bool = False,
         allow_local_test_object_authority_writes: bool = False,
@@ -1003,6 +1004,7 @@ class KnowledgeSearchService:
         # live MCP anyway). None -> legacy behaviour (RetiredIndexBridge if dataset_ids, else empty).
         self._mirror_search = mirror_search
         self._semantic_ranker = semantic_ranker
+        self.pgvector_store = pgvector_store
         self.authorized_reader = authorized_reader or read_pipeline or MemoryReadPipeline(
             ledger=ledger,
             retired_index_bridge=retired_index_bridge,
@@ -1051,6 +1053,7 @@ class KnowledgeSearchService:
 
         return BrainStewardService(
             self.ledger,
+            pgvector_store=self.pgvector_store,
             allow_restricted=self.allow_restricted_steward,
             allow_auto_accept=self.allow_steward_auto_accept,
         )
@@ -2350,6 +2353,16 @@ class KnowledgeSearchService:
 
     def brain_resolve(self, *, query: str = "") -> dict:
         return resolve_brain_ids(read_model=LegacyLedgerBrainReadModel(self.ledger), query=query)
+
+    def brain_memory_resolve(self, **arguments: Any) -> dict:
+        """프로젝트 메모리 공개 read 경로. Graphiti 검색 후 PG 권위를 검증한다."""
+        from .llm_brain_core.graph_first_resolver import GraphFirstResolver
+
+        return GraphFirstResolver(
+            store=self.pgvector_store,
+            graph_adapter=self.graph_adapter,
+            embed_query=getattr(self._semantic_ranker, "embed_query", None),
+        ).resolve(**arguments)
 
 
 def _knowledge_search_public_limit(limit: int) -> int:

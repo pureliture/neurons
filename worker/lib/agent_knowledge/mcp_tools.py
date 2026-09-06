@@ -198,17 +198,21 @@ def list_public_agent_tools() -> list[dict]:
             "name": BRAIN_RESOLVE_TOOL_NAME,
             "description": (
                 "통합 LLM-Brain 읽기 도구. 프로젝트 활성 컨텍스트(mode='context'), "
-                "시맨틱/키워드 질의(mode='query'), 또는 카드 목록(mode='list')을 조회한다."
+                "Graphiti/Neo4j 우선 질의(mode='query'), 또는 카드 목록(mode='list')을 조회한다. "
+                "그래프 장애·미투영 시 PG fallback과 검색 경로 metadata를 명시한다."
             ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "project": {
                         "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64,
                         "description": "대상 프로젝트 이름 (필수)",
                     },
                     "query": {
                         "type": "string",
+                        "maxLength": 2000,
                         "description": "검색 질의어 (context/list 모드에서는 선택, query 모드에서는 필수)",
                     },
                     "mode": {
@@ -232,7 +236,12 @@ def list_public_agent_tools() -> list[dict]:
                     },
                     "as_of": {
                         "type": "string",
-                        "description": "Temporal Recall용 ISO-8601 일시 또는 UTC 날짜",
+                        "description": "Temporal Recall용 timezone 포함 ISO-8601 일시 또는 UTC 날짜",
+                    },
+                    "cursor": {
+                        "type": "string",
+                        "maxLength": 2048,
+                        "description": "이전 응답의 next_cursor. 동일한 query·project·mode·limit으로 사용",
                     },
                 },
                 "required": ["project"],
