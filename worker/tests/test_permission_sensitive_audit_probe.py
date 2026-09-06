@@ -824,7 +824,7 @@ def test_disabled_probe_masks_projected_token_in_jsonrpc_error(tmp_path):
     )
 
     serialized = json.dumps(response, sort_keys=True)
-    assert response["error"]["message"] == "internal error"
+    assert response["error"]["message"] == "unknown tool: brain_permission_sensitive_audit_probe"
     assert PROJECTED_TOKEN not in serialized
 
 

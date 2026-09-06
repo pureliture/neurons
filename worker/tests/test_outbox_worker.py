@@ -1,19 +1,27 @@
-"""Unit and integration test suite for OutboxWorker (Milestone 3).
+"""DSN-gated live integration tests for OutboxWorker (M6a).
 
-Verifies polling loop, lease claiming, external embedding generation,
-CAS write-back with graceful discard on stale updates, and retry escalation.
+Live tests require ``LBRAIN_TEST_PG_DSN`` pointing at a disposable PostgreSQL
+(pgvector >= 0.8.0). Without the DSN they skip; the static contract tests in
+this file run without any database.
+
+Shared embedding profile: 3072-dim (gemini-embedding-2 / halfvec(3072)).
+``SHARED_EMBEDDING_DIM`` pins the expectation file-locally; the production
+default is imported, never changed here.
 """
 
 from __future__ import annotations
 
-import threading
-import time
+import os
+import uuid
+
 import pytest
 
 from agent_knowledge.postgres_store.pgvector_store import (
     MemoryCard,
-    SessionChunk,
+    OutboxJob,
     PgVectorStore,
+    SessionChunk,
+    VECTOR_DIMENSION,
     make_dummy_vector,
 )
 from agent_knowledge.postgres_store.outbox_worker import (
@@ -21,253 +29,295 @@ from agent_knowledge.postgres_store.outbox_worker import (
     generate_deterministic_embedding,
 )
 
+SHARED_EMBEDDING_DIM = 3072
+
+PG_DSN = os.environ.get("LBRAIN_TEST_PG_DSN", "")
+live_pg = pytest.mark.skipif(
+    not PG_DSN,
+    reason="LBRAIN_TEST_PG_DSN 미설정 (전용 live PostgreSQL integration gate)",
+)
+
+OFFLINE_DSN = "postgresql://invalid.example.invalid/never"
+
+
+def _cleanup(store: PgVectorStore, tag: str) -> None:
+    like = tag + "%"
+    with store.transaction() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM embedding_outbox WHERE target_id LIKE %s", (like,))
+            cur.execute(
+                "DELETE FROM memory_edges WHERE src_id LIKE %s OR dst_id LIKE %s",
+                (like, like),
+            )
+            cur.execute(
+                "DELETE FROM session_memory_chunks WHERE chunk_id LIKE %s", (like,)
+            )
+            cur.execute(
+                "DELETE FROM memory_cards WHERE memory_id LIKE %s", (like,)
+            )
+
 
 @pytest.fixture
-def store() -> PgVectorStore:
-    s = PgVectorStore(use_in_memory=True)
-    s.execute_ddl()
-    return s
+def pg_store():
+    store = PgVectorStore(dsn=PG_DSN)
+    store.execute_ddl()
+    tag = f"m6a_worker_{uuid.uuid4().hex[:10]}"
+    yield store, tag
+    _cleanup(store, tag)
 
 
-def test_outbox_worker_single_job_lifecycle(store: PgVectorStore):
-    """Worker claims job, generates 1536-dim embedding, and performs successful CAS write-back."""
-    card = MemoryCard(
-        memory_id="card_worker_1",
-        project="neurons",
+def _expire_lease(store: PgVectorStore, outbox_id: int) -> None:
+    with store.transaction() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE embedding_outbox SET lease_until = NOW() - INTERVAL '1 second'"
+                " WHERE outbox_id = %s",
+                (outbox_id,),
+            )
+
+
+def _pending_card(memory_id: str, project: str, content_hash: str, **kwargs) -> MemoryCard:
+    return MemoryCard(
+        memory_id=memory_id,
+        project=project,
         card_type="decision",
-        title="Worker Test",
-        summary="Test summary for embedding generation",
-        content_hash="sha256:w1_hash",
+        title=f"Title {memory_id}",
+        summary=f"Summary {memory_id}",
+        content_hash=content_hash,
         embedding_state="pending",
+        **kwargs,
     )
-    store.upsert_card(card)
-    assert len(store.outbox) == 1
 
-    worker = OutboxWorker(store=store, worker_id="worker_test_1", batch_size=5)
-    processed = worker.run_once()
+
+def _worker(store: PgVectorStore, worker_id: str, **kwargs) -> OutboxWorker:
+    kwargs.setdefault("embedding_fn", generate_deterministic_embedding)
+    return OutboxWorker(store=store, worker_id=worker_id, **kwargs)
+
+
+# ==============================================================================
+# A. Static contract tests (no database)
+# ==============================================================================
+
+
+def test_shared_embedding_profile_is_3072():
+    assert VECTOR_DIMENSION == SHARED_EMBEDDING_DIM
+
+
+def test_worker_requires_explicit_embedding_provider_without_database():
+    store = PgVectorStore(dsn=OFFLINE_DSN)
+    with pytest.raises(ValueError, match="embedding_fn is required"):
+        OutboxWorker(store=store, worker_id="w-no-provider")
+
+
+def test_worker_rejects_misdimensioned_provider_output_without_database():
+    store = PgVectorStore(dsn=OFFLINE_DSN)
+    worker = OutboxWorker(
+        store=store,
+        worker_id="w-bad-dim",
+        embedding_fn=lambda _text: [0.1] * 1536,
+    )
+    job = OutboxJob(
+        outbox_id=1,
+        target_type="memory_card",
+        target_id="t",
+        content_hash="sha256:h",
+        payload_text="text",
+    )
+    with pytest.raises(ValueError, match="invalid vector length"):
+        worker.process_job(job)
+
+
+def test_deterministic_embedding_helper_uses_shared_profile():
+    vec = generate_deterministic_embedding("hello")
+    assert len(vec) == SHARED_EMBEDDING_DIM
+    assert generate_deterministic_embedding("") == make_dummy_vector(0)
+    assert generate_deterministic_embedding("a") != generate_deterministic_embedding("b")
+
+
+# ==============================================================================
+# B. Live tests (disposable PostgreSQL)
+# ==============================================================================
+
+
+@live_pg
+def test_live_worker_single_job_lifecycle(pg_store):
+    store, tag = pg_store
+    memory_id = f"{tag}_card_1"
+    store.upsert_card(_pending_card(memory_id, f"{tag}_proj", "sha256:w1_hash"))
+    assert any(job.target_id == memory_id for job in store.list_outbox_jobs())
+
+    processed = _worker(store, f"{tag}_w1", batch_size=5).run_once()
 
     assert processed == 1
-    updated_card = store.get_card("card_worker_1")
-    assert updated_card.embedding_state == "ready"
-    assert updated_card.embedding is not None
-    assert len(updated_card.embedding) == 1536
-    assert updated_card.embedding_revision == 2
+    updated = store.get_card(memory_id)
+    assert updated.embedding_state == "ready"
+    assert updated.embedding is not None
+    assert len(updated.embedding) == SHARED_EMBEDDING_DIM
+    assert updated.embedding_revision == 2
 
-    job = list(store.outbox.values())[0]
-    assert job.status == "completed"
-    assert job.last_error is None
-
-
-def test_outbox_worker_session_chunk_processing(store: PgVectorStore):
-    """Worker processes session_chunk target types correctly."""
-    chunk = SessionChunk(
-        chunk_id="chk_1",
-        session_id_hash="sha256:sess1",
-        project="neurons",
-        content_markdown="Conversation chunk content",
-        embedding_model="text-embedding-3-small",
-    )
-    store.insert_chunk(chunk)
-    job_id = store.enqueue_outbox(
-        target_type="session_chunk",
-        target_id="chk_1",
-        content_hash="sha256:chk1",
-        payload_text="Conversation chunk content",
-    )
-
-    worker = OutboxWorker(store=store, worker_id="worker_chunk")
-    processed = worker.run_once()
-
-    assert processed == 1
-    updated_chunk = store.get_chunk("chk_1")
-    assert updated_chunk.embedding is not None
-    assert len(updated_chunk.embedding) == 1536
-    assert store.outbox[job_id].status == "completed"
+    jobs = [job for job in store.list_outbox_jobs() if job.target_id == memory_id]
+    assert len(jobs) == 1
+    assert jobs[0].status == "completed"
+    assert jobs[0].last_error is None
 
 
-def test_outbox_worker_concurrent_workers_no_overlap(store: PgVectorStore):
-    """Multiple workers polling simultaneously receive distinct non-overlapping jobs."""
-    for i in range(10):
-        card = MemoryCard(
-            memory_id=f"card_multi_{i}",
-            project="neurons",
-            card_type="decision",
-            title=f"Multi {i}",
-            summary=f"Summary {i}",
-            content_hash=f"sha256:hash_{i}",
-            embedding_state="pending",
+@live_pg
+def test_live_worker_session_chunk_processing(pg_store):
+    store, tag = pg_store
+    chunk_id = f"{tag}_chk_1"
+    store.insert_chunk(
+        SessionChunk(
+            chunk_id=chunk_id,
+            session_id_hash="sha256:sess1",
+            project=f"{tag}_proj",
+            content_markdown="Conversation chunk content",
+            content_hash="sha256:chk1",
         )
-        store.upsert_card(card)
-
-    w1 = OutboxWorker(store=store, worker_id="worker_1", batch_size=3)
-    w2 = OutboxWorker(store=store, worker_id="worker_2", batch_size=3)
-    w3 = OutboxWorker(store=store, worker_id="worker_3", batch_size=4)
-
-    c1 = w1.run_once()
-    c2 = w2.run_once()
-    c3 = w3.run_once()
-
-    assert c1 == 3
-    assert c2 == 3
-    assert c3 == 4
-
-    # Verify all 10 cards processed successfully
-    for i in range(10):
-        c = store.get_card(f"card_multi_{i}")
-        assert c.embedding_state == "ready"
-
-
-def test_outbox_worker_cas_stale_update_interleaving(store: PgVectorStore):
-    """
-    Simulates race condition:
-    1. Card C1 created (content_hash = H1) & Outbox J1 enqueued.
-    2. Card C1 updated concurrently to C2 (content_hash = H2) & Outbox J2 enqueued.
-    3. Worker processes J1 (with H1) -> CAS detects mismatch, discards stale vector.
-    4. Worker processes J2 (with H2) -> CAS matches, writes correct vector V2.
-    """
-    card = MemoryCard(
-        memory_id="card_race",
-        project="neurons",
-        card_type="decision",
-        title="Original",
-        summary="Original Text",
-        content_hash="sha256:hash_v1",
-        embedding_state="pending",
     )
-    store.insert_card(card)
-    job1_id = store.enqueue_outbox("memory_card", "card_race", "sha256:hash_v1", "Original Text")
 
-    # Card updated before worker starts
-    store.cards["card_race"].title = "Updated"
-    store.cards["card_race"].summary = "Updated Text"
-    store.cards["card_race"].content_hash = "sha256:hash_v2"
+    processed = _worker(store, f"{tag}_w_chunk").run_once()
 
-    job2_id = store.enqueue_outbox("memory_card", "card_race", "sha256:hash_v2", "Updated Text")
+    assert processed == 1
+    updated = store.get_chunk(chunk_id)
+    assert updated.embedding is not None
+    assert len(updated.embedding) == SHARED_EMBEDDING_DIM
+    jobs = [job for job in store.list_outbox_jobs() if job.target_id == chunk_id]
+    assert len(jobs) == 1
+    assert jobs[0].status == "completed"
 
-    # Custom embedding fn to distinguish versions
+
+@live_pg
+def test_live_workers_receive_non_overlapping_jobs(pg_store):
+    store, tag = pg_store
+    project = f"{tag}_proj"
+    for i in range(10):
+        store.upsert_card(
+            _pending_card(f"{tag}_multi_{i}", project, f"sha256:hash_{i}")
+        )
+
+    c1 = _worker(store, f"{tag}_w1", batch_size=3).run_once()
+    c2 = _worker(store, f"{tag}_w2", batch_size=3).run_once()
+    c3 = _worker(store, f"{tag}_w3", batch_size=4).run_once()
+
+    assert (c1, c2, c3) == (3, 3, 4)
+    for i in range(10):
+        assert store.get_card(f"{tag}_multi_{i}").embedding_state == "ready"
+
+
+@live_pg
+def test_live_worker_stale_cas_interleaving(pg_store):
+    """Stale job retires as cas_skipped; the newer job writes the vector."""
+    store, tag = pg_store
+    memory_id = f"{tag}_race"
+    project = f"{tag}_proj"
+    store.insert_card(_pending_card(memory_id, project, "sha256:hash_v1"))
+    job1_id = store.enqueue_outbox(
+        "memory_card", memory_id, "sha256:hash_v1", "Original Text"
+    )
+
+    updated = _pending_card(memory_id, project, "sha256:hash_v2")
+    updated.title = "Updated"
+    updated.summary = "Updated Text"
+    store.upsert_card(updated)
+    job2_id = store.enqueue_outbox(
+        "memory_card", memory_id, "sha256:hash_v2", "Updated Text"
+    )
+    assert job1_id != job2_id
+
     def custom_embed(text: str) -> list[float]:
         if "Original" in text:
             return make_dummy_vector(1)
         return make_dummy_vector(2)
 
-    worker = OutboxWorker(store=store, worker_id="worker_race", embedding_fn=custom_embed, batch_size=1)
+    worker = _worker(store, f"{tag}_w_race", embedding_fn=custom_embed, batch_size=1)
 
-    # Process Job 1 (stale)
-    w1_processed = worker.run_once()
-    assert w1_processed == 1
-    assert store.outbox[job1_id].status == "completed"
-    assert "CAS skip" in store.outbox[job1_id].last_error
-    # Card should NOT have vector 1
-    assert store.cards["card_race"].embedding is None
+    assert worker.run_once() == 1
+    assert store.get_outbox_job(job1_id).status == "cas_skipped"
+    assert "CAS skip" in (store.get_outbox_job(job1_id).last_error or "")
+    assert store.get_card(memory_id).embedding is None
 
-    # Process Job 2 (latest)
-    w2_processed = worker.run_once()
-    assert w2_processed == 1
-    assert store.outbox[job2_id].status == "completed"
-    assert store.outbox[job2_id].last_error is None
+    assert worker.run_once() == 1
+    assert store.get_outbox_job(job2_id).status == "completed"
+    assert store.get_outbox_job(job2_id).last_error is None
 
-    final_card = store.get_card("card_race")
-    assert final_card.embedding_state == "ready"
-    assert final_card.embedding == make_dummy_vector(2)
+    final = store.get_card(memory_id)
+    assert final.embedding_state == "ready"
+    assert final.embedding == pytest.approx(make_dummy_vector(2), abs=1e-4)
 
 
-def test_outbox_worker_crash_and_lease_expiry_reclaim(store: PgVectorStore):
-    """Worker crash with expired lease is reclaimed and processed by another worker."""
-    card = MemoryCard(
-        memory_id="card_crash_rec",
-        project="neurons",
-        card_type="decision",
-        title="Crash Test",
-        summary="Crash summary",
-        content_hash="sha256:crash_hash",
-        embedding_state="pending",
-    )
-    store.upsert_card(card)
+@live_pg
+def test_live_worker_crash_lease_reclaimed(pg_store):
+    store, tag = pg_store
+    memory_id = f"{tag}_crash"
+    store.upsert_card(_pending_card(memory_id, f"{tag}_proj", "sha256:crash_hash"))
 
-    # Crashed worker claimed with lease in past
-    store.claim_outbox_leases(worker_id="crashed_worker", batch_size=1, lease_seconds=-10)
-    job_id = list(store.outbox.keys())[0]
-    assert store.outbox[job_id].worker_id == "crashed_worker"
+    claimed = store.claim_outbox_leases(f"{tag}_crashed", batch_size=1, lease_seconds=30)
+    assert len(claimed) == 1
+    job_id = claimed[0].outbox_id
+    assert store.get_outbox_job(job_id).worker_id == f"{tag}_crashed"
 
-    # Recovery worker polls and reclaims
-    recovery_worker = OutboxWorker(store=store, worker_id="recovery_worker")
-    processed = recovery_worker.run_once()
+    _expire_lease(store, job_id)
 
-    assert processed == 1
-    assert store.outbox[job_id].worker_id == "recovery_worker"
-    assert store.outbox[job_id].status == "completed"
-    assert store.get_card("card_crash_rec").embedding_state == "ready"
+    recovery = _worker(store, f"{tag}_recovery")
+    assert recovery.run_once() == 1
+    job = store.get_outbox_job(job_id)
+    assert job.worker_id == f"{tag}_recovery"
+    assert job.status == "completed"
+    assert store.get_card(memory_id).embedding_state == "ready"
 
 
-def test_outbox_worker_transient_error_retry_and_dead_letter(store: PgVectorStore):
-    """Failing embedding generation retries up to max_retries then marks dead_letter."""
-    card = MemoryCard(
-        memory_id="card_fatal",
-        project="neurons",
-        card_type="decision",
-        title="Fatal Card",
-        summary="Fatal summary",
-        content_hash="sha256:fatal_hash",
-        embedding_state="pending",
-    )
-    store.upsert_card(card)
+@live_pg
+def test_live_worker_transient_errors_escalate_to_dead_letter(pg_store):
+    store, tag = pg_store
+    memory_id = f"{tag}_fatal"
+    store.upsert_card(_pending_card(memory_id, f"{tag}_proj", "sha256:fatal_hash"))
 
-    # Embedding function that raises transient network exceptions
-    def failing_embed(text: str) -> list[float]:
+    def failing_embed(_text: str) -> list[float]:
         raise ConnectionResetError("Remote embedding API timeout")
 
-    worker = OutboxWorker(store=store, worker_id="w_fail", embedding_fn=failing_embed, max_retries=5)
+    worker = _worker(store, f"{tag}_w_fail", embedding_fn=failing_embed, max_retries=5)
 
-    # Process 5 times (simulating retries after lease expiries)
-    for i in range(1, 6):
-        job = list(store.outbox.values())[0]
-        # Force lease expiry to allow retry
-        job.lease_until = None
-        job.status = "failed" if i > 1 else "queued"
+    for _ in range(5):
+        jobs = [job for job in store.list_outbox_jobs() if job.target_id == memory_id]
+        _expire_lease(store, jobs[0].outbox_id)
         worker.run_once()
 
-    job = list(store.outbox.values())[0]
+    job = [job for job in store.list_outbox_jobs() if job.target_id == memory_id][0]
     assert job.status == "dead_letter"
     assert job.retry_count >= 5
-    assert store.get_card("card_fatal").embedding_state == "failed"
+    assert store.get_card(memory_id).embedding_state == "failed"
 
 
-def test_outbox_worker_empty_payload_safety(store: PgVectorStore):
-    """Empty payload text generates valid 1536-dim vector without error."""
-    card = MemoryCard(
-        memory_id="card_empty",
-        project="neurons",
-        card_type="decision",
-        title="",
-        summary="",
-        content_hash="sha256:empty_hash",
-        embedding_state="pending",
+@live_pg
+def test_live_worker_empty_payload_safety(pg_store):
+    store, tag = pg_store
+    memory_id = f"{tag}_empty"
+    store.upsert_card(
+        MemoryCard(
+            memory_id=memory_id,
+            project=f"{tag}_proj",
+            card_type="decision",
+            title="",
+            summary="",
+            content_hash="sha256:empty_hash",
+            embedding_state="pending",
+        )
     )
-    store.upsert_card(card)
 
-    worker = OutboxWorker(store=store, worker_id="w_empty")
-    processed = worker.run_once()
-
-    assert processed == 1
-    updated_card = store.get_card("card_empty")
-    assert updated_card.embedding_state == "ready"
-    assert len(updated_card.embedding) == 1536
+    assert _worker(store, f"{tag}_w_empty").run_once() == 1
+    updated = store.get_card(memory_id)
+    assert updated.embedding_state == "ready"
+    assert len(updated.embedding) == SHARED_EMBEDDING_DIM
 
 
-def test_outbox_worker_run_loop_bounded(store: PgVectorStore):
-    """Worker run_loop runs bounded iterations cleanly."""
-    card = MemoryCard(
-        memory_id="card_loop",
-        project="neurons",
-        card_type="decision",
-        title="Loop",
-        summary="Loop summary",
-        content_hash="sha256:loop_hash",
-        embedding_state="pending",
+@live_pg
+def test_live_worker_run_loop_bounded(pg_store):
+    store, tag = pg_store
+    memory_id = f"{tag}_loop"
+    store.upsert_card(_pending_card(memory_id, f"{tag}_proj", "sha256:loop_hash"))
+
+    _worker(store, f"{tag}_w_loop", poll_interval_seconds=0.01).run_loop(
+        max_iterations=2
     )
-    store.upsert_card(card)
 
-    worker = OutboxWorker(store=store, worker_id="w_loop", poll_interval_seconds=0.01)
-    worker.run_loop(max_iterations=2)
-
-    assert store.get_card("card_loop").embedding_state == "ready"
+    assert store.get_card(memory_id).embedding_state == "ready"

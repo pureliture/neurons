@@ -14,7 +14,7 @@ def _candidate(**overrides):
     span = {
         "source_ref": {"source_id": "src"},
         "span_ref": {"span_id": "span"},
-        "content_hash": "sha256:x",
+        "content_hash": "sha256:2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
         "brain_id": f"/project/{PROJECT}",
         "card_type": "task",
         "scope": "project",

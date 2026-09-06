@@ -1,3 +1,9 @@
+"""Tier 1 Feature Coverage Test Suite (Simulation).
+
+Pure simulation suite running against InMemoryPostgresStore, InMemoryQdrantStore,
+and MockMCPServer with isolated legacy 1536-dim simulation profile.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -19,6 +25,8 @@ from .conftest import (
     make_dummy_vector,
     sha256_str,
 )
+
+pytestmark = [pytest.mark.simulation, pytest.mark.legacy_profile]
 
 # ==============================================================================
 # Feature 1: brain.resolve Tool (5 Test Cases)

@@ -1,3 +1,9 @@
+"""Tier 2 Boundary Condition Coverage Test Suite (Simulation).
+
+Pure simulation suite running against InMemoryPostgresStore, InMemoryQdrantStore,
+and MockMCPServer with isolated legacy 1536-dim simulation profile.
+"""
+
 from __future__ import annotations
 
 import base64
@@ -22,6 +28,8 @@ from .conftest import (
     make_dummy_vector,
     sha256_str,
 )
+
+pytestmark = [pytest.mark.simulation, pytest.mark.legacy_profile]
 
 # ==============================================================================
 # Feature 1 Boundary: brain.resolve (5 Boundary Tests)

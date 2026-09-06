@@ -109,6 +109,21 @@ class _BenchmarkQdrant:
             raise self.error
         return [{"id": item} for item in self.ids]
 
+    def query_points(self, **_kwargs):
+        # New Qdrant SDK seam used by DualReadShadowHarness._query_qdrant.
+        if self.error is not None:
+            raise self.error
+
+        class _Point:
+            def __init__(self, memory_id: str):
+                self.payload = {"memory_id": memory_id}
+
+        class _Response:
+            def __init__(self, points):
+                self.points = points
+
+        return _Response([_Point(item) for item in self.ids])
+
 
 class _BenchmarkPg:
     def __init__(self, ids: list[str] | None = None, error: Exception | None = None):
@@ -128,8 +143,10 @@ def test_shadow_benchmark_does_not_hide_backend_errors_or_empty_fixtures():
         minimum_queries_for_cutover=1,
     )
 
-    result = harness.execute_query([0.1, 0.2])
-    assert result.qdrant_error == "TimeoutError"
+    result = harness.execute_query([0.1] * 3072)
+    # Backend exceptions are normalized to reason codes (redaction contract),
+    # never raw exception text — but the failure must stay explicit.
+    assert result.qdrant_error == "qdrant_query_failed"
     assert result.recall_at_k == 0.0
     assert result.discrepancies
 
@@ -142,7 +159,7 @@ def test_shadow_benchmark_requires_cutover_sample_size():
         qdrant_client=_BenchmarkQdrant(ids=["memory-1"]),
         pg_store=_BenchmarkPg(ids=["memory-1"]),
     )
-    summary = harness.run_benchmark([[0.1, 0.2]])
+    summary = harness.run_benchmark([[0.1] * 3072])
     assert summary.benchmark_valid is True
     assert summary.sample_size_gate_passed is False
     assert summary.overall_gate_passed is False

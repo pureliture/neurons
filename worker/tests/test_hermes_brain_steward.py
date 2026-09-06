@@ -56,7 +56,7 @@ def _span(**overrides) -> dict:
     span = {
         "source_ref": {"source_id": "src_steward"},
         "span_ref": {"span_id": "span_steward"},
-        "content_hash": "sha256:steward-card",
+        "content_hash": "sha256:f6bffc2573450316af83bfa55f23097acf336de42aac0c4ddaa26e28dff79f67",
         "card_type": "preference",
         "scope": "project",
         "project": PROJECT,
@@ -124,7 +124,7 @@ def test_stale_and_supersede_record_proposer(tmp_path):
 
     superseded = steward.supersede_propose(
         old_memory_id=accepted["memory_id"],
-        source_span=_span(content_hash="sha256:replacement", redacted_summary="영어로 응답한다"),
+        source_span=_span(content_hash="sha256:95713e9cbdd1dfcb2d4080c2537f418d43ca0da25f0d7d6631f4f7c97b89dc47", redacted_summary="영어로 응답한다"),
         proposer="hermes",
     )
     assert superseded["proposal"]["proposed_by"] == "hermes"
@@ -273,7 +273,7 @@ def test_korean_free_text_round_trips_through_proposal(tmp_path):
         source_span=_span(
             title=korean_title,
             redacted_summary=korean_summary,
-            content_hash="sha256:korean-roundtrip",
+            content_hash="sha256:e5a7f715998a1413c9a8316cabae4572b9d0cac30298767c3ce68fd15f48ed70",
             typed_payload={
                 "preference": korean_summary,
                 "explicitness": "explicit",

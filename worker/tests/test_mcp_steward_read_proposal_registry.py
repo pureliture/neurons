@@ -42,6 +42,7 @@ _READ_PROPOSAL_TOOL_ARGS = {
         "review_reason": "unit-test reason",
         "mark_needs_review": True,
         "proposer": "codex",
+        "content_hash": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
     },
     MEMORY_STALE_MARK_TOOL_NAME: {
         "memory_id": "memory-stale-id",
@@ -81,7 +82,7 @@ class _FakeSteward:
         return {"tool": MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME}
 
     def select_source_span(self, arguments: dict) -> dict:
-        span = {"source_ref": {"source_id": "fake"}, "span_ref": {"span_id": "fake"}, "content_hash": "sha256:fake"}
+        span = {"source_ref": {"source_id": "fake"}, "span_ref": {"span_id": "fake"}, "content_hash": "sha256:b5d54c39e66671c9731b9f471e585d8262cd4f54963f0c93082d8dcf334d4c78"}
         self.calls.append(("select_source_span", dict(arguments)))
         self.selected_spans.append(span)
         return span
@@ -125,7 +126,10 @@ def _assert_source_span_proposal_call(steward: _FakeSteward, tool_name: str) -> 
     assert proposal_call[0] == tool_name
     assert isinstance(source_span, dict)
     assert steward.selected_spans == [source_span]
-    assert proposal_call[1] == dict(_READ_PROPOSAL_TOOL_ARGS[tool_name], source_span=source_span)
+    # content_hash is validated on the wire but not forwarded to candidate_create.
+    expected_call = dict(_READ_PROPOSAL_TOOL_ARGS[tool_name], source_span=source_span)
+    expected_call.pop("content_hash", None)
+    assert proposal_call[1] == expected_call
 
 
 def test_steward_read_proposal_registry_exposes_contracted_entrypoint():
