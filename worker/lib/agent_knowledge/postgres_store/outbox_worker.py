@@ -151,3 +151,100 @@ class OutboxWorker:
     def stop(self) -> None:
         """Signal the polling loop to stop."""
         self._stop_event.set()
+
+
+class GraphProjectionWorker:
+    """Leased worker for graph_projection_outbox projecting episodes to Graphiti / Neo4j."""
+
+    def __init__(
+        self,
+        store: PgVectorStore,
+        graph_adapter: Any,
+        worker_id: str | None = None,
+        batch_size: int = 10,
+        lease_seconds: int = 60,
+        poll_interval_seconds: float = 0.5,
+        max_retries: int = 5,
+    ):
+        self.store = store
+        if graph_adapter is None:
+            raise ValueError("graph_adapter is required")
+        self.graph_adapter = graph_adapter
+        self.worker_id = worker_id or f"graph_worker_{int(time.time() * 1000)}"
+        self.batch_size = batch_size
+        self.lease_seconds = lease_seconds
+        self.poll_interval = poll_interval_seconds
+        self.max_retries = max_retries
+        self._stop_event = threading.Event()
+
+    def process_job(self, job: Any) -> None:
+        """Project one episode payload through the Graphiti adapter seam."""
+        from .graph_replay import call_adapter_seam
+
+        outcome = call_adapter_seam(self.graph_adapter, job.episode_payload)
+        if outcome == "failed":
+            raise RuntimeError(f"adapter returned failed outcome for projection {job.projection_id}")
+
+    def run_once(self) -> int:
+        """Claim and process a single batch of graph projection outbox jobs."""
+        jobs = self.store.claim_graph_projection_leases(
+            worker_id=self.worker_id,
+            batch_size=self.batch_size,
+            lease_seconds=self.lease_seconds,
+        )
+        if not jobs:
+            return 0
+
+        processed_count = 0
+        for job in jobs:
+            try:
+                self.process_job(job)
+                self.store.mark_graph_projection_completed(
+                    projection_id=job.projection_id,
+                    worker_id=self.worker_id,
+                )
+            except Exception as e:
+                logger.error(
+                    f"[{self.worker_id}] Error projecting outbox job {job.projection_id}: {e}",
+                    exc_info=True,
+                )
+                try:
+                    self.store.mark_graph_projection_failed(
+                        projection_id=job.projection_id,
+                        error_message=str(e),
+                        max_retries=self.max_retries,
+                        worker_id=self.worker_id,
+                    )
+                except ValueError as lease_error:
+                    logger.warning(
+                        "[%s] graph projection job %s was not owned while recording failure: %s",
+                        self.worker_id,
+                        job.projection_id,
+                        lease_error,
+                    )
+            processed_count += 1
+
+        return processed_count
+
+    def run_loop(
+        self,
+        stop_event: threading.Event | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
+        """Run continuous polling loop until stopped or max_iterations reached."""
+        stop = stop_event or self._stop_event
+        iterations = 0
+
+        while not stop.is_set():
+            if max_iterations is not None and iterations >= max_iterations:
+                break
+
+            processed = self.run_once()
+            iterations += 1
+
+            if processed == 0:
+                stop.wait(self.poll_interval)
+
+    def stop(self) -> None:
+        """Signal the polling loop to stop."""
+        self._stop_event.set()

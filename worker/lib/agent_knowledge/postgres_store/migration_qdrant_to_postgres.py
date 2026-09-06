@@ -158,7 +158,8 @@ class QdrantToPostgresMigrator:
             return False
         if len(vector) != DEFAULT_EMBEDDING_DIM:
             raise ValueError("vector_dimension_mismatch")
-        if payload.get("embedding_model") != DEFAULT_EMBEDDING_MODEL:
+        model = payload.get("embedding_model")
+        if model is not None and model != DEFAULT_EMBEDDING_MODEL:
             raise ValueError("embedding_profile_mismatch")
         return True
 
@@ -186,7 +187,7 @@ class QdrantToPostgresMigrator:
         result.total_quarantined += 1
         result.quarantined_records.append({"point_digest": _digest(point_id) if point_id is not None else "unknown", "reason_code": reason})
 
-    def _migrate(self, name: str, project: str | None, build: Callable[..., Any], write: Callable[[Any], Any]) -> MigrationResult:
+    def _migrate(self, name: str, project: str | None, build: Callable[..., Any], write: Callable[..., Any]) -> MigrationResult:
         started, preflight = time.time(), self._preflight(name)
         result = MigrationResult(collection_name=_digest(name), dry_run=self.dry_run, preflight=preflight)
         checkpoint = self._checkpoint(name, preflight)
@@ -202,25 +203,46 @@ class QdrantToPostgresMigrator:
             points, next_offset = self._fetch_qdrant_points(name, offset)
             if not points:
                 break
-            for item in points:
-                point_id = None
-                result.total_scanned += 1
-                try:
-                    point_id, vector, payload = self._unpack(item)
-                    if project is not None and payload.get("project") != project:
-                        result.total_skipped += 1
-                        continue
-                    record = build(point_id, vector, payload)
-                    if not self.dry_run:
-                        write(record)
-                        if record.embedding is None:
-                            result.outbox_enqueued += 1
-                    result.total_migrated += 1
-                except (TypeError, ValueError, OverflowError) as exc:
-                    self._quarantine(result, point_id, self._reason_code(exc))
-                except Exception:
-                    logger.exception("migration_record_failed reason_code=target_write_failed")
-                    self._quarantine(result, point_id, "target_write_failed")
+            if not self.dry_run and hasattr(self.target_store, "_scope"):
+                with self.target_store._scope(write=True) as batch_conn:
+                    for item in points:
+                        point_id = None
+                        result.total_scanned += 1
+                        try:
+                            point_id, vector, payload = self._unpack(item)
+                            if project is not None and payload.get("project") != project:
+                                result.total_skipped += 1
+                                continue
+                            record = build(point_id, vector, payload)
+                            write(record, conn=batch_conn)
+                            if record.embedding is None:
+                                result.outbox_enqueued += 1
+                            result.total_migrated += 1
+                        except (TypeError, ValueError, OverflowError) as exc:
+                            self._quarantine(result, point_id, self._reason_code(exc))
+                        except Exception:
+                            logger.exception("migration_record_failed reason_code=target_write_failed")
+                            self._quarantine(result, point_id, "target_write_failed")
+            else:
+                for item in points:
+                    point_id = None
+                    result.total_scanned += 1
+                    try:
+                        point_id, vector, payload = self._unpack(item)
+                        if project is not None and payload.get("project") != project:
+                            result.total_skipped += 1
+                            continue
+                        record = build(point_id, vector, payload)
+                        if not self.dry_run:
+                            write(record)
+                            if record.embedding is None:
+                                result.outbox_enqueued += 1
+                        result.total_migrated += 1
+                    except (TypeError, ValueError, OverflowError) as exc:
+                        self._quarantine(result, point_id, self._reason_code(exc))
+                    except Exception:
+                        logger.exception("migration_record_failed reason_code=target_write_failed")
+                        self._quarantine(result, point_id, "target_write_failed")
             offset = next_offset
             if not self.dry_run:
                 checkpoint.update(next_offset=offset, completed=offset is None)
@@ -241,10 +263,29 @@ class QdrantToPostgresMigrator:
     def migrate_session_chunks(self, collection_name: str = "session_chunks", project: str | None = None) -> MigrationResult:
         def build(_id: object, vector: list[float] | None, payload: dict[str, Any]) -> SessionChunk:
             copied = self._copyable(vector, payload)
-            return SessionChunk(chunk_id=str(self._require(payload, "chunk_id")), session_id_hash=str(self._require(payload, "session_id_hash")),
-                project=str(self._require(payload, "project")), provider=str(self._require(payload, "provider")), chunk_index=int(self._require(payload, "chunk_index")),
-                content_markdown=str(self._require(payload, "content_markdown")), token_count=int(self._require(payload, "token_count")), content_hash=self._content_hash(payload),
-                embedding_model=DEFAULT_EMBEDDING_MODEL, embedding_state="ready" if copied else "pending", embedding=list(vector) if copied else None)
+            chunk_id = str(payload.get("chunk_id") or payload.get("memory_id") or _id)[:128]
+            session_id_hash = str(self._require(payload, "session_id_hash"))
+            project_val = str(self._require(payload, "project"))[:128]
+            provider_val = str(payload.get("provider") or "unspecified")[:64]
+            raw_index = payload.get("chunk_index")
+            if raw_index is None:
+                raw_index = payload.get("turn_start_index")
+            chunk_index = int(raw_index) if raw_index is not None else 0
+            content_markdown = str(payload.get("content_markdown") or payload.get("text") or payload.get("summary") or "").replace("\x00", "")
+            token_count = int(payload.get("token_count") or 0)
+            return SessionChunk(
+                chunk_id=chunk_id,
+                session_id_hash=session_id_hash,
+                project=project_val,
+                provider=provider_val,
+                chunk_index=chunk_index,
+                content_markdown=content_markdown,
+                token_count=token_count,
+                content_hash=self._content_hash(payload),
+                embedding_model=DEFAULT_EMBEDDING_MODEL,
+                embedding_state="ready" if copied else "pending",
+                embedding=list(vector) if (copied and vector is not None) else None,
+            )
         return self._migrate(collection_name, project, build, self.target_store.insert_chunk)
 
     def migrate_memory_cards(self, collection_name: str = "memory_cards", project: str | None = None) -> MigrationResult:
