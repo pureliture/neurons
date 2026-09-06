@@ -10,7 +10,7 @@ name = "rag-ingress-worker"
 version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = [
-    "graphiti-core>=0.29.2",
+    "graphiti-core>=0.30.1",
     "nats-py>=2.6",
     "psycopg[binary]>=3.3.4",
     "pyyaml>=6.0.3",
