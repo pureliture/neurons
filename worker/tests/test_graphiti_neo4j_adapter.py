@@ -1743,6 +1743,103 @@ def _episode(entity_type: str, natural_id: str, payload: dict) -> OntologyEpisod
     )
 
 
+def test_graphiti_adapter_edge_lane_applies_query_relevance_gate():
+    """Edge (GraphFact) results must pass the same query-term relevance gate as
+    the episode lane. graphiti's embedding search always returns
+    nearest-neighbour edges even for unrelated queries, so without the gate
+    unrelated facts surface as answers for unrelated (e.g. negative-control)
+    queries."""
+    graphiti = _FakeGraphiti()
+    source = _episode(
+        "Task",
+        "task:relevance-gate-source",
+        {"brain_id": "/project/neurons", "provider": "codex", "task": "CouchDB projection build tuning"},
+    )
+    graphiti.episodes.append(
+        SimpleNamespace(content=json.dumps(source.to_dict(), ensure_ascii=True, sort_keys=True))
+    )
+    graphiti.edges.extend(
+        [
+            SimpleNamespace(
+                uuid="edge-relevance-relevant",
+                name="RELATES_TO",
+                fact="The couchdb projection build uses a mango index.",
+                valid_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+                invalid_at=None,
+                source_node_uuid="node-relevance-a",
+                target_node_uuid="node-relevance-b",
+                episodes=[source.episode_id],
+            ),
+            SimpleNamespace(
+                uuid="edge-relevance-unrelated",
+                name="RELATES_TO",
+                fact="The ragflow compose project includes redis as a component.",
+                valid_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+                invalid_at=None,
+                source_node_uuid="node-relevance-c",
+                target_node_uuid="node-relevance-d",
+                episodes=[source.episode_id],
+            ),
+        ]
+    )
+    adapter = GraphitiNeo4jGraphMemoryAdapter(graphiti, default_group_id="/project/neurons")
+
+    result = adapter.search_context(
+        brain_id="/project/neurons",
+        query="couchdb projection",
+        entity_types=None,
+        limit=10,
+    )
+
+    facts = [
+        str(episode.payload.get("fact", ""))
+        for episode in result.episodes
+        if episode.entity_type == "GraphFact"
+    ]
+    assert any("couchdb" in fact.lower() for fact in facts)
+    assert all("ragflow" not in fact.lower() for fact in facts)
+    assert "edge_relevance_filtered:1" in result.details
+
+
+def test_graphiti_adapter_nonexistent_topic_query_returns_empty_not_noise():
+    """A query about a topic absent from the graph must return zero episodes
+    with a healthy status, not nearest-neighbour noise."""
+    graphiti = _FakeGraphiti()
+    source = _episode(
+        "Task",
+        "task:negative-control-source",
+        {"brain_id": "/project/neurons", "provider": "codex", "task": "CouchDB projection build tuning"},
+    )
+    graphiti.episodes.append(
+        SimpleNamespace(content=json.dumps(source.to_dict(), ensure_ascii=True, sort_keys=True))
+    )
+    graphiti.edges.extend(
+        [
+            SimpleNamespace(
+                uuid="edge-negative-control",
+                name="RELATES_TO",
+                fact="The ragflow compose project includes elasticsearch as a component.",
+                valid_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+                invalid_at=None,
+                source_node_uuid="node-negative-a",
+                target_node_uuid="node-negative-b",
+                episodes=[source.episode_id],
+            ),
+        ]
+    )
+    adapter = GraphitiNeo4jGraphMemoryAdapter(graphiti, default_group_id="/project/neurons")
+
+    result = adapter.search_context(
+        brain_id="/project/neurons",
+        query="takoyaki recipe quantum resilience",
+        entity_types=None,
+        limit=10,
+    )
+
+    assert result.status == "available"
+    assert result.episodes == ()
+
+
 def test_bulk_semantic_entity_uuid_is_name_based_and_type_independent():
     from agent_knowledge.llm_brain_core import bulk_semantic as bs
 
