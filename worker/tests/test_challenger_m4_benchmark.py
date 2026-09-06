@@ -1,7 +1,11 @@
 """Challenger Adversarial Test Suite for Milestone 4 (Migration & Dual-Read Shadow).
 
-Tests empty collections, corrupted/missing fields, checkpoint resume from mid-batch failures,
-large query corpus (200+ queries), and strict Recall@5 gate thresholds.
+OBSOLETE (M6b): pre-fail-closed mock benchmark. Uses removed seams
+(`use_in_memory=True`, `collections`/`vectors` dicts, `_fetch_qdrant_points`,
+`checkpoints["session_chunks_offset"]`) and asserts the old contract
+(mock overall PASS, empty-source recall 1.0). Superseded by
+`test_migration_qdrant_to_postgres.py`, `test_graph_replay.py` and
+`test_dual_read_shadow.py` (M5a-c). Kept as inventory, not executed.
 """
 
 from __future__ import annotations
@@ -23,6 +27,10 @@ from agent_knowledge.postgres_store.migration_qdrant_to_postgres import (
 from agent_knowledge.postgres_store.dual_read_shadow import (
     DualReadShadowHarness,
     BenchmarkQuery,
+)
+
+pytestmark = pytest.mark.skip(
+    reason="obsolete pre-fail-closed mock benchmark (M6b inventory only)"
 )
 
 

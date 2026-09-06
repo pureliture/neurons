@@ -44,7 +44,7 @@ def _source_span(**overrides):
     span = {
         "source_ref": {"source_id": "src_decision_2"},
         "span_ref": {"span_id": "span_decision_2"},
-        "content_hash": "sha256:decision2",
+        "content_hash": "sha256:b23304470006ddbed88edf2157bcb62cb63a6e33c6e72f39cc03f382f3912c4d",
         "brain_id": f"/project/{PROJECT}",
         "card_type": "decision",
         "scope": "project",
@@ -91,7 +91,7 @@ def test_candidate_key_changes_when_span_or_content_changes():
         _source_span(span_ref={"span_id": "span_decision_3"})
     )
     changed_content = memory_card_candidate_idempotency_key(
-        _source_span(content_hash="sha256:decision3")
+        _source_span(content_hash="sha256:6d6a27d443e76180746b59b7dc76d1807fe0bbb9c6da51ed107f5048da0974bf")
     )
 
     assert len({base, changed_span, changed_content}) == 3
@@ -127,7 +127,7 @@ def test_candidate_contains_refs_hashes_and_redacted_summary_not_source_body():
     assert candidate["span_refs"][0]["span_id"] == "span_decision_2"
     assert candidate["span_refs"][0]["source_owner"] == "transcript_memory_canonical_store"
     assert candidate["span_refs"][0]["access_mode"] == "span_ref_only"
-    assert candidate["evidence_hashes"] == ["sha256:decision2"]
+    assert candidate["evidence_hashes"] == ["sha256:b23304470006ddbed88edf2157bcb62cb63a6e33c6e72f39cc03f382f3912c4d"]
     assert "private session body" not in serialized
     assert "raw_transcript" not in serialized
 
@@ -136,7 +136,7 @@ def test_immediate_candidate_enqueue_accepts_high_signal_event_without_write():
     event = _source_span(
         event_kind="commit",
         refresh_watermark="immediate-commit",
-        content_hash="sha256:commit1",
+        content_hash="sha256:4ba10998a6ebceb06ecf1a94bb2970c91ff19a671978836aaa62b4bbe8206354",
         source_ref={"source_id": "commit_abc"},
         span_ref={"span_id": "commit_abc"},
     )
@@ -154,7 +154,7 @@ def test_immediate_high_severity_drift_requires_high_drift_payload():
         event_kind="high_severity_drift",
         card_type="drift",
         typed_payload=_drift_payload(severity="medium"),
-        content_hash="sha256:drift1",
+        content_hash="sha256:95a0c07de7c638a3621f2da791ea475c837a2b1d602119bd408b6b54db805c70",
     )
     with pytest.raises(ValueError, match="severity=high"):
         build_immediate_candidate_enqueue(low_event)
@@ -164,7 +164,7 @@ def test_immediate_high_severity_drift_requires_high_drift_payload():
         card_type="drift",
         title="High severity drift",
         typed_payload=_drift_payload(severity="high"),
-        content_hash="sha256:drift2",
+        content_hash="sha256:be4b2ee0bd3f226af6253016b74f671b4b8844c147d50293cdec65be295f5b93",
     )
     record = build_immediate_candidate_enqueue(high_event)
 

@@ -54,6 +54,12 @@ from agent_knowledge.postgres_store.dual_read_shadow import (
     DualReadShadowHarness,
 )
 
+PG_DSN = os.environ.get("LBRAIN_TEST_PG_DSN", "")
+live_pg = pytest.mark.skipif(
+    not PG_DSN,
+    reason="LBRAIN_TEST_PG_DSN 미설정 (전용 live PostgreSQL integration gate)",
+)
+
 
 def _service(tmp_path: Path) -> KnowledgeSearchService:
     private = tmp_path / "private"
@@ -185,9 +191,10 @@ def test_tier5_adversarial_extreme_payload_truncation():
 # 3. High-Concurrency CAS Race Stress (10 Mutating Threads vs 5 Workers)
 # ==============================================================================
 
+@live_pg
 def test_tier5_adversarial_high_concurrency_cas_stress():
     """10 mutator threads updating cards concurrently with 5 outbox worker threads."""
-    store = PgVectorStore(use_in_memory=True)
+    store = PgVectorStore(dsn=PG_DSN)
     store.execute_ddl()
 
     # Create 20 initial cards
@@ -249,9 +256,10 @@ def test_tier5_adversarial_high_concurrency_cas_stress():
 # 4. Multi-Hop Cycle & Diamond DAG Provenance Traversal
 # ==============================================================================
 
+@live_pg
 def test_tier5_adversarial_deep_cyclic_provenance_dag():
     """Traverses complex multi-hop DAG with diamond convergence, cycles, and temporal filters."""
-    store = PgVectorStore(use_in_memory=True)
+    store = PgVectorStore(dsn=PG_DSN)
     store.execute_ddl()
 
     # Create nodes: R -> A1, R -> A2; A1 -> B, A2 -> B (diamond); B -> C -> D -> E -> R (cycle!)
@@ -313,6 +321,7 @@ def test_tier5_adversarial_deep_cyclic_provenance_dag():
 # 5. Full End-to-End Migration & Dual-Read Cutover Verification
 # ==============================================================================
 
+@live_pg
 def test_tier5_adversarial_full_backfill_and_dual_read_cutover():
     """Simulates full zero-downtime cutover: migrate 100 items and verify Recall@5 >= 0.95."""
     class SourceQdrant:
@@ -340,7 +349,7 @@ def test_tier5_adversarial_full_backfill_and_dual_read_cutover():
                 self.vectors[f"card_{i}"] = card_data
 
     source_qdrant = SourceQdrant()
-    pg_target = PgVectorStore(use_in_memory=True)
+    pg_target = PgVectorStore(dsn=PG_DSN)
     pg_target.execute_ddl()
 
     # Step 1: Run Backfill Migration

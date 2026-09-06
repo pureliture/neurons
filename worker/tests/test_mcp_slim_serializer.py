@@ -168,26 +168,23 @@ def test_schema_rationalization_absence_of_legacy_keys():
 
 def test_dispatch_brain_resolve_tool_integration():
     mock_service = MagicMock()
-    mock_service.ledger.list_llm_brain_memory_cards.return_value = [
-        {
-            "memory_id": "mem_test_1",
-            "card_type": "decision",
-            "title": "PostgreSQL Convergence",
-            "summary": "Converge storage on Postgres",
-            "typed_payload": {"decision": "Use PostgreSQL 17 + pgvector", "rationale": "Simplicity"},
-            "content_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "currentness": "current",
-        },
-        {
-            "memory_id": "mem_pref_1",
-            "card_type": "preference",
-            "title": "Use uv",
-            "summary": "Prefer uv for python run",
-            "typed_payload": {"rule": "uv run pytest", "scope": "testing"},
-            "content_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            "currentness": "current",
-        },
-    ]
+    def mock_resolve(**kwargs):
+        if kwargs.get("response_mode") == "with_evidence":
+            return {
+                "schema_version": "lbrain_evidence_context.v1",
+                "decisions": [{"id": "mem_test_1"}],
+                "preferences": [{"id": "mem_pref_1"}],
+                "evidence_hashes": ["sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+                "edges": [],
+                "source_refs": [],
+            }
+        return {
+            "schema_version": "lbrain_slim_context.v1",
+            "decisions": [{"id": "mem_test_1"}],
+            "preferences": [{"id": "mem_pref_1"}],
+        }
+
+    mock_service.brain_memory_resolve.side_effect = mock_resolve
 
     res_slim = _dispatch_brain_resolve_tool(
         "brain.resolve",

@@ -1,3 +1,9 @@
+"""Tier 3 Feature Combination Coverage Test Suite (Simulation).
+
+Pure simulation suite running against InMemoryPostgresStore, InMemoryQdrantStore,
+and MockMCPServer with isolated legacy 1536-dim simulation profile.
+"""
+
 from __future__ import annotations
 
 import json
@@ -16,6 +22,8 @@ from .conftest import (
     make_dummy_vector,
     sha256_str,
 )
+
+pytestmark = [pytest.mark.simulation, pytest.mark.legacy_profile]
 
 
 def test_tier3_01_f1_f4_f6_slim_rationalized_query(mcp_server: MockMCPServer, pg_store: InMemoryPostgresStore):

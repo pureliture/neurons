@@ -1,3 +1,9 @@
+"""Tier 4 End-to-End Persona Scenario Coverage Test Suite (Simulation).
+
+Pure simulation suite running against InMemoryPostgresStore, InMemoryQdrantStore,
+and MockMCPServer with isolated legacy 1536-dim simulation profile.
+"""
+
 from __future__ import annotations
 
 import json
@@ -18,6 +24,8 @@ from .conftest import (
     make_dummy_vector,
     sha256_str,
 )
+
+pytestmark = [pytest.mark.simulation, pytest.mark.legacy_profile]
 
 
 def test_tier4_scenario_1_developer_feature_implementation_cycle(

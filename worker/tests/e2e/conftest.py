@@ -1,3 +1,13 @@
+"""Shared test fixtures and in-memory simulation doubles for E2E suites.
+
+Note:
+    Tier 1-4 tests run as pure simulations against InMemoryPostgresStore,
+    InMemoryQdrantStore, and MockMCPServer.
+    The default vector dimension (1536) and embedding model ('text-embedding-3-small')
+    represent the isolated legacy simulation profile, kept distinct from the
+    shared 3072-dim profile used in live production stores.
+"""
+
 from __future__ import annotations
 
 import base64
@@ -11,6 +21,19 @@ from datetime import datetime, timezone
 from typing import Any
 
 import pytest
+
+# Legacy simulation profile (isolated from shared 3072-dim profile)
+LEGACY_SIMULATION_EMBEDDING_DIM = 1536
+LEGACY_SIMULATION_EMBEDDING_MODEL = "text-embedding-3-small"
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers", "simulation: mark test as pure simulation suite (InMemory stores/Mock MCP)"
+    )
+    config.addinivalue_line(
+        "markers", "legacy_profile: mark test as using isolated legacy 1536-dim profile"
+    )
 
 
 def sha256_str(content: str) -> str:
@@ -28,7 +51,7 @@ def compute_cosine_similarity(v1: list[float], v2: list[float]) -> float:
     return max(0.0, min(1.0, dot / (norm1 * norm2)))
 
 
-def make_dummy_vector(seed: int, dim: int = 1536) -> list[float]:
+def make_dummy_vector(seed: int, dim: int = LEGACY_SIMULATION_EMBEDDING_DIM) -> list[float]:
     # Deterministic unit vector
     vec = [(math.sin(seed * 1000 + i) + 1.0) / 2.0 for i in range(dim)]
     norm = math.sqrt(sum(x * x for x in vec))
@@ -51,7 +74,7 @@ class MemoryCard:
     confidence: float = 1.0
     valid_from: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     valid_to: datetime | None = None
-    embedding_model: str = "text-embedding-3-small"
+    embedding_model: str = LEGACY_SIMULATION_EMBEDDING_MODEL
     embedding_revision: int = 1
     embedding_state: str = "pending"  # 'pending', 'ready', 'stale', 'failed'
     embedding: list[float] | None = None
@@ -122,8 +145,8 @@ class InMemoryPostgresStore:
         self.local_guc[name] = val
 
     def insert_card(self, card: MemoryCard) -> str:
-        if card.embedding is not None and len(card.embedding) != 1536:
-            raise ValueError(f"Vector dimension mismatch: expected 1536, got {len(card.embedding)}")
+        if card.embedding is not None and len(card.embedding) != LEGACY_SIMULATION_EMBEDDING_DIM:
+            raise ValueError(f"Vector dimension mismatch: expected {LEGACY_SIMULATION_EMBEDDING_DIM}, got {len(card.embedding)}")
         if card.valid_to and card.valid_to < card.valid_from:
             raise ValueError("valid_to cannot be earlier than valid_from")
         if card.lifecycle_state not in ("candidate", "human_accepted"):
@@ -154,8 +177,8 @@ class InMemoryPostgresStore:
             del self.cards[memory_id]
 
     def insert_chunk(self, chunk: SessionChunk) -> str:
-        if chunk.embedding is not None and len(chunk.embedding) != 1536:
-            raise ValueError(f"Vector dimension mismatch: expected 1536, got {len(chunk.embedding)}")
+        if chunk.embedding is not None and len(chunk.embedding) != LEGACY_SIMULATION_EMBEDDING_DIM:
+            raise ValueError(f"Vector dimension mismatch: expected {LEGACY_SIMULATION_EMBEDDING_DIM}, got {len(chunk.embedding)}")
         self.chunks[chunk.chunk_id] = copy.deepcopy(chunk)
         return chunk.chunk_id
 

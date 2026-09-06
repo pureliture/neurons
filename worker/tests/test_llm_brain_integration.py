@@ -21,7 +21,7 @@ def _source_span(**overrides):
     span = {
         "source_ref": {"source_id": "src_integration"},
         "span_ref": {"span_id": "span_integration"},
-        "content_hash": "sha256:integration",
+        "content_hash": "sha256:eb92cc52a766c500e001d02f1eaa78784da47f8c96b019ce874d3e3c205b4e3c",
         "brain_id": f"/project/{PROJECT}",
         "card_type": "task",
         "scope": "project",
@@ -56,7 +56,7 @@ def _suggested_accept_candidate(**overrides):
         evidence={
             "evidence_kind": "commit",
             "decision_id": "decision_integration_auto",
-            "content_hash": "sha256:integration-auto-evidence",
+            "content_hash": "sha256:1f2e7bfae84976edc529a77c43e4a1d6b84721b1b8620ff9e2e1136abde24d01",
             "source_ref": {"evidence_id": "commit_integration_auto"},
         },
         decision_id="decision_integration_auto",
@@ -95,7 +95,7 @@ def test_human_approved_candidate_is_canonical_in_ledger_and_queryable(tmp_path)
     service = LLMBrainMemoryService(ledger)
 
     candidate = _candidate()
-    candidate["content_hash"] = "sha256:caller-controlled-stale-hash"
+    candidate["content_hash"] = "sha256:d7877402100b6cc1d3f09b6074388a6a5399e6d32c6ef505a906eb270e3d309d"
     committed = service.accept_human_approved_candidate(
         candidate,
         approved_by="ddalkak",
@@ -108,7 +108,7 @@ def test_human_approved_candidate_is_canonical_in_ledger_and_queryable(tmp_path)
     assert committed["canonical_write_performed"] is True
     assert stored["lifecycle_state"] == "human_accepted"
     assert stored["content_hash"].startswith("sha256:")
-    assert stored["content_hash"] != "sha256:caller-controlled-stale-hash"
+    assert stored["content_hash"] != "sha256:d7877402100b6cc1d3f09b6074388a6a5399e6d32c6ef505a906eb270e3d309d"
     assert stored["card_hash"] == stored["content_hash"]
     assert ledger.list_llm_brain_feedback_records(memory_id=stored["memory_id"])[0]["user_action"] == "approve"
 
