@@ -20,7 +20,7 @@ class EmbeddingSpec:
     provider: str = "openai"
     model: str = ""
     base_url: str = field(default="", repr=False)
-    dim: int = 1024
+    dim: int = 3072
 
 
 @dataclass(frozen=True)

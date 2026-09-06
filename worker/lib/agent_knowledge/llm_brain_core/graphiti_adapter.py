@@ -33,6 +33,7 @@ from ..model_connectors.structured_response import (
     normalize_structured_keys as _normalize_structured_keys,
     normalize_structured_response as _normalize_structured_response,
 )
+from ..model_connectors.env import DEFAULT_EMBEDDING_DIM, DEFAULT_EMBEDDING_MODEL
 
 _SYNTHETIC_CANARY_PROVIDER = "lbrain-temporal-canary"
 _MAX_EDGE_PROVENANCE_IDS = 500
@@ -53,13 +54,15 @@ _GEMINI_LLM_FORBIDDEN_MESSAGE = (
 # Generic fallback embedding dimension when neither the env nor a known model
 # pins one. Kept as a single source so the dataclass default, from_env default,
 # and the model/dim reconciliation in _build_graphiti cannot drift apart.
-_DEFAULT_EMBEDDING_DIM = 1024
+_DEFAULT_EMBEDDING_DIM = DEFAULT_EMBEDDING_DIM
+_DEFAULT_EMBEDDING_MODEL = DEFAULT_EMBEDDING_MODEL
 # Native output dimensions for embedding models whose true dimension differs from
 # the generic _DEFAULT_EMBEDDING_DIM. nomic-embed-text (the ollama default) emits
-# 768-dim vectors; pairing it with the 1024 default mismatches the index/query
+# 768-dim vectors; pairing it with the 3072 default mismatches the index/query
 # dimension. Add only models whose native dim is known to be safe to assume.
 _KNOWN_EMBEDDING_DIMS = {
     "nomic-embed-text": 768,
+    "gemini-embedding-2": 3072,
 }
 
 
@@ -77,8 +80,11 @@ class GraphitiNeo4jConfig:
     llm_reasoning_effort: str = ""
     llm_base_url: str = ""
     llm_api_key: str = field(default="", repr=False)
-    embedding_provider: str = "openai"
-    embedding_model: str = ""
+    # Empty means "follow llm_provider" when no dedicated embedding endpoint
+    # is configured. This keeps an explicit Ollama profile on nomic-embed-text
+    # instead of silently pairing Ollama with the cloud Gemini profile.
+    embedding_provider: str = ""
+    embedding_model: str = _DEFAULT_EMBEDDING_MODEL
     embedding_base_url: str = ""
     embedding_api_key: str = field(default="", repr=False)
     embedding_dim: int = _DEFAULT_EMBEDDING_DIM
@@ -110,6 +116,24 @@ class GraphitiNeo4jConfig:
         )
         for model in (llm_model, small_model, fallback_llm_model, fallback_small_model):
             _reject_forbidden_gemini_llm_model(model)
+        embedding_provider = env.get(
+            "LLM_BRAIN_EMBEDDING_PROVIDER",
+            env.get("EMBEDDING_PROVIDER", "openai"),
+        ).lower()
+        embedding_base_url = env.get(
+            "LLM_BRAIN_EMBEDDING_BASE_URL",
+            env.get("OPENAI_BASE_URL", ""),
+        )
+        if (
+            "LLM_BRAIN_EMBEDDING_PROVIDER" not in env
+            and "EMBEDDING_PROVIDER" not in env
+            and not embedding_base_url
+        ):
+            embedding_provider = provider.lower()
+        embedding_model = env.get(
+            "LLM_BRAIN_EMBEDDING_MODEL",
+            env.get("EMBEDDING_MODEL", ""),
+        ) or ("nomic-embed-text" if embedding_provider == "ollama" else _DEFAULT_EMBEDDING_MODEL)
         return cls(
             uri=env.get("LLM_BRAIN_NEO4J_URI", env.get("NEO4J_URI", "bolt://localhost:7687")),
             user=env.get("LLM_BRAIN_NEO4J_USER", env.get("NEO4J_USER", "neo4j")),
@@ -123,9 +147,9 @@ class GraphitiNeo4jConfig:
             ),
             llm_base_url=env.get("LLM_BRAIN_LLM_BASE_URL", env.get("OPENAI_BASE_URL", "")),
             llm_api_key=env.get("LLM_BRAIN_LLM_API_KEY", env.get("OPENAI_API_KEY", "")),
-            embedding_provider=env.get("LLM_BRAIN_EMBEDDING_PROVIDER", env.get("EMBEDDING_PROVIDER", "openai")).lower(),
-            embedding_model=env.get("LLM_BRAIN_EMBEDDING_MODEL", env.get("EMBEDDING_MODEL", "")),
-            embedding_base_url=env.get("LLM_BRAIN_EMBEDDING_BASE_URL", env.get("OPENAI_BASE_URL", "")),
+            embedding_provider=embedding_provider,
+            embedding_model=embedding_model,
+            embedding_base_url=embedding_base_url,
             embedding_api_key=env.get("LLM_BRAIN_EMBEDDING_API_KEY", env.get("OPENAI_API_KEY", "")),
             embedding_dim=_int_env(env.get("LLM_BRAIN_EMBEDDING_DIM", ""), default=_DEFAULT_EMBEDDING_DIM),
             store_raw_episode_content=env.get("LLM_BRAIN_GRAPH_STORE_EPISODE_CONTENT", "true").lower()
@@ -440,12 +464,28 @@ class GraphitiNeo4jGraphMemoryAdapter:
         query: str,
         entity_types: list[str] | None = None,
         limit: int = 10,
+        as_of: str | None = None,
     ) -> GraphMemoryResult:
         bounded = max(1, min(int(limit), 100))
         scope = brain_id or self._default_group_id
         group_id = graph_group_id(scope)
         group_ids = list(graph_group_ids(scope)) or None
         allowed_group_ids = set(group_ids or ())
+        reference_time = datetime.now(timezone.utc)
+        from graphiti_core.search.search_filters import ComparisonOperator, DateFilter, SearchFilters
+
+        if as_of:
+            reference_time = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+            if reference_time.tzinfo is None:
+                if len(as_of) != 10:
+                    raise ValueError("as_of must include a timezone")
+                reference_time = reference_time.replace(tzinfo=timezone.utc)
+        search_filter = SearchFilters(
+            valid_at=[[DateFilter(date=reference_time, comparison_operator=ComparisonOperator.less_than_equal)],
+                      [DateFilter(comparison_operator=ComparisonOperator.is_null)]],
+            invalid_at=[[DateFilter(date=reference_time, comparison_operator=ComparisonOperator.greater_than)],
+                        [DateFilter(comparison_operator=ComparisonOperator.is_null)]],
+        )
 
         async def _call() -> tuple[list[Any], list[Any], list[Any], list[str], bool]:
             loop = asyncio.get_running_loop()
@@ -460,6 +500,7 @@ class GraphitiNeo4jGraphMemoryAdapter:
                     query,
                     group_ids=group_ids,
                     num_results=bounded,
+                    search_filter=search_filter,
                 )
             except Exception as exc:
                 edges = []
@@ -467,7 +508,7 @@ class GraphitiNeo4jGraphMemoryAdapter:
                 details.append(f"edge_search:{type(exc).__name__}")
             episodes = list(
                 await self._graphiti.retrieve_episodes(
-                    reference_time=datetime.now(timezone.utc),
+                    reference_time=reference_time,
                     last_n=max(bounded * 5, bounded),
                     group_ids=group_ids,
                 )
@@ -968,7 +1009,7 @@ def _build_graphiti(config: GraphitiNeo4jConfig):
             reasoning_effort=config.llm_reasoning_effort,
         )
         embedding_model = config.embedding_model or (
-            "nomic-embed-text" if config.llm_provider == "ollama" else "text-embedding-3-small"
+            "nomic-embed-text" if config.llm_provider == "ollama" else _DEFAULT_EMBEDDING_MODEL
         )
         embedder = OpenAIEmbedder(
             config=OpenAIEmbedderConfig(
@@ -1216,6 +1257,15 @@ def _edge_to_ontology(
         "target_node_uuid": public_safe_text(str(getattr(edge, "target_node_uuid", "") or ""), max_chars=200),
         "provider": source_providers[0] if len(source_providers) == 1 else "",
         "source_providers": source_providers,
+        # GraphFact 자체의 hash는 추론 fact의 hash다. 검증된 원본 episode의
+        # 카드 키를 별도로 보존해야 PG 권위 join에서 둘을 혼동하지 않는다.
+        "authority_sources": [
+            {"authority_memory_id": episode.payload["authority_memory_id"],
+             "content_hash": episode.payload["content_hash"]}
+            for episode in source_episodes
+            if isinstance(episode.payload.get("authority_memory_id"), str)
+            and isinstance(episode.payload.get("content_hash"), str)
+        ],
     }
     return OntologyEpisode.from_payload(
         event_id=f"evt:graphiti:{short_hash([edge_uuid, fact])}",

@@ -134,148 +134,159 @@ def test_selector_rejects_supplied_malformed_evidence_bound(
     ) is False
 
 
-@pytest.mark.parametrize(
-    "selector",
-    [
-        {"as_of": "2026-07-09T12:00:00Z"},
-        {"date_from": "2026-07-09T00:00:00Z"},
-        {"date_to": "2026-07-15T23:59:59Z"},
-        {
-            "date_from": "2026-07-09T00:00:00Z",
-            "date_to": "2026-07-15T23:59:59Z",
-        },
-    ],
+@pytest.mark.skip(
+    reason="obsolete M3 surface: brain.query and brain_objects_query removed from public agent MCP surface (M3 2-tier cutover)"
 )
-def test_mcp_brain_objects_query_forwards_temporal_selectors(selector: dict[str, str]) -> None:
-    service = _RecordingObjectQueryService()
+class TestObsoleteMcpQuerySurface:
+    """OBSOLETE (M6c): Tests assuming brain.query or brain_objects_query on public agent surface.
 
-    response = _mcp_object_query(service, **selector)
+    In M3, public agent MCP surface was restricted to brain.resolve and memory_candidate_create.
+    Kept as inventory, not executed.
+    """
 
-    assert "error" not in response
-    assert service.calls
-    assert set(selector).issubset(service.calls[0])
-    for field, value in selector.items():
-        assert service.calls[0][field] == value
+    @staticmethod
+    @pytest.mark.parametrize(
+        "selector",
+        [
+            {"as_of": "2026-07-09T12:00:00Z"},
+            {"date_from": "2026-07-09T00:00:00Z"},
+            {"date_to": "2026-07-15T23:59:59Z"},
+            {
+                "date_from": "2026-07-09T00:00:00Z",
+                "date_to": "2026-07-15T23:59:59Z",
+            },
+        ],
+    )
+    def test_mcp_brain_objects_query_forwards_temporal_selectors(selector: dict[str, str]) -> None:
+        service = _RecordingObjectQueryService()
 
+        response = _mcp_object_query(service, **selector)
 
-@pytest.mark.parametrize(
-    "selector",
-    [
-        {"date_from": "2026-07-09T00:00:00Z"},
-        {"date_to": "2026-07-15T23:59:59Z"},
-    ],
-)
-def test_mcp_brain_query_forwards_open_ended_temporal_selector(
-    selector: dict[str, str],
-) -> None:
-    service = _RecordingBrainQueryService()
+        assert "error" not in response
+        assert service.calls
+        assert set(selector).issubset(service.calls[0])
+        for field, value in selector.items():
+            assert service.calls[0][field] == value
 
-    response = handle_jsonrpc_message(
-        {
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/call",
-            "params": {
-                "name": BRAIN_QUERY_TOOL_NAME,
-                "arguments": {
-                    "brain_id": "/project/neurons",
-                    "query": "temporal migration",
-                    **selector,
+    @staticmethod
+    @pytest.mark.parametrize(
+        "selector",
+        [
+            {"date_from": "2026-07-09T00:00:00Z"},
+            {"date_to": "2026-07-15T23:59:59Z"},
+        ],
+    )
+    def test_mcp_brain_query_forwards_open_ended_temporal_selector(
+        selector: dict[str, str],
+    ) -> None:
+        service = _RecordingBrainQueryService()
+
+        response = handle_jsonrpc_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": BRAIN_QUERY_TOOL_NAME,
+                    "arguments": {
+                        "brain_id": "/project/neurons",
+                        "query": "temporal migration",
+                        **selector,
+                    },
                 },
             },
-        },
-        service,
+            service,
+        )
+
+        assert "error" not in response
+        assert service.calls
+        for field, value in selector.items():
+            assert service.calls[0][field] == value
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        "selector",
+        [
+            {
+                "as_of": "2026-07-09T10:00:00Z",
+                "date_from": "2026-07-09T00:00:00Z",
+            },
+            {"as_of": "2026-07-09T10:00:00"},
+            {"date_to": "2026-07-09T10:00:00"},
+        ],
     )
+    def test_mcp_brain_query_rejects_conflicting_or_offsetless_temporal_selector(
+        selector: dict[str, str],
+    ) -> None:
+        service = _RecordingBrainQueryService()
 
-    assert "error" not in response
-    assert service.calls
-    for field, value in selector.items():
-        assert service.calls[0][field] == value
-
-
-@pytest.mark.parametrize(
-    "selector",
-    [
-        {
-            "as_of": "2026-07-09T10:00:00Z",
-            "date_from": "2026-07-09T00:00:00Z",
-        },
-        {"as_of": "2026-07-09T10:00:00"},
-        {"date_to": "2026-07-09T10:00:00"},
-    ],
-)
-def test_mcp_brain_query_rejects_conflicting_or_offsetless_temporal_selector(
-    selector: dict[str, str],
-) -> None:
-    service = _RecordingBrainQueryService()
-
-    response = handle_jsonrpc_message(
-        {
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "tools/call",
-            "params": {
-                "name": BRAIN_QUERY_TOOL_NAME,
-                "arguments": {
-                    "brain_id": "/project/neurons",
-                    "query": "temporal migration",
-                    **selector,
+        response = handle_jsonrpc_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": BRAIN_QUERY_TOOL_NAME,
+                    "arguments": {
+                        "brain_id": "/project/neurons",
+                        "query": "temporal migration",
+                        **selector,
+                    },
                 },
             },
-        },
-        service,
+            service,
+        )
+
+        assert response["error"]["code"] == -32602
+        assert service.calls == []
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        "selector",
+        [
+            {"as_of": "not-an-iso-date"},
+            {
+                "date_from": "2026-07-16T00:00:00Z",
+                "date_to": "2026-07-15T23:59:59Z",
+            },
+        ],
     )
+    def test_mcp_brain_objects_query_rejects_invalid_temporal_selectors(
+        selector: dict[str, str],
+    ) -> None:
+        service = _RecordingObjectQueryService()
 
-    assert response["error"]["code"] == -32602
-    assert service.calls == []
+        response = _mcp_object_query(service, **selector)
 
+        assert "error" in response
+        assert response["error"]["code"] == -32602
+        assert service.calls == []
 
-@pytest.mark.parametrize(
-    "selector",
-    [
-        {"as_of": "not-an-iso-date"},
-        {
-            "date_from": "2026-07-16T00:00:00Z",
-            "date_to": "2026-07-15T23:59:59Z",
-        },
-    ],
-)
-def test_mcp_brain_objects_query_rejects_invalid_temporal_selectors(
-    selector: dict[str, str],
-) -> None:
-    service = _RecordingObjectQueryService()
+    @staticmethod
+    def test_mcp_temporal_selector_rejects_a_conflicting_non_temporal_route() -> None:
+        service = _RecordingObjectQueryService()
 
-    response = _mcp_object_query(service, **selector)
-
-    assert "error" in response
-    assert response["error"]["code"] == -32602
-    assert service.calls == []
-
-
-def test_mcp_temporal_selector_rejects_a_conflicting_non_temporal_route() -> None:
-    service = _RecordingObjectQueryService()
-
-    response = handle_jsonrpc_message(
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
-                "arguments": {
-                    "repository": "neurons",
-                    "branch": "main",
-                    "query": "deployment migration",
-                    "route": "documentation_cleanup",
-                    "as_of": "2026-07-15T10:30:00Z",
+        response = handle_jsonrpc_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": BRAIN_OBJECTS_QUERY_TOOL_NAME,
+                    "arguments": {
+                        "repository": "neurons",
+                        "branch": "main",
+                        "query": "deployment migration",
+                        "route": "documentation_cleanup",
+                        "as_of": "2026-07-15T10:30:00Z",
+                    },
                 },
             },
-        },
-        service,
-    )
+            service,
+        )
 
-    assert response["error"]["code"] == -32602
-    assert service.calls == []
+        assert response["error"]["code"] == -32602
+        assert service.calls == []
 
 
 def test_explicit_temporal_selector_routes_to_temporal_recall_when_route_is_omitted() -> None:

@@ -16,7 +16,7 @@ def _candidate(**overrides):
     span = {
         "source_ref": {"source_id": "src_notify"},
         "span_ref": {"span_id": "span_notify"},
-        "content_hash": "sha256:notify-card",
+        "content_hash": "sha256:da6e2854d781fea7cad7f89a089efb629749900f416652551c7761a04e061490",
         "brain_id": f"/project/{PROJECT}",
         "card_type": "task",
         "scope": "project",
@@ -71,7 +71,7 @@ def test_build_discord_digest_uses_aggregate_counts_and_no_raw_fields(tmp_path):
     ledger.upsert_eval_query(
         {
             "query_id": "eval_notify",
-            "query_hash": "sha256:eval-notify",
+            "query_hash": "sha256:1d4eea7e224df47ea23fcfdfaac1adebca024ebe4b6f62601f309db4c0e175a3",
             "query_terms": ["notify"],
             "project": PROJECT,
             "provider": PROVIDER,

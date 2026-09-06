@@ -53,6 +53,16 @@ class EmbeddingSemanticRanker:
         if callable(close):
             close()
 
+    def embed_query(self, query: str) -> list[float]:
+        """Return the query vector for a database-backed semantic search.
+
+        ``__call__`` remains the legacy in-process card ranker. The
+        rationalized pgvector path only needs the query embedding; PostgreSQL
+        ranks the persisted card vectors server-side.
+        """
+
+        return list(self._embed(str(query or "")))
+
     def _embed(self, text: str) -> list[float]:
         key = str(text or "")
         if key not in self._cache:

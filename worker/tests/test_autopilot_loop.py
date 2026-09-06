@@ -12,7 +12,7 @@ def _candidate(**overrides):
     span = {
         "source_ref": {"source_id": "src"},
         "span_ref": {"span_id": "span"},
-        "content_hash": "sha256:x",
+        "content_hash": "sha256:2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
         "brain_id": f"/project/{PROJECT}",
         "card_type": "task",
         "scope": "project",
@@ -41,7 +41,7 @@ def test_cycle_accepts_clean_and_routes_blocked_to_review(tmp_path):
     blocked = _candidate(
         source_ref={"source_id": "src2"},
         span_ref={"span_id": "span2"},
-        content_hash="sha256:y",
+        content_hash="sha256:a1fce4363854ff888cff4b8e7875d600c2682390412a8cf79b37d0b11148b0fa",
     )
     blocked["conflicts"] = [{"memory_id": "other", "reason": "contradicts"}]
 
@@ -73,7 +73,7 @@ def test_cycle_projects_accepted_and_superseded_cards_to_mirror(tmp_path):
     new_candidate = _candidate(
         source_ref={"source_id": "src_new"},
         span_ref={"span_id": "span_new"},
-        content_hash="sha256:new",
+        content_hash="sha256:11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437",
         redacted_summary="Auth now uses OAuth.",
     )
     result = run_autopilot_cycle(
@@ -107,7 +107,7 @@ def test_cycle_supersedes_when_detector_returns_old_card(tmp_path):
     new_candidate = _candidate(
         source_ref={"source_id": "src_new"},
         span_ref={"span_id": "span_new"},
-        content_hash="sha256:new",
+        content_hash="sha256:11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437",
         redacted_summary="Auth now uses OAuth.",
     )
 

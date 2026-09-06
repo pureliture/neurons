@@ -10,7 +10,7 @@ def _chunk():
     return {
         "redacted_text": "We switched auth from JWT to OAuth this week.",
         "knowledge_id": "k1",
-        "content_hash": "sha256:c1",
+        "content_hash": "sha256:" + "c" * 64,
         "project": PROJECT,
         "provider": "codex",
     }
@@ -41,7 +41,7 @@ def _real_index_chunk():
     # top-level {content, content_hash, metadata{...}}, NOT a flat redacted_text/knowledge_id dict.
     return {
         "content": "We switched auth from JWT to OAuth this week.",
-        "content_hash": "sha256:c1",
+        "content_hash": "sha256:" + "c" * 64,
         "metadata": {
             "knowledge_id": "kid-1",
             "project": "workspace-index-advisor",

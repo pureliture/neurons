@@ -20,7 +20,7 @@ def _source_span(**overrides):
     span = {
         "source_ref": {"source_id": "src_promotion"},
         "span_ref": {"span_id": "span_promotion"},
-        "content_hash": "sha256:promotion",
+        "content_hash": "sha256:adb8457527ddcdc802d8d6acead8f0ff96e72562bf4b22a2792c909d62f889b6",
         "brain_id": f"/project/{PROJECT}",
         "card_type": "decision",
         "scope": "project",
@@ -95,7 +95,7 @@ def test_accepted_evidence_creates_suggested_accept_not_current_truth():
         evidence={
             "evidence_kind": "commit",
             "decision_id": "decision_3",
-            "content_hash": "sha256:commit",
+            "content_hash": "sha256:9505cacb7c710ed17125fcc6cb3669e8ddca6c8cd8af6a31f6b3cd64604c3098",
             "source_ref": {"source_id": "commit_123"},
         },
         decision_id="decision_3",
@@ -111,7 +111,7 @@ def test_accepted_evidence_creates_suggested_accept_not_current_truth():
     assert suggested["judgment_state"] == "suggested_status"
     assert suggested["approval_state"] == "suggested"
     assert suggested["currentness"] == "unknown"
-    assert "sha256:commit" in suggested["evidence_hashes"]
+    assert "sha256:9505cacb7c710ed17125fcc6cb3669e8ddca6c8cd8af6a31f6b3cd64604c3098" in suggested["evidence_hashes"]
     assert suggested["reason_capsule"]["review_block_reason"] == "initial_policy_human_approval_required"
 
 
@@ -119,7 +119,7 @@ def test_accepted_evidence_rejects_unknown_or_unhashed_evidence():
     with pytest.raises(ValueError, match="accepted evidence"):
         suggest_accept_from_evidence(
             _candidate(),
-            evidence={"evidence_kind": "slack_message", "content_hash": "sha256:x"},
+            evidence={"evidence_kind": "slack_message", "content_hash": "sha256:2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"},
             decision_id="decision_3",
         )
     with pytest.raises(ValueError, match="sha256"):
@@ -131,7 +131,7 @@ def test_accepted_evidence_rejects_unknown_or_unhashed_evidence():
     with pytest.raises(ValueError, match="decision_id"):
         suggest_accept_from_evidence(
             _candidate(),
-            evidence={"evidence_kind": "commit", "decision_id": "other", "content_hash": "sha256:x"},
+            evidence={"evidence_kind": "commit", "decision_id": "other", "content_hash": "sha256:2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"},
             decision_id="decision_3",
         )
 

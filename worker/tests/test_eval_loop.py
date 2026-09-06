@@ -17,7 +17,7 @@ def _candidate(**overrides):
     span = {
         "source_ref": {"source_id": "src_eval"},
         "span_ref": {"span_id": "span_eval"},
-        "content_hash": "sha256:eval-card",
+        "content_hash": "sha256:44af084ee2ecc906fb8d8106e882cda8f3b9635e60593b2c83b1776d05a0eef1",
         "brain_id": f"/project/{PROJECT}",
         "card_type": "task",
         "scope": "project",
@@ -69,7 +69,7 @@ def test_enabled_eval_queries_write_eval_run_and_retrieval_audit(tmp_path):
     ledger.upsert_eval_query(
         {
             "query_id": "eval_current_task",
-            "query_hash": "sha256:eval-current-task",
+            "query_hash": "sha256:3e5bd75609c717be03ed8b66586e62d59409285b9146663310d3f70cd07ddd64",
             "query_terms": ["eval", "loop", "current", "task"],
             "project": PROJECT,
             "provider": PROVIDER,
@@ -109,7 +109,7 @@ def test_enabled_eval_queries_write_eval_run_and_retrieval_audit(tmp_path):
     assert run["mutation_performed"] == 1
 
     audit = ledger.list_retrieval_audit()[0]
-    assert audit["query_hash"] == "sha256:eval-current-task"
+    assert audit["query_hash"] == "sha256:3e5bd75609c717be03ed8b66586e62d59409285b9146663310d3f70cd07ddd64"
     assert audit["result_count"] >= 1
     assert audit["private_allowed"] == 0
 
@@ -127,7 +127,7 @@ def test_eval_loop_passes_structured_query_terms_to_query_runner(tmp_path):
     ledger.upsert_eval_query(
         {
             "query_id": "eval_phrase_terms",
-            "query_hash": "sha256:eval-phrase-terms",
+            "query_hash": "sha256:dd28b58ead8646c93c30426e907213c3c5a4e3805e4d3c2cbfefccf762be7f7d",
             "query_terms": ["neurons", "live mutation", "approval gate", "dry-run"],
             "project": PROJECT,
             "provider": PROVIDER,
@@ -164,7 +164,7 @@ def test_eval_loop_passes_semantic_ranker_and_marks_network_used(tmp_path):
     ledger.upsert_eval_query(
         {
             "query_id": "eval_semantic_rank",
-            "query_hash": "sha256:eval-semantic-rank",
+            "query_hash": "sha256:5ecc23c982a478bce4929d0eaf1796d5b35dd24c3bb4e87c9ef4bea7e8dedce6",
             "query_terms": ["eval", "semantic", "rank"],
             "project": PROJECT,
             "provider": PROVIDER,
@@ -207,7 +207,7 @@ def test_eval_cli_returns_success_when_eval_fails_but_storage_succeeds(tmp_path,
     ledger.upsert_eval_query(
         {
             "query_id": "eval_expected_missing",
-            "query_hash": "sha256:eval-expected-missing",
+            "query_hash": "sha256:9ff35ba9cdd8ec83deddfa75a5fd276ba626de5fd754baadbcd6de1f70ab2c4d",
             "query_terms": ["eval", "loop", "current", "task"],
             "project": PROJECT,
             "provider": PROVIDER,
@@ -274,7 +274,7 @@ def test_eval_cli_semantic_rank_flag_builds_ranker_and_keeps_safe_stdout(tmp_pat
     ledger.upsert_eval_query(
         {
             "query_id": "eval_semantic_cli",
-            "query_hash": "sha256:eval-semantic-cli",
+            "query_hash": "sha256:506fcb236a7dd8f30a2e5c687225a4fb5f84db1425c5d89ccd3fb04b639896fa",
             "query_terms": ["eval", "loop", "implementation"],
             "project": PROJECT,
             "provider": PROVIDER,
@@ -329,7 +329,7 @@ def test_eval_loop_retains_only_latest_runs_and_prunes_owned_audit_rows(tmp_path
     ledger.upsert_eval_query(
         {
             "query_id": "eval_current_task",
-            "query_hash": "sha256:eval-current-task",
+            "query_hash": "sha256:3e5bd75609c717be03ed8b66586e62d59409285b9146663310d3f70cd07ddd64",
             "query_terms": ["eval", "loop", "current", "task"],
             "project": PROJECT,
             "provider": PROVIDER,

@@ -23,7 +23,7 @@ def _source_span(**overrides):
     span = {
         "source_ref": {"source_id": "src_projection"},
         "span_ref": {"span_id": "span_projection"},
-        "content_hash": "sha256:projection",
+        "content_hash": "sha256:1b250ea199bec73d392caad39d1167d6edc43c81f20edead86eea52c52b94fc1",
         "brain_id": f"/project/{PROJECT}",
         "card_type": "decision",
         "scope": "project",

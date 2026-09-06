@@ -28,7 +28,7 @@ def _default_kubernetes_pod_cidr(monkeypatch):
 
 
 class _StubService:
-    """`_call_tool`의 knowledge.search 경로가 호출하는 `.search`만 제공하는 stub."""
+    """공개 `brain.resolve` transport 경로만 제공하는 최소 stub."""
 
     def __init__(self, *, result=None, raises: BaseException | None = None, sleep: float = 0.0):
         self._result = result if result is not None else {"results": []}
@@ -40,13 +40,8 @@ class _StubService:
     def invalidate_brain_card_cache(self):
         self.invalidations += 1
 
-    def search(self, query, *, filters=None, limit=10, include_private=False):
-        self.last_kwargs = {
-            "query": query,
-            "filters": filters,
-            "limit": limit,
-            "include_private": include_private,
-        }
+    def brain_resolve(self, *, query):
+        self.last_kwargs = {"query": query}
         if self._sleep:
             time.sleep(self._sleep)
         if self._raises is not None:
@@ -57,15 +52,28 @@ class _StubService:
 # --- _to_sdk_tools: 스키마 무변형 매핑 ---
 
 
-def test_to_sdk_tools_maps_all_tools_without_mutation():
+def test_to_sdk_tools_maps_agent_tools_without_mutation():
     sdk_tools = mh._to_sdk_tools()
-    source = list_tools()
+    source = list_tools(surface="agent")
     assert len(sdk_tools) == len(source)
     assert {t.name for t in sdk_tools} == {t["name"] for t in source}
     by_name = {t["name"]: t for t in source}
     for tool in sdk_tools:
         # transport가 inputSchema를 변형하지 않음을 증명.
         assert tool.inputSchema == by_name[tool.name]["inputSchema"]
+
+
+def test_to_sdk_tools_defaults_to_exact_public_agent_surface():
+    assert {tool.name for tool in mh._to_sdk_tools()} == {
+        "brain.resolve",
+        "memory_candidate_create",
+    }
+
+
+@pytest.mark.parametrize("token", ["한" * 32, "a" * 31 + "\n", " " * 32])
+def test_admin_token_rejects_non_header_safe_secret(token):
+    with pytest.raises(ValueError, match="ASCII"):
+        mh.build_app(_StubService(), surface="admin", admin_token=token)
 
 
 # --- bind 가드 ---
@@ -320,6 +328,7 @@ def test_mcp_http_cli_accepts_proposal_only_steward_write_flag(monkeypatch):
 
     def _fake_serve(service, **kwargs):
         captured["served"] = True
+        captured.update(kwargs)
 
     monkeypatch.setattr(cli_mod, "_build_recall_service", _build_service)
     monkeypatch.setattr(mh, "serve", _fake_serve)
@@ -333,7 +342,26 @@ def test_mcp_http_cli_accepts_proposal_only_steward_write_flag(monkeypatch):
     )
 
     assert rc == 0
-    assert captured == {"allow_steward_proposals": True, "served": True}
+    assert captured["allow_steward_proposals"] is True
+    assert captured["served"] is True
+    assert captured["surface"] == "agent"
+    assert captured["admin_token"] is None
+
+
+def test_mcp_http_cli_passes_admin_token_without_printing_it(monkeypatch, capsys):
+    from agent_knowledge import cli as cli_mod
+
+    captured = {}
+    monkeypatch.setenv("LLM_BRAIN_ADMIN_TOKEN", "admin-token-with-at-least-thirty-two-characters")
+    monkeypatch.setattr(cli_mod, "_build_recall_service", lambda _args: _StubService())
+    monkeypatch.setattr(mh, "serve", lambda _service, **kwargs: captured.update(kwargs))
+
+    rc = cli_mod._mcp_http_main(["--ledger", "/tmp/placeholder.sqlite", "--surface", "admin"])
+
+    assert rc == 0
+    assert captured["surface"] == "admin"
+    assert captured["admin_token"] == "admin-token-with-at-least-thirty-two-characters"
+    assert "admin-token" not in capsys.readouterr().out
 
 
 def test_build_recall_service_defaults_to_read_only_ledger(monkeypatch, tmp_path):
@@ -442,6 +470,15 @@ def test_build_app_loopback_has_routes():
     assert paths == {"/healthz", "/mcp"}
 
 
+def test_build_app_rejects_invalid_admin_credentials_at_startup():
+    with pytest.raises(ValueError, match="at least 32"):
+        mh.build_app(_StubService(), surface="admin")
+    with pytest.raises(ValueError, match="fixed admin identity"):
+        mh.build_app(_StubService(), surface="admin", admin_token="lbrain_admin")
+    with pytest.raises(ValueError, match="agent or admin"):
+        mh.build_app(_StubService(), surface="all")
+
+
 # --- _healthz: 정적 200, service 미조회 ---
 
 
@@ -454,9 +491,9 @@ def test_healthz_static_ok():
 # --- _dispatch_call_tool: 위임 + 결과 매핑 ---
 
 
-def test_dispatch_delegates_and_maps_result():
+def test_dispatch_delegates_public_brain_resolve_and_maps_result():
     stub = _StubService(result={"results": [{"knowledge_id": "k1"}]})
-    res = asyncio.run(mh._dispatch_call_tool(stub, "knowledge.search", {"query": "hello"}))
+    res = asyncio.run(mh._dispatch_call_tool(stub, "brain.resolve", {"query": "hello"}))
     assert res.isError is False
     # structuredContent는 _call_tool의 _tool_result 출구를 그대로 통과.
     assert res.structuredContent == {"results": [{"knowledge_id": "k1"}]}
@@ -464,18 +501,23 @@ def test_dispatch_delegates_and_maps_result():
     assert "k1" in res.content[0].text
 
 
-def test_dispatch_passes_include_private_through_to_service():
-    # 안전 게이트는 service 안(allow_private_results)에 있고 transport는 인자를 그대로 전달.
+def test_dispatch_passes_public_brain_resolve_arguments_to_service():
     stub = _StubService()
-    res = asyncio.run(
-        mh._dispatch_call_tool(stub, "knowledge.search", {"query": "q", "include_private": True, "limit": 5})
-    )
+    res = asyncio.run(mh._dispatch_call_tool(stub, "brain.resolve", {"query": "q"}))
     assert res.isError is False
-    assert stub.last_kwargs["include_private"] is True
-    assert stub.last_kwargs["limit"] == 5
+    assert stub.last_kwargs == {"query": "q"}
 
 
 # --- _dispatch_call_tool: 오류 마스킹 ---
+
+
+def test_http_preserves_explicit_resolver_failure():
+    result = asyncio.run(mh._dispatch_call_tool(
+        _StubService(result={"error_code": "authority_store_unavailable", "items": []}),
+        "brain.resolve", {"query": "q"},
+    ))
+    assert result.isError is True
+    assert result.structuredContent["error_code"] == "authority_store_unavailable"
 
 
 def test_dispatch_value_error_is_masked_to_type_name():
@@ -495,7 +537,7 @@ def test_dispatch_value_error_is_masked_to_type_name():
 def test_dispatch_unexpected_exception_is_masked():
     # 내부 RuntimeError(가짜 private path 포함)는 'internal error'로 마스킹.
     stub = _StubService(raises=RuntimeError("boom at /private/secret/path token=abc"))
-    res = asyncio.run(mh._dispatch_call_tool(stub, "knowledge.search", {"query": "q"}))
+    res = asyncio.run(mh._dispatch_call_tool(stub, "brain.resolve", {"query": "q"}))
     assert res.isError is True
     assert res.content[0].text == "internal error"
     assert res.structuredContent == {
@@ -510,7 +552,7 @@ def test_dispatch_unexpected_exception_logs_redacted_stack(caplog):
     caplog.set_level("ERROR", logger="agent_knowledge.mcp_http_server")
     stub = _StubService(raises=RuntimeError("boom at /private/secret/path token=abc"))
 
-    res = asyncio.run(mh._dispatch_call_tool(stub, "knowledge.search", {"query": "q"}))
+    res = asyncio.run(mh._dispatch_call_tool(stub, "brain.resolve", {"query": "q"}))
 
     assert res.isError is True
     assert "RuntimeError" in caplog.text
@@ -532,7 +574,7 @@ def test_dispatch_does_not_block_event_loop():
             flag["fast_done"] = True
 
         dispatch = asyncio.create_task(
-            mh._dispatch_call_tool(stub, "knowledge.search", {"query": "q"})
+            mh._dispatch_call_tool(stub, "brain.resolve", {"query": "q"})
         )
         await asyncio.create_task(racer())
         # 느린(0.4s) 블로킹 호출이 스레드풀에서 도는 동안 racer(0.05s)가 먼저 끝나야 한다.
@@ -604,17 +646,22 @@ def test_initialize_list_and_call_over_http(http_base):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 tools = await session.list_tools()
-                called = await session.call_tool("knowledge.search", {"query": "hello"})
+                called = await session.call_tool("brain.resolve", {"query": "hello"})
                 return tools, called
 
     tools, called = asyncio.run(_roundtrip())
-    assert len(tools.tools) == len(list_tools())
-    assert "knowledge.search" in {t.name for t in tools.tools}
+    assert {tool.name for tool in tools.tools} == {"brain.resolve", "memory_candidate_create"}
     assert called.isError is False
     assert called.structuredContent == {"results": [{"knowledge_id": "kx"}]}
 
 
-def _post_mcp_initialize(base: str, *, host: str, origin: str | None = None) -> httpx.Response:
+def _post_mcp_initialize(
+    base: str,
+    *,
+    host: str,
+    origin: str | None = None,
+    authorization: str | None = None,
+) -> httpx.Response:
     payload = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -632,6 +679,8 @@ def _post_mcp_initialize(base: str, *, host: str, origin: str | None = None) -> 
     }
     if origin is not None:
         headers["origin"] = origin
+    if authorization is not None:
+        headers["authorization"] = authorization
     return httpx.post(f"{base}/mcp", headers=headers, json=payload, timeout=2)
 
 
@@ -670,6 +719,53 @@ def test_healthz_liveness_remains_static_while_mcp_fails_closed_on_bad_host():
     assert mcp.status_code == 421
 
 
+def test_admin_mcp_requires_bearer_for_every_http_method_and_keeps_healthz_public():
+    port = _free_port()
+    token = "admin-token-with-at-least-thirty-two-characters"
+    app = mh.build_app(_StubService(), port=port, surface="admin", admin_token=token)
+
+    with _ServerThread(app, port) as base:
+        healthz = httpx.get(f"{base}/healthz", timeout=2)
+        missing = [
+            httpx.request(method, f"{base}/mcp", timeout=2)
+            for method in ("GET", "POST", "DELETE")
+        ]
+        wrong = _post_mcp_initialize(
+            base, host=f"127.0.0.1:{port}", authorization="Bearer wrong-token"
+        )
+        correct = _post_mcp_initialize(
+            base, host=f"127.0.0.1:{port}", authorization=f"Bearer {token}"
+        )
+
+    assert healthz.status_code == 200
+    assert all(response.status_code == 401 for response in missing)
+    assert wrong.status_code == 401
+    assert correct.status_code == 200
+
+
+def test_agent_http_roundtrip_rejects_admin_tool_call():
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    port = _free_port()
+    app = mh.build_app(_StubService(), port=port, surface="agent")
+
+    async def _roundtrip(base):
+        async with streamablehttp_client(f"{base}/mcp") as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                return await session.call_tool("knowledge.search", {"query": "must not run"})
+
+    with _ServerThread(app, port) as base:
+        rejected = asyncio.run(_roundtrip(base))
+
+    assert rejected.isError is True
+    assert rejected.structuredContent == {
+        "error_code": -32602,
+        "error_type": "ValueError",
+    }
+
+
 def test_http_call_refreshes_brain_card_cache_per_request():
     from mcp import ClientSession
     from mcp.client.streamable_http import streamable_http_client
@@ -682,8 +778,8 @@ def test_http_call_refreshes_brain_card_cache_per_request():
         async with streamable_http_client(f"{base}/mcp") as (read, write, _):
             async with ClientSession(read, write) as session:
                 await session.initialize()
-                await session.call_tool("knowledge.search", {"query": "first"})
-                await session.call_tool("knowledge.search", {"query": "second"})
+                await session.call_tool("brain.resolve", {"query": "first"})
+                await session.call_tool("brain.resolve", {"query": "second"})
 
     with _ServerThread(app, port) as base:
         asyncio.run(_roundtrip(base))
@@ -707,6 +803,6 @@ def test_stateless_two_independent_sessions(http_base):
         return first, second
 
     first, second = asyncio.run(_both())
-    expected_tool_count = len(list_tools())
+    expected_tool_count = len(list_tools(surface="agent"))
     assert len(first) == expected_tool_count
     assert len(second) == expected_tool_count
