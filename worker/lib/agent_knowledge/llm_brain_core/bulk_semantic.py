@@ -134,7 +134,12 @@ class OpenAICompatibleBulkSemanticExtractor:
         }
         if self._reasoning_effort:
             body["reasoning_effort"] = self._reasoning_effort
-        headers = {"Content-Type": "application/json"}
+        headers = {
+            "Content-Type": "application/json",
+            # Cloudflare in front of OpenAI-compatible gateways (e.g. opencode zen)
+            # rejects the default Python-urllib UA with 403 error 1010; identify us.
+            "User-Agent": "neurons-bulk-semantic/1.0",
+        }
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         raw = self._post_fn(
@@ -195,7 +200,10 @@ class OpenAICompatibleEmbeddingBatcher:
     def embed_many(self, texts: list[str]) -> list[list[float] | None]:
         if not texts:
             return []
-        headers = {"Content-Type": "application/json"}
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "neurons-bulk-semantic/1.0",
+        }
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         raw = self._post_fn(
