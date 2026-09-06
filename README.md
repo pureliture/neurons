@@ -500,7 +500,7 @@ brain_evidence_get
 
 <div align="center">
 <img src="https://img.shields.io/badge/⚫_OFF_by_default-dual_gated-64748b?style=for-the-badge" alt="off by default" />
-<img src="https://img.shields.io/badge/graphiti--core-0.29.2-8b5cf6?style=for-the-badge" alt="graphiti" />
+<img src="https://img.shields.io/badge/graphiti--core-0.30.1-8b5cf6?style=for-the-badge" alt="graphiti" />
 <img src="https://img.shields.io/badge/neo4j-driver_6.2.0-018BFF?style=for-the-badge&logo=neo4j&logoColor=white" alt="neo4j" />
 </div>
 
