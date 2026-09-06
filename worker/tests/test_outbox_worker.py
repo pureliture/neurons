@@ -321,3 +321,87 @@ def test_live_worker_run_loop_bounded(pg_store):
     )
 
     assert store.get_card(memory_id).embedding_state == "ready"
+
+
+@live_pg
+def test_live_graph_projection_outbox_enqueued_on_upsert(pg_store):
+    store, tag = pg_store
+    memory_id = f"{tag}_graph_card"
+    card = _pending_card(memory_id, f"{tag}_proj", "sha256:graph_hash")
+    store.upsert_card(card)
+
+    graph_jobs = [job for job in store.list_graph_projection_jobs() if job.source_id == memory_id]
+    assert len(graph_jobs) == 1
+    job = graph_jobs[0]
+    assert job.status == "queued"
+    assert job.source_type == "memory_card"
+    assert job.source_revision == "sha256:graph_hash"
+    assert job.episode_payload["authority_memory_id"] == memory_id
+
+
+@live_pg
+def test_live_graph_projection_worker_happy_path(pg_store):
+    from agent_knowledge.postgres_store.outbox_worker import GraphProjectionWorker
+
+    store, tag = pg_store
+    memory_id = f"{tag}_graph_worker"
+    card = _pending_card(memory_id, f"{tag}_proj", "sha256:worker_graph_hash")
+    store.upsert_card(card)
+
+    received_payloads = []
+
+    class MockAdapter:
+        def upsert_episode(self, payload):
+            received_payloads.append(payload)
+            return "inserted"
+
+    worker = GraphProjectionWorker(
+        store=store,
+        graph_adapter=MockAdapter(),
+        worker_id=f"{tag}_gworker",
+        batch_size=50,
+    )
+
+    # Process all pending queue items in the batch
+    processed = worker.run_once()
+    assert processed >= 1
+    assert any(p.get("authority_memory_id") == memory_id for p in received_payloads)
+
+    graph_jobs = [job for job in store.list_graph_projection_jobs() if job.source_id == memory_id]
+    assert graph_jobs[0].status == "completed"
+
+
+@live_pg
+def test_live_graph_projection_worker_retry_to_dead_letter(pg_store):
+    from agent_knowledge.postgres_store.outbox_worker import GraphProjectionWorker
+
+    store, tag = pg_store
+    memory_id = f"{tag}_graph_fail"
+    card = _pending_card(memory_id, f"{tag}_proj", "sha256:fail_graph_hash")
+    store.upsert_card(card)
+
+    class FailingAdapter:
+        def upsert_episode(self, payload):
+            raise ConnectionError("Neo4j down")
+
+    worker = GraphProjectionWorker(
+        store=store,
+        graph_adapter=FailingAdapter(),
+        worker_id=f"{tag}_gfail_worker",
+        max_retries=3,
+    )
+
+    for _ in range(3):
+        with store._scope(write=True) as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    "UPDATE graph_projection_outbox SET lease_until = NOW() - INTERVAL '1 second' WHERE source_id = %s",
+                    (memory_id,),
+                )
+        worker.run_once()
+
+    jobs = [job for job in store.list_graph_projection_jobs() if job.source_id == memory_id]
+    assert len(jobs) == 1
+    assert jobs[0].status == "dead_letter"
+    assert jobs[0].retry_count >= 3
+    assert "Neo4j down" in (jobs[0].last_error or "")
