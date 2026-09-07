@@ -139,6 +139,9 @@ class OpenAICompatibleBulkSemanticExtractor:
             # Cloudflare in front of OpenAI-compatible gateways (e.g. opencode zen)
             # rejects the default Python-urllib UA with 403 error 1010; identify us.
             "User-Agent": "neurons-bulk-semantic/1.0",
+            # opencode-go requires a per-client session id for quota routing;
+            # without it every request fails with 400 MissingSessionID.
+            "x-opencode-session": "neurons-bulk-semantic",
         }
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
