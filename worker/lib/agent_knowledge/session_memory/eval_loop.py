@@ -282,6 +282,7 @@ def run_enabled_eval_queries(
     retain_runs: int = 0,
     semantic_ranker: Callable[..., list[dict]] | None = None,
     query_runner: QueryRunner = run_brain_query_v2,
+    llm_judge: Any = None,
 ) -> dict:
     """Run enabled eval_queries and optionally persist eval_runs/retrieval_audit.
 
@@ -298,6 +299,7 @@ def run_enabled_eval_queries(
     read_model = LegacyLedgerBrainReadModel(ledger)
     per_query: list[dict] = []
     failures: list[dict] = []
+    judge_results: list[dict] = []
     max_k = 0
 
     for query in queries:
@@ -359,6 +361,46 @@ def run_enabled_eval_queries(
                     query_hash=query_hash,
                     response=response,
                 )
+            # LLM judge lane: score retrieval quality after retrieval audit.
+            # Failures are graceful — a judge error does not fail the eval run itself.
+            if llm_judge is not None:
+                items = _result_items(response)
+                top_passage = ""
+                if items:
+                    top_item = items[0]
+                    top_passage = str(
+                        top_item.get("summary")
+                        or top_item.get("title")
+                        or top_item.get("render_text")
+                        or ""
+                    )
+                context_text = "\n".join(
+                    str(item.get("summary") or item.get("title") or "")
+                    for item in items[:3]
+                )
+                try:
+                    rel = llm_judge.judge_relevance(
+                        query_text=query_text,
+                        passage_text=top_passage,
+                    )
+                    gnd = llm_judge.judge_groundedness(
+                        query_text=query_text,
+                        context_text=context_text,
+                    )
+                    judge_results.append(
+                        {
+                            "query_id": query_id,
+                            "relevance": rel,
+                            "groundedness": gnd,
+                        }
+                    )
+                except Exception:
+                    judge_results.append(
+                        {
+                            "query_id": query_id,
+                            "error": "judge_call_failed",
+                        }
+                    )
         except Exception as exc:  # pragma: no cover - defensive runtime reporting path
             score = {
                 "query_id": query_id,
@@ -374,8 +416,24 @@ def run_enabled_eval_queries(
             failures.append({"query_id": query_id, "reason": "query_error", "error_type": type(exc).__name__})
 
     metrics = _aggregate(per_query)
+    if judge_results:
+        judge_passed = sum(
+            1
+            for r in judge_results
+            if r.get("relevance", {}).get("relevant") is True
+            and r.get("groundedness", {}).get("grounded") is True
+        )
+        metrics["judge"] = {
+            "schema_version": "llm_judge.v1",
+            "query_count": len(judge_results),
+            "judge_passed": judge_passed,
+            "judge_failed": len(judge_results) - judge_passed,
+            "total_tokens": llm_judge.total_tokens if llm_judge else 0,
+            "call_count": llm_judge.call_count if llm_judge else 0,
+        }
     evaluation_status = "no_queries" if not queries else "pass" if not failures else "fail"
     status = evaluation_status if execute else "dry_run"
+    network_used = semantic_ranker is not None or llm_judge is not None
     if execute:
         ledger.insert_eval_run(
             {
@@ -387,7 +445,7 @@ def run_enabled_eval_queries(
                 "query_count": metrics["query_count"],
                 "metrics": metrics,
                 "failures": failures,
-                "network_used": semantic_ranker is not None,
+                "network_used": network_used,
                 "mutation_performed": True,
             }
         )
@@ -407,11 +465,14 @@ def run_enabled_eval_queries(
         "run_id": effective_run_id,
         "execute": bool(execute),
         "mutation_performed": bool(execute),
-        "network_used": semantic_ranker is not None,
+        "network_used": network_used,
         "project": project or "",
         "provider": provider or "",
         "readiness": build_eval_readiness_report(),
         "metrics": metrics,
         "failures": failures,
         "retention": retention,
+        "judge_enabled": llm_judge is not None,
+        "judge_call_count": llm_judge.call_count if llm_judge else 0,
+        "judge_total_tokens": llm_judge.total_tokens if llm_judge else 0,
     }

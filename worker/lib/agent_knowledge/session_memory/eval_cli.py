@@ -54,6 +54,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="use the configured embedding endpoint to vector-rank accepted MemoryCards before eval scoring",
     )
+    parser.add_argument(
+        "--llm-judge",
+        action="store_true",
+        help="use the configured LLM bridge endpoint to judge retrieval relevance and groundedness",
+    )
+    parser.add_argument(
+        "--judge-model",
+        default="",
+        help="override the LLM judge model (default: gemini-3.7-flash)",
+    )
     args = parser.parse_args(argv)
 
     if args.execute:
@@ -62,6 +72,12 @@ def main(argv: list[str] | None = None) -> int:
     else:
         ledger = Ledger.open_read_only(args.ledger)
     semantic_ranker = build_embedding_semantic_ranker() if args.semantic_rank else None
+    llm_judge = None
+    if args.llm_judge:
+        from .llm_judge import DEFAULT_JUDGE_MODEL, build_llm_judge_client
+
+        judge_model = args.judge_model or DEFAULT_JUDGE_MODEL
+        llm_judge = build_llm_judge_client(model=judge_model)
     try:
         result = run_enabled_eval_queries(
             ledger=ledger,
@@ -72,12 +88,21 @@ def main(argv: list[str] | None = None) -> int:
             run_id=args.run_id or None,
             retain_runs=args.retain_runs,
             semantic_ranker=semantic_ranker,
+            llm_judge=llm_judge,
         )
     finally:
         close = getattr(semantic_ranker, "close", None)
         if callable(close):
             close()
+        if llm_judge is not None:
+            llm_judge.close()
     print(json.dumps(_safe_stdout_payload(result), ensure_ascii=False, sort_keys=True))
     # Evaluation quality failure is persisted as eval_runs.status=fail; process
     # failure should mean the loop could not run/store its bounded evidence.
     return 0 if result["status"] in {"dry_run", "pass", "fail", "no_queries"} else 1
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(main())
