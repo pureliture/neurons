@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
 
 from ._util import ensure_public_safe, hash_payload, public_safe_text
@@ -29,6 +30,7 @@ from .objects.object_packs import (
 )
 from .objects.reference_corpus import default_corpus_policy_status
 from .source_ref import SourceRefResolver
+from .terms import terms as _terms_impl
 from .temporal import (
     TemporalSelector,
     TemporalSelectorError,
@@ -175,6 +177,8 @@ class BrainReadService:
         project: str,
         card_types: list[str] | None = None,
         limit: int = 8,
+        date_from: str = "",
+        date_to: str = "",
     ) -> dict[str, Any]:
         bounded = max(1, min(int(limit), 100))
         wanted = set(card_types or [])
@@ -192,11 +196,14 @@ class BrainReadService:
                 limit=bounded,
             )
         )
+        graph_episodes = _filter_episodes_by_date_window(
+            list(graph.episodes), date_from=date_from, date_to=date_to
+        )
         result = {
             "memory_status": {"status": "available", "authority": "canonical_card", "count": len(cards)},
             "graph_status": {"status": graph.status, "authority": "derived_index"},
             "results": cards,
-            "graph_results": [episode.to_dict() for episode in graph.episodes],
+            "graph_results": [episode.to_dict() for episode in graph_episodes],
         }
         ensure_public_safe(result, "brain_memory_search")
         return result
@@ -1774,7 +1781,48 @@ def _persona_conflicts(card: Mapping[str, Any], plan: str) -> bool:
 
 
 def _terms(value: Any) -> list[str]:
-    return [term for term in re.split(r"[^a-zA-Z0-9_가-힣]+", str(value).lower()) if len(term) >= 3]
+    return _terms_impl(value)
+
+
+def _parse_window_bound(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _filter_episodes_by_date_window(
+    episodes: list[Any],
+    *,
+    date_from: str = "",
+    date_to: str = "",
+) -> list[Any]:
+    """date_from/date_to(ISO 8601) 지정 시 창 밖 에피소드를 제외한다 (Fix 2).
+
+    observed_at 기준. 창 파라미터가 없으면 원본 리스트를 그대로 반환한다.
+    """
+    lower = _parse_window_bound(date_from)
+    upper = _parse_window_bound(date_to)
+    if lower is None and upper is None:
+        return list(episodes)
+    filtered: list[Any] = []
+    for episode in episodes:
+        observed = episode.observed_at
+        if isinstance(observed, str):
+            if not observed:
+                continue
+            observed = _parse_window_bound(observed)
+            if observed is None:
+                continue
+        if lower is not None and observed < lower:
+            continue
+        if upper is not None and observed > upper:
+            continue
+        filtered.append(episode)
+    return filtered
 
 
 def _matches_terms(value: Any, terms: list[str]) -> bool:
