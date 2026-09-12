@@ -13,3 +13,6 @@ __pycache__/
 
 # separation: private scan patterns (runtime-only, never commit)
 *private-patterns*.tsv
+
+# kubectl local discovery cache (contains cluster host addresses)
+.kube/
