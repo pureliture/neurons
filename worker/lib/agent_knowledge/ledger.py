@@ -593,11 +593,24 @@ class _LedgerTransaction:
         ).fetchone()
         return json.loads(row["envelope_json"]) if row is not None else None
 
-    def list_llm_brain_memory_cards(self, *, project: str) -> list[dict]:
-        rows = self._connection.execute(
-            "SELECT envelope_json FROM llm_brain_memory_cards WHERE project = ? ORDER BY memory_id",
-            (project,),
-        ).fetchall()
+    def list_llm_brain_memory_cards(
+        self,
+        *,
+        project: str,
+        accepted_only: bool = False,
+        limit: int | None = None,
+    ) -> list[dict]:
+        sql = "SELECT envelope_json FROM llm_brain_memory_cards WHERE project = ?"
+        params: list[object] = [project]
+        if accepted_only:
+            sql += (
+                " AND lifecycle_state IN ('accepted', 'human_accepted', 'auto_accepted')"
+                " AND approval_state IN ('approved', 'auto_accepted')"
+            )
+        sql += " ORDER BY memory_id"
+        if limit is not None:
+            sql += f" LIMIT {int(limit)}"
+        rows = self._connection.execute(sql, params).fetchall()
         return [json.loads(row["envelope_json"]) for row in rows]
 
     def get_object_authority_decision(self, decision_id: str) -> dict:

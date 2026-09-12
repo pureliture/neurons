@@ -81,7 +81,10 @@ def test_graphiti_as_of_filters_relationship_candidates_before_top_k(as_of):
             assert filters.valid_at[0][0].date == datetime(2026, 1, 15, tzinfo=timezone.utc)
         assert filters.valid_at[0][0].comparison_operator == ComparisonOperator.less_than_equal
         assert filters.invalid_at[0][0].comparison_operator == ComparisonOperator.greater_than
-        assert filters.invalid_at[1][0].comparison_operator == ComparisonOperator.is_null
+        # Fix 5: null 허용(is_null OR)은 제거됐다 — valid_at/invalid_at이 null인
+        # stale 사실은 현재 시점 조회에서 완전히 제외된다(사용자 승인 정책).
+        assert len(filters.valid_at) == 1
+        assert len(filters.invalid_at) == 1
         assert observed["reference_time"] == filters.valid_at[0][0].date
         assert observed["num_results"] == 5
     finally:

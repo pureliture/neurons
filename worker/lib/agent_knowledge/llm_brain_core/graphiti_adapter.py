@@ -27,6 +27,8 @@ from .graph_scope import (
     graph_group_id_for_episode,
 )
 from .models import GraphMemoryResult, OntologyEpisode
+from .terms import matches as _terms_impl_matches
+from .terms import terms as _terms_impl
 from ..model_connectors.structured_response import (
     existing_fact_idx_values_from_messages as _existing_fact_idx_values_from_messages,
     is_list_annotation as _is_list_annotation,
@@ -480,11 +482,12 @@ class GraphitiNeo4jGraphMemoryAdapter:
                 if len(as_of) != 10:
                     raise ValueError("as_of must include a timezone")
                 reference_time = reference_time.replace(tzinfo=timezone.utc)
+        # Fix 5 (보수적 정책, 사용자 승인): valid_at/invalid_at이 null인 사실은
+        # 현재 시점 조회에서 완전히 제외한다. is_null 허용은 valid_to 미설정
+        # stale 사실이 current로 계속 노출되는 원인이었다.
         search_filter = SearchFilters(
-            valid_at=[[DateFilter(date=reference_time, comparison_operator=ComparisonOperator.less_than_equal)],
-                      [DateFilter(comparison_operator=ComparisonOperator.is_null)]],
-            invalid_at=[[DateFilter(date=reference_time, comparison_operator=ComparisonOperator.greater_than)],
-                        [DateFilter(comparison_operator=ComparisonOperator.is_null)]],
+            valid_at=[[DateFilter(date=reference_time, comparison_operator=ComparisonOperator.less_than_equal)]],
+            invalid_at=[[DateFilter(date=reference_time, comparison_operator=ComparisonOperator.greater_than)]],
         )
 
         async def _call() -> tuple[list[Any], list[Any], list[Any], list[str], bool]:
@@ -509,7 +512,7 @@ class GraphitiNeo4jGraphMemoryAdapter:
             episodes = list(
                 await self._graphiti.retrieve_episodes(
                     reference_time=reference_time,
-                    last_n=max(bounded * 5, bounded),
+                    last_n=_episode_fanout(bounded),
                     group_ids=group_ids,
                 )
                 or []
@@ -1362,11 +1365,26 @@ def _datetime_to_iso(value: Any) -> str:
 
 
 def _terms(value: Any) -> list[str]:
-    return [term for term in str(value or "").lower().split() if len(term) >= 3]
+    return _terms_impl(value)
+
+
+_EPISODE_FANOUT_MULTIPLIER = 1.0
+
+
+def _episode_fanout(bounded: int) -> int:
+    """retrieve_episodes 후보 풀 크기 (Fix 3).
+
+    기존 ×5 fan-out은 limit의 5배를 풀로 가져와 무관한 오래된 에피소드까지
+    후보에 포함했다. 기본 배율 1.0로 축소하고, 필요 시 환경변수로만 확장한다.
+    """
+    multiplier = _int_env("LBRAIN_EPISODE_FANOUT_X", default=int(_EPISODE_FANOUT_MULTIPLIER))
+    if multiplier < 1:
+        multiplier = 1
+    return max(bounded * multiplier, bounded)
 
 
 def _matches(value: str, terms: list[str]) -> bool:
-    return any(term in value for term in terms)
+    return _terms_impl_matches(value, terms)
 
 
 def _int_env(value: str, *, default: int) -> int:
