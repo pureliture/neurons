@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>LLM-Brain MCP Stable Host Rollout Requirements</title>
+  <meta name="generator" content="markdown-it-py">
+  <meta name="source-path" content="docs/specs/2026-07-02-llm-brain-mcp-stable-host-rollout/requirements.md">
+  <meta name="source-sha256" content="fd615dffd62df659c653fb9fbf3f34daeb1ba6fd0ed6260d46a83378ca238b29">
+  <meta name="rendered-at" content="2026-07-02T09:57:41.600050+00:00">
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 40px auto; max-width: 980px; line-height: 1.6; color: #172033; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    pre { padding: 16px; overflow: auto; background: #f6f8fa; border: 1px solid #d8dee4; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #d8dee4; padding: 8px 10px; text-align: left; vertical-align: top; }
+    th { background: #f6f8fa; }
+  </style>
+</head>
+<body>
+<!-- source-sha256:fd615dffd62df659c653fb9fbf3f34daeb1ba6fd0ed6260d46a83378ca238b29 -->
+<h1>LLM-Brain MCP Stable Host Rollout Requirements</h1>
+<h2>승인 대상</h2>
+<ul>
+<li>Source of truth: <code>requirements.md</code></li>
+<li>Preview companion: <code>requirements.html</code></li>
+<li>승인 상태: 사용자가 <code>requirements.md</code>와 후속 <code>design.md</code>를 사전 승인함.</li>
+<li>실행 방식: 승인된 <code>design.md</code>를 단일 목표로 보고 <code>agentic-execution</code>으로 진행한다.</li>
+</ul>
+<h2>질문-답변 흐름</h2>
+<h3>Q: 이번 목표의 실제 종료 지점은 어디인가?</h3>
+<p>A: <code>neurons</code> 코드/image, <code>neurons-ops</code> k3s manifest, tyche 설정, 필요 시 Tailscale ACL 판정까지 rollout 준비를 닫는다. production cluster apply, ArgoCD sync/prune, Tailscale policy mutation, tyche live mutation은 별도 live 승인 게이트 전에는 실행하지 않는다.</p>
+<h3>Q: MCP 서버가 무엇을 allowlist해야 하는가?</h3>
+<p>A: 클라이언트 기기가 아니라 stable Tailscale Serve server authority를 allowlist한다. <code>Host</code> header가 stable server URL authority와 일치하면 통과해야 하고, MacBook/Mac mini/iPhone 같은 client device name, client Tailscale IP, client MagicDNS 이름은 allowlist에 넣지 않는다.</p>
+<h3>Q: DNS rebinding protection을 끌 수 있는가?</h3>
+<p>A: 끄지 않는다. <code>TransportSecuritySettings.enable_dns_rebinding_protection</code>은 계속 켜고, stable server authority만 명시 allowlist로 추가한다.</p>
+<h3>Q: <code>neurons</code> public repo에 실제 운영 hostname을 기록할 수 있는가?</h3>
+<p>A: public-safe 문서와 테스트에는 실제 tailnet hostname을 기록하지 않는다. public repo에는 <code>&lt;stable-tailscale-serve-host&gt;</code> placeholder와 reserved test domain을 사용하고, 실제 운영값은 private <code>neurons-ops</code> manifest 또는 운영 secret/config 표면에서만 다룬다.</p>
+<h3>Q: 기존 running image를 신뢰할 수 있는가?</h3>
+<p>A: 신뢰하지 않는다. running image가 stable Host allowlist 기능을 포함한다고 간주하지 않고, 현재 <code>neurons</code> commit 기준의 새 <code>mcp-http</code> image tag를 build/push한 뒤 <code>neurons-ops</code> manifest가 그 tag를 명시해야 한다.</p>
+<h2>기능 요구사항</h2>
+<ul>
+<li><code>neurons</code> MCP HTTP 서버는 <code>MCP_HTTP_ALLOWED_HOSTS</code> comma-separated authority 목록을 지원해야 한다.</li>
+<li><code>neurons</code> MCP HTTP CLI는 반복 가능한 <code>--allowed-host</code>를 지원해야 한다.</li>
+<li>추가 allowed host는 <code>TransportSecuritySettings.allowed_hosts</code>에 기존 bind host/port allowlist와 함께 반영되어야 한다.</li>
+<li>추가 allowed host마다 <code>https://&lt;authority&gt;</code> origin이 <code>TransportSecuritySettings.allowed_origins</code>에 반영되어야 한다.</li>
+<li>wildcard, 빈 host, scheme/path/query/fragment/userinfo, public/private 전체 대역, client device identity allowlist는 금지한다.</li>
+<li><code>0.0.0.0</code> bind 거부 정책은 유지한다.</li>
+<li>Kubernetes Pod IP bind 허용 정책은 유지한다.</li>
+<li><code>neurons</code> focused MCP HTTP 테스트가 통과해야 한다.</li>
+<li>새 <code>mcp-http</code> image tag는 현재 verified source commit에서 산출되어야 한다.</li>
+<li><code>neurons-ops</code> canary와 production manifest는 새 image tag와 stable server authority allowlist를 명시해야 한다.</li>
+<li>tyche 설정은 production stable-host proof 후 Pod IP <code>Host</code> header workaround를 제거하는 방향이어야 한다.</li>
+<li>Tailscale ACL은 server stable URL 접근을 막는 증거가 있을 때만 변경 대상으로 올린다.</li>
+</ul>
+<h2>비기능 요구사항</h2>
+<table>
+<thead>
+<tr>
+<th>항목</th>
+<th>요구값</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>보안</td>
+<td>DNS rebinding protection 유지, client 기기별 allowlist 금지</td>
+</tr>
+<tr>
+<td>공개 안전</td>
+<td>public <code>neurons</code> repo에는 실제 tailnet hostname, private path, secret, raw id 기록 금지</td>
+</tr>
+<tr>
+<td>배포 안전</td>
+<td>live apply/sync/restart/ACL mutation은 별도 승인 전 금지</td>
+</tr>
+<tr>
+<td>증거</td>
+<td>각 milestone은 테스트, render, image tag, kustomize output, 또는 read-only live evidence로 완료 판단</td>
+</tr>
+<tr>
+<td>격리</td>
+<td><code>main</code>/<code>master</code> 직접 수정 금지, repo별 전용 branch/worktree 사용</td>
+</tr>
+</tbody>
+</table>
+<h2>사용자 시나리오</h2>
+<ul>
+<li>Tailnet에 등록된 client는 stable Tailscale Serve URL로 <code>/mcp</code>에 접근하고, MCP 서버는 client identity가 아니라 <code>Host</code> authority를 검증한다.</li>
+<li>Pod가 재시작되어 Pod IP가 바뀌어도 tyche/stocks는 Pod IP <code>Host</code> workaround 없이 stable URL로 계속 연결된다.</li>
+<li>운영자는 canary에서 새 image와 allowlist를 먼저 확인한 뒤 production manifest와 tyche 설정을 순차적으로 반영한다.</li>
+</ul>
+<h2>미결정 항목</h2>
+<ul>
+<li>Tailscale ACL 변경 필요 여부: current ACL/Serve evidence 확인 전까지 미정이며, 기본값은 변경하지 않는다.</li>
+<li>tyche config의 실제 저장 위치: local repo/config discovery 결과에 따라 patch 또는 운영 지침으로 처리한다.</li>
+</ul>
+
+</body>
+</html>
