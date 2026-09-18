@@ -96,6 +96,7 @@ class SourceLocator:
     cwd: str = ""
     workspace_marker: str = ""
     index_project_hint: str = ""
+    identity_version: str = "legacy"  # legacy | project_scoped_v2
     scope: str = "historical"  # historical | live
 
 
@@ -157,6 +158,7 @@ def import_historical_source(
             locator.source_path,
             project=resolution.project,
             source_locator_hash=source_locator_hash,
+            identity_version=locator.identity_version,
         )
     except ValueError as exc:
         return ImportResult(
@@ -175,6 +177,11 @@ def import_historical_source(
             build_conversation_chunk_document(chunk=chunk, source_locator_hash=source_locator_hash)
             for chunk in chunks
         ]
+        document_identity_version = (
+            "v2" if locator.identity_version == "project_scoped_v2" else "legacy"
+        )
+        for chunk_doc in chunk_docs:
+            chunk_doc["identity_version"] = document_identity_version
     except SourceRedactionLeak as exc:
         # Fail closed: a still-leaking chunk blocks the whole session write.
         return ImportResult(
@@ -189,6 +196,7 @@ def import_historical_source(
         )
 
     session_doc = build_transcript_session_document(session=parsed.session)
+    session_doc["identity_version"] = document_identity_version
     source_documents = [session_doc, *chunk_docs]
     session_id_hash = parsed.session.session_id_hash
 
@@ -273,6 +281,7 @@ def import_historical_source(
             ledger_comparison=ledger_comparison,
             project_authority=resolution.to_authority_block(),
         )
+        coverage_doc["identity_version"] = document_identity_version
         store.put(coverage_doc)
 
         # A pointer can be published after the last origin recheck and before

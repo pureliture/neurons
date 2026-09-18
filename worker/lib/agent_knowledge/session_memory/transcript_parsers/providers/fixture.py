@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from ....redaction import redact_text_v2
 from ...transcript_model import TranscriptSession, TranscriptToolEvent, TranscriptTurn
-from ..common import ParsedTranscript, _normalize_role, _sha256
+from ..common import (
+    ParsedTranscript,
+    _normalize_role,
+    _sha256,
+    build_session_identity_hash_for_source,
+)
 
 def _parse_provider_fixture(
     provider: str,
@@ -10,12 +15,19 @@ def _parse_provider_fixture(
     *,
     project: str,
     source_locator_hash: str,
+    identity_version: str = "legacy",
 ) -> ParsedTranscript:
     session_id = str(payload.get("session_id") or "")
     if not session_id:
         raise ValueError("source_parse_failed: missing session_id")
+    session_hash = build_session_identity_hash_for_source(
+        provider,
+        project,
+        session_id,
+        identity_version=identity_version,
+    )
     session = TranscriptSession(
-        session_id_hash=_sha256(f"{provider}:{session_id}"),
+        session_id_hash=session_hash,
         provider=provider,
         project=project,
         started_at=str(payload.get("started_at") or ""),

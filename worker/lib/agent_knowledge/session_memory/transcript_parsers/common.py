@@ -8,6 +8,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ...couchdb_source.document_model import (
+    build_project_scoped_session_id_hash,
+    build_session_id_hash,
+)
 from ..transcript_model import (
     TranscriptSession,
     TranscriptToolEvent,
@@ -27,6 +31,20 @@ class ParsedTranscript:
     tool_events: list[TranscriptToolEvent] = field(default_factory=list)
     parser_warnings: list[str] = field(default_factory=list)
     source_status: str = "source_locator_private_spool_only"
+
+
+def build_session_identity_hash_for_source(
+    provider: str,
+    project: str,
+    raw_session_id: str,
+    *,
+    identity_version: str = "legacy",
+) -> str:
+    if identity_version == "legacy":
+        return build_session_id_hash(provider, raw_session_id)
+    if identity_version == "project_scoped_v2":
+        return build_project_scoped_session_id_hash(provider, project, raw_session_id)
+    raise ValueError(f"unsupported_session_identity_version:{identity_version}")
 
 
 @dataclass(frozen=True)

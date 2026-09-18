@@ -273,6 +273,7 @@ def run_migration(
     limit: int | None = None,
     runtime_dir: Path | None = None,
     dry_run: bool = False,
+    identity_version: str = "legacy",
 ) -> dict:
     roots = roots if roots is not None else default_source_roots()
     providers = providers or list(MIGRATION_PROVIDERS)
@@ -315,6 +316,7 @@ def run_migration(
                         source_path=str(source_path),
                         capture_metadata_project=capture_project,
                         cwd=cwd,
+                        identity_version=identity_version,
                     ),
                     store=store,
                 )
@@ -727,6 +729,12 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--identity-version",
+        choices=("legacy", "project_scoped_v2"),
+        default="legacy",
+        help="session identity contract for source admission",
+    )
     parser.add_argument("--approval", default="", help="Path to live-approval JSON (required for non-dry-run).")
     parser.add_argument("--source-root", action="append", help="provider=/path override; repeatable")
     parser.add_argument("--runtime-dir")
@@ -744,6 +752,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv if argv is not None else None)
     effective_argv = list(sys.argv[1:] if argv is None else argv)
+
+    if args.tool_evidence and args.identity_version != "legacy":
+        print(json.dumps({
+            "schema_version": MIGRATION_CLI_SCHEMA_VERSION,
+            "status": "error",
+            "error_class": "tool_evidence_project_scoped_identity_requires_project_resolution",
+            "dry_run": bool(args.dry_run),
+            "mutation_performed": False,
+            "network_used": False,
+        }, sort_keys=True))
+        return 2
 
     if args.tool_evidence and args.limit is not None:
         print(json.dumps({
@@ -788,6 +807,7 @@ def main(argv: list[str] | None = None) -> int:
             or args.reconcile_coverage
             or args.approval
             or args.runtime_dir
+            or args.identity_version != "legacy"
         ):
             print(json.dumps({
                 "status": "error",
@@ -894,6 +914,7 @@ def main(argv: list[str] | None = None) -> int:
         limit=args.limit,
         runtime_dir=Path(args.runtime_dir) if args.runtime_dir else None,
         dry_run=args.dry_run,
+        identity_version=args.identity_version,
     )
     report["status"] = "ok"
     print(json.dumps(report, sort_keys=True))

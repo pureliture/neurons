@@ -98,6 +98,126 @@ class _PointerPublishAfterHistoricalSourceWriteStore(InMemoryCouchDBSourceStore)
         return super().put_if_revision(document, expected_rev=expected_rev)
 
 
+def test_project_scoped_identity_version_separates_same_raw_session_across_projects(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    source = _write_codex_fixture(tmp_path, session_id="same-raw-session")
+
+    first = import_historical_source(
+        locator=SourceLocator(
+            provider="codex",
+            source_path=source,
+            capture_metadata_project="security-scanner",
+            identity_version="project_scoped_v2",
+        ),
+        store=store,
+    )
+    second = import_historical_source(
+        locator=SourceLocator(
+            provider="codex",
+            source_path=source,
+            capture_metadata_project="antigravity",
+            identity_version="project_scoped_v2",
+        ),
+        store=store,
+    )
+
+    assert first.status == ImportStatus.IMPORTED
+    assert second.status == ImportStatus.IMPORTED
+    assert first.session_id_hash == dm.build_project_scoped_session_id_hash(
+        "codex", "security-scanner", "same-raw-session"
+    )
+    assert second.session_id_hash == dm.build_project_scoped_session_id_hash(
+        "codex", "antigravity", "same-raw-session"
+    )
+    assert first.session_id_hash != second.session_id_hash
+    first_docs = store.find_by_session(session_id_hash=first.session_id_hash)
+    second_docs = store.find_by_session(session_id_hash=second.session_id_hash)
+    assert first_docs
+    assert second_docs
+    assert all(doc.get("identity_version") == "v2" for doc in first_docs)
+    assert all(doc.get("identity_version") == "v2" for doc in second_docs)
+
+
+def test_project_scoped_identity_version_applies_to_native_claude_and_antigravity(tmp_path):
+    claude_path = tmp_path / "claude-native.jsonl"
+    claude_path.write_text(
+        json.dumps(
+            {
+                "type": "user",
+                "sessionId": "same-raw-session",
+                "timestamp": "2026-06-17T01:00:01Z",
+                "message": {"role": "user", "content": "hello"},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "assistant",
+                "sessionId": "same-raw-session",
+                "timestamp": "2026-06-17T01:00:02Z",
+                "message": {"role": "assistant", "content": "done"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    antigravity_dir = tmp_path / "same-raw-session" / ".system_generated"
+    antigravity_dir.mkdir(parents=True)
+    antigravity_path = antigravity_dir / "transcript.jsonl"
+    antigravity_path.write_text(
+        json.dumps(
+            {
+                "conversationId": "same-raw-session",
+                "type": "USER_INPUT",
+                "content": "hello",
+                "timestamp": "2026-06-17T01:00:01Z",
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "conversationId": "same-raw-session",
+                "type": "RESPONSE",
+                "content": "done",
+                "timestamp": "2026-06-17T01:00:02Z",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    claude_result = import_historical_source(
+        locator=SourceLocator(
+            provider="claude",
+            source_path=str(claude_path),
+            capture_metadata_project="workspace-stocks",
+            identity_version="project_scoped_v2",
+        ),
+        store=InMemoryCouchDBSourceStore(),
+    )
+    antigravity_result = import_historical_source(
+        locator=SourceLocator(
+            provider="antigravity",
+            source_path=str(antigravity_path),
+            capture_metadata_project="security-scanner",
+            identity_version="project_scoped_v2",
+        ),
+        store=InMemoryCouchDBSourceStore(),
+    )
+
+    assert claude_result.status == ImportStatus.IMPORTED
+    assert antigravity_result.status == ImportStatus.IMPORTED
+    assert claude_result.session_id_hash == dm.build_project_scoped_session_id_hash(
+        "claude", "workspace-stocks", "same-raw-session"
+    )
+    assert antigravity_result.session_id_hash == dm.build_project_scoped_session_id_hash(
+        "antigravity", antigravity_result.project, "same-raw-session"
+    )
+    assert antigravity_result.session_id_hash != dm.build_session_id_hash(
+        "antigravity", "same-raw-session"
+    )
+
+
 def test_import_writes_session_chunks_and_coverage(tmp_path):
     store = InMemoryCouchDBSourceStore()
     src = _write_codex_fixture(tmp_path)

@@ -5,7 +5,12 @@ from pathlib import Path
 
 from ....redaction import redact_text_v2
 from ...transcript_model import TranscriptSession, TranscriptToolEvent, TranscriptTurn, ToolEvidenceSummaryRecord
-from ..common import ParsedTranscript, _load_jsonl_source, _sha256
+from ..common import (
+    ParsedTranscript,
+    _load_jsonl_source,
+    _sha256,
+    build_session_identity_hash_for_source,
+)
 from ..evidence import _build_evidence_records, _coerce_result_text
 
 def _parse_antigravity_native_jsonl(
@@ -13,6 +18,7 @@ def _parse_antigravity_native_jsonl(
     *,
     project: str,
     source_locator_hash: str,
+    identity_version: str = "legacy",
 ) -> ParsedTranscript:
     records = _load_jsonl_source(path)
     session_id = _antigravity_session_id_from_path(path)
@@ -30,7 +36,12 @@ def _parse_antigravity_native_jsonl(
             )
             if session_id:
                 break
-    session_hash = _sha256(f"antigravity:{session_id}")
+    session_hash = build_session_identity_hash_for_source(
+        "antigravity",
+        project,
+        session_id,
+        identity_version=identity_version,
+    )
     turns: list[TranscriptTurn] = []
     tool_events: list[TranscriptToolEvent] = []
     started_at = ""
@@ -140,6 +151,7 @@ def extract_antigravity_tool_evidence(
     *,
     project: str,
     source_locator_hash: str,
+    identity_version: str = "legacy",
 ) -> list[ToolEvidenceSummaryRecord]:
     """Extract tool evidence from a raw Antigravity transcript.
 
@@ -178,4 +190,10 @@ def extract_antigravity_tool_evidence(
     if not session_id:
         raise ValueError("source_parse_failed: missing session_id")
 
-    return _build_evidence_records(raw_items, session_hash=_sha256(f"antigravity:{session_id}"), provider="antigravity", project=project)
+    session_hash = build_session_identity_hash_for_source(
+        "antigravity",
+        project,
+        session_id,
+        identity_version=identity_version,
+    )
+    return _build_evidence_records(raw_items, session_hash=session_hash, provider="antigravity", project=project)

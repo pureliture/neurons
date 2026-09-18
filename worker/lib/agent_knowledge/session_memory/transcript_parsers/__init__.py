@@ -49,6 +49,7 @@ def parse_transcript_source(
     *,
     project: str,
     source_locator_hash: str,
+    identity_version: str = "legacy",
 ) -> ParsedTranscript:
     provider = canonicalize_provider(provider)
     # hermes has no native transcript format yet; it ingests via the generic
@@ -58,13 +59,27 @@ def parse_transcript_source(
     path = Path(source_path)
     native = _NATIVE_PARSERS.get(provider)
     if native is not None and path.suffix.lower() == ".jsonl":
-        return native(path, project=project, source_locator_hash=source_locator_hash)
+        if identity_version != "legacy" and provider not in {"claude", "antigravity"}:
+            raise ValueError("project_scoped_identity_not_supported_for_native_provider")
+        kwargs = {
+            "project": project,
+            "source_locator_hash": source_locator_hash,
+        }
+        if identity_version != "legacy":
+            kwargs["identity_version"] = identity_version
+        return native(path, **kwargs)
     payload = _load_json_source(path)
     if canonicalize_provider(payload.get("provider")) != provider:
         raise ValueError("source_parse_failed: provider mismatch")
     if payload.get("schema_version") != "provider_transcript_fixture.v1":
         raise ValueError("source_parse_failed: unsupported fixture schema")
-    return _parse_provider_fixture(provider, payload, project=project, source_locator_hash=source_locator_hash)
+    return _parse_provider_fixture(
+        provider,
+        payload,
+        project=project,
+        source_locator_hash=source_locator_hash,
+        identity_version=identity_version,
+    )
 
 
 def extract_tool_evidence(
@@ -73,13 +88,20 @@ def extract_tool_evidence(
     *,
     project: str,
     source_locator_hash: str,
+    identity_version: str = "legacy",
 ):
     """Dispatch tool-evidence extraction by provider."""
     provider = canonicalize_provider(provider)
     extractor = _TOOL_EVIDENCE_EXTRACTORS.get(provider)
     if extractor is None:
         raise ValueError(f"unsupported provider: {provider}")
-    return extractor(source_path, project=project, source_locator_hash=source_locator_hash)
+    kwargs = {
+        "project": project,
+        "source_locator_hash": source_locator_hash,
+    }
+    if identity_version != "legacy":
+        kwargs["identity_version"] = identity_version
+    return extractor(source_path, **kwargs)
 
 
 __all__ = [

@@ -11,6 +11,7 @@ from ..common import (
     _load_jsonl_source,
     _normalize_role,
     _sha256,
+    build_session_identity_hash_for_source,
 )
 from ..evidence import _build_evidence_records, _coerce_result_text, _SHELL_TOOL_NAMES
 
@@ -19,16 +20,25 @@ def _parse_claude_native_jsonl(
     *,
     project: str,
     source_locator_hash: str,
+    identity_version: str = "legacy",
 ) -> ParsedTranscript:
     records = _load_jsonl_source(path)
     turns: list[TranscriptTurn] = []
     session_id = ""
+    session_hash = ""
     started_at = ""
     ended_at = ""
 
     for record in records:
         if not session_id:
             session_id = str(record.get("sessionId") or record.get("session_id") or "")
+        if session_id and not session_hash:
+            session_hash = build_session_identity_hash_for_source(
+                "claude",
+                project,
+                session_id,
+                identity_version=identity_version,
+            )
         record_type = str(record.get("type") or "")
         if record_type not in {"user", "assistant"}:
             continue
@@ -46,11 +56,12 @@ def _parse_claude_native_jsonl(
             started_at = observed_at
         ended_at = observed_at or ended_at
         index = len(turns) + 1
-        turn_hash = _sha256(f"{session_id}:{index}:{role}:{redact_text_v2(text)}")
+        turn_hash_seed = session_hash if identity_version != "legacy" else session_id
+        turn_hash = _sha256(f"{turn_hash_seed}:{index}:{role}:{redact_text_v2(text)}")
         turns.append(
             TranscriptTurn(
                 turn_id_hash=turn_hash,
-                session_id_hash=_sha256(f"claude:{session_id}"),
+                session_id_hash=session_hash,
                 turn_index=index,
                 role=role,
                 observed_at=observed_at,
@@ -62,9 +73,16 @@ def _parse_claude_native_jsonl(
         raise ValueError("source_parse_failed: missing transcript turns")
     if not session_id:
         raise ValueError("source_parse_failed: missing session_id")
+    if not session_hash:
+        session_hash = build_session_identity_hash_for_source(
+            "claude",
+            project,
+            session_id,
+            identity_version=identity_version,
+        )
 
     session = TranscriptSession(
-        session_id_hash=_sha256(f"claude:{session_id}"),
+        session_id_hash=session_hash,
         provider="claude",
         project=project,
         started_at=started_at,
@@ -86,6 +104,7 @@ def extract_claude_tool_evidence(
     *,
     project: str,
     source_locator_hash: str,
+    identity_version: str = "legacy",
 ) -> list[ToolEvidenceSummaryRecord]:
     """Extract tool evidence from a raw Claude Code JSONL transcript.
 
@@ -134,4 +153,10 @@ def extract_claude_tool_evidence(
                 command = str(tool_input.get("command") or tool_input.get("cmd") or "")
         raw_items.append({"tool_name": name, "command": command, "output": output, "is_error": is_error, "observed_at": entry["observed_at"]})
 
-    return _build_evidence_records(raw_items, session_hash=_sha256(f"claude:{session_id}"), provider="claude", project=project)
+    session_hash = build_session_identity_hash_for_source(
+        "claude",
+        project,
+        session_id,
+        identity_version=identity_version,
+    )
+    return _build_evidence_records(raw_items, session_hash=session_hash, provider="claude", project=project)
