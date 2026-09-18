@@ -47,15 +47,19 @@ class TranscriptIngestWorker:
         ledger: Ledger,
         enqueue_sink,
         target_profile: str = DEFAULT_TRANSCRIPT_TARGET_PROFILE,
+        identity_version: str = "legacy",
     ):
         if ledger is None:
             raise ValueError("server transcript ingest requires a ledger")
         if enqueue_sink is None:
             raise ValueError("server transcript ingest requires an enqueue sink")
+        if identity_version not in {"legacy", "project_scoped_v2"}:
+            raise ValueError("unsupported_session_identity_version")
         self.capture_spool = capture_spool
         self.ledger = ledger
         self.enqueue_sink = enqueue_sink
         self.target_profile = target_profile
+        self.identity_version = identity_version
 
     def run_once(self) -> TranscriptIngestResult:
         claimed = self.capture_spool.claim_next()
@@ -67,6 +71,7 @@ class TranscriptIngestWorker:
                 source_path,
                 project=request["project"],
                 source_locator_hash=request["source_locator"].get("locator_hash", ""),
+                identity_version=self.identity_version,
             )
             result = self.index_parsed_transcript(request=request, parsed=parsed)
             self.capture_spool.ack(claimed)

@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 from agent_knowledge.ledger import Ledger
+from agent_knowledge.couchdb_source.document_model import build_project_scoped_session_id_hash
 from agent_knowledge.session_memory.transcript_ingest import (
     DEFAULT_TRANSCRIPT_TARGET_PROFILE,
     TranscriptIngestWorker,
@@ -140,6 +141,30 @@ def test_transcript_ingest_worker_enqueues_redacted_chunks_and_marks_ledger(tmp_
     row = ledger.get_by_knowledge_id(result.knowledge_ids[0])
     assert row["status"] == "queued"
     assert row["ingress_job_id"] == "job_transcript_001"
+
+
+def test_transcript_ingest_worker_can_stage_project_scoped_identity(tmp_path):
+    source = tmp_path / "source.json"
+    session_id = "project-scoped-ingest-session"
+    _write_source(source, session_id=session_id)
+    spool = _FakeCaptureSpool(tmp_path / "spool")
+    spool.enqueue(_request(source))
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    sink = _FakeIngressSink()
+
+    result = TranscriptIngestWorker(
+        capture_spool=spool,
+        ledger=ledger,
+        enqueue_sink=sink,
+        identity_version="project_scoped_v2",
+    ).run_once()
+
+    expected = build_project_scoped_session_id_hash("claude", PROJECT, session_id)
+    assert result.status == "queued"
+    session = ledger.get_transcript_session(expected)
+    assert session is not None
+    assert session["session_id_hash"] == expected
+    assert ledger.get_transcript_session(f"legacy:{session_id}") is None
 
 
 def test_transcript_ingest_worker_dedupes_existing_queued_chunk(tmp_path):
