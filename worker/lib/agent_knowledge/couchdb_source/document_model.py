@@ -147,6 +147,25 @@ def build_session_id_hash(provider: str, raw_session_id: str) -> str:
     return sha256_hash(f"{canonicalize_provider(provider)}:{raw_session_id}")
 
 
+def build_project_scoped_session_id_hash(
+    provider: str,
+    project: str,
+    raw_session_id: str,
+) -> str:
+    """Build a project-scoped identity without exposing the raw session id.
+
+    This is intentionally separate from :func:`build_session_id_hash` so legacy
+    ``provider:raw_session_id`` documents remain readable during migration.
+    New source admission must reject an empty canonical project instead of
+    silently collapsing back to the legacy identity.
+    """
+    canonical_provider = canonicalize_provider(provider)
+    canonical_project = canonicalize_project(project)
+    if not canonical_provider or not canonical_project or not raw_session_id:
+        raise ValueError("project_scoped_session_identity_requires_provider_project_and_session")
+    return sha256_hash(f"{canonical_provider}:{canonical_project}:{raw_session_id}")
+
+
 def build_source_locator_hash(raw_locator: str) -> str:
     """Hash a private source path/locator. The raw locator never leaves here."""
 

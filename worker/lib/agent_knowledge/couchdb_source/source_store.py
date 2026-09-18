@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 
 from ..rag_ingress.idempotency import IdempotencyOutcome, classify_idempotency
+from ..session_memory.transcript_model import canonicalize_project
 from .document_model import (
     SourceDocType,
     active_source_revision_pointer_doc_id,
@@ -124,6 +125,16 @@ class CouchDBSourceStore(Protocol):
         observed_at_end: str,
         expected_source_locator_hash: str | None = None,
         replacement_source_locator_hash: str | None = None,
+    ) -> StoredRevision: ...
+
+    def patch_project_if_content_hash(
+        self,
+        *,
+        doc_id: str,
+        expected_content_hash: str,
+        expected_rev: str,
+        expected_project: str,
+        replacement_project: str,
     ) -> StoredRevision: ...
 
     def iter_by_type(
@@ -689,6 +700,57 @@ class InMemoryCouchDBSourceStore:
             return self.put(updated)
 
         updated["source_locator_hash"] = replacement_source_locator_hash
+        validate_for_write(updated)
+        incoming_hash = payload_hash(updated)
+        current_rev = str(current.get("_rev") or "")
+        rev_number = int(current_rev.split("-", 1)[0]) + 1
+        rev = f"{rev_number}-{incoming_hash.split(':', 1)[-1][:12]}"
+        updated["_rev"] = rev
+        updated["idempotency_key"] = doc_id
+        updated["payload_hash"] = incoming_hash
+        self._docs[doc_id] = updated
+        return StoredRevision(doc_id=doc_id, rev=rev, outcome="conflict_resolved")
+
+    def patch_project_if_content_hash(
+        self,
+        *,
+        doc_id: str,
+        expected_content_hash: str,
+        expected_rev: str,
+        expected_project: str,
+        replacement_project: str,
+    ) -> StoredRevision:
+        """CAS-patch only project metadata on an unpinned source document."""
+
+        current = self._docs.get(doc_id)
+        if current is None:
+            raise SourceStoreConflict("conditional project patch source is missing")
+        if str(current.get("content_hash") or "") != str(expected_content_hash or ""):
+            raise SourceStoreConflict("conditional project patch content changed")
+        if not expected_rev or str(current.get("_rev") or "") != str(expected_rev):
+            raise SourceStoreConflict("conditional project patch revision changed")
+        expected = canonicalize_project(expected_project)
+        replacement = canonicalize_project(replacement_project)
+        if not expected or not replacement:
+            raise SourceStoreError("conditional project patch requires non-empty projects")
+        current_project = canonicalize_project(str(current.get("project") or ""))
+        if current_project != expected:
+            raise SourceStoreConflict("conditional project patch project changed")
+        if current_project == replacement:
+            return StoredRevision(
+                doc_id=doc_id,
+                rev=str(current.get("_rev") or ""),
+                outcome="duplicate",
+            )
+        self._require_source_document_unpinned(
+            doc_id,
+            doc_type=str(current.get("doc_type") or ""),
+            session_id_hash=str(current.get("session_id_hash") or ""),
+        )
+        updated = copy.deepcopy(current)
+        for key in ("_rev", "idempotency_key", "payload_hash"):
+            updated.pop(key, None)
+        updated["project"] = replacement
         validate_for_write(updated)
         incoming_hash = payload_hash(updated)
         current_rev = str(current.get("_rev") or "")

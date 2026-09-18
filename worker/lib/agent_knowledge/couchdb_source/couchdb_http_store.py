@@ -24,6 +24,7 @@ from collections.abc import Iterator
 from urllib.parse import quote
 
 from ..rag_ingress.idempotency import IdempotencyOutcome
+from ..session_memory.transcript_model import canonicalize_project
 from ..transport_contract import ProxyResponse
 from .document_model import (
     SourceDocType,
@@ -442,6 +443,62 @@ class CouchDBHttpSourceStore:
             raise SourceStoreConflict("conditional temporal patch revision changed")
         if status not in (201, 202) or not response.get("ok"):
             raise CouchDBError(f"conditional temporal patch failed: HTTP {status}")
+        return StoredRevision(
+            doc_id=doc_id,
+            rev=str(response.get("rev") or ""),
+            outcome="conflict_resolved",
+        )
+
+    def patch_project_if_content_hash(
+        self,
+        *,
+        doc_id: str,
+        expected_content_hash: str,
+        expected_rev: str,
+        expected_project: str,
+        replacement_project: str,
+    ) -> StoredRevision:
+        """CAS-patch only project metadata on an unpinned source document."""
+
+        current = self.get(doc_id)
+        if current is None:
+            raise SourceStoreConflict("conditional project patch source is missing")
+        if str(current.get("content_hash") or "") != str(expected_content_hash or ""):
+            raise SourceStoreConflict("conditional project patch content changed")
+        if not expected_rev or str(current.get("_rev") or "") != str(expected_rev):
+            raise SourceStoreConflict("conditional project patch revision changed")
+        expected = canonicalize_project(expected_project)
+        replacement = canonicalize_project(replacement_project)
+        if not expected or not replacement:
+            raise SourceStoreError("conditional project patch requires non-empty projects")
+        current_project = canonicalize_project(str(current.get("project") or ""))
+        if current_project != expected:
+            raise SourceStoreConflict("conditional project patch project changed")
+        if current_project == replacement:
+            return StoredRevision(
+                doc_id=doc_id,
+                rev=str(current.get("_rev") or ""),
+                outcome="duplicate",
+            )
+        self._require_source_document_unpinned(
+            doc_id,
+            doc_type=str(current.get("doc_type") or ""),
+            session_id_hash=str(current.get("session_id_hash") or ""),
+        )
+        current_rev = str(current.get("_rev") or "")
+        if not current_rev:
+            raise SourceStoreConflict("conditional project patch revision is missing")
+        stored = copy.deepcopy(current)
+        stored["project"] = replacement
+        validate_for_write(stored)
+        incoming_hash = payload_hash(stored)
+        stored["idempotency_key"] = doc_id
+        stored["payload_hash"] = incoming_hash
+        status, response = self._request("PUT", self._doc_path(doc_id), json_body=stored)
+        if status == 409:
+            raise SourceStoreConflict("conditional project patch revision changed")
+        if status not in (201, 202) or not response.get("ok"):
+            raise CouchDBError(f"conditional project patch failed: HTTP {status}")
         return StoredRevision(
             doc_id=doc_id,
             rev=str(response.get("rev") or ""),

@@ -48,6 +48,26 @@ def test_sha256_hash_parity_with_transcript_pipeline() -> None:
     assert dm.build_session_id_hash("codex", "sess-001") == _sha256("codex:sess-001")
 
 
+def test_project_scoped_session_identity_separates_same_raw_id_across_projects() -> None:
+    workspace_stocks = dm.build_project_scoped_session_id_hash(
+        "claude",
+        "workspace-stocks",
+        "same-raw-session",
+    )
+    another_project = dm.build_project_scoped_session_id_hash(
+        "claude",
+        "another-project",
+        "same-raw-session",
+    )
+
+    assert workspace_stocks == dm.build_project_scoped_session_id_hash(
+        "Claude",
+        "workspace-stocks",
+        "same-raw-session",
+    )
+    assert workspace_stocks != another_project
+
+
 def test_doc_ids_are_deterministic_and_partitioned() -> None:
     sid = dm.build_session_id_hash("codex", "sess-001")
     assert dm.session_doc_id(sid) == dm.session_doc_id(sid)

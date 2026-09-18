@@ -104,6 +104,31 @@ def test_identity_upgrade_keeps_exact_legacy_duplicate_idempotent() -> None:
     assert duplicate.rev == first.rev
 
 
+def test_conditional_project_patch_changes_only_project_metadata() -> None:
+    store = InMemoryCouchDBSourceStore()
+    document = _chunk_doc("project metadata repair")
+    first = store.put(document)
+    before = store.get(document["_id"])
+    assert before is not None
+
+    patched = store.patch_project_if_content_hash(
+        doc_id=document["_id"],
+        expected_content_hash=document["content_hash"],
+        expected_rev=first.rev,
+        expected_project="neurons",
+        replacement_project="security-scanner",
+    )
+
+    current = store.get(document["_id"])
+    assert current is not None
+    assert patched.outcome == "conflict_resolved"
+    assert current["project"] == "security-scanner"
+    assert current["body"] == before["body"]
+    assert current["content_hash"] == before["content_hash"]
+    assert current["source_locator_hash"] == before["source_locator_hash"]
+    assert current["_rev"] != before["_rev"]
+
+
 def test_put_preserves_later_temporal_metadata_for_identical_chunk_body() -> None:
     store = InMemoryCouchDBSourceStore()
     original = _chunk_doc("same body")
