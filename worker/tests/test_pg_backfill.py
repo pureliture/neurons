@@ -249,13 +249,80 @@ def test_live_repeat_same_revision_preserves_ready_vector():
                 )
 
 
+class CountingEmbedProvider(SyntheticEmbedProvider):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.calls = 0
+
+    def embed(self, text: str) -> list[float]:
+        self.calls += 1
+        return super().embed(text)
+
+
 @live_pg
-def test_live_changed_revision_creates_new_chunk():
-    """Changing source_hash produces a different chunk_id."""
+def test_live_reuses_ready_chunk_with_legacy_id_without_embedding():
+    """A ready row with a shorter legacy id must be reused, not re-embedded."""
     store = PgVectorStore(dsn=PG_DSN)
     store.execute_ddl()
     suffix = uuid.uuid4().hex[:12]
-    provider = SyntheticEmbedProvider()
+    provider = CountingEmbedProvider()
+    projector = PgSessionMemoryProjector(store=store, embed_provider=provider)
+    body = f"legacy reuse {suffix}"
+    doc = {
+        "body": body,
+        "content_hash": sha256_hash(body),
+        "session_id_hash": f"sha256:{'e' * 64}",
+        "source_hash": f"sha256:{'f' * 64}",
+        "project": f"pg-legacy-{suffix}",
+        "provider": "codex",
+    }
+    from agent_knowledge.postgres_store.pgvector_store import SessionChunk
+
+    legacy_id = f"legacy-{suffix}"
+    store.insert_chunk(
+        SessionChunk(
+            chunk_id=legacy_id,
+            session_id_hash=doc["session_id_hash"],
+            project=doc["project"],
+            provider=doc["provider"],
+            chunk_index=0,
+            content_markdown=body,
+            content_hash=doc["content_hash"],
+            embedding_state="ready",
+            embedding=provider.embed(body),
+            embedding_model="gemini-embedding-2",
+        )
+    )
+    provider.calls = 0
+    try:
+        reused_id = projector.project(target_profile="session-memory", document=doc)
+        assert reused_id == legacy_id
+        assert provider.calls == 0
+        derived_id = _derive_pg_chunk_id_impl(
+            project=doc["project"],
+            provider=doc["provider"],
+            session_id_hash=doc["session_id_hash"],
+            source_hash=doc["source_hash"],
+            content_hash=doc["content_hash"],
+        )
+        assert store.get_chunk(derived_id) is None
+    finally:
+        projector.close()
+        with store.transaction() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM session_memory_chunks WHERE project = %s",
+                    (doc["project"],),
+                )
+
+
+@live_pg
+def test_live_changed_source_hash_reuses_ready_content_vector():
+    """Same body/content may keep the ready vector when only source_hash changes."""
+    store = PgVectorStore(dsn=PG_DSN)
+    store.execute_ddl()
+    suffix = uuid.uuid4().hex[:12]
+    provider = CountingEmbedProvider()
     projector = PgSessionMemoryProjector(store=store, embed_provider=provider)
 
     base_doc = {
@@ -272,24 +339,25 @@ def test_live_changed_revision_creates_new_chunk():
     chunk_id_v1 = projector.project(
         target_profile="session-memory", document=doc_v1
     )
+    embed_calls_after_first = provider.calls
     chunk_id_v2 = projector.project(
         target_profile="session-memory", document=doc_v2
     )
     try:
-        assert chunk_id_v1 != chunk_id_v2
+        assert chunk_id_v1 == chunk_id_v2
+        assert provider.calls == embed_calls_after_first
         assert store.get_chunk(chunk_id_v1) is not None
-        assert store.get_chunk(chunk_id_v2) is not None
     finally:
         projector.close()
         with store.transaction() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "DELETE FROM session_memory_chunks WHERE chunk_id IN (%s, %s)",
-                    (chunk_id_v1, chunk_id_v2),
+                    "DELETE FROM session_memory_chunks WHERE chunk_id = %s",
+                    (chunk_id_v1,),
                 )
                 cur.execute(
-                    "DELETE FROM embedding_outbox WHERE target_id IN (%s, %s)",
-                    (chunk_id_v1, chunk_id_v2),
+                    "DELETE FROM embedding_outbox WHERE target_id = %s",
+                    (chunk_id_v1,),
                 )
 
 
