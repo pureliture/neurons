@@ -27,6 +27,33 @@ def _default_kubernetes_pod_cidr(monkeypatch):
 # --- 테스트용 stub service (transport 경로만 검증; 실 ledger/graph 불필요) ---
 
 
+@pytest.mark.parametrize("failure", ["missing_authority", "embedding_factory"])
+def test_mcp_pg_wiring_fails_closed_redacted_without_qdrant(monkeypatch, tmp_path, failure):
+    import argparse
+    from agent_knowledge import cli
+    from agent_knowledge.ledger import Ledger
+    from agent_knowledge.rag_ingress import qdrant_recall
+    ledger = str(tmp_path / "ledger.sqlite")
+    Ledger(ledger)
+    parser = argparse.ArgumentParser()
+    cli._add_recall_service_arguments(parser)
+    args = parser.parse_args(["--ledger", ledger])
+    monkeypatch.setenv("NEURON_LBRAIN_PGVECTOR_DSN", "postgresql://synthetic.invalid/test")
+    monkeypatch.delenv("COUCHDB_URL", raising=False)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Qdrant fallback forbidden")
+    monkeypatch.setattr(qdrant_recall, "build_qdrant_brain_query_search_from_env", forbidden)
+    if failure == "embedding_factory":
+        monkeypatch.setenv("COUCHDB_URL", "http://synthetic.invalid")
+        def fail(*, environ):
+            raise ValueError("private-secret-must-not-escape")
+        monkeypatch.setattr("agent_knowledge.rag_ingress.qdrant_embedding.build_openai_embedding_provider", fail)
+    with pytest.raises(cli._ServiceWiringError, match="^PG recall wiring failed$") as caught:
+        cli._build_recall_service(args)
+    assert caught.value.code == 2
+    assert "private-secret" not in str(caught.value)
+
+
 class _StubService:
     """공개 `brain.resolve` transport 경로만 제공하는 최소 stub."""
 

@@ -57,6 +57,9 @@ def _cleanup(store: PgVectorStore, tag: str) -> None:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM embedding_outbox WHERE target_id LIKE %s", (like,))
             cur.execute(
+                "DELETE FROM graph_projection_outbox WHERE source_id LIKE %s", (like,)
+            )
+            cur.execute(
                 "DELETE FROM memory_edges WHERE src_id LIKE %s OR dst_id LIKE %s",
                 (like, like),
             )
@@ -73,6 +76,7 @@ def pg_store():
     store = PgVectorStore(dsn=PG_DSN)
     store.execute_ddl()
     tag = f"m6a_store_{uuid.uuid4().hex[:10]}"
+    _cleanup(store, tag)
     yield store, tag
     _cleanup(store, tag)
 
