@@ -320,6 +320,8 @@ def mark_projection_pending_if_source_changed(
             projected_source_hash=projected_source_hash,
             materialized_at=str((existing or {}).get("materialized_at") or ""),
         )
+        if (existing or {}).get("backend_receipts"):
+            state["backend_receipts"] = (existing or {})["backend_receipts"]
         try:
             store.put_if_revision(
                 state,
@@ -470,15 +472,39 @@ def _projection_state_for_materialization(
     projection_status: str,
     failure_reason: str = "",
     ref: str = "",
+    backend: str = "retired_index_bridge",
 ) -> dict:
-    projected_source_hash = str(existing.get("projected_source_hash") or "")
+    if backend == "postgres_pgvector":
+        doc = dict(existing) if existing else build_projection_state_document(
+            session_id_hash=materialized.session_id_hash,
+            provider=materialized.provider,
+            project=materialized.project,
+            projection_status=ProjectionStatus.PENDING,
+        )
+        receipts = dict(doc.get("backend_receipts") or {})
+        receipts[backend] = {
+            "projection_status": projection_status,
+            "projected_source_hash": materialized.source_hash if projection_status == ProjectionStatus.PROJECTED else "",
+            "active_content_hash": materialized.content_hash if projection_status == ProjectionStatus.PROJECTED else "",
+            "session_memory_knowledge_id": ref,
+            "provider": materialized.provider,
+            "project": materialized.project,
+            "materialized_at": materialized.materialized_at,
+            "failure_reason": failure_reason,
+        }
+        doc["backend_receipts"] = receipts
+        return doc
+    hash_field = "projected_source_hash"
+
+    projected_source_hash = str(existing.get(hash_field) or "")
     if (
         not projected_source_hash
         and str(existing.get("projection_status") or "") == ProjectionStatus.PROJECTED
     ):
         projected_source_hash = str(existing.get("source_hash") or "")
+
     if projection_status == ProjectionStatus.PROJECTED:
-        return build_projection_state_document(
+        doc = build_projection_state_document(
             session_id_hash=materialized.session_id_hash,
             provider=materialized.provider,
             project=materialized.project,
@@ -489,7 +515,11 @@ def _projection_state_for_materialization(
             projected_source_hash=materialized.source_hash,
             materialized_at=materialized.materialized_at,
         )
-    return build_projection_state_document(
+        if existing.get("backend_receipts"):
+            doc["backend_receipts"] = existing["backend_receipts"]
+        return doc
+
+    doc = build_projection_state_document(
         session_id_hash=materialized.session_id_hash,
         provider=materialized.provider,
         project=materialized.project,
@@ -498,6 +528,9 @@ def _projection_state_for_materialization(
         source_hash=materialized.source_hash,
         projected_source_hash=projected_source_hash,
     )
+    if existing.get("backend_receipts"):
+        doc["backend_receipts"] = existing["backend_receipts"]
+    return doc
 
 
 def _commit_projection_state_if_source_current(
@@ -507,6 +540,7 @@ def _commit_projection_state_if_source_current(
     projection_status: str,
     failure_reason: str = "",
     ref: str = "",
+    backend: str = "retired_index_bridge",
 ) -> tuple[str, dict]:
     state_id = projection_state_doc_id(materialized.session_id_hash)
     for _attempt in range(3):
@@ -519,9 +553,10 @@ def _commit_projection_state_if_source_current(
         ):
             return "source_revision_changed", store.get(state_id) or {}
         existing = store.get(state_id) or {}
+        receipt = (existing.get("backend_receipts") or {}).get(backend, {}) if backend == "postgres_pgvector" else existing
         if (
-            str(existing.get("projection_status") or "") == ProjectionStatus.PROJECTED
-            and str(existing.get("projected_source_hash") or "")
+            str(receipt.get("projection_status") or "") == ProjectionStatus.PROJECTED
+            and str(receipt.get("projected_source_hash") or "")
             == materialized.source_hash
         ):
             return "already_projected", existing
@@ -531,6 +566,7 @@ def _commit_projection_state_if_source_current(
             projection_status=projection_status,
             failure_reason=failure_reason,
             ref=ref,
+            backend=backend,
         )
         try:
             store.put_if_revision(
@@ -539,7 +575,13 @@ def _commit_projection_state_if_source_current(
             )
         except SourceStoreConflict:
             continue
-        return "written", store.get(state_id) or state
+        persisted = store.get(state_id)
+        if backend == "postgres_pgvector":
+            if _current_session_source_hash(session_id_hash=materialized.session_id_hash, store=store) != materialized.source_hash:
+                return "source_revision_changed", persisted or {}
+            if persisted is None or persisted.get("backend_receipts") != state.get("backend_receipts"):
+                raise SourceStoreConflict("PG projection receipt readback mismatch")
+        return "written", persisted or state
     raise SourceStoreConflict("projection state conflict retry exhausted")
 
 
@@ -605,6 +647,7 @@ def project_session_memory(
     store: CouchDBSourceStore,
     projector: SessionMemoryProjector,
     mirror_sink: "QdrantMirrorSink | None" = None,
+    backend: str = "retired_index_bridge",
 ) -> dict:
     """Project a materialized session-memory to RetiredIndexBridge, recording projection_state.
 
@@ -624,6 +667,7 @@ def project_session_memory(
             store=store,
             projection_status=ProjectionStatus.FAILED,
             failure_reason="materialization_loss",
+            backend=backend,
         )
         result = {
             "status": ProjectionStatus.FAILED,
@@ -656,6 +700,7 @@ def project_session_memory(
             store=store,
             projection_status=ProjectionStatus.FAILED,
             failure_reason=type(exc).__name__,
+            backend=backend,
         )
         result = {
             "status": ProjectionStatus.FAILED,
@@ -671,6 +716,7 @@ def project_session_memory(
         store=store,
         projection_status=ProjectionStatus.PROJECTED,
         ref=ref,
+        backend=backend,
     )
     if commit_status == "source_revision_changed":
         return {
@@ -719,6 +765,7 @@ def materialize_and_project(
     store: CouchDBSourceStore,
     projector: SessionMemoryProjector | None = None,
     mirror_sink: "QdrantMirrorSink | None" = None,
+    backend: str = "retired_index_bridge",
 ) -> dict:
     """End-to-end M3 step for one session: refresh coverage, materialize, project."""
 
@@ -727,7 +774,11 @@ def materialize_and_project(
     projection = None
     if projector is not None:
         projection = project_session_memory(
-            materialized=materialized, store=store, projector=projector, mirror_sink=mirror_sink
+            materialized=materialized,
+            store=store,
+            projector=projector,
+            mirror_sink=mirror_sink,
+            backend=backend,
         )
     return {
         "session_id_hash": session_id_hash,

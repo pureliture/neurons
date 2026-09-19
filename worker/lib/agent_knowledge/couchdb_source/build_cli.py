@@ -41,7 +41,7 @@ def _build_auth_header(user: str, password: str) -> str:
 
 
 def _select_sessions_needing_projection(
-    store, limit: int, *, project: str = "", provider: str = ""
+    store, limit: int, *, project: str = "", provider: str = "", backend: str = "qdrant"
 ) -> list[dict]:
     """Return sessions whose projected revision is not the current source revision.
 
@@ -59,6 +59,7 @@ def _select_sessions_needing_projection(
     from .source_revision import resolve_active_source_revision_from_snapshot
 
     scope_selector = _scope_selector(project=project, provider=provider)
+    hash_field = "backend_receipts" if backend == "postgres_pgvector" else "projected_source_hash"
     states = store.find_by_type(
         SourceDocType.PROJECTION_STATE,
         fields=[
@@ -66,10 +67,15 @@ def _select_sessions_needing_projection(
             "session_id_hash",
             "projection_status",
             "source_hash",
-            "projected_source_hash",
+            hash_field,
         ],
-        selector={"projection_status": ProjectionStatus.PROJECTED, **scope_selector},
+        selector=scope_selector if backend == "postgres_pgvector" else {"projection_status": ProjectionStatus.PROJECTED, **scope_selector},
     )
+    if backend == "postgres_pgvector":
+        states = [
+            {**state, **(state.get("backend_receipts") or {}).get(backend, {})}
+            for state in states
+        ]
     projected_source_hashes = {
         session_id_hash: str(state.get("projected_source_hash") or "")
         for state in states
@@ -286,9 +292,12 @@ def main(argv: list[str] | None = None) -> int:
         auth_header=auth_header,
     )
 
+    # --- Backend Resolution -------------------------------------------------
+    backend = os.environ.get("SESSION_MEMORY_PROJECTION_BACKEND", "retired_index_bridge").strip().lower()
+
     # --- Session selection --------------------------------------------------
     sessions = _select_sessions_needing_projection(
-        store, limit=args.limit, project=str(args.project or ""), provider=str(args.provider or "")
+        store, limit=args.limit, project=str(args.project or ""), provider=str(args.provider or ""), backend=backend
     )
     selected_count = len(sessions)
 
@@ -310,18 +319,16 @@ def main(argv: list[str] | None = None) -> int:
 
     # --- Projector construction (live run only) ------------------------------
     from .session_memory_materializer import materialize_and_project
-
-    backend = os.environ.get("SESSION_MEMORY_PROJECTION_BACKEND", "retired_index_bridge").strip().lower()
     # Fail-closed: 오타 등으로 알 수 없는 backend가 들어오면 retired_index_bridge로 조용히
     # fallback하지 않고 명시적으로 거부한다.
-    if backend not in {"retired_index_bridge", "qdrant"}:
+    if backend not in {"retired_index_bridge", "qdrant", "postgres_pgvector"}:
         print(
             json.dumps(
                 {
                     "schema_version": BUILD_CLI_SCHEMA_VERSION,
                     "error": "env_invalid",
                     "reason": (
-                        "SESSION_MEMORY_PROJECTION_BACKEND는 'retired_index_bridge' 또는 'qdrant'여야 한다"
+                        "SESSION_MEMORY_PROJECTION_BACKEND는 'retired_index_bridge', 'qdrant', 또는 'postgres_pgvector'여야 한다"
                     ),
                     "dry_run": False,
                     "selected": 0,
@@ -347,6 +354,35 @@ def main(argv: list[str] | None = None) -> int:
                         "schema_version": BUILD_CLI_SCHEMA_VERSION,
                         "error": "env_missing",
                         "reason": "QDRANT_URL (and a reachable mirror collection) is required for the qdrant projection backend",
+                        "dry_run": False,
+                        "selected": selected_count,
+                        "projected": 0,
+                        "failed": 0,
+                        "skipped": 0,
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 2
+        mirror_sink = None
+    elif backend == "postgres_pgvector":
+        try:
+            projector = _build_pg_projector(os.environ)
+        except Exception:
+            print(json.dumps({
+                "schema_version": BUILD_CLI_SCHEMA_VERSION,
+                "error": "pg_projector_unavailable",
+                "dry_run": False, "selected": selected_count,
+                "projected": 0, "failed": 0, "skipped": 0,
+            }, sort_keys=True))
+            return 2
+        if projector is None:
+            print(
+                json.dumps(
+                    {
+                        "schema_version": BUILD_CLI_SCHEMA_VERSION,
+                        "error": "env_missing",
+                        "reason": "PGVECTOR_DSN is required for the postgres_pgvector projection backend",
                         "dry_run": False,
                         "selected": selected_count,
                         "projected": 0,
@@ -409,6 +445,7 @@ def main(argv: list[str] | None = None) -> int:
                     store=store,
                     projector=projector,
                     mirror_sink=mirror_sink,
+                    backend=backend,
                 )
                 projection = result.get("projection") or {}
                 status = str(projection.get("status") or "")
@@ -583,6 +620,27 @@ def _build_qdrant_projector(environ):
         return QdrantSessionMemoryProjector(QdrantSessionMemoryMirrorSink(adapter))
     except Exception:
         return None
+
+
+def _build_pg_projector(environ):
+    dsn = (
+        environ.get("NEURON_LBRAIN_PGVECTOR_DSN", "")
+        or environ.get("LLM_BRAIN_PGVECTOR_DSN", "")
+        or environ.get("NEURON_LEDGER_PG_DSN", "")
+    )
+    if not dsn:
+        return None
+    from ..rag_ingress.pg_backfill import PgSessionMemoryProjector
+    from ..postgres_store.pgvector_store import PgVectorStore
+    from ..rag_ingress.qdrant_embedding import build_openai_embedding_provider
+
+    store = PgVectorStore(dsn=dsn, pgvector_version=environ.get("LLM_BRAIN_PGVECTOR_VERSION", "0.8.0"))
+    provider = build_openai_embedding_provider(environ=environ)
+    try:
+        return PgSessionMemoryProjector(store=store, embed_provider=provider)
+    except Exception:
+        _close_if_supported(provider)
+        raise
 
 
 if __name__ == "__main__":

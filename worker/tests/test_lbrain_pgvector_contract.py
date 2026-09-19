@@ -264,6 +264,7 @@ def test_live_candidate_and_outbox_are_read_back_from_same_postgres(tmp_path: Pa
         with store.transaction() as conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM embedding_outbox WHERE target_id = %s", (memory_id,))
+                cur.execute("DELETE FROM graph_projection_outbox WHERE source_id = %s", (memory_id,))
                 cur.execute("DELETE FROM memory_cards WHERE memory_id = %s", (memory_id,))
 
 
@@ -307,6 +308,7 @@ def test_live_candidate_cannot_overwrite_accepted_card(tmp_path: Path):
         with store.transaction() as conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM embedding_outbox WHERE target_id = %s", (memory_id,))
+                cur.execute("DELETE FROM graph_projection_outbox WHERE source_id = %s", (memory_id,))
                 cur.execute("DELETE FROM memory_cards WHERE memory_id = %s", (memory_id,))
 
 
@@ -353,6 +355,7 @@ def test_live_brain_steward_candidate_uses_pg_store(tmp_path: Path):
         with store.transaction() as conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM embedding_outbox WHERE target_id = %s", (memory_id,))
+                cur.execute("DELETE FROM graph_projection_outbox WHERE source_id = %s", (memory_id,))
                 cur.execute("DELETE FROM memory_cards WHERE memory_id = %s", (memory_id,))
 
 
@@ -413,6 +416,7 @@ def test_live_outbox_worker_dual_cas_updates_card_and_session_chunk():
         with store.transaction() as conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM embedding_outbox WHERE target_id IN (%s, %s)", (card_id, chunk_id))
+                cur.execute("DELETE FROM graph_projection_outbox WHERE source_id = %s", (card_id,))
                 cur.execute("DELETE FROM session_memory_chunks WHERE chunk_id = %s", (chunk_id,))
                 cur.execute("DELETE FROM memory_cards WHERE memory_id = %s", (card_id,))
 
@@ -484,6 +488,7 @@ def test_live_dual_cas_stale_hash_is_terminal_noop(target_type: str):
         with store.transaction() as conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM embedding_outbox WHERE target_id = %s", (target_id,))
+                cur.execute("DELETE FROM graph_projection_outbox WHERE source_id = %s", (target_id,))
                 cur.execute("DELETE FROM session_memory_chunks WHERE chunk_id = %s", (target_id,))
                 cur.execute("DELETE FROM memory_cards WHERE memory_id = %s", (target_id,))
 
@@ -571,6 +576,7 @@ def test_live_outbox_claims_are_non_overlapping_and_expired_owner_is_fenced():
         with store.transaction() as conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM embedding_outbox WHERE target_id LIKE %s", (f"m2_lease_{suffix}_%",))
+                cur.execute("DELETE FROM graph_projection_outbox WHERE source_id LIKE %s", (f"m2_lease_{suffix}_%",))
                 cur.execute("DELETE FROM memory_cards WHERE memory_id LIKE %s", (f"m2_lease_{suffix}_%",))
 
 
@@ -604,6 +610,7 @@ def test_live_duplicate_cas_commits_once_and_old_dead_letter_preserves_new_conte
     finally:
         with store.transaction() as conn:
             conn.execute("DELETE FROM embedding_outbox WHERE target_id = %s", (target_id,))
+            conn.execute("DELETE FROM graph_projection_outbox WHERE source_id = %s", (target_id,))
             conn.execute("DELETE FROM memory_cards WHERE memory_id = %s", (target_id,))
 
 
@@ -644,4 +651,5 @@ def test_live_graph_join_and_vector_search_enforce_authority_filters():
             store.hybrid_search(project=base.project, query_vector=base.embedding, as_of="bad-time")
     finally:
         with store.transaction() as conn:
+            conn.execute("DELETE FROM graph_projection_outbox WHERE source_id = ANY(%s)", ([c.memory_id for c in cards],))
             conn.execute("DELETE FROM memory_cards WHERE memory_id = ANY(%s)", ([c.memory_id for c in cards],))

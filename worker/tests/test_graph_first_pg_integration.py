@@ -186,4 +186,5 @@ def test_public_list_keyset_crosses_100_rows_with_actual_mcp_wire_budget(tmp_pat
         assert observed == ids
     finally:
         with store.transaction() as conn:
+            conn.execute("DELETE FROM graph_projection_outbox WHERE source_id IN (SELECT memory_id FROM memory_cards WHERE project = %s)", (project,))
             conn.execute("DELETE FROM memory_cards WHERE project = %s", (project,))

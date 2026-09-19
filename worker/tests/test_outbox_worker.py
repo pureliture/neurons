@@ -40,30 +40,9 @@ live_pg = pytest.mark.skipif(
 OFFLINE_DSN = "postgresql://invalid.example.invalid/never"
 
 
-def _cleanup(store: PgVectorStore, tag: str) -> None:
-    like = tag + "%"
-    with store.transaction() as conn:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM embedding_outbox WHERE target_id LIKE %s", (like,))
-            cur.execute(
-                "DELETE FROM memory_edges WHERE src_id LIKE %s OR dst_id LIKE %s",
-                (like, like),
-            )
-            cur.execute(
-                "DELETE FROM session_memory_chunks WHERE chunk_id LIKE %s", (like,)
-            )
-            cur.execute(
-                "DELETE FROM memory_cards WHERE memory_id LIKE %s", (like,)
-            )
-
-
 @pytest.fixture
-def pg_store():
-    store = PgVectorStore(dsn=PG_DSN)
-    store.execute_ddl()
-    tag = f"m6a_worker_{uuid.uuid4().hex[:10]}"
-    yield store, tag
-    _cleanup(store, tag)
+def pg_store(isolated_pg_store):
+    return isolated_pg_store, f"m6a_worker_{uuid.uuid4().hex[:10]}"
 
 
 def _expire_lease(store: PgVectorStore, outbox_id: int) -> None:
@@ -137,6 +116,47 @@ def test_deterministic_embedding_helper_uses_shared_profile():
 # ==============================================================================
 # B. Live tests (disposable PostgreSQL)
 # ==============================================================================
+
+
+@live_pg
+def test_live_fixture_owns_queue_schema(pg_store):
+    store, _ = pg_store
+    with store.transaction() as conn:
+        schema = conn.execute("SELECT current_schema() AS name").fetchone()["name"]
+        assert schema.startswith("c1_test_"), "worker leases must not use a shared queue"
+        tables = conn.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = %s",
+            (schema,),
+        ).fetchall()
+    assert {row["table_name"] for row in tables} >= {
+        "memory_cards", "embedding_outbox", "graph_projection_outbox",
+    }
+
+
+@live_pg
+def test_live_workers_leave_other_schema_queues_untouched(pg_store, isolated_pg_store_factory):
+    from agent_knowledge.postgres_store.outbox_worker import GraphProjectionWorker
+
+    store, tag = pg_store
+    with isolated_pg_store_factory() as unrelated:
+        unrelated.upsert_card(_pending_card("sentinel", "sentinel", "sha256:sentinel"))
+        before_embedding = unrelated.list_outbox_jobs()
+        before_graph = unrelated.list_graph_projection_jobs()
+        before_card = unrelated.get_card("sentinel")
+        store.upsert_card(_pending_card(tag, tag, "sha256:owned"))
+        received = []
+
+        class Adapter:
+            def upsert_episode(self, payload):
+                received.append(payload["authority_memory_id"])
+                return "inserted"
+
+        assert _worker(store, "owned").run_once() == 1
+        assert GraphProjectionWorker(store, graph_adapter=Adapter()).run_once() == 1
+        assert received == [tag]
+        assert unrelated.list_outbox_jobs() == before_embedding
+        assert unrelated.list_graph_projection_jobs() == before_graph
+        assert unrelated.get_card("sentinel") == before_card
 
 
 @live_pg
@@ -362,10 +382,8 @@ def test_live_graph_projection_worker_happy_path(pg_store):
         batch_size=50,
     )
 
-    # Process all pending queue items in the batch
-    processed = worker.run_once()
-    assert processed >= 1
-    assert any(p.get("authority_memory_id") == memory_id for p in received_payloads)
+    assert worker.run_once() == 1
+    assert [p["authority_memory_id"] for p in received_payloads] == [memory_id]
 
     graph_jobs = [job for job in store.list_graph_projection_jobs() if job.source_id == memory_id]
     assert graph_jobs[0].status == "completed"
@@ -382,6 +400,7 @@ def test_live_graph_projection_worker_retry_to_dead_letter(pg_store):
 
     class FailingAdapter:
         def upsert_episode(self, payload):
+            assert payload["authority_memory_id"] == memory_id
             raise ConnectionError("Neo4j down")
 
     worker = GraphProjectionWorker(
@@ -398,7 +417,7 @@ def test_live_graph_projection_worker_retry_to_dead_letter(pg_store):
                     "UPDATE graph_projection_outbox SET lease_until = NOW() - INTERVAL '1 second' WHERE source_id = %s",
                     (memory_id,),
                 )
-        worker.run_once()
+        assert worker.run_once() == 1
 
     jobs = [job for job in store.list_graph_projection_jobs() if job.source_id == memory_id]
     assert len(jobs) == 1

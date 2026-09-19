@@ -285,10 +285,10 @@ def _build_recall_service(
         )
     except Exception as exc:
         raise _ServiceWiringError(1, f"graph adapter unavailable: {type(exc).__name__}") from exc
-    # M8 read cutover: when QDRANT_URL (+ COUCHDB_URL authority store) is configured,
-    # fill brain.query's archive/evidence lanes from the Qdrant searchable mirror.
-    # Additive -- the RetiredIndexBridge archive search is off in the live MCP (empty dataset_ids).
+    # A configured PG lane owns session archive recall. Construction failures
+    # must be visible; neither Qdrant nor the retired bridge is a fallback.
     from .rag_ingress.qdrant_recall import build_qdrant_brain_query_search_from_env
+    from .rag_ingress.pg_recall import build_pg_brain_query_search_from_env
 
     pgvector_store = None
     pgvector_dsn = (
@@ -297,7 +297,13 @@ def _build_recall_service(
         or os.environ.get("NEURON_LEDGER_PG_DSN", "")
     )
     # PG authority 구성 시 Qdrant는 shadow/migration 전용이다.
-    mirror_search = None if pgvector_dsn else build_qdrant_brain_query_search_from_env(os.environ)
+    if pgvector_dsn:
+        try:
+            mirror_search = build_pg_brain_query_search_from_env(os.environ)
+        except Exception:
+            raise _ServiceWiringError(2, "PG recall wiring failed") from None
+    else:
+        mirror_search = build_qdrant_brain_query_search_from_env(os.environ)
     if pgvector_dsn:
         try:
             from .postgres_store.pgvector_store import PgVectorStore

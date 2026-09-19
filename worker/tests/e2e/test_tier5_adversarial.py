@@ -12,12 +12,15 @@ Extends E2E verification with extreme adversarial scenarios:
 from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
+import hashlib
 import json
 import os
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
-import time
+import uuid
 import pytest
+from qdrant_client import QdrantClient, models
 
 from agent_knowledge.ledger import Ledger
 from agent_knowledge.knowledge_search_service import (
@@ -46,6 +49,7 @@ from agent_knowledge.postgres_store.pgvector_store import (
 )
 from agent_knowledge.postgres_store.outbox_worker import (
     OutboxWorker,
+    generate_deterministic_embedding,
 )
 from agent_knowledge.postgres_store.migration_qdrant_to_postgres import (
     QdrantToPostgresMigrator,
@@ -191,65 +195,185 @@ def test_tier5_adversarial_extreme_payload_truncation():
 # 3. High-Concurrency CAS Race Stress (10 Mutating Threads vs 5 Workers)
 # ==============================================================================
 
+def _mutate_card(store, target_id, content_hash):
+    card = store.get_card(target_id)
+    assert card is not None, f"missing mutation target: {target_id}"
+    card.content_hash = content_hash
+    card.summary = f"Revision {content_hash}"
+    card.embedding_state = "pending"
+    card.embedding = None
+    card.updated_at = datetime.now(timezone.utc)
+    store.upsert_card(card)
+
+
 @live_pg
-def test_tier5_adversarial_high_concurrency_cas_stress():
+def test_tier5_mutator_ready_revision_enqueues_new_job(isolated_pg_store):
+    store = isolated_pg_store
+    store.upsert_card(MemoryCard(
+        memory_id="revision", project="test", card_type="decision", title="old",
+        summary="old", content_hash="sha256:old", embedding_state="ready",
+        embedding=make_dummy_vector(1),
+    ))
+    assert store.list_outbox_jobs() == []
+    _mutate_card(store, "revision", "sha256:new")
+    jobs = store.list_outbox_jobs()
+    assert len(jobs) == 1, "every changed ready revision must enqueue an embedding job"
+    assert (jobs[0].target_id, jobs[0].content_hash, jobs[0].status) == ("revision", "sha256:new", "queued")
+    card = store.get_card("revision")
+    assert card.embedding_state == "pending"
+    assert card.embedding is None
+
+
+@live_pg
+@pytest.mark.parametrize("participant", ["worker", "mutator"])
+def test_tier5_stress_propagates_participant_exception(isolated_pg_store, monkeypatch, participant):
+    def fail(*args, **kwargs):
+        raise RuntimeError(f"injected {participant} failure")
+
+    if participant == "worker":
+        monkeypatch.setattr(OutboxWorker, "run_once", fail)
+    else:
+        monkeypatch.setitem(globals(), "_mutate_card", fail)
+    with pytest.raises(RuntimeError, match=f"injected {participant} failure"):
+        test_tier5_adversarial_high_concurrency_cas_stress(isolated_pg_store)
+
+
+@live_pg
+@pytest.mark.parametrize("max_retries", [1, 5], ids=["dead_letter", "failed"])
+def test_tier5_stress_rejects_embedding_failure(isolated_pg_store, monkeypatch, max_retries):
+    def fail_embedding(text):
+        raise RuntimeError("injected embedding failure")
+
+    original_init = OutboxWorker.__init__
+
+    def init(worker, *args, **kwargs):
+        original_init(worker, *args, **kwargs, max_retries=max_retries)
+
+    monkeypatch.setattr(OutboxWorker, "__init__", init)
+    monkeypatch.setitem(globals(), "generate_deterministic_embedding", fail_embedding)
+    with pytest.raises(AssertionError, match="unsuccessful outbox"):
+        test_tier5_adversarial_high_concurrency_cas_stress(isolated_pg_store)
+
+
+@live_pg
+def test_tier5_stress_rejects_zero_worker_progress(isolated_pg_store, monkeypatch):
+    monkeypatch.setattr(OutboxWorker, "run_once", lambda self: 0)
+    with pytest.raises(AssertionError, match="workers made no progress"):
+        test_tier5_adversarial_high_concurrency_cas_stress(isolated_pg_store)
+
+
+@live_pg
+def test_tier5_adversarial_high_concurrency_cas_stress(isolated_pg_store):
     """10 mutator threads updating cards concurrently with 5 outbox worker threads."""
-    store = PgVectorStore(dsn=PG_DSN)
-    store.execute_ddl()
+    store = isolated_pg_store
+
+    tag = f"t5_stress_{uuid.uuid4().hex[:8]}"
 
     # Create 20 initial cards
     for i in range(20):
         store.upsert_card(
             MemoryCard(
-                memory_id=f"stress_card_{i}",
+                memory_id=f"{tag}_card_{i}",
                 project="neurons",
                 card_type="decision",
                 title=f"Initial Title {i}",
                 summary=f"Initial Summary {i}",
-                content_hash=f"sha256:init_{i:060d}",
+                content_hash=f"sha256:{hashlib.sha256(f'{tag}_init_{i}'.encode()).hexdigest()}",
                 embedding_state="pending",
             )
         )
 
-    # 5 worker threads
+    # 5 worker threads with injected deterministic embedding provider
     workers = [
-        OutboxWorker(store, worker_id=f"stress_worker_{w}", batch_size=4, lease_seconds=5)
+        OutboxWorker(
+            store,
+            worker_id=f"{tag}_worker_{w}",
+            batch_size=4,
+            lease_seconds=5,
+            poll_interval_seconds=0.05,
+            embedding_fn=generate_deterministic_embedding,
+        )
         for w in range(5)
     ]
 
-    stop_event = threading.Event()
-    worker_threads = []
-    for w in workers:
-        t = threading.Thread(target=w.run_loop, kwargs={"stop_event": stop_event, "max_iterations": 20})
-        worker_threads.append(t)
-        t.start()
+    # Five synchronized rounds exercise all 15 participants without timing sleeps.
+    rounds = threading.Barrier(15, timeout=20)
 
-    # 10 mutator threads concurrently updating content_hash on random cards
-    def mutator_work(thread_idx: int):
+    def worker_work(worker):
+        processed = 0
+        for _ in range(5):
+            rounds.wait()
+            processed += worker.run_once()
+            rounds.wait()
+        return processed
+
+    def mutator_work(thread_idx):
+        mutations = 0
         for step in range(5):
-            target_id = f"stress_card_{(thread_idx + step) % 20}"
-            card = store.get_card(target_id)
-            if card:
-                card.content_hash = f"sha256:mutated_{thread_idx}_{step}" + "0" * (64 - len(f"mutated_{thread_idx}_{step}"))
-                card.updated_at = datetime.now(timezone.utc)
-                store.cards[target_id] = card
-            time.sleep(0.01)
+            rounds.wait()
+            target_id = f"{tag}_card_{(thread_idx + step) % 20}"
+            _mutate_card(store, target_id, f"sha256:{hashlib.sha256(f'{tag}_mutated_{thread_idx}_{step}'.encode()).hexdigest()}")
+            mutations += 1
+            rounds.wait()
+        return mutations
 
-    mutator_threads = [threading.Thread(target=mutator_work, args=(m,)) for m in range(10)]
-    for mt in mutator_threads:
-        mt.start()
+    def guarded(fn, arg):
+        try:
+            return fn(arg)
+        except BaseException:
+            rounds.abort()
+            raise
 
-    for mt in mutator_threads:
-        mt.join()
+    errors = []
+    with ThreadPoolExecutor(max_workers=15) as pool:
+        worker_futures = [pool.submit(guarded, worker_work, w) for w in workers]
+        mutator_futures = [pool.submit(guarded, mutator_work, m) for m in range(10)]
+        for future in as_completed(worker_futures + mutator_futures, timeout=90):
+            try:
+                future.result()
+            except BaseException as exc:
+                errors.append(exc)
+    if errors:
+        # Barrier cancellation is secondary: surface the actual participant failure.
+        raise next((exc for exc in errors if not isinstance(exc, threading.BrokenBarrierError)), errors[0])
+    assert [future.result() for future in mutator_futures] == [5] * 10
+    assert all(future.result() > 0 for future in worker_futures), "workers made no progress"
 
-    time.sleep(0.1)
-    stop_event.set()
-    for wt in worker_threads:
-        wt.join()
+    # Each committed revision owns one job, including all 50 mutations.
+    jobs = store.list_outbox_jobs()
+    assert len(jobs) == 70, "expected 20 initial + 50 mutated revision jobs"
+    expected_revisions = {
+        (f"{tag}_card_{i}", f"sha256:{hashlib.sha256(f'{tag}_init_{i}'.encode()).hexdigest()}")
+        for i in range(20)
+    } | {
+        (f"{tag}_card_{(m + step) % 20}", f"sha256:{hashlib.sha256(f'{tag}_mutated_{m}_{step}'.encode()).hexdigest()}")
+        for m in range(10) for step in range(5)
+    }
+    assert {(job.target_id, job.content_hash) for job in jobs} == expected_revisions
 
-    # Verify storage integrity: no unhandled exceptions, all jobs accounted for
-    for job in store.outbox.values():
-        assert job.status in ("completed", "processing", "queued", "failed", "dead_letter")
+    # Participants have stopped: finish only this fixture's bounded queue.
+    for _ in range(70):
+        if workers[0].run_once() == 0:
+            break
+    jobs = store.list_outbox_jobs()
+    unsuccessful = [(job.outbox_id, job.status, job.last_error) for job in jobs
+                    if job.status not in {"completed", "cas_skipped"}]
+    assert not unsuccessful, f"unsuccessful outbox: {unsuccessful}"
+    assert all(job.retry_count == 0 for job in jobs)
+
+    for i in range(20):
+        card = store.get_card(f"{tag}_card_{i}")
+        assert card is not None
+        assert card.embedding_state == "ready"
+        assert card.embedding is not None and len(card.embedding) == 3072
+        current_jobs = [job for job in jobs if job.target_id == card.memory_id
+                        and job.content_hash == card.content_hash]
+        assert len(current_jobs) == 1
+        assert current_jobs[0].status == "completed"
+        assert current_jobs[0].last_error is None
+        assert card.embedding == pytest.approx(
+            generate_deterministic_embedding(current_jobs[0].payload_text), abs=1e-4,
+        )
 
 
 # ==============================================================================
@@ -262,59 +386,74 @@ def test_tier5_adversarial_deep_cyclic_provenance_dag():
     store = PgVectorStore(dsn=PG_DSN)
     store.execute_ddl()
 
-    # Create nodes: R -> A1, R -> A2; A1 -> B, A2 -> B (diamond); B -> C -> D -> E -> R (cycle!)
-    nodes = ["R", "A1", "A2", "B", "C", "D", "E"]
-    for n in nodes:
-        store.insert_card(
-            MemoryCard(
-                memory_id=n,
-                project="neurons",
-                card_type="decision",
-                title=f"Node {n}",
-                summary=f"Summary {n}",
-                content_hash=f"sha256:{n.lower() * 64}",
+    tag = f"t5_dag_{uuid.uuid4().hex[:8]}"
+    node_map = {n: f"{tag}_{n}" for n in ["R", "A1", "A2", "B", "C", "D", "E"]}
+
+    try:
+        # Create nodes: R -> A1, R -> A2; A1 -> B, A2 -> B (diamond); B -> C -> D -> E -> R (cycle!)
+        for n, nid in node_map.items():
+            store.insert_card(
+                MemoryCard(
+                    memory_id=nid,
+                    project="neurons",
+                    card_type="decision",
+                    title=f"Node {n}",
+                    summary=f"Summary {n}",
+                    content_hash=f"sha256:{hashlib.sha256(nid.encode()).hexdigest()}",
+                    lifecycle_state="human_accepted",
+                    authorization_status="active",
+                    currentness="current",
+                    valid_from=datetime(2026, 7, 1, tzinfo=timezone.utc),
+                )
             )
-        )
 
-    edges = [
-        ("R", "A1", "derived_from", datetime(2026, 8, 1, tzinfo=timezone.utc)),
-        ("R", "A2", "derived_from", datetime(2026, 8, 1, tzinfo=timezone.utc)),
-        ("A1", "B", "supports", datetime(2026, 8, 5, tzinfo=timezone.utc)),
-        ("A2", "B", "supports", datetime(2026, 8, 5, tzinfo=timezone.utc)),
-        ("B", "C", "supersedes", datetime(2026, 8, 10, tzinfo=timezone.utc)),
-        ("C", "D", "derived_from", datetime(2026, 8, 15, tzinfo=timezone.utc)),
-        ("D", "E", "derived_from", datetime(2026, 8, 20, tzinfo=timezone.utc)),
-        ("E", "R", "contradicts", datetime(2026, 8, 25, tzinfo=timezone.utc)),  # Cycle!
-    ]
+        edges = [
+            ("R", "A1", "derived_from", datetime(2026, 8, 1, tzinfo=timezone.utc)),
+            ("R", "A2", "derived_from", datetime(2026, 8, 1, tzinfo=timezone.utc)),
+            ("A1", "B", "supports", datetime(2026, 8, 5, tzinfo=timezone.utc)),
+            ("A2", "B", "supports", datetime(2026, 8, 5, tzinfo=timezone.utc)),
+            ("B", "C", "supersedes", datetime(2026, 8, 10, tzinfo=timezone.utc)),
+            ("C", "D", "derived_from", datetime(2026, 8, 15, tzinfo=timezone.utc)),
+            ("D", "E", "derived_from", datetime(2026, 8, 20, tzinfo=timezone.utc)),
+            ("E", "R", "contradicts", datetime(2026, 8, 25, tzinfo=timezone.utc)),  # Cycle!
+        ]
 
-    for src, dst, rel, valid_from in edges:
-        store.insert_edge(
-            MemoryEdge(
-                src_id=src,
-                dst_id=dst,
-                rel_type=rel,
-                valid_from=valid_from,
-                provenance_hash=f"sha256:edge_{src}_{dst}" + "0" * (64 - len(f"edge_{src}_{dst}")),
+        for src, dst, rel, valid_from in edges:
+            src_id = node_map[src]
+            dst_id = node_map[dst]
+            store.insert_edge(
+                MemoryEdge(
+                    src_id=src_id,
+                    dst_id=dst_id,
+                    rel_type=rel,
+                    valid_from=valid_from,
+                    provenance_hash=f"sha256:{hashlib.sha256(f'{src_id}_{dst_id}'.encode()).hexdigest()}",
+                )
             )
+
+        # 1. Full traversal from root R (max_depth=5)
+        results = store.traverse_provenance_dag(root_memory_id=node_map["R"], max_depth=5)
+        assert len(results) > 0
+        assert max(r["depth"] for r in results) <= 5
+
+        # 2. Point-in-time traversal as of 2026-08-08 (should only include R->A1, R->A2, A1->B, A2->B)
+        pit_results = store.traverse_provenance_dag(
+            root_memory_id=node_map["R"],
+            max_depth=5,
+            as_of="2026-08-08T00:00:00Z",
         )
-
-    # 1. Full traversal from root R (max_depth=5)
-    results = store.traverse_provenance_dag(root_memory_id="R", max_depth=5)
-    assert len(results) > 0
-    assert max(r["depth"] for r in results) <= 5
-
-    # 2. Point-in-time traversal as of 2026-08-08 (should only include R->A1, R->A2, A1->B, A2->B)
-    pit_results = store.traverse_provenance_dag(
-        root_memory_id="R",
-        max_depth=5,
-        as_of="2026-08-08T00:00:00Z",
-    )
-    pit_dsts = {r["dst_id"] for r in pit_results}
-    assert "A1" in pit_dsts
-    assert "A2" in pit_dsts
-    assert "B" in pit_dsts
-    assert "C" not in pit_dsts  # Created after 2026-08-08
-    assert "D" not in pit_dsts
+        pit_dsts = {r["dst_id"] for r in pit_results}
+        assert node_map["A1"] in pit_dsts
+        assert node_map["A2"] in pit_dsts
+        assert node_map["B"] in pit_dsts
+        assert node_map["C"] not in pit_dsts  # Created after 2026-08-08
+        assert node_map["D"] not in pit_dsts
+    finally:
+        with store.transaction() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM memory_edges WHERE src_id LIKE %s OR dst_id LIKE %s", (f"{tag}%", f"{tag}%"))
+                cur.execute("DELETE FROM graph_projection_outbox WHERE source_id LIKE %s", (f"{tag}%",))
+                cur.execute("DELETE FROM memory_cards WHERE memory_id LIKE %s", (f"{tag}%",))
 
 
 # ==============================================================================
@@ -324,66 +463,86 @@ def test_tier5_adversarial_deep_cyclic_provenance_dag():
 @live_pg
 def test_tier5_adversarial_full_backfill_and_dual_read_cutover():
     """Simulates full zero-downtime cutover: migrate 100 items and verify Recall@5 >= 0.95."""
-    class SourceQdrant:
-        def __init__(self):
-            self.collections = {"memory_cards": {}, "session_chunks": {}}
-            self.vectors = {}
-            for i in range(100):
-                vec = make_dummy_vector(i * 7)
-                card_data = (
-                    vec,
-                    {
-                        "memory_id": f"card_{i}",
-                        "project": "neurons",
-                        "card_type": "decision" if i % 2 == 0 else "preference",
-                        "title": f"Migrated Knowledge {i}",
-                        "summary": f"Summary for knowledge point {i}",
-                        "typed_payload": {"idx": i},
-                        "content_hash": f"sha256:{i:064d}",
-                        "lifecycle_state": "human_accepted",
-                        "authorization_status": "active",
-                        "currentness": "current",
-                    },
-                )
-                self.collections["memory_cards"][f"card_{i}"] = card_data
-                self.vectors[f"card_{i}"] = card_data
+    project = f"t5_cutover_{uuid.uuid4().hex[:8]}"
 
-    source_qdrant = SourceQdrant()
+    source_qdrant = QdrantClient(":memory:")
+    source_qdrant.create_collection(
+        "session_chunks",
+        vectors_config=models.VectorParams(size=3072, distance=models.Distance.COSINE),
+    )
+    source_qdrant.create_collection(
+        "memory_cards",
+        vectors_config=models.VectorParams(size=3072, distance=models.Distance.COSINE),
+    )
+
+    points = []
+    for i in range(100):
+        vec = make_dummy_vector(i * 7)
+        card_id = f"{project}_card_{i}"
+        payload = {
+            "memory_id": card_id,
+            "project": project,
+            "card_type": "decision" if i % 2 == 0 else "preference",
+            "title": f"Migrated Knowledge {i}",
+            "summary": f"Summary for knowledge point {i}",
+            "typed_payload": {"idx": i},
+            "content_hash": f"sha256:{hashlib.sha256(card_id.encode()).hexdigest()}",
+            "lifecycle_state": "human_accepted",
+            "authorization_status": "active",
+            "currentness": "current",
+            "confidence": 0.95,
+            "valid_from": "2026-01-01T00:00:00Z",
+            "valid_to": None,
+            "source_ref": [f"ref_{i}"],
+            "embedding_model": "gemini-embedding-2",
+        }
+        points.append(models.PointStruct(id=i + 1, vector=vec, payload=payload))
+    source_qdrant.upsert("memory_cards", points)
+
     pg_target = PgVectorStore(dsn=PG_DSN)
     pg_target.execute_ddl()
 
-    # Step 1: Run Backfill Migration
-    migrator = QdrantToPostgresMigrator(
-        qdrant_client=source_qdrant,
-        target_store=pg_target,
-        batch_size=25,
-    )
-    summary = migrator.run_full_migration(project="neurons")
-    assert summary.total_migrated == 100
-    assert len(pg_target.cards) == 100
+    try:
+        # Step 1: Run Backfill Migration
+        migrator = QdrantToPostgresMigrator(
+            qdrant_client=source_qdrant,
+            target_store=pg_target,
+            batch_size=25,
+        )
+        summary = migrator.run_full_migration(project=project)
+        assert summary.total_migrated == 100
+        migrated_cards = pg_target.list_authorized_cards(project=project)
+        assert len(migrated_cards) == 100
 
+        # Step 2: Run Dual-Read Shadow Benchmark
+        harness = DualReadShadowHarness(
+            qdrant_client=source_qdrant,
+            pg_store=pg_target,
+            default_limit=5,
+            recall_gate_threshold=0.95,
+            p95_latency_gate_ms=20.0,
+            evidence_class="test_harness",
+        )
+        benchmark_queries = [make_dummy_vector(q * 11) for q in range(50)]
+        bench_res = harness.run_benchmark(benchmark_queries, project=project)
 
-    # Step 2: Run Dual-Read Shadow Benchmark
-    harness = DualReadShadowHarness(
-        qdrant_client=source_qdrant,
-        pg_store=pg_target,
-        default_limit=5,
-        recall_gate_threshold=0.95,
-        p95_latency_gate_ms=20.0,
-    )
-    benchmark_queries = [make_dummy_vector(q * 11) for q in range(50)]
-    bench_res = harness.run_benchmark(benchmark_queries, project="neurons")
+        assert bench_res.mean_recall_at_k >= 0.95
+        assert bench_res.recall_gate_passed is True
+        assert bench_res.p95_pgvector_latency_ms <= 20.0
+        assert bench_res.overall_gate_passed is False
+        assert "test_harness_not_cutover_evidence" in bench_res.cutover_blockers
 
-    assert bench_res.mean_recall_at_k >= 0.95
-    assert bench_res.recall_gate_passed is True
-    assert bench_res.p95_pgvector_latency_ms <= 20.0
-    assert bench_res.overall_gate_passed is True
-
-    # Step 3: Verify Cutover Search on Target Store
-    resolved = pg_target.hybrid_search(
-        project="neurons",
-        query_vector=make_dummy_vector(0),
-        limit=5,
-    )
-    assert len(resolved) == 5
-    assert resolved[0]["similarity_score"] >= 0.99
+        # Step 3: Verify Cutover Search on Target Store
+        resolved = pg_target.hybrid_search(
+            project=project,
+            query_vector=make_dummy_vector(0),
+            limit=5,
+        )
+        assert len(resolved) == 5
+        assert resolved[0]["similarity_score"] >= 0.99
+    finally:
+        with pg_target.transaction() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM embedding_outbox WHERE target_id LIKE %s", (f"{project}%",))
+                cur.execute("DELETE FROM graph_projection_outbox WHERE source_id LIKE %s", (f"{project}%",))
+                cur.execute("DELETE FROM memory_cards WHERE project = %s", (project,))
