@@ -508,6 +508,51 @@ class PgVectorStore:
                 row = cur.fetchone()
         return _chunk_from_row(row) if row is not None else None
 
+    def find_ready_chunk_by_identity(
+        self,
+        *,
+        session_id_hash: str,
+        project: str,
+        provider: str,
+        content_hash: str,
+        embedding_model: str,
+        conn: Any | None = None,
+    ) -> SessionChunk | None:
+        """Return the unique ready chunk for this identity, independent of chunk_id.
+
+        Legacy rows used shorter ids than the scoped 64-char projector. Reuse
+        must not re-embed when the same session/content/model is already ready.
+        Ambiguous matches fail closed.
+        """
+
+        with self._scope(conn=conn) as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT chunk_id, session_id_hash, project, provider, chunk_index,
+                           content_markdown, token_count, content_hash, embedding_model,
+                           embedding_state, embedding_revision, embedding,
+                           created_at, updated_at
+                      FROM session_memory_chunks
+                     WHERE session_id_hash = %s
+                       AND project = %s
+                       AND provider = %s
+                       AND content_hash = %s
+                       AND embedding_model = %s
+                       AND embedding_state = 'ready'
+                       AND embedding IS NOT NULL
+                     ORDER BY chunk_id
+                     LIMIT 2
+                    """,
+                    (session_id_hash, project, provider, content_hash, embedding_model),
+                )
+                rows = cur.fetchall()
+        if not rows:
+            return None
+        if len(rows) > 1:
+            raise ValueError("PG ready chunk identity is not unique")
+        return _chunk_from_row(rows[0])
+
     def search_session_chunks(
         self,
         query_vector: list[float],

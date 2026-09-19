@@ -86,9 +86,14 @@ class PgSessionMemoryProjector:
             content_hash=content_hash,
             embedding_profile=embedding_profile,
         )
+        identity_lock = hashlib.sha256(
+            json.dumps(
+                [session_id_hash, project, provider, content_hash, embedding_model],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
 
-        # Check if it already exists to avoid re-embedding
-        existing = self._store.get_chunk(chunk_id)
         def validate_identity(row: SessionChunk) -> None:
             if (row.session_id_hash, row.project, row.provider, row.content_hash,
                 row.content_markdown, row.embedding_model) != (
@@ -96,12 +101,28 @@ class PgSessionMemoryProjector:
             ):
                 raise ValueError("PG chunk identity mismatch")
 
-        if existing is not None:
-            validate_identity(existing)
-            if existing.embedding_state == "ready":
-                if existing.embedding is None or len(existing.embedding) != embedding_size:
-                    raise ValueError("PG ready chunk vector mismatch")
-                return chunk_id
+        def reuse_ready(row: SessionChunk | None) -> str | None:
+            if row is None or row.embedding_state != "ready":
+                return None
+            validate_identity(row)
+            if row.embedding is None or len(row.embedding) != embedding_size:
+                raise ValueError("PG ready chunk vector mismatch")
+            return row.chunk_id
+
+        reused = reuse_ready(self._store.get_chunk(chunk_id))
+        if reused is not None:
+            return reused
+        reused = reuse_ready(
+            self._store.find_ready_chunk_by_identity(
+                session_id_hash=session_id_hash,
+                project=project,
+                provider=provider,
+                content_hash=content_hash,
+                embedding_model=embedding_model,
+            )
+        )
+        if reused is not None:
+            return reused
 
         # Validate embedding dimension
         if embedding_size <= 0:
@@ -129,14 +150,25 @@ class PgSessionMemoryProjector:
         # case (a row lock alone cannot fence concurrent first inserts).
         with self._store.transaction() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (chunk_id,))
-            concurrent = self._store.get_chunk(chunk_id, conn=conn)
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (identity_lock,),
+                )
+            concurrent = reuse_ready(self._store.get_chunk(chunk_id, conn=conn))
             if concurrent is not None:
-                validate_identity(concurrent)
-                if concurrent.embedding_state == "ready":
-                    if concurrent.embedding is None or len(concurrent.embedding) != embedding_size:
-                        raise ValueError("PG ready chunk vector mismatch")
-                    return chunk_id
+                return concurrent
+            concurrent = reuse_ready(
+                self._store.find_ready_chunk_by_identity(
+                    session_id_hash=session_id_hash,
+                    project=project,
+                    provider=provider,
+                    content_hash=content_hash,
+                    embedding_model=embedding_model,
+                    conn=conn,
+                )
+            )
+            if concurrent is not None:
+                return concurrent
             self._store.insert_chunk(chunk, conn=conn)
 
         # Verify ready readback
