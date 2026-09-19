@@ -43,6 +43,7 @@ def graph():
         yield store, project, ids, start
     finally:
         with store.transaction() as conn:
+            conn.execute("DELETE FROM graph_projection_outbox WHERE source_id = ANY(%s)", (list(ids.values()),))
             conn.execute("DELETE FROM memory_edges WHERE src_id = ANY(%s) OR dst_id = ANY(%s)", (list(ids.values()), list(ids.values())))
             conn.execute("DELETE FROM memory_cards WHERE memory_id = ANY(%s)", (list(ids.values()),))
 

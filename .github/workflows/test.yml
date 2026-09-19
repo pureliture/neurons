@@ -92,9 +92,15 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+      - name: LBRAIN_TEST_PG_DSN 필수 검증
+        run: |
+          if [ -z "$LBRAIN_TEST_PG_DSN" ]; then
+            echo "ERROR: LBRAIN_TEST_PG_DSN is required by worker-lbrain-pgvector CI gate" >&2
+            exit 1
+          fi
       - name: 실제 PostgreSQL 권위 저장 및 공개 Graph-first 조회 검증
         working-directory: worker
-        run: uv run --group dev --extra mcp-http pytest -q tests/test_lbrain_pgvector_contract.py tests/test_graph_first_pg_integration.py tests/test_graph_first_resolver.py tests/test_pg_evidence.py
+        run: uv run --group dev --extra mcp-http pytest -q tests/test_lbrain_pgvector_contract.py tests/test_graph_first_pg_integration.py tests/test_graph_first_resolver.py tests/test_pg_evidence.py tests/test_pg_session_memory_integration.py tests/test_pg_backfill.py
 
   worker-postgres-parity:
     name: worker PostgreSQL parity (uv)

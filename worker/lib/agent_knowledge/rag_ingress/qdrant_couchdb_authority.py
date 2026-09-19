@@ -35,8 +35,9 @@ from ..llm_brain_core.runtime import session_source_revision_from_couchdb_source
 class CouchDBProjectionStateAuthorityResolver:
     """Resolve a mirror hit to CouchDB projection authority by session + content_hash."""
 
-    def __init__(self, store: Any, *, filters: dict[str, str] | None = None) -> None:
+    def __init__(self, store: Any, *, filters: dict[str, str] | None = None, backend: str = "qdrant") -> None:
         self._store = store
+        self._backend = backend
         self._filters = dict(filters or {})
 
     def resolve(self, hit: dict[str, Any]) -> dict[str, Any] | None:
@@ -47,6 +48,12 @@ class CouchDBProjectionStateAuthorityResolver:
         state = self._store.get(projection_state_doc_id(session_id_hash))
         if state is None:
             return None
+        if self._backend == "postgres_pgvector":
+            state = (state.get("backend_receipts") or {}).get(self._backend, {})
+            if str(state.get("session_memory_knowledge_id") or "") != str(hit.get("memory_id") or ""):
+                return None
+            if any(str(state.get(key) or "") != str(hit.get(key) or "") for key in ("provider", "project")):
+                return None
         if str(state.get("projection_status") or "") != ProjectionStatus.PROJECTED:
             return None
         # Status alone is not currentness evidence. Legacy rows are unresolved

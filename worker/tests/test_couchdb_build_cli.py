@@ -1291,3 +1291,30 @@ class TestReportRedaction:
 
         allowed_keys = {"schema_version", "dry_run", "selected", "projected", "failed", "skipped"}
         assert set(report.keys()) <= allowed_keys
+
+def test_pg_missing_reselects_even_if_qdrant_current() -> None:
+    store = InMemoryCouchDBSourceStore()
+
+    # 1) insert session
+    session = TranscriptSession(
+        session_id_hash="sha256:" + "a" * 64,
+        provider="anthropic",
+        project="brain",
+        started_at="2026-09-19T00:00:00Z"
+    )
+    store.put(dm.build_transcript_session_document(session=session))
+
+    # 2) mark projected for Qdrant
+    _mark_projected(store, session.session_id_hash, "anthropic", "brain")
+
+    # Verify qdrant skips it
+    qdrant_selected = _select_sessions_needing_projection(
+        store, limit=10, project="", provider="", backend="qdrant"
+    )
+    assert len(qdrant_selected) == 0
+
+    # Verify pg selects it
+    pg_selected = _select_sessions_needing_projection(
+        store, limit=10, project="", provider="", backend="postgres_pgvector"
+    )
+    assert len(pg_selected) == 1
