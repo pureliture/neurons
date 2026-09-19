@@ -317,12 +317,12 @@ def test_live_reuses_ready_chunk_with_legacy_id_without_embedding():
 
 
 @live_pg
-def test_live_changed_revision_creates_new_chunk():
-    """Changing source_hash produces a different chunk_id."""
+def test_live_changed_source_hash_reuses_ready_content_vector():
+    """Same body/content may keep the ready vector when only source_hash changes."""
     store = PgVectorStore(dsn=PG_DSN)
     store.execute_ddl()
     suffix = uuid.uuid4().hex[:12]
-    provider = SyntheticEmbedProvider()
+    provider = CountingEmbedProvider()
     projector = PgSessionMemoryProjector(store=store, embed_provider=provider)
 
     base_doc = {
@@ -339,24 +339,25 @@ def test_live_changed_revision_creates_new_chunk():
     chunk_id_v1 = projector.project(
         target_profile="session-memory", document=doc_v1
     )
+    embed_calls_after_first = provider.calls
     chunk_id_v2 = projector.project(
         target_profile="session-memory", document=doc_v2
     )
     try:
-        assert chunk_id_v1 != chunk_id_v2
+        assert chunk_id_v1 == chunk_id_v2
+        assert provider.calls == embed_calls_after_first
         assert store.get_chunk(chunk_id_v1) is not None
-        assert store.get_chunk(chunk_id_v2) is not None
     finally:
         projector.close()
         with store.transaction() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "DELETE FROM session_memory_chunks WHERE chunk_id IN (%s, %s)",
-                    (chunk_id_v1, chunk_id_v2),
+                    "DELETE FROM session_memory_chunks WHERE chunk_id = %s",
+                    (chunk_id_v1,),
                 )
                 cur.execute(
-                    "DELETE FROM embedding_outbox WHERE target_id IN (%s, %s)",
-                    (chunk_id_v1, chunk_id_v2),
+                    "DELETE FROM embedding_outbox WHERE target_id = %s",
+                    (chunk_id_v1,),
                 )
 
 
