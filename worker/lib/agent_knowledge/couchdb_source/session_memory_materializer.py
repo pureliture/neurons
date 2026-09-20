@@ -541,7 +541,21 @@ def _commit_projection_state_if_source_current(
     failure_reason: str = "",
     ref: str = "",
     backend: str = "retired_index_bridge",
+    representation_receipt: dict | None = None,
 ) -> tuple[str, dict]:
+    if representation_receipt is not None:
+        from ..rag_ingress.pg_representation import valid_pg_receipt_metadata
+        if (backend != "postgres_pgvector" or projection_status != ProjectionStatus.PROJECTED
+            or not valid_pg_receipt_metadata(representation_receipt)
+            or representation_receipt.get("receipt_version") != 2
+            or any(representation_receipt.get(key) != value for key, value in {
+                "session_id_hash": materialized.session_id_hash,
+                "provider": materialized.provider, "project": materialized.project,
+                "active_content_hash": materialized.content_hash,
+                "projected_source_hash": materialized.source_hash,
+                "session_memory_knowledge_id": ref,
+            }.items())):
+            raise ValueError("PG representation receipt mismatch")
     state_id = projection_state_doc_id(materialized.session_id_hash)
     for _attempt in range(3):
         if (
@@ -554,10 +568,32 @@ def _commit_projection_state_if_source_current(
             return "source_revision_changed", store.get(state_id) or {}
         existing = store.get(state_id) or {}
         receipt = (existing.get("backend_receipts") or {}).get(backend, {}) if backend == "postgres_pgvector" else existing
+        if (backend == "postgres_pgvector" and projection_status != ProjectionStatus.PROJECTED
+            and receipt.get("projection_status") == ProjectionStatus.PROJECTED):
+            # Failed refresh must not destroy the last successful mapping.
+            return "previous_receipt_preserved", existing
+        pg_metadata_valid = True
+        if backend == "postgres_pgvector":
+            from ..rag_ingress.pg_representation import valid_pg_receipt_metadata
+            pg_metadata_valid = valid_pg_receipt_metadata(receipt)
         if (
             str(receipt.get("projection_status") or "") == ProjectionStatus.PROJECTED
             and str(receipt.get("projected_source_hash") or "")
             == materialized.source_hash
+            and pg_metadata_valid
+            and (backend != "postgres_pgvector" or (
+                projection_status == ProjectionStatus.PROJECTED
+                and all(receipt.get(key) == value for key, value in (
+                    representation_receipt or {
+                        "active_content_hash": materialized.content_hash,
+                        "projected_source_hash": materialized.source_hash,
+                        "session_memory_knowledge_id": ref,
+                        "provider": materialized.provider,
+                        "project": materialized.project,
+                    }
+                ).items())
+                and (representation_receipt is not None or "representation_content_hash" not in receipt)
+            ))
         ):
             return "already_projected", existing
         state = _projection_state_for_materialization(
@@ -568,6 +604,8 @@ def _commit_projection_state_if_source_current(
             ref=ref,
             backend=backend,
         )
+        if representation_receipt is not None:
+            state["backend_receipts"][backend].update(representation_receipt)
         try:
             store.put_if_revision(
                 state,

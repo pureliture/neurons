@@ -22,6 +22,7 @@ from ..couchdb_source.document_model import sha256_hash
 from .qdrant_couchdb_authority import CouchDBProjectionStateAuthorityResolver
 from .qdrant_authority_join import join_mirror_hits_to_authority
 from .pg_backfill import validated_pg_embedding_profile
+from .pg_embedding_privacy import assert_pg_embedding_egress_safe
 from ..session_memory.brain_query import project_from_brain_id
 
 _SYNTHETIC_CANARY_PROVIDER = "lbrain-temporal-canary"
@@ -104,7 +105,8 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
         if project is None:
             raise RuntimeError("PG recall requires project scope")
 
-        # embed query
+        # Query embedding leaves the tailnet too; preserve text or reject it.
+        assert_pg_embedding_egress_safe(query)
         vector = embed_provider.embed(query)
 
         # One bounded SQL result, already ordered by distance then chunk_id.

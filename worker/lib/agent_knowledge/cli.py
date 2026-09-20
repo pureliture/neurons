@@ -121,6 +121,7 @@ def run_stdio_server(service) -> None:
 
 
 COMMAND_HANDLERS: dict[str, CommandHandler] = {
+    "pg-qdrant-import": _lazy_handler(".rag_ingress.pg_qdrant_import_cli"),
     "rag-ingress-state": state_cli.main,
     "memory-regeneration": memory_regeneration_cli.main,
     "cleanup-readiness": cleanup_readiness.main,
