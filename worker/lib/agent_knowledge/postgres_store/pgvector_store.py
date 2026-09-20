@@ -431,10 +431,25 @@ class PgVectorStore:
                 rows = cur.fetchall()
         return [_edge_from_row(row) for row in rows]
 
-    def insert_chunk(self, chunk: SessionChunk, conn: Any | None = None) -> str:
-        """Insert a chunk and enqueue its embedding in the same transaction."""
+    def insert_chunk(self, chunk: SessionChunk, conn: Any | None = None, *, insert_only: bool = False) -> str:
+        """Insert/enqueue atomically; insert_only refuses any existing ID."""
 
         normalized = self._normalize_chunk(chunk)
+        conflict_clause = "" if insert_only else """
+            ON CONFLICT (chunk_id) DO UPDATE SET
+                session_id_hash = EXCLUDED.session_id_hash,
+                project = EXCLUDED.project,
+                provider = EXCLUDED.provider,
+                chunk_index = EXCLUDED.chunk_index,
+                content_markdown = EXCLUDED.content_markdown,
+                token_count = EXCLUDED.token_count,
+                content_hash = EXCLUDED.content_hash,
+                embedding_model = EXCLUDED.embedding_model,
+                embedding_state = EXCLUDED.embedding_state,
+                embedding_revision = EXCLUDED.embedding_revision,
+                embedding = EXCLUDED.embedding,
+                updated_at = EXCLUDED.updated_at
+        """
         values = (
             normalized.chunk_id,
             normalized.session_id_hash,
@@ -454,7 +469,7 @@ class PgVectorStore:
         with self._scope(conn=conn, write=conn is None and self.connection is None) as db:
             with db.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     INSERT INTO session_memory_chunks (
                         chunk_id, session_id_hash, project, provider, chunk_index,
                         content_markdown, token_count, content_hash, embedding_model,
@@ -463,19 +478,7 @@ class PgVectorStore:
                         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                         %s::halfvec, %s, %s
                     )
-                    ON CONFLICT (chunk_id) DO UPDATE SET
-                        session_id_hash = EXCLUDED.session_id_hash,
-                        project = EXCLUDED.project,
-                        provider = EXCLUDED.provider,
-                        chunk_index = EXCLUDED.chunk_index,
-                        content_markdown = EXCLUDED.content_markdown,
-                        token_count = EXCLUDED.token_count,
-                        content_hash = EXCLUDED.content_hash,
-                        embedding_model = EXCLUDED.embedding_model,
-                        embedding_state = EXCLUDED.embedding_state,
-                        embedding_revision = EXCLUDED.embedding_revision,
-                        embedding = EXCLUDED.embedding,
-                        updated_at = EXCLUDED.updated_at
+                    {conflict_clause}
                     """,
                     values,
                 )

@@ -82,6 +82,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
+      ATLAS_QRET_SYNTHETIC_SQL: "1"
       LBRAIN_TEST_PG_DSN: postgresql://neurons_test:neurons_test@127.0.0.1:5432/neurons_test
     steps:
       - name: Checkout
@@ -100,7 +101,7 @@ jobs:
           fi
       - name: 실제 PostgreSQL 권위 저장 및 공개 Graph-first 조회 검증
         working-directory: worker
-        run: uv run --group dev --extra mcp-http pytest -q tests/test_lbrain_pgvector_contract.py tests/test_graph_first_pg_integration.py tests/test_graph_first_resolver.py tests/test_pg_evidence.py tests/test_pg_session_memory_integration.py tests/test_pg_backfill.py
+        run: uv run --group dev --extra mcp-http pytest -q tests/test_lbrain_pgvector_contract.py tests/test_graph_first_pg_integration.py tests/test_graph_first_resolver.py tests/test_pg_evidence.py tests/test_pg_session_memory_integration.py tests/test_pg_backfill.py tests/test_pg_representation.py tests/test_pg_projection_privacy.py tests/test_pg_qdrant_import.py tests/test_pg_qdrant_import_cli.py tests/test_pg_import_underflow.py tests/test_pg_projection_locking.py tests/test_pg_import_canonical_preflight.py tests/test_pg_embedding_named_credentials.py tests/test_pg_import_selection.py
 
   worker-postgres-parity:
     name: worker PostgreSQL parity (uv)
