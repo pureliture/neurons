@@ -80,7 +80,7 @@ The generated compose config includes:
 
 ```text
 LLM_BRAIN_NEO4J_URI=bolt://llm-brain-neo4j:7687
-NEO4J_AUTH=neo4j/llmbrain
+NEO4J_AUTH=<username>/<password>
 llm-brain-neo4j-data
 llm-brain-neo4j-logs
 127.0.0.1 host publish binding
