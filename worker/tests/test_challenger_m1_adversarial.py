@@ -353,7 +353,7 @@ class TestMemoryCandidateCreateTampering:
             validate_content_hash(malformed_hash)
 
     @pytest.mark.parametrize("poisoned_field,poisoned_value", [
-        ("title", "/Users/ddalkak/secret/credentials.json"),
+        ("title", "/Users/example/secret/credentials.json"),
         ("summary", "Token is Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.t-IDcSemACt8x4iTMCda8Yhe3iZaWbvV5XKSTbuAn0M"),
         ("title", "private transcript content leaking here"),
         ("summary", "raw_transcript_body dump"),

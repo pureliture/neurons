@@ -2,7 +2,7 @@
 
 - **Spec Version**: v2.5 (Post-Implementation Audit, Multi-Agent Review & Remediation)
 - **Date**: 2026-09-03
-- **Target Worktree**: `/Users/ddalkak/Projects/neurons/.worktrees/lbrain-architecture-rationalization-spec`
+- **Target Worktree**: `/Users/example/Projects/neurons/.worktrees/lbrain-architecture-rationalization-spec`
 - **Status**: Review Findings Applied; Graph-first Cutover Still Blocked by Explicit Residual Milestones
 
 ---

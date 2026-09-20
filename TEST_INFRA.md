@@ -1,6 +1,6 @@
 # LBrain Architecture Rationalization: Test Architecture & Infrastructure Specification (TEST_INFRA.md)
 
-- **Target Worktree**: `/Users/ddalkak/Projects/neurons/.worktrees/lbrain-architecture-rationalization-spec`
+- **Target Worktree**: `/Users/example/Projects/neurons/.worktrees/lbrain-architecture-rationalization-spec`
 - **Specification Version**: v2.2 (`requirements.md`, `design.md`, `review.md`)
 - **Methodology**: 4-Tier Requirement-Driven Test Architecture
 - **Test Suite Location**: `worker/tests/e2e/`

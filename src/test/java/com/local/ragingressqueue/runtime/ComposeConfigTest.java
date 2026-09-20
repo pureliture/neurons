@@ -67,7 +67,7 @@ class ComposeConfigTest {
         // Secrets must be required (${VAR:?...}) — no checked-in shared password/secret
         // fallback may let the stack boot with public credentials and bypass the
         // .env.example placeholder contract.
-        assertThat(compose).doesNotContain(":-llmbrain");
+        assertThat(compose).doesNotContain(":-shared-password");
         assertThat(compose).contains("LLM_BRAIN_COUCHDB_PASSWORD:?set LLM_BRAIN_COUCHDB_PASSWORD");
         assertThat(compose).contains("LLM_BRAIN_COUCHDB_SECRET:?set LLM_BRAIN_COUCHDB_SECRET");
         assertThat(compose).contains("LLM_BRAIN_LEDGER_POSTGRES_PASSWORD:?set LLM_BRAIN_LEDGER_POSTGRES_PASSWORD");
