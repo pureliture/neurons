@@ -21,7 +21,9 @@ _REDACTED = re.compile(
 )
 _VALUE = r'''(?:"(?P<double>(?:\\.|[^"\\])*)"|'(?P<single>(?:\\.|[^'\\])*)'|(?P<bare>[^\s,;\}"']+))'''
 _ASSIGNMENT = re.compile(
-    r'''(?<![\w-])["']?[\w-]*(?:password|passwd|secret|token|api[_-]?key)["']?\s*[:=]\s*'''
+    # These additional names are exact keys, not broad auth/config vocabulary.
+    r'''(?<![\w-])["']?(?:[\w-]*(?:password|passwd|secret|token|api[_-]?key)'''
+    r'''|AWS_ACCESS_KEY_ID|ACCESS_KEY|DOCKER_AUTH_CONFIG|credential)["']?\s*[:=]\s*'''
     + _VALUE,
     re.IGNORECASE,
 )

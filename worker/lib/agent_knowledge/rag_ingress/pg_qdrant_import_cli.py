@@ -21,6 +21,7 @@ from ..couchdb_source.couchdb_http_store import CouchDBHttpSourceStore
 from ..postgres_store.pgvector_store import PgVectorStore
 from ..transport_contract import ProxyResponse
 
+from ..couchdb_source.document_model import sha256_hash
 from ..couchdb_source.session_memory_materializer import materialize_session_memory
 from .pg_qdrant_import import LegacyCollection, OperatorEmbeddingAttestation, import_qdrant_point
 
@@ -295,6 +296,7 @@ def parser():
     p.add_argument("--attestation-file", required=True)
     p.add_argument("--manifest", required=True)
     p.add_argument("--approval-file", required=True)
+    p.add_argument("--point-ids-file")
     return p
 
 
@@ -320,7 +322,7 @@ def inspect_point(boundary, point, collection, attestation):
     if isinstance(body, str):
         chunk_id = _derive_pg_chunk_id_impl(project=current.project, provider=current.provider,
             session_id_hash=current.session_id_hash, source_hash=current.source_hash,
-            content_hash=hashlib.sha256(body.encode()).hexdigest())
+            content_hash=sha256_hash(body))
         row = boundary.sql.get_chunk(chunk_id)
         row_value = None if row is None else {k: getattr(row, k) for k in (
             "chunk_id", "session_id_hash", "project", "provider", "content_markdown", "content_hash",
@@ -355,7 +357,7 @@ def inspect_batch(boundary, points, collection, attestation):
             current = materialize_session_memory(session_id_hash=payload["session_id_hash"], store=boundary.source)
             identity = _derive_pg_chunk_id_impl(project=current.project, provider=current.provider,
                 session_id_hash=current.session_id_hash, source_hash=current.source_hash,
-                content_hash=hashlib.sha256(payload["text"].encode()).hexdigest())
+                content_hash=sha256_hash(payload["text"]))
             vector = normalized_pg_halfvec(boundary.sql, point["vector"])
             if identity in vectors and vectors[identity] != vector:
                 conflicts.add(identity)
@@ -374,6 +376,68 @@ def point_id(value):
     if isinstance(value, str) and str(uuid.UUID(value)) == value:
         return value
     raise ValueError("point identity")
+
+
+MAX_SELECTION_FILE_BYTES = 16 * 1024 * 1024
+
+
+def load_selection_ids(path_str, limit):
+    path = Path(path_str).resolve()
+    if not path.is_file():
+        raise ValueError("selection file not found")
+    if path.stat().st_size > MAX_SELECTION_FILE_BYTES:
+        raise ValueError("selection file size")
+    raw = path.read_bytes()
+    if len(raw) > MAX_SELECTION_FILE_BYTES or not raw.strip():
+        raise ValueError("selection file size")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except Exception:
+        raise ValueError("selection file json")
+    if not isinstance(data, list) or not data:
+        raise ValueError("selection file not a nonempty list")
+    if len(data) > limit:
+        raise ValueError("selection file exceeds limit")
+    validated_ids = []
+    seen = set()
+    for item in data:
+        pid = point_id(item)
+        token = digest(pid)
+        if token in seen:
+            raise ValueError("selection file duplicate id")
+        seen.add(token)
+        validated_ids.append(pid)
+    content_digest = digest(validated_ids)
+    file_digest = hashlib.sha256(raw).hexdigest()
+    return validated_ids, content_digest, file_digest
+
+
+def collect_explicit(boundary, args, budget, selected_ids):
+    points = []
+    for start in range(0, len(selected_ids), args.page_size):
+        budget.check()
+        wanted = selected_ids[start:start + args.page_size]
+        batch = boundary.retrieve(wanted)
+        budget.check()
+        if not isinstance(batch, list) or len(batch) != len(wanted):
+            raise ValueError("retrieve count mismatch")
+        by_id = {}
+        for p in batch:
+            pid = point_id(p["id"])
+            tok = digest(pid)
+            if tok in by_id:
+                raise ValueError("retrieve duplicate")
+            by_id[tok] = p
+        if set(by_id.keys()) != {digest(i) for i in wanted}:
+            raise ValueError("retrieve id mismatch")
+        ordered_batch = [by_id[digest(i)] for i in wanted]
+        for p in ordered_batch:
+            payload = p.get("payload") or {}
+            if any(value is not None and payload.get(key) != value
+                   for key, value in {"project": args.project, "provider": args.provider}.items()):
+                raise ValueError("scope")
+        points.extend(ordered_batch)
+    return points
 
 
 def collect(boundary, args, budget):
@@ -427,6 +491,20 @@ def read_approved(args, argv, attestation_digest, revision):
         plan["attestation_digest"] != attestation_digest or plan["code_revision"] != revision or
         len(plan["points"]) > args.limit or plan["limit"] != args.limit):
         raise ValueError("approval")
+    plan_mode = plan.get("selection_mode")
+    if args.point_ids_file:
+        if plan_mode != "explicit":
+            raise ValueError("selection mode mismatch")
+        selected_ids, content_digest, file_digest = load_selection_ids(args.point_ids_file, args.limit)
+        if (plan.get("point_ids_digest") != content_digest or
+            plan.get("point_ids_file_digest") != file_digest):
+            raise ValueError("selection file drift")
+        plan_ids = [point_id(p["id"]) for p in plan["points"]]
+        if [digest(i) for i in plan_ids] != [digest(i) for i in selected_ids]:
+            raise ValueError("selection id/order drift")
+    else:
+        if plan_mode is not None:
+            raise ValueError("selection mode mismatch")
     return plan
 
 
@@ -466,10 +544,15 @@ def _run_worker(argv=None, *, boundary_factory=None):
                 0 < args.request_timeout_seconds <= args.timeout_seconds):
             raise ValueError("bounds")
         paths = [Path(value).resolve() for value in (args.manifest, args.attestation_file, args.approval_file)]
-        if len(set(paths)) != 3 or (not args.apply and paths[0].exists()):
+        if args.point_ids_file:
+            paths.append(Path(args.point_ids_file).resolve())
+        if len(set(paths)) != len(paths) or (not args.apply and paths[0].exists()):
             raise ValueError("manifest path")
         alarm = DeadlineAlarm(args.timeout_seconds)
         budget = Budget(args.timeout_seconds, args.request_timeout_seconds)
+        selection_info = None
+        if args.point_ids_file:
+            selection_info = load_selection_ids(args.point_ids_file, args.limit)
         attestation = OperatorEmbeddingAttestation(**json.loads(Path(args.attestation_file).read_text()))
         if (attestation.confirmed is not True or attestation.collection != args.collection or
             attestation.model != "gemini-embedding-2" or type(attestation.dimension) is not int or
@@ -503,9 +586,42 @@ def _run_worker(argv=None, *, boundary_factory=None):
                 if result["status"] != "projected":
                     raise ValueError("apply failed")
                 applied += 1
-            print(json.dumps({"status": "applied", "mutation_started": mutation_started,
-                              "applied": applied, "complete": approved["complete"]}))
+            is_explicit = approved.get("selection_mode") == "explicit"
+            report = {"status": "applied", "mutation_started": mutation_started,
+                      "applied": applied, "complete": False if is_explicit else approved["complete"]}
+            if is_explicit:
+                report["selected_count"] = approved.get("selected_count", applied)
+                report["selected_batch_complete"] = approved.get("selected_batch_complete", True)
+            print(json.dumps(report))
+            if is_explicit:
+                return 0 if approved.get("selected_batch_complete", True) else 2
             return 0 if approved["complete"] else 2
+        if selection_info is not None:
+            selected_ids, selection_digest, selection_file_digest = selection_info
+            points = collect_explicit(boundary, args, budget, selected_ids)
+            inspected = inspect_batch(boundary, points, collection, attestation)
+            selected_batch_complete = all(p["status"] == "validated" for p in inspected)
+            plan = {"schema_version": 1, "operation": "pg-qdrant-import", "argv": argv,
+                    "attestation_digest": attestation_digest, "code_revision": revision,
+                    "target_fingerprint": target, "collection": asdict(collection), "limit": args.limit,
+                    "points": inspected,
+                    "scope": {"project": args.project, "provider": args.provider},
+                    "complete": False,
+                    "selection_mode": "explicit",
+                    "point_ids_digest": selection_digest,
+                    "point_ids_file_digest": selection_file_digest,
+                    "selected_count": len(selected_ids),
+                    "selected_batch_complete": selected_batch_complete}
+            budget.check()
+            plan["plan_digest"] = digest(plan)
+            fd = os.open(args.manifest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as handle:
+                handle.write(json.dumps(plan, sort_keys=True) + "\n")
+            print(json.dumps({"status": "dry_run", "mutation_started": False,
+                              "complete": False, "selected_count": len(selected_ids),
+                              "selected_batch_complete": selected_batch_complete,
+                              "plan_digest": plan["plan_digest"]}))
+            return 0 if selected_batch_complete else 2
         points, complete = collect(boundary, args, budget)
         plan = {"schema_version": 1, "operation": "pg-qdrant-import", "argv": argv,
                 "attestation_digest": attestation_digest, "code_revision": revision,

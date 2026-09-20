@@ -44,6 +44,18 @@ def _derive_pg_chunk_id_impl(
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
+def _pg_identity_lock(*, session_id_hash: str, project: str, provider: str,
+                      content_hash: str, embedding_model: str) -> str:
+    """Shared absence fence, including ready-body reuse across source revisions."""
+    return hashlib.sha256(
+        json.dumps(
+            [session_id_hash, project, provider, content_hash, embedding_model],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def validated_pg_embedding_profile(provider: Any) -> str:
     if (getattr(provider, "model", ""), getattr(provider, "size", 0)) != (
         DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIM
@@ -154,10 +166,16 @@ def project_pg_representation(*, materialized, source_store, sql_store, embed_pr
             validate(row)
         return {"status": "validated", "reason": "", "ref": ""}
 
-    # Serialize canonical IDs. Never use the adapter's upsert on an existing row.
+    # Share the normal projector's identity fence before any absence/reuse read.
+    # Exclude source revision so same-body renewals serialize too. All writers
+    # acquire this advisory lock before row writes; never upsert an existing row.
+    identity_lock = _pg_identity_lock(
+        session_id_hash=current.session_id_hash, project=current.project,
+        provider=current.provider, content_hash=b_hash, embedding_model=embed_provider.model,
+    )
     with sql_store.transaction() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (chunk_id,))
+            cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (identity_lock,))
         row = sql_store.get_chunk(chunk_id, conn=conn)
         if row is not None:
             validate(row)
@@ -225,13 +243,10 @@ class PgSessionMemoryProjector:
             content_hash=content_hash,
             embedding_profile=embedding_profile,
         )
-        identity_lock = hashlib.sha256(
-            json.dumps(
-                [session_id_hash, project, provider, content_hash, embedding_model],
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
+        identity_lock = _pg_identity_lock(
+            session_id_hash=session_id_hash, project=project, provider=provider,
+            content_hash=content_hash, embedding_model=embedding_model,
+        )
 
         def validate_identity(row: SessionChunk) -> None:
             if (row.session_id_hash, row.project, row.provider, row.content_hash,
