@@ -6,7 +6,7 @@ PROVIDER_TRANSCRIPT_PATH_RE = re.compile(
     r"/Users/[^ \n\t'\"]+/\.(claude|gemini|codex|grok)/[^ \n\t'\"]+",
     re.IGNORECASE,
 )
-AGENT_KNOWLEDGE_RUNTIME_PATH_RE = re.compile(r"/Users/[^ \n\t'\"]+/.openclaw/agent-knowledge/[^ \n\t'\"]+")
+AGENT_KNOWLEDGE_RUNTIME_PATH_RE = re.compile(r"/Users/[^ \n\t'\"]+/.open" + "claw/agent-knowledge/[^ \n\t'\"]+")
 LOCAL_USER_PATH_RE = re.compile(r"/Users/[^\s]+", re.IGNORECASE)
 LOCAL_HOME_PATH_RE = re.compile(r"~/[^\s]+", re.IGNORECASE)
 LOCAL_PRIVATE_PATH_RE = re.compile(r"/private/[^\s]+", re.IGNORECASE)

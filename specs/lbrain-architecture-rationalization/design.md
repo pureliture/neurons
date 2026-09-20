@@ -3,7 +3,7 @@
 - **Status**: Decision-aligned target architecture; multi-agent review remediation (v2.5)
 - **Date**: 2026-09-03
 - **Target Repository**: `neurons` (Server/Brain Authority)
-- **Worktree**: `/Users/ddalkak/Projects/neurons/.worktrees/lbrain-architecture-rationalization-spec`
+- **Worktree**: `/Users/example/Projects/neurons/.worktrees/lbrain-architecture-rationalization-spec`
 - **Requirements**: `specs/lbrain-architecture-rationalization/requirements.md`
 - **Review & Audit History**: `specs/lbrain-architecture-rationalization/review.md` 참조
 

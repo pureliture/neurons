@@ -1,6 +1,6 @@
 # Test Readiness Certificate (TEST_READY.md)
 
-- **Target Worktree**: `/Users/ddalkak/Projects/neurons/.worktrees/lbrain-architecture-rationalization-spec`
+- **Target Worktree**: `/Users/example/Projects/neurons/.worktrees/lbrain-architecture-rationalization-spec`
 - **Date**: 2026-09-02
 - **Author**: Test Writer Agent (`test_writer_e2e`)
 - **Specification**: LBrain Architecture Rationalization (Phases 1 & 2)
