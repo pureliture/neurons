@@ -940,14 +940,31 @@ def test_actual_sql_readonly_batch_conflicts_and_equal_idempotence(lane, capsys,
     assert boundary.source.get(dm.projection_state_doc_id(boundary.sid)) is None
 
 
+def _write_test_pg_service(path, info):
+    # get_parameters() may omit libpq defaults, including port 5432.
+    path.write_text("[synthetic]\n" + "".join(
+        f"{key}={getattr(info, key)}\n" for key in ("host", "port", "dbname", "user")))
+
+
+def test_service_file_uses_resolved_defaults_without_credentials(tmp_path):
+    from types import SimpleNamespace
+    info = SimpleNamespace(
+        get_parameters=lambda: {"host": "127.0.0.1", "dbname": "synthetic", "user": "synthetic"},
+        host="127.0.0.1", port=5432, dbname="synthetic", user="synthetic",
+        password="synthetic-never-write-this",
+    )
+    path = tmp_path / "service.conf"
+    _write_test_pg_service(path, info)
+    assert path.read_text() == "[synthetic]\nhost=127.0.0.1\nport=5432\ndbname=synthetic\nuser=synthetic\n"
+    assert info.password not in path.read_text()
+
+
 def test_actual_sql_service_resolution_and_readonly_target_fingerprint(lane, tmp_path, monkeypatch, actual_sql):
     import psycopg
     api = cli()
     store, conn, dsn = actual_sql
     servicefile = tmp_path / "pg_service.conf"
-    parameters = conn.info.get_parameters()
-    servicefile.write_text("[synthetic]\n" + "".join(
-        f"{key}={parameters[key]}\n" for key in ("host", "port", "dbname", "user")))
+    _write_test_pg_service(servicefile, conn.info)
     monkeypatch.setenv("PGSERVICEFILE", str(servicefile))
     # libpq omits passwords from get_parameters(); keep CI credentials in memory.
     credentials = {"password": conn.info.password} if conn.info.password else {}
