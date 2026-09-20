@@ -48,8 +48,31 @@ class CouchDBProjectionStateAuthorityResolver:
         state = self._store.get(projection_state_doc_id(session_id_hash))
         if state is None:
             return None
+        representation_hash = None
         if self._backend == "postgres_pgvector":
-            state = (state.get("backend_receipts") or {}).get(self._backend, {})
+            receipts = state.get("backend_receipts") or {}
+            if not isinstance(receipts, dict):
+                return None
+            state = receipts.get(self._backend, {})
+            from .pg_representation import valid_pg_receipt_metadata
+            if not valid_pg_receipt_metadata(state):
+                return None
+            if state.get("receipt_version") == 2:
+                from .pg_representation import valid_representation_receipt
+                if not valid_representation_receipt(state) or state["session_id_hash"] != session_id_hash:
+                    return None
+                from ..couchdb_source.session_memory_materializer import materialize_session_memory
+                from ..couchdb_source.document_model import sha256_hash
+                from .qdrant_backfill import public_safe_mask_body
+
+                current = materialize_session_memory(session_id_hash=session_id_hash, store=self._store)
+                if (not current.fully_materialized
+                    or current.content_hash != state["active_content_hash"]
+                    or current.source_hash != state["projected_source_hash"]
+                    or current.provider != state["provider"] or current.project != state["project"]
+                    or sha256_hash(public_safe_mask_body(current.body)) != state["representation_content_hash"]):
+                    return None
+                representation_hash = state["representation_content_hash"]
             if str(state.get("session_memory_knowledge_id") or "") != str(hit.get("memory_id") or ""):
                 return None
             if any(str(state.get(key) or "") != str(hit.get(key) or "") for key in ("provider", "project")):
@@ -60,7 +83,7 @@ class CouchDBProjectionStateAuthorityResolver:
         # until a rebuild records both active body and projected source revision.
         active = str(state.get("active_content_hash") or "")
         projected_source_hash = str(state.get("projected_source_hash") or "")
-        if not active or active != content_hash or not projected_source_hash:
+        if not active or (representation_hash or active) != content_hash or not projected_source_hash:
             return None
         current_source_hash = session_source_revision_from_couchdb_source(
             session_id_hash=session_id_hash,
