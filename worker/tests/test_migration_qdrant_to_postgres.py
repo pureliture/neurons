@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import struct
 import tempfile
 from typing import Any
 
@@ -19,9 +20,60 @@ import pytest
 
 from agent_knowledge.postgres_store.pgvector_store import (
     MemoryCard,
+    PgVectorStore,
     SessionChunk,
+    _vector_literal,
     make_dummy_vector,
 )
+
+
+class _SemanticCursor:
+    def __init__(self, equal: bool | None) -> None:
+        self.equal = equal
+        self.executed: tuple[str, tuple[object, ...]] | None = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def execute(self, sql, params) -> None:
+        self.executed = (sql, params)
+
+    def fetchone(self):
+        return None if self.equal is None else {"embedding_equal": self.equal}
+
+
+class _SemanticConnection:
+    def __init__(self, equal: bool | None) -> None:
+        self.cursor_value = _SemanticCursor(equal)
+
+    def cursor(self):
+        return self.cursor_value
+
+
+def test_postgres_semantic_embedding_equality_uses_server_halfvec_cast_and_chunk_scope():
+    source = make_dummy_vector(905)
+    conn = _SemanticConnection(True)
+    store = PgVectorStore(connection=conn)
+
+    assert store.chunk_embedding_equals("chunk_905", source, conn=conn) is True
+    sql, params = conn.cursor_value.executed
+    assert "FROM session_memory_chunks" in sql
+    assert "WHERE chunk_id = %s" in sql
+    assert "embedding = %s::halfvec" in sql
+    assert params == (_vector_literal(source), "chunk_905")
+
+
+def test_postgres_semantic_embedding_equality_fails_closed_when_query_has_no_row():
+    source = make_dummy_vector(906)
+    conn = _SemanticConnection(None)
+    store = PgVectorStore(connection=conn)
+
+    assert store.chunk_embedding_equals("missing", source, conn=conn) is False
+
+
 from agent_knowledge.postgres_store.migration_qdrant_to_postgres import (
     QdrantToPostgresMigrator,
 )
@@ -148,6 +200,12 @@ class FakePgVectorStore:
         self.fail_readback = False
         self.corrupt_readback = False
         self.corrupt_vector_readback = False
+        self.semantic_embedding_equal: bool | None = True
+        self.semantic_calls: list[tuple[str, list[float], Any]] = []
+
+    def chunk_embedding_equals(self, chunk_id: str, source_vector, conn: Any | None = None) -> bool:
+        self.semantic_calls.append((chunk_id, list(source_vector), conn))
+        return self.semantic_embedding_equal is True
 
     def _scope(self, *, write: bool = False):
         from contextlib import nullcontext
@@ -634,13 +692,81 @@ def test_session_chunk_missing_readback_capability_fails_before_checkpoint():
         assert not os.path.exists(checkpoint)
 
 
-def test_session_chunk_readback_requires_exact_vector_equivalence_before_checkpoint():
+@pytest.mark.skipif(
+    not os.environ.get("LBRAIN_TEST_PG_DSN"),
+    reason="LBRAIN_TEST_PG_DSN 미설정 (전용 live PostgreSQL integration gate)",
+)
+def test_live_postgres_semantic_equality_accepts_server_halfvec_when_python_binary16_differs(isolated_pg_store):
+    value = 1.00048828126
+    source = [value] * 3072
+    assert struct.unpack("e", struct.pack("e", value))[0] == 1.0009765625
+
+    chunk = SessionChunk(
+        chunk_id="halfvec_semantic_match",
+        session_id_hash="sha256:session_halfvec",
+        project="neurons",
+        provider="codex",
+        content_markdown="halfvec semantic integration fixture",
+        content_hash="sha256:" + "a" * 64,
+        embedding_model="gemini-embedding-2",
+        embedding_state="ready",
+        embedding=source,
+    )
+    with isolated_pg_store.transaction() as conn:
+        isolated_pg_store.insert_chunk(chunk, conn=conn)
+        stored = isolated_pg_store.get_chunk(chunk.chunk_id, conn=conn)
+        assert stored is not None and stored.embedding is not None
+        assert stored.embedding != source
+        assert isolated_pg_store.chunk_embedding_equals(chunk.chunk_id, source, conn=conn) is True
+
+
+def test_session_chunk_readback_uses_postgres_semantic_equality_despite_python_representation_difference():
     client = MockQdrantClient()
     store = FakePgVectorStore()
     store.corrupt_vector_readback = True
+    source = make_dummy_vector(904)
     with tempfile.TemporaryDirectory() as tmpdir:
         checkpoint = os.path.join(tmpdir, "checkpoint.json")
-        client.add_chunk("corrupt-vector", make_dummy_vector(904), _chunk_payload(904))
+        client.add_chunk("corrupt-vector", source, _chunk_payload(904))
+        migrator = QdrantToPostgresMigrator(
+            qdrant_client=client,
+            target_store=store,
+            checkpoint_file=checkpoint,
+        )
+
+        result = migrator.migrate_session_chunks(collection_name=DEFAULT_SESSION_COLLECTION)
+
+        assert result.total_migrated == 1
+        assert store.semantic_calls == [("chunk_904", source, store)]
+        assert os.path.exists(checkpoint)
+
+
+def test_session_chunk_semantic_vector_mismatch_prevents_checkpoint():
+    client = MockQdrantClient()
+    store = FakePgVectorStore()
+    store.semantic_embedding_equal = False
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint = os.path.join(tmpdir, "checkpoint.json")
+        client.add_chunk("corrupt-vector", make_dummy_vector(907), _chunk_payload(907))
+        migrator = QdrantToPostgresMigrator(
+            qdrant_client=client,
+            target_store=store,
+            checkpoint_file=checkpoint,
+        )
+
+        with pytest.raises(RuntimeError, match="target_readback_failed"):
+            migrator.migrate_session_chunks(collection_name=DEFAULT_SESSION_COLLECTION)
+
+        assert not os.path.exists(checkpoint)
+
+
+def test_session_chunk_semantic_vector_check_unavailable_prevents_checkpoint():
+    client = MockQdrantClient()
+    store = FakePgVectorStore()
+    store.semantic_embedding_equal = None
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint = os.path.join(tmpdir, "checkpoint.json")
+        client.add_chunk("missing-semantic", make_dummy_vector(908), _chunk_payload(908))
         migrator = QdrantToPostgresMigrator(
             qdrant_client=client,
             target_store=store,

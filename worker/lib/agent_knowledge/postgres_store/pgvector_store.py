@@ -492,6 +492,27 @@ class PgVectorStore:
                 )
         return normalized.chunk_id
 
+    def chunk_embedding_equals(
+        self, chunk_id: str, source_vector: list[float] | tuple[float, ...], conn: Any | None = None
+    ) -> bool:
+        """Compare one stored embedding to PostgreSQL's halfvec cast of source_vector."""
+
+        literal = _vector_literal(source_vector)
+        if literal is None:
+            return False
+        with self._scope(conn=conn) as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT embedding = %s::halfvec AS embedding_equal
+                      FROM session_memory_chunks
+                     WHERE chunk_id = %s
+                    """,
+                    (literal, chunk_id),
+                )
+                row = cur.fetchone()
+        return bool(row is not None and row["embedding_equal"] is True)
+
     def get_chunk(self, chunk_id: str, conn: Any | None = None) -> SessionChunk | None:
         """Read one session chunk from PostgreSQL."""
 
