@@ -511,7 +511,7 @@ class PgVectorStore:
                     (literal, chunk_id),
                 )
                 row = cur.fetchone()
-        return bool(row is not None and row["embedding_equal"] is True)
+        return bool(row is not None and _row_value(row, "embedding_equal", 0) is True)
 
     def get_chunk(self, chunk_id: str, conn: Any | None = None) -> SessionChunk | None:
         """Read one session chunk from PostgreSQL."""

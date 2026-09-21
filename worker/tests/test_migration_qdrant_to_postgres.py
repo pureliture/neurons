@@ -53,6 +53,19 @@ class _SemanticConnection:
         return self.cursor_value
 
 
+class _TupleSemanticCursor(_SemanticCursor):
+    def fetchone(self):
+        return None if self.equal is None else (self.equal,)
+
+
+class _TupleSemanticConnection:
+    def __init__(self, equal: bool | None) -> None:
+        self.cursor_value = _TupleSemanticCursor(equal)
+
+    def cursor(self):
+        return self.cursor_value
+
+
 def test_postgres_semantic_embedding_equality_uses_server_halfvec_cast_and_chunk_scope():
     source = make_dummy_vector(905)
     conn = _SemanticConnection(True)
@@ -66,8 +79,16 @@ def test_postgres_semantic_embedding_equality_uses_server_halfvec_cast_and_chunk
     assert params == (_vector_literal(source), "chunk_905")
 
 
-def test_postgres_semantic_embedding_equality_fails_closed_when_query_has_no_row():
+def test_postgres_semantic_embedding_equality_supports_tuple_row():
     source = make_dummy_vector(906)
+    conn = _TupleSemanticConnection(True)
+    store = PgVectorStore(connection=conn)
+
+    assert store.chunk_embedding_equals("tuple-row", source, conn=conn) is True
+
+
+def test_postgres_semantic_embedding_equality_fails_closed_when_query_has_no_row():
+    source = make_dummy_vector(907)
     conn = _SemanticConnection(None)
     store = PgVectorStore(connection=conn)
 
