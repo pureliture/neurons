@@ -9,7 +9,6 @@ import json
 import logging
 import os
 import re
-import struct
 import time
 from typing import Any, Callable
 
@@ -159,13 +158,6 @@ class QdrantToPostgresMigrator:
         if max_length is not None and len(value) > max_length:
             raise ValueError(f"{key}_overlength")
         return value
-
-    @staticmethod
-    def _canonical_halfvec_bytes(vector: list[float]) -> bytes:
-        try:
-            return b"".join(struct.pack(">e", 0.0 if value == 0.0 else float(value)) for value in vector)
-        except (OverflowError, struct.error, TypeError, ValueError) as exc:
-            raise RuntimeError("target_readback_failed") from exc
 
     def _unpack(self, item: object) -> tuple[object, list[float] | None, dict[str, Any]]:
         point_id, vector, payload = _value(item, "id"), _value(item, "vector"), _value(item, "payload")
@@ -331,7 +323,8 @@ class QdrantToPostgresMigrator:
 
         def verify_chunk(chunk: SessionChunk, conn: Any | None = None) -> None:
             get_chunk = getattr(self.target_store, "get_chunk", None)
-            if not callable(get_chunk):
+            embedding_equals = getattr(self.target_store, "chunk_embedding_equals", None)
+            if not callable(get_chunk) or not callable(embedding_equals):
                 raise RuntimeError("target_readback_unavailable")
             stored = get_chunk(chunk.chunk_id, conn=conn)
             if (
@@ -348,8 +341,7 @@ class QdrantToPostgresMigrator:
                 or stored.embedding_state != "ready"
                 or stored.embedding is None
                 or len(stored.embedding) != DEFAULT_EMBEDDING_DIM
-                or self._canonical_halfvec_bytes(stored.embedding)
-                != self._canonical_halfvec_bytes(chunk.embedding)
+                or embedding_equals(chunk.chunk_id, chunk.embedding, conn=conn) is not True
             ):
                 raise RuntimeError("target_readback_failed")
 
