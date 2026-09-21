@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re
+import struct
 import time
 from typing import Any, Callable
 
@@ -18,6 +19,7 @@ from .pgvector_store import MemoryCard, PgVectorStore, SessionChunk
 logger = logging.getLogger(__name__)
 _VERSION = 1
 _DISTANCE = "cosine"
+DEFAULT_SESSION_COLLECTION = "neurons_mirror_gemini_3072_v1"
 
 
 def _digest(value: object) -> str:
@@ -145,6 +147,26 @@ class QdrantToPostgresMigrator:
             raise ValueError(f"required_{key}_missing")
         return value
 
+    @staticmethod
+    def _require_string(payload: dict[str, Any], key: str, max_length: int | None = None) -> str:
+        value = payload.get(key)
+        if value is None or value == "":
+            raise ValueError(f"required_{key}_missing")
+        if not isinstance(value, str):
+            raise ValueError(f"{key}_invalid")
+        if "\x00" in value:
+            raise ValueError("text_contains_nul" if key == "text" else f"{key}_invalid")
+        if max_length is not None and len(value) > max_length:
+            raise ValueError(f"{key}_overlength")
+        return value
+
+    @staticmethod
+    def _canonical_halfvec_bytes(vector: list[float]) -> bytes:
+        try:
+            return b"".join(struct.pack(">e", 0.0 if value == 0.0 else float(value)) for value in vector)
+        except (OverflowError, struct.error, TypeError, ValueError) as exc:
+            raise RuntimeError("target_readback_failed") from exc
+
     def _unpack(self, item: object) -> tuple[object, list[float] | None, dict[str, Any]]:
         point_id, vector, payload = _value(item, "id"), _value(item, "vector"), _value(item, "payload")
         if point_id is None or not isinstance(payload, dict):
@@ -187,7 +209,15 @@ class QdrantToPostgresMigrator:
         result.total_quarantined += 1
         result.quarantined_records.append({"point_digest": _digest(point_id) if point_id is not None else "unknown", "reason_code": reason})
 
-    def _migrate(self, name: str, project: str | None, build: Callable[..., Any], write: Callable[..., Any]) -> MigrationResult:
+    def _migrate(
+        self,
+        name: str,
+        project: str | None,
+        build: Callable[..., Any],
+        write: Callable[..., Any],
+        verify: Callable[..., Any] | None = None,
+        raise_target_failures: bool = False,
+    ) -> MigrationResult:
         started, preflight = time.time(), self._preflight(name)
         result = MigrationResult(collection_name=_digest(name), dry_run=self.dry_run, preflight=preflight)
         checkpoint = self._checkpoint(name, preflight)
@@ -214,15 +244,21 @@ class QdrantToPostgresMigrator:
                                 result.total_skipped += 1
                                 continue
                             record = build(point_id, vector, payload)
-                            write(record, conn=batch_conn)
-                            if record.embedding is None:
-                                result.outbox_enqueued += 1
-                            result.total_migrated += 1
                         except (TypeError, ValueError, OverflowError) as exc:
                             self._quarantine(result, point_id, self._reason_code(exc))
+                            continue
+                        try:
+                            write(record, conn=batch_conn)
+                            if verify is not None:
+                                verify(record, conn=batch_conn)
                         except Exception:
-                            logger.exception("migration_record_failed reason_code=target_write_failed")
+                            if raise_target_failures:
+                                raise
                             self._quarantine(result, point_id, "target_write_failed")
+                            continue
+                        if getattr(record, "embedding", None) is None:
+                            result.outbox_enqueued += 1
+                        result.total_migrated += 1
             else:
                 for item in points:
                     point_id = None
@@ -233,16 +269,16 @@ class QdrantToPostgresMigrator:
                             result.total_skipped += 1
                             continue
                         record = build(point_id, vector, payload)
-                        if not self.dry_run:
-                            write(record)
-                            if record.embedding is None:
-                                result.outbox_enqueued += 1
-                        result.total_migrated += 1
                     except (TypeError, ValueError, OverflowError) as exc:
                         self._quarantine(result, point_id, self._reason_code(exc))
-                    except Exception:
-                        logger.exception("migration_record_failed reason_code=target_write_failed")
-                        self._quarantine(result, point_id, "target_write_failed")
+                        continue
+                    if not self.dry_run:
+                        write(record)
+                        if verify is not None:
+                            verify(record)
+                        if getattr(record, "embedding", None) is None:
+                            result.outbox_enqueued += 1
+                    result.total_migrated += 1
             offset = next_offset
             if not self.dry_run:
                 checkpoint.update(next_offset=offset, completed=offset is None)
@@ -260,33 +296,71 @@ class QdrantToPostgresMigrator:
             raise ValueError("content_hash_invalid")
         return value
 
-    def migrate_session_chunks(self, collection_name: str = "session_chunks", project: str | None = None) -> MigrationResult:
+    def migrate_session_chunks(self, collection_name: str = DEFAULT_SESSION_COLLECTION, project: str | None = None) -> MigrationResult:
         def build(_id: object, vector: list[float] | None, payload: dict[str, Any]) -> SessionChunk:
-            copied = self._copyable(vector, payload)
-            chunk_id = str(payload.get("chunk_id") or payload.get("memory_id") or _id)[:128]
-            session_id_hash = str(self._require(payload, "session_id_hash"))
-            project_val = str(self._require(payload, "project"))[:128]
-            provider_val = str(payload.get("provider") or "unspecified")[:64]
-            raw_index = payload.get("chunk_index")
-            if raw_index is None:
-                raw_index = payload.get("turn_start_index")
-            chunk_index = int(raw_index) if raw_index is not None else 0
-            content_markdown = str(payload.get("content_markdown") or payload.get("text") or payload.get("summary") or "").replace("\x00", "")
-            token_count = int(payload.get("token_count") or 0)
+            if vector is None:
+                raise ValueError("vector_missing")
+            if not isinstance(vector, list) or len(vector) != DEFAULT_EMBEDDING_DIM:
+                raise ValueError("vector_dimension_mismatch")
+            model = payload.get("embedding_model")
+            if model is not None and model != DEFAULT_EMBEDDING_MODEL:
+                raise ValueError("embedding_profile_mismatch")
+
+            chunk_id = self._require_string(payload, "memory_id", max_length=64)
+            session_id_hash = self._require_string(payload, "session_id_hash", max_length=71)
+            project_val = self._require_string(payload, "project", max_length=64)
+            provider_val = self._require_string(payload, "provider", max_length=32)
+            text_val = self._require_string(payload, "text")
+            if "\x00" in text_val:
+                raise ValueError("text_contains_nul")
+            content_markdown = text_val
+
             return SessionChunk(
                 chunk_id=chunk_id,
                 session_id_hash=session_id_hash,
                 project=project_val,
                 provider=provider_val,
-                chunk_index=chunk_index,
+                chunk_index=0,
                 content_markdown=content_markdown,
-                token_count=token_count,
+                token_count=0,
                 content_hash=self._content_hash(payload),
                 embedding_model=DEFAULT_EMBEDDING_MODEL,
-                embedding_state="ready" if copied else "pending",
-                embedding=list(vector) if (copied and vector is not None) else None,
+                embedding_state="ready",
+                embedding=list(vector),
             )
-        return self._migrate(collection_name, project, build, self.target_store.insert_chunk)
+
+        def verify_chunk(chunk: SessionChunk, conn: Any | None = None) -> None:
+            get_chunk = getattr(self.target_store, "get_chunk", None)
+            if not callable(get_chunk):
+                raise RuntimeError("target_readback_unavailable")
+            stored = get_chunk(chunk.chunk_id, conn=conn)
+            if (
+                stored is None
+                or stored.chunk_id != chunk.chunk_id
+                or stored.session_id_hash != chunk.session_id_hash
+                or stored.project != chunk.project
+                or stored.provider != chunk.provider
+                or stored.chunk_index != chunk.chunk_index
+                or stored.content_markdown != chunk.content_markdown
+                or stored.token_count != chunk.token_count
+                or stored.content_hash != chunk.content_hash
+                or stored.embedding_model != chunk.embedding_model
+                or stored.embedding_state != "ready"
+                or stored.embedding is None
+                or len(stored.embedding) != DEFAULT_EMBEDDING_DIM
+                or self._canonical_halfvec_bytes(stored.embedding)
+                != self._canonical_halfvec_bytes(chunk.embedding)
+            ):
+                raise RuntimeError("target_readback_failed")
+
+        return self._migrate(
+            collection_name,
+            project,
+            build,
+            self.target_store.insert_chunk,
+            verify=verify_chunk,
+            raise_target_failures=True,
+        )
 
     def migrate_memory_cards(self, collection_name: str = "memory_cards", project: str | None = None) -> MigrationResult:
         def build(_id: object, vector: list[float] | None, payload: dict[str, Any]) -> MemoryCard:
