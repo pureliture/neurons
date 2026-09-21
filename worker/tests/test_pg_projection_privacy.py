@@ -174,31 +174,189 @@ def test_ready_credential_content_reuses_without_external_egress(body, reuse):
 def recall_boundary(monkeypatch):
     from agent_knowledge.rag_ingress import pg_recall
     from agent_knowledge.rag_ingress import qdrant_embedding
-    from agent_knowledge.couchdb_source import couchdb_http_store
 
     pg_store = MagicMock(spec=PgVectorStore)
     pg_store.search_session_chunks.return_value = []
+    # Compatibility sentinel for existing test consumers. Runtime pg_recall no
+    # longer creates or consults a CouchDB authority store.
     source = MagicMock()
     _, _, provider, _, _ = projection_boundary("synthetic")
     monkeypatch.setattr(pg_recall, "PgVectorStore", lambda **kw: pg_store)
-    monkeypatch.setattr(couchdb_http_store, "CouchDBHttpSourceStore", lambda **kw: source)
     monkeypatch.setattr(qdrant_embedding, "build_openai_embedding_provider", lambda **kw: provider)
     search = pg_recall.build_pg_brain_query_search_from_env({
         "NEURON_LBRAIN_PGVECTOR_DSN": "synthetic-not-a-dsn",
-        "COUCHDB_URL": "https://example.invalid",
     })
     assert search is not None
     return search, pg_store, source, provider
 
 
+def test_recall_returns_valid_ready_row_without_couchdb_receipt(monkeypatch):
+    search, store, _, provider = recall_boundary(monkeypatch)
+    body = "historically migrated PG row"
+    row = SessionChunk(
+        chunk_id="migrated-row",
+        session_id_hash="sha256:" + "b" * 64,
+        project="privacy-test",
+        provider="synthetic",
+        content_markdown=body,
+        content_hash=sha256_hash(body),
+        embedding_state="ready",
+        embedding_model=provider.model,
+        embedding=[0.01] * provider.size,
+    )
+    store.search_session_chunks.return_value = [{
+        "chunk_id": row.chunk_id,
+        "session_id_hash": row.session_id_hash,
+        "project": row.project,
+        "provider": row.provider,
+        "content_markdown": row.content_markdown,
+        "content_hash": row.content_hash,
+        "distance": 0.0,
+    }]
+    store.get_chunk.return_value = row
+
+    assert search("migrated row", "/project/privacy-test") == [{
+        "result_type": "session_memory",
+        "retrieval_lane": "pg_semantic",
+        "memory_id": row.chunk_id,
+        "card_type": "",
+        "summary": body,
+        "currentness": "current",
+        "score": 1.0,
+        "content_hash": row.content_hash,
+    }]
+
+
+def test_recall_rejects_mismatched_fetched_row_id(monkeypatch):
+    search, store, _, provider = recall_boundary(monkeypatch)
+    body = "mismatched fetched row"
+    row = SessionChunk(
+        chunk_id="different-row-id",
+        session_id_hash="sha256:" + "e" * 64,
+        project="privacy-test",
+        provider="synthetic",
+        content_markdown=body,
+        content_hash=sha256_hash(body),
+        embedding_state="ready",
+        embedding_model=provider.model,
+        embedding=[0.01] * provider.size,
+    )
+    store.search_session_chunks.return_value = [{
+        "chunk_id": "candidate-row-id",
+        "session_id_hash": row.session_id_hash,
+        "project": row.project,
+        "provider": row.provider,
+        "content_markdown": row.content_markdown,
+        "content_hash": row.content_hash,
+        "distance": 0.0,
+    }]
+    store.get_chunk.return_value = row
+
+    assert search("mismatched id", "/project/privacy-test") == []
+
+
+def test_recall_excludes_synthetic_canary_pg_row(monkeypatch):
+    search, store, _, provider = recall_boundary(monkeypatch)
+    body = "synthetic canary row"
+    row = SessionChunk(
+        chunk_id="synthetic-row",
+        session_id_hash="sha256:" + "f" * 64,
+        project="privacy-test",
+        provider="lbrain-temporal-canary",
+        content_markdown=body,
+        content_hash=sha256_hash(body),
+        embedding_state="ready",
+        embedding_model=provider.model,
+        embedding=[0.01] * provider.size,
+    )
+    store.search_session_chunks.return_value = [{
+        "chunk_id": row.chunk_id,
+        "session_id_hash": row.session_id_hash,
+        "project": row.project,
+        "provider": row.provider,
+        "content_markdown": row.content_markdown,
+        "content_hash": row.content_hash,
+        "distance": 0.0,
+    }]
+    store.get_chunk.return_value = row
+
+    assert search("synthetic canary", "/project/privacy-test") == []
+
+
+def test_recall_excludes_invalid_ready_candidate(monkeypatch):
+    search, store, _, provider = recall_boundary(monkeypatch)
+    body = "tampered historical PG row"
+    row = SessionChunk(
+        chunk_id="invalid-migrated-row",
+        session_id_hash="sha256:" + "c" * 64,
+        project="privacy-test",
+        provider="synthetic",
+        content_markdown=body,
+        content_hash=sha256_hash("original body"),
+        embedding_state="ready",
+        embedding_model=provider.model,
+        embedding=[0.01] * provider.size,
+    )
+    store.search_session_chunks.return_value = [{
+        "chunk_id": row.chunk_id,
+        "session_id_hash": row.session_id_hash,
+        "project": row.project,
+        "provider": row.provider,
+        "content_markdown": row.content_markdown,
+        "content_hash": row.content_hash,
+        "distance": 0.0,
+    }]
+    store.get_chunk.return_value = row
+
+    assert search("invalid row", "/project/privacy-test") == []
+
+
+def test_recall_rejects_candidate_outside_requested_project(monkeypatch):
+    search, store, _, provider = recall_boundary(monkeypatch)
+    body = "other project row"
+    row = SessionChunk(
+        chunk_id="other-project-row",
+        session_id_hash="sha256:" + "d" * 64,
+        project="other-project",
+        provider="synthetic",
+        content_markdown=body,
+        content_hash=sha256_hash(body),
+        embedding_state="ready",
+        embedding_model=provider.model,
+        embedding=[0.01] * provider.size,
+    )
+    store.search_session_chunks.return_value = [{
+        "chunk_id": row.chunk_id,
+        "session_id_hash": row.session_id_hash,
+        "project": row.project,
+        "provider": row.provider,
+        "content_markdown": row.content_markdown,
+        "content_hash": row.content_hash,
+        "distance": 0.0,
+    }]
+    store.get_chunk.return_value = row
+
+    assert search("project scope", "/project/privacy-test") == []
+    assert store.search_session_chunks.call_args.kwargs["project"] == "privacy-test"
+
+
+def test_pg_recall_has_no_qdrant_reader_or_couchdb_authority_import():
+    from pathlib import Path
+    source = (Path(__file__).parents[1] / "lib/agent_knowledge/rag_ingress/pg_recall.py").read_text()
+    assert "qdrant_recall" not in source
+    assert "qdrant_couchdb_authority" not in source
+    assert "qdrant_authority_join" not in source
+    assert "CouchDBProjectionStateAuthorityResolver" not in source
+    assert "join_mirror_hits_to_authority" not in source
+
+
 @pytest.mark.parametrize("query", ASSIGNED_CREDENTIALS + AUTH_CREDENTIALS)
 def test_recall_query_credentials_rejected_before_embedding(monkeypatch, query):
-    search, store, source, provider = recall_boundary(monkeypatch)
+    search, store, _, provider = recall_boundary(monkeypatch)
     with pytest.raises(ValueError, match="^PG embedding input rejected by secret egress policy$"):
         search(query, "/project/privacy-test")
     provider.embed.assert_not_called()
     assert store.mock_calls == []
-    assert source.mock_calls == []
 
 
 @pytest.mark.parametrize("query", ALLOWED_TEXT + REDACTED_ASSIGNMENTS + REDACTED_AUTH)
@@ -242,9 +400,8 @@ def test_ready_reuse_still_requires_exact_identity_and_vector(reuse, field, valu
 
 
 def test_recall_scope_required_before_embedding(monkeypatch):
-    search, store, source, provider = recall_boundary(monkeypatch)
+    search, store, _, provider = recall_boundary(monkeypatch)
     with pytest.raises(RuntimeError, match="^PG recall requires project scope$"):
         search(ALLOWED_TEXT[0], "/global")
     provider.embed.assert_not_called()
     assert store.mock_calls == []
-    assert source.mock_calls == []
