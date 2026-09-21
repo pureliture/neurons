@@ -1,13 +1,13 @@
 """PG-backed brain.query recall.
 
-Fills brain.query's ``archive`` / ``evidence_candidates`` lanes directly from
-ready, integrity-valid PgVectorStore rows.  Returns the
-``(query, brain_id) -> list[dict]`` shape that
-``session_memory.brain_query.build_brain_query_response_v2`` consumes.
+By default, PG candidates remain joined to CouchDB projection receipts. During
+the explicit migrated-reader cutover, ``PG_RECALL_DIRECT_MIGRATED=true`` serves
+ready, integrity-valid PostgreSQL rows directly. No path falls back to Qdrant.
 """
 
 from __future__ import annotations
 
+import base64
 from typing import Any, Callable
 
 from ..postgres_store.pgvector_store import PgVectorStore
@@ -15,6 +15,12 @@ from ..couchdb_source.document_model import sha256_hash
 from .pg_backfill import validated_pg_embedding_profile
 from .pg_embedding_privacy import assert_pg_embedding_egress_safe
 from ..session_memory.brain_query import project_from_brain_id
+from .qdrant_authority_join import join_mirror_hits_to_authority
+from .qdrant_couchdb_authority import CouchDBProjectionStateAuthorityResolver
+
+
+def _direct_migrated_reader_enabled(environ: Any) -> bool:
+    return str(environ.get("PG_RECALL_DIRECT_MIGRATED") or "").strip().casefold() == "true"
 
 _SYNTHETIC_CANARY_PROVIDER = "lbrain-temporal-canary"
 _RECALL_LIMIT = 5
@@ -47,8 +53,28 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
     )
     if not dsn:
         return None
+    direct_migrated = _direct_migrated_reader_enabled(environ)
+    couch_store = None
     embed_provider = None
     try:
+        if not direct_migrated:
+            couch_url = str(environ.get("COUCHDB_URL") or "").strip()
+            if not couch_url:
+                raise RuntimeError("PG recall requires CouchDB authority")
+            from ..couchdb_source.couchdb_http_store import CouchDBHttpSourceStore
+
+            user = str(environ.get("COUCHDB_USER") or "")
+            password = str(environ.get("COUCHDB_PASSWORD") or "")
+            auth_header = (
+                "Basic " + base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
+                if user
+                else ""
+            )
+            couch_store = CouchDBHttpSourceStore(
+                base_url=couch_url,
+                db=str(environ.get("COUCHDB_DB") or "transcript_source"),
+                auth_header=auth_header,
+            )
         from .qdrant_embedding import build_openai_embedding_provider
 
         pg_store = PgVectorStore(
@@ -78,7 +104,7 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
             query_vector=vector, project=project, limit=_RECALL_CANDIDATE_LIMIT + 1
         )
 
-        results: list[dict[str, Any]] = []
+        validated_hits: list[dict[str, Any]] = []
         for candidate in raw_chunks[:_RECALL_CANDIDATE_LIMIT]:
             row = pg_store.get_chunk(candidate["chunk_id"])
             if (
@@ -103,18 +129,40 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
                 or _is_synthetic_canary_pg_row(row.provider)
             ):
                 continue
-            results.append(
-                {
-                    "result_type": "session_memory",
-                    "retrieval_lane": "pg_semantic",
-                    "memory_id": row.chunk_id,
-                    "card_type": "",
-                    "summary": row.content_markdown,
-                    "currentness": "current",
-                    "score": 1.0 - float(candidate["distance"]),
-                    "content_hash": row.content_hash,
-                }
+            validated_hits.append({
+                "session_id_hash": row.session_id_hash,
+                "content_hash": row.content_hash,
+                "memory_id": row.chunk_id,
+                "summary": row.content_markdown,
+                "provider": row.provider,
+                "project": row.project,
+                "score": 1.0 - float(candidate["distance"]),
+            })
+
+        if direct_migrated:
+            authorized_hits = validated_hits
+        else:
+            resolver = CouchDBProjectionStateAuthorityResolver(
+                couch_store, filters={"project": project}, backend="postgres_pgvector"
             )
+            authorized_hits = join_mirror_hits_to_authority(
+                validated_hits, resolver=resolver, drop_unresolved=True
+            )
+
+        results = [
+            {
+                "result_type": "session_memory",
+                "retrieval_lane": "pg_semantic",
+                "memory_id": str(hit["memory_id"]),
+                "card_type": "",
+                "summary": str(hit["summary"]),
+                "currentness": str(hit.get("authority_currentness") or "current"),
+                "score": hit["score"],
+                "content_hash": str(hit["content_hash"]),
+            }
+            for hit in authorized_hits
+            if not _is_synthetic_canary_pg_row(str(hit.get("provider") or ""))
+        ]
         if len(results) < _RECALL_LIMIT and len(raw_chunks) > _RECALL_CANDIDATE_LIMIT:
             # brain.query maps this to projection_state=unavailable, not fresh [].
             raise RuntimeError("PG recall candidate limit exhausted")
