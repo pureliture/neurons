@@ -424,3 +424,107 @@ def test_live_graph_projection_worker_retry_to_dead_letter(pg_store):
     assert jobs[0].status == "dead_letter"
     assert jobs[0].retry_count >= 3
     assert "Neo4j down" in (jobs[0].last_error or "")
+
+
+# ==============================================================================
+# S3: the graph-projection adapter contract (no database)
+# ==============================================================================
+
+
+def _graph_job(episode_payload):
+    from agent_knowledge.postgres_store.pgvector_store import GraphOutboxJob
+
+    def _field(name: str, default: str = "") -> str:
+        return episode_payload.get(name, default) if isinstance(episode_payload, dict) else default
+
+    return GraphOutboxJob(
+        projection_id=1,
+        source_type="memory_card",
+        source_id=_field("memory_id") or _field("authority_memory_id") or _field("source_id"),
+        source_revision=_field("content_hash"),
+        content_hash=_field("content_hash"),
+        episode_payload=episode_payload,
+    )
+
+
+def _card_outbox_payload() -> dict:
+    """The payload shape `pgvector_store.upsert_card` enqueues for a card."""
+    return {
+        "source_type": "memory_card",
+        "source_id": "card_xyz",
+        "source_revision": "sha256:card_xyz_hash",
+        "content_hash": "sha256:card_xyz_hash",
+        "authority_memory_id": "card_xyz",
+        "project": "neurons",
+        "card_type": "decision",
+        "title": "Title",
+        "summary": "Summary",
+        "typed_payload": {"rule": "Rule"},
+        "lifecycle_state": "accepted",
+        "currentness": "current",
+    }
+
+
+class _DataclassOnlyAdapter:
+    """Adapter that only accepts a real OntologyEpisode.
+
+    Mirrors the production `GraphitiNeo4jAdapter.upsert_episode` contract, which
+    performs attribute access (`.episode_id`, `.to_dict()`). A dict raises here
+    exactly as it raised in production -- this is the assertion that was missing
+    and let the mismatch ship.
+    """
+
+    def __init__(self) -> None:
+        self.episodes = []
+
+    def upsert_episode(self, episode):
+        self.episodes.append(episode)
+        _ = episode.episode_id          # dataclass attribute access
+        _ = episode.to_dict()            # dataclass method
+        return "inserted"
+
+
+def test_graph_projection_worker_passes_ontology_episode_not_raw_dict():
+    from agent_knowledge.postgres_store.outbox_worker import GraphProjectionWorker
+    from agent_knowledge.llm_brain_core.ontology import OntologyEpisode
+
+    adapter = _DataclassOnlyAdapter()
+    worker = GraphProjectionWorker(store=None, graph_adapter=adapter, worker_id="w-s3")
+    worker.process_job(_graph_job(_card_outbox_payload()))
+
+    assert len(adapter.episodes) == 1
+    episode = adapter.episodes[0]
+    assert isinstance(episode, OntologyEpisode)
+    # The PG authority join keys on these two fields, off the stored payload.
+    assert episode.payload["authority_memory_id"] == "card_xyz"
+    assert episode.payload["content_hash"] == "sha256:card_xyz_hash"
+
+
+def test_graph_projection_episode_carries_source_card_hash_not_derived_hash():
+    """The payload's content_hash must be the CARD's hash, not the episode's.
+
+    `graph_first_resolver._join_graph_candidates` compares the graph's
+    content_hash for equality against `memory_cards.content_hash`. The episode's
+    own hash is derived from the payload, so the two never match; publishing the
+    derived value would make every join fail closed.
+    """
+    from agent_knowledge.postgres_store.outbox_worker import GraphProjectionWorker
+
+    adapter = _DataclassOnlyAdapter()
+    worker = GraphProjectionWorker(store=None, graph_adapter=adapter, worker_id="w-s3b")
+    worker.process_job(_graph_job(_card_outbox_payload()))
+
+    episode = adapter.episodes[0]
+    assert episode.payload["content_hash"] == "sha256:card_xyz_hash"
+    # Explicitly: the derived episode hash is a DIFFERENT value.
+    assert episode.content_hash != "sha256:card_xyz_hash"
+
+
+def test_graph_projection_worker_rejects_non_mapping_payload():
+    from agent_knowledge.postgres_store.outbox_worker import GraphProjectionWorker
+
+    worker = GraphProjectionWorker(
+        store=None, graph_adapter=_DataclassOnlyAdapter(), worker_id="w-s3c"
+    )
+    with pytest.raises(TypeError, match="graph_projection_payload_must_be_mapping"):
+        worker.process_job(_graph_job(["not", "a", "mapping"]))

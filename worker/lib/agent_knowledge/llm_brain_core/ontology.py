@@ -119,6 +119,22 @@ def episode_from_memory_card(card: Mapping[str, Any], *, project: str = "") -> O
         "typed_payload": _public_safe_typed_payload(card.get("typed_payload")),
     }
     memory_id = require_non_empty(payload["memory_id"], "memory_id")
+    # The PG authority join is keyed on the SOURCE card, not on this episode.
+    # `graph_first_resolver._join_graph_candidates` reads
+    # `authority_memory_id` + `content_hash` off the stored payload and compares
+    # `content_hash` for EQUALITY against `memory_cards.content_hash`
+    # (graph_first_resolver.py:271-272, :302). The episode's own
+    # `OntologyEpisode.content_hash` is DERIVED from this payload
+    # (models.py:510-518) and therefore never equals the card's hash, so
+    # publishing it here would make every join fail closed. Both fields below
+    # must therefore carry the ORIGINAL card values verbatim.
+    #
+    # Emitted alongside (never instead of) `memory_id`, which other readers
+    # (`context_builder`, `sync_shadow`, `index_projection`) still consume.
+    card_content_hash = str(card.get("content_hash") or "")
+    if card_content_hash:
+        payload["authority_memory_id"] = memory_id
+        payload["content_hash"] = card_content_hash
     card_type = require_non_empty(payload["card_type"], "card_type")
     # brain_id is the graph group key. A missing brain_id silently breaks
     # group_ids scoping, so derive it from the project (the canonical group key

@@ -153,6 +153,30 @@ class OutboxWorker:
         self._stop_event.set()
 
 
+def _card_mapping_from_outbox_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Bridge the outbox payload's field names to the card mapper's contract.
+
+    `PgVectorStore.upsert_card` enqueues the card's identity under
+    ``authority_memory_id`` (plus ``source_id``), while
+    `episode_from_memory_card` reads ``memory_id`` and fails closed without it.
+    The two conventions exist in different layers, so the rename belongs here at
+    the seam rather than in either layer. The already-correct canonical key
+    ``content_hash`` is passed through untouched -- the PG authority join
+    compares it for equality against `memory_cards.content_hash`.
+    """
+
+    card = dict(payload)
+    memory_id = str(
+        card.get("memory_id")
+        or card.get("authority_memory_id")
+        or card.get("source_id")
+        or ""
+    )
+    if memory_id:
+        card["memory_id"] = memory_id
+    return card
+
+
 class GraphProjectionWorker:
     """Leased worker for graph_projection_outbox projecting episodes to Graphiti / Neo4j."""
 
@@ -179,9 +203,23 @@ class GraphProjectionWorker:
 
     def process_job(self, job: Any) -> None:
         """Project one episode payload through the Graphiti adapter seam."""
+        from ..llm_brain_core.ontology import episode_from_memory_card
         from .graph_replay import call_adapter_seam
 
-        outcome = call_adapter_seam(self.graph_adapter, job.episode_payload)
+        payload = job.episode_payload
+        if not isinstance(payload, dict):
+            raise TypeError("graph_projection_payload_must_be_mapping")
+        # The adapter contract is `upsert_episode(OntologyEpisode)`, NOT a raw
+        # mapping. Passing the dict straight through raised AttributeError on
+        # the first attribute access inside the real adapter, so every claimed
+        # job failed, retried OUTBOX_RETRY_LIMIT times, and landed in
+        # dead_letter. Map the stored payload into the episode the adapter
+        # actually expects.
+        episode = episode_from_memory_card(
+            _card_mapping_from_outbox_payload(payload),
+            project=str(payload.get("project") or ""),
+        )
+        outcome = call_adapter_seam(self.graph_adapter, episode)
         if outcome == "failed":
             raise RuntimeError(f"adapter returned failed outcome for projection {job.projection_id}")
 
