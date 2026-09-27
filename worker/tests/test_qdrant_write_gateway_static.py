@@ -315,6 +315,16 @@ def test_operator_activation_has_no_automation_or_deploy_invocation() -> None:
             not path.is_file()
             or ".git" in path.parts
             or ".venv" in path.parts
+            # `.worktrees/<name>/` is a linked git worktree: an independent
+            # checkout of this same repository, ignored via .git/info/exclude.
+            # It is local operational state, not repository content. Without
+            # this skip the scan walks sibling checkouts, and the
+            # repo-relative allowlist below can never match them
+            # (".worktrees/<name>/worker/pyproject.toml" != "worker/pyproject.toml"),
+            # so an unrelated worktree's identical pyproject.toml registers as a
+            # packaging-declaration-mismatch. Each worktree scans its own
+            # checkout when its own tests run.
+            or ".worktrees" in path.parts
             or "tests" in path.parts
             or path.name
             in {
