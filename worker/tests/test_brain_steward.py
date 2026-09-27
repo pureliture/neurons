@@ -836,3 +836,147 @@ def test_dispatch_round_trip_read_and_proposal(tmp_path):
         )
     )
     assert proposal["proposal"]["memory_id"] in [item["memory_id"] for item in queue["items"]]
+
+
+# -------------------------------------------------------------- S1: PG authority write
+
+
+class _MockPgVectorStore:
+    """Minimal mock that records upsert_card calls and supports get_card readback."""
+
+    def __init__(self):
+        self.cards: dict[str, dict] = {}
+
+    def upsert_card(self, card):
+        self.cards[card.memory_id] = {
+            "memory_id": card.memory_id,
+            "project": card.project,
+            "card_type": card.card_type,
+            "lifecycle_state": card.lifecycle_state,
+            "authorization_status": card.authorization_status,
+            "currentness": card.currentness,
+            "content_hash": card.content_hash,
+        }
+        return card.memory_id
+
+    def get_card(self, memory_id):
+        row = self.cards.get(memory_id)
+        if row is None:
+            return None
+        # Return a simple object with attribute access (mimics MemoryCard dataclass)
+        from types import SimpleNamespace
+        return SimpleNamespace(**row)
+
+
+def test_accepted_card_written_to_pg_with_active_status(tmp_path):
+    """S1: 승인 카드가 PG memory_cards에 authorization_status='active'로 저장된다."""
+    ledger = _ledger(tmp_path)
+    mock_pg = _MockPgVectorStore()
+    service = LLMBrainMemoryService(ledger, pgvector_store=mock_pg)
+
+    candidate = build_memory_card_candidate_from_source_span(
+        _span(), refresh_watermark="test"
+    )
+    result = service.accept_human_approved_candidate(
+        candidate, approved_by="ddalkak", decision_id="decision_s1"
+    )
+
+    accepted_card = result["accepted_card"]
+    memory_id = accepted_card["memory_id"]
+
+    # PG에 저장되었는지 확인
+    assert memory_id in mock_pg.cards, "accepted card was not written to PG"
+
+    pg_row = mock_pg.cards[memory_id]
+    # authorization_status가 'active'여야 _authority_filter를 통과함
+    assert pg_row["authorization_status"] == "active", (
+        f"expected authorization_status='active', got '{pg_row['authorization_status']}'"
+    )
+    # lifecycle_state가 accepted 상태여야 함
+    assert pg_row["lifecycle_state"] in ("accepted", "human_accepted", "auto_accepted"), (
+        f"unexpected lifecycle_state: {pg_row['lifecycle_state']}"
+    )
+    # content_hash가 일치해야 함
+    assert pg_row["content_hash"] == accepted_card["content_hash"]
+
+
+def test_auto_accept_card_written_to_pg(tmp_path):
+    """S1: auto_accept 경로도 PG에 저장한다."""
+    ledger = _ledger(tmp_path)
+    mock_pg = _MockPgVectorStore()
+    service = LLMBrainMemoryService(ledger, pgvector_store=mock_pg)
+
+    candidate = build_memory_card_candidate_from_source_span(
+        _span(), refresh_watermark="test"
+    )
+    evaluation = {"status": "auto_accepted", "confidence": 0.9}
+    result = service.accept_auto_policy_candidate(
+        candidate, evaluation, operator_approval_ref="op_ref_1"
+    )
+
+    if result["canonical_write_performed"]:
+        accepted_card = result["accepted_card"]
+        memory_id = accepted_card["memory_id"]
+        assert memory_id in mock_pg.cards, "auto-accepted card was not written to PG"
+        assert mock_pg.cards[memory_id]["authorization_status"] == "active"
+
+
+def test_supersede_writes_new_card_to_pg(tmp_path):
+    """S1: supersede 경로도 새 카드를 PG에 저장한다."""
+    ledger = _ledger(tmp_path)
+    mock_pg = _MockPgVectorStore()
+    service = LLMBrainMemoryService(ledger, pgvector_store=mock_pg)
+
+    # old card를 먼저 승인
+    old_candidate = build_memory_card_candidate_from_source_span(
+        _span(content_hash="sha256:old"), refresh_watermark="test"
+    )
+    old_result = service.accept_human_approved_candidate(
+        old_candidate, approved_by="ddalkak", decision_id="decision_old"
+    )
+    old_card = old_result["accepted_card"]
+
+    # new candidate를 승인하고 supersede
+    new_candidate = build_memory_card_candidate_from_source_span(
+        _span(content_hash="sha256:new"), refresh_watermark="test"
+    )
+    new_result = service.accept_human_approved_candidate(
+        new_candidate, approved_by="ddalkak", decision_id="decision_new"
+    )
+    new_card = new_result["accepted_card"]
+
+    # supersede 호출
+    result = service.supersede_accepted_card(
+        old_card=old_card,
+        new_candidate=new_candidate,
+        approved_by="ddalkak",
+        decision_id="decision_supersede",
+    )
+
+    # 새 카드가 PG에 저장되어야 함
+    new_memory_id = result["new_card"]["memory_id"]
+    assert new_memory_id in mock_pg.cards, "superseded new card was not written to PG"
+    assert mock_pg.cards[new_memory_id]["authorization_status"] == "active"
+
+
+def test_pg_write_failure_raises_runtime_error(tmp_path):
+    """S1: PG readback 실패 시 RuntimeError를 발생시킨다."""
+    ledger = _ledger(tmp_path)
+
+    class _FailingPgStore(_MockPgVectorStore):
+        def get_card(self, memory_id):
+            return None  # readback 실패
+
+    mock_pg = _FailingPgStore()
+    service = LLMBrainMemoryService(ledger, pgvector_store=mock_pg)
+
+    candidate = build_memory_card_candidate_from_source_span(
+        _span(), refresh_watermark="test"
+    )
+    try:
+        service.accept_human_approved_candidate(
+            candidate, approved_by="ddalkak", decision_id="decision_fail"
+        )
+        assert False, "expected RuntimeError on PG readback failure"
+    except RuntimeError as exc:
+        assert "readback failed" in str(exc)

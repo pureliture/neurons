@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from .memory_evaluation import apply_auto_acceptance_plan, classify_candidate_block_reason
@@ -7,11 +8,49 @@ from .memory_promotion import commit_supersession, human_approve_memory_card_can
 from .index_projection import build_projection_job, execute_projection_job
 
 
+def _build_pg_card(card: Mapping[str, Any]):
+    """Convert a card envelope dict to a PostgreSQL MemoryCard dataclass.
+
+    Accepted cards must have authorization_status='active' so they pass the
+    _authority_filter. The envelope uses source_refs (plural) but MemoryCard
+    uses source_ref (singular).
+    """
+    from ..postgres_store.pgvector_store import MemoryCard
+
+    valid_from = card.get("valid_from")
+    if isinstance(valid_from, str):
+        valid_from = datetime.fromisoformat(valid_from.replace("Z", "+00:00"))
+    elif valid_from is None:
+        valid_from = datetime.now(timezone.utc)
+
+    valid_to = card.get("valid_to")
+    if isinstance(valid_to, str):
+        valid_to = datetime.fromisoformat(valid_to.replace("Z", "+00:00"))
+
+    return MemoryCard(
+        memory_id=str(card["memory_id"]),
+        project=str(card["project"]),
+        card_type=str(card["card_type"]),
+        title=str(card.get("title") or ""),
+        summary=str(card.get("summary") or ""),
+        typed_payload=dict(card.get("typed_payload") or {}),
+        lifecycle_state=str(card.get("lifecycle_state") or "candidate"),
+        authorization_status="active",
+        currentness=str(card.get("currentness") or "current"),
+        confidence=float(card.get("confidence") or 0.0),
+        valid_from=valid_from,
+        valid_to=valid_to,
+        content_hash=str(card.get("content_hash") or ""),
+        source_ref=list(card.get("source_refs") or []),
+    )
+
+
 class LLMBrainMemoryService:
     """Integration boundary for canonical LLM-brain ledger writes."""
 
-    def __init__(self, ledger):
+    def __init__(self, ledger, *, pgvector_store=None):
         self.ledger = ledger
+        self.pgvector_store = pgvector_store
 
     def accept_human_approved_candidate(
         self,
@@ -38,6 +77,14 @@ class LLMBrainMemoryService:
         with self.ledger._transaction() as tx:
             accepted_card = tx.upsert_llm_brain_memory_card(promotion["accepted_card"])
             feedback_record = tx.upsert_llm_brain_feedback_record(promotion["feedback_record"])
+        # PG authority write after SQLite commit. Accepted cards must be
+        # authorization_status='active' to pass _authority_filter.
+        if self.pgvector_store is not None:
+            pg_card = _build_pg_card(accepted_card)
+            self.pgvector_store.upsert_card(pg_card)
+            stored = self.pgvector_store.get_card(pg_card.memory_id)
+            if stored is None or stored.content_hash != pg_card.content_hash:
+                raise RuntimeError("PostgreSQL accepted card readback failed")
         return {
             "schema_version": "llm_brain_human_acceptance_commit.v1",
             "promotion_path": "human_approval",
@@ -66,6 +113,12 @@ class LLMBrainMemoryService:
                 "application": application,
             }
         accepted_card = self.ledger.upsert_llm_brain_memory_card(application["accepted_card"])
+        if self.pgvector_store is not None:
+            pg_card = _build_pg_card(accepted_card)
+            self.pgvector_store.upsert_card(pg_card)
+            stored = self.pgvector_store.get_card(pg_card.memory_id)
+            if stored is None or stored.content_hash != pg_card.content_hash:
+                raise RuntimeError("PostgreSQL accepted card readback failed")
         return {
             "schema_version": "llm_brain_auto_acceptance_commit.v1",
             "promotion_path": "auto_policy",
@@ -105,6 +158,13 @@ class LLMBrainMemoryService:
                 timestamp=timestamp,
             )
             superseded_card = tx.upsert_llm_brain_memory_card(demoted)
+        # PG authority write for the newly accepted card.
+        if self.pgvector_store is not None:
+            pg_card = _build_pg_card(new_card)
+            self.pgvector_store.upsert_card(pg_card)
+            stored = self.pgvector_store.get_card(pg_card.memory_id)
+            if stored is None or stored.content_hash != pg_card.content_hash:
+                raise RuntimeError("PostgreSQL accepted card readback failed")
         return {
             "schema_version": "llm_brain_supersession_commit.v1",
             "canonical_write_performed": True,

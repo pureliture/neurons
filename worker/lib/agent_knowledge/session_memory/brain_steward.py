@@ -355,7 +355,7 @@ class BrainStewardService:
         self._guard_restricted("memory_candidate_approve")
         self._guard_writable()
         candidate = self._load_pending_candidate(candidate_memory_id)
-        result = LLMBrainMemoryService(self.ledger).accept_human_approved_candidate(
+        result = LLMBrainMemoryService(self.ledger, pgvector_store=self.pgvector_store).accept_human_approved_candidate(
             candidate, approved_by=approved_by, decision_id=decision_id
         )
         return self._safe_restricted_result(result)
@@ -394,7 +394,7 @@ class BrainStewardService:
         self._guard_restricted("memory_candidate_auto_accept", capability="auto_accept")
         self._guard_writable()
         candidate = self._load_pending_candidate(candidate_memory_id)
-        result = LLMBrainMemoryService(self.ledger).accept_auto_policy_candidate(
+        result = LLMBrainMemoryService(self.ledger, pgvector_store=self.pgvector_store).accept_auto_policy_candidate(
             candidate, evaluation, operator_approval_ref=operator_approval_ref
         )
         return self._safe_restricted_result(result)
@@ -410,7 +410,7 @@ class BrainStewardService:
         old_id = str(proposal.get("steward_target_memory_id") or "")
         old = self._load_current_target(old_id, what="supersede")
         # 교체 후보(proposal)를 accept 하면서 old card 를 superseded 로 atomically demote 한다.
-        return LLMBrainMemoryService(self.ledger).supersede_accepted_card(
+        return LLMBrainMemoryService(self.ledger, pgvector_store=self.pgvector_store).supersede_accepted_card(
             old_card=old,
             new_candidate=proposal,
             approved_by=approved_by,
