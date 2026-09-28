@@ -174,8 +174,8 @@ def assert_public_safe(payload: Any, field_name: str = "steward_response") -> An
 class BrainStewardService:
     """proposal-only Brain Steward 서비스.
 
-    ledger 는 authority store. allow_restricted 가 True 일 때만 approve/reject/auto_accept
-    위임이 열린다(기본 False).
+    PostgreSQL is the sole steward-card authority; ledger only supplies the
+    transport read-only boundary. Restricted capabilities default to False.
     """
 
     def __init__(
@@ -187,10 +187,8 @@ class BrainStewardService:
         allow_auto_accept: bool = False,
     ) -> None:
         self.ledger = ledger
-        # When supplied, the rationalized candidate path uses PostgreSQL as
-        # its sole proposal store. The legacy ledger path remains available
-        # only for callers that have not opted into the new store yet; this is
-        # an explicit cutover seam, not a silent dual-write.
+        # Steward card creation, decisions and reads require PostgreSQL.
+        # The ledger remains only for the transport read-only permission gate.
         self.pgvector_store = pgvector_store
         # restricted 권한을 capability 별로 분리한다. review_commit 은 approve/reject/
         # supersede_commit/stale_commit 을, auto_accept 는 가장 위험한 자동수락을 연다.
@@ -199,6 +197,26 @@ class BrainStewardService:
         self.allow_auto_accept = bool(allow_auto_accept)
         # backward-compat alias.
         self.allow_restricted = self.allow_review_commit
+
+    def _pg(self):
+        if self.pgvector_store is None:
+            raise ValueError("PostgreSQL steward store is required")
+        return self.pgvector_store
+
+    def _get_card(self, memory_id: str) -> dict | None:
+        return self._pg().get_steward_card(memory_id)
+
+    def _load_decided(self, decision_id: str, memory_id: str, action: str, actor: str,
+                      target_memory_id: str = "") -> dict | None:
+        record = self._pg().get_steward_decision(decision_id)
+        if record is None:
+            return None
+        decided_card = record.get('result_card')
+        if (not isinstance(decided_card, Mapping) or record['memory_id'] != memory_id or
+            record['content_hash'] != decided_card.get('content_hash') or record['action'] != action or
+            record['actor'] != actor or (record['target_memory_id'] or '') != target_memory_id):
+            raise ValueError('conflicting steward decision id')
+        return dict(decided_card)
 
     # --------------------------------------------------------- arg / denial
 
@@ -226,12 +244,9 @@ class BrainStewardService:
 
         if not project:
             raise ValueError("authority pack requires a project scope")
-        cards = self.ledger.list_llm_brain_memory_cards(
-            project=project,
-            accepted_only=True,
-            current_only=True,
-            limit=max(int(limit), 1),
-        )
+        pg = self._pg()
+        cards = pg.list_steward_cards(project=project, accepted_only=True, current_only=True,
+                                      limit=min(max(int(limit), 1), 100))
         items = [self._authority_item(card) for card in cards if _is_accepted(card)]
         response = {
             "schema_version": "brain_steward_authority_pack.v1",
@@ -245,10 +260,8 @@ class BrainStewardService:
     def review_queue_list(self, *, project: str = "", limit: int = 20) -> dict:
         """사람이 검토해야 할 candidate / stale / supersede proposal 목록(redacted)."""
 
-        cards = self.ledger.list_llm_brain_review_queue(
-            project=project or None,
-            limit=max(int(limit), 1),
-        )
+        cards = self._pg().list_steward_cards(project=project, review_only=True,
+                                              limit=min(max(int(limit), 1), 100))
         items = [self._review_item(card) for card in cards]
         response = {
             "schema_version": "brain_steward_review_queue.v1",
@@ -304,14 +317,18 @@ class BrainStewardService:
             raise ValueError("stale mark requires a memory_id")
         if not reason or not reason.strip():
             raise ValueError("stale mark requires a reason")
-        target = self.ledger.get_llm_brain_memory_card(memory_id)
+        target = self._get_card(memory_id)
         if target is None:
             raise ValueError("unknown target memory card")
         # reference-only proposal: target 의 raw payload 를 복제하지 않는다(M2).
         proposal = build_stale_proposal_card(target, reason=reason)
         # id 는 (target, reason) 에 멱등이다. reason 을 무시해 첫 reason 을 덮어쓰지 않는다(M2).
         proposal["memory_id"] = STEWARD_PROPOSAL_PREFIX + _sha16(memory_id, "stale", _sha16(reason))
+        proposal["content_hash"] = "sha256:" + hashlib.sha256(
+            (memory_id + "|stale|" + proposal["summary"]).encode("utf-8")
+        ).hexdigest()
         proposal["steward_proposal_kind"] = "stale"
+        proposal["authorization_status"] = "disabled"
         proposal["steward_target_memory_id"] = memory_id
         # proposer 귀속: ref-only 경로는 _stamp_proposal 을 거치지 않으므로 직접 stamp 한다.
         proposal["steward_proposed_by"] = canonicalize_provider(proposer) or "unspecified"
@@ -330,7 +347,7 @@ class BrainStewardService:
 
         if not old_memory_id:
             raise ValueError("supersede proposal requires an old_memory_id")
-        old = self.ledger.get_llm_brain_memory_card(old_memory_id)
+        old = self._get_card(old_memory_id)
         if old is None:
             raise ValueError("unknown target memory card")
         card = build_memory_card_candidate_from_source_span(
@@ -354,6 +371,11 @@ class BrainStewardService:
     ) -> dict:
         self._guard_restricted("memory_candidate_approve")
         self._guard_writable()
+        decided = self._load_decided(decision_id, candidate_memory_id, 'approve', approved_by)
+        if decided is not None:
+            return self._safe_restricted_result({
+                'schema_version': 'llm_brain_human_acceptance_commit.v1', 'promotion_path': 'human_approval',
+                'canonical_write_performed': True, 'accepted_card': decided})
         candidate = self._load_pending_candidate(candidate_memory_id)
         result = LLMBrainMemoryService(self.ledger, pgvector_store=self.pgvector_store).accept_human_approved_candidate(
             candidate, approved_by=approved_by, decision_id=decision_id
@@ -365,17 +387,25 @@ class BrainStewardService:
     ) -> dict:
         self._guard_restricted("memory_candidate_reject")
         self._guard_writable()
+        decided = self._load_decided(decision_id, candidate_memory_id, 'reject', rejected_by)
+        if decided is not None:
+            return self._safe_restricted_result({
+                'schema_version': 'brain_steward_candidate_rejection.v1',
+                'canonical_write_performed': True, 'rejected_card': decided})
         from .memory_promotion import human_reject_memory_card_candidate
 
         candidate = self._load_pending_candidate(candidate_memory_id)
-        rejection = human_reject_memory_card_candidate(
-            candidate, rejected_by=rejected_by, decision_id=decision_id, reason=reason
-        )
-        # card + audit 를 한 트랜잭션으로 묶어 부분 커밋을 막는다(#49).
-        with self.ledger._transaction() as tx:
-            stored = tx.upsert_llm_brain_memory_card(rejection["rejected_card"])
-            # audit: authority 를 바꾸는 restricted 결정에 feedback record 를 남긴다(M4).
-            tx.upsert_llm_brain_feedback_record(rejection["feedback_record"])
+        if not reason or not reason.strip():
+            raise ValueError('rejection reason required')
+        def transform(current, target):
+            if current.get('lifecycle_state') not in REVIEW_LIFECYCLE_STATES:
+                raise ValueError('only pending steward candidates may be rejected')
+            return human_reject_memory_card_candidate(current, rejected_by=rejected_by,
+                decision_id=decision_id, reason=reason)['rejected_card'], None
+        changed = self._pg().steward_decision(
+            decision_id=decision_id, memory_id=candidate_memory_id, content_hash=str(candidate['content_hash']),
+            action='reject', actor=rejected_by, transform=transform)
+        stored = changed['card']
         return self._safe_restricted_result(
             {
                 "schema_version": "brain_steward_candidate_rejection.v1",
@@ -393,6 +423,12 @@ class BrainStewardService:
     ) -> dict:
         self._guard_restricted("memory_candidate_auto_accept", capability="auto_accept")
         self._guard_writable()
+        decided = self._load_decided(operator_approval_ref, candidate_memory_id,
+                                    'auto_accept', operator_approval_ref)
+        if decided is not None:
+            return self._safe_restricted_result({
+                'schema_version': 'llm_brain_auto_acceptance_commit.v1', 'promotion_path': 'auto_policy',
+                'canonical_write_performed': True, 'accepted_card': decided})
         candidate = self._load_pending_candidate(candidate_memory_id)
         result = LLMBrainMemoryService(self.ledger, pgvector_store=self.pgvector_store).accept_auto_policy_candidate(
             candidate, evaluation, operator_approval_ref=operator_approval_ref
@@ -406,16 +442,25 @@ class BrainStewardService:
 
         self._guard_restricted("memory_supersede_commit")
         self._guard_writable()
+        existing = self._get_card(proposal_memory_id)
+        if existing is not None and existing.get('steward_proposal_kind') == 'supersede':
+            target_id = str(existing.get('steward_target_memory_id') or '')
+            decided = self._load_decided(decision_id, proposal_memory_id, 'supersede', approved_by, target_id)
+            if decided is not None:
+                return self._safe_restricted_result({
+                    'schema_version': 'llm_brain_supersession_commit.v1', 'canonical_write_performed': True,
+                    'new_card': decided, 'superseded_card': self._pg().get_steward_decision(decision_id)['result_target']})
         proposal = self._load_proposal_of_kind(proposal_memory_id, "supersede")
         old_id = str(proposal.get("steward_target_memory_id") or "")
         old = self._load_current_target(old_id, what="supersede")
         # 교체 후보(proposal)를 accept 하면서 old card 를 superseded 로 atomically demote 한다.
-        return LLMBrainMemoryService(self.ledger, pgvector_store=self.pgvector_store).supersede_accepted_card(
+        result = LLMBrainMemoryService(self.ledger, pgvector_store=self.pgvector_store).supersede_accepted_card(
             old_card=old,
             new_candidate=proposal,
             approved_by=approved_by,
             decision_id=decision_id,
         )
+        return self._safe_restricted_result(result)
 
     def stale_commit(
         self, *, proposal_memory_id: str, approved_by: str, decision_id: str
@@ -424,6 +469,15 @@ class BrainStewardService:
 
         self._guard_restricted("memory_stale_commit")
         self._guard_writable()
+        existing = self._get_card(proposal_memory_id)
+        if existing is not None and existing.get('steward_proposal_kind') == 'stale':
+            target_id = str(existing.get('steward_target_memory_id') or '')
+            decided = self._load_decided(decision_id, proposal_memory_id, 'stale', approved_by, target_id)
+            if decided is not None:
+                return assert_public_safe({
+                    'schema_version': 'brain_steward_stale_commit.v1', 'canonical_write_performed': True,
+                    'demoted_card': self._authority_item(self._pg().get_steward_decision(decision_id)['result_target'] or {}),
+                    'committed_proposal': self._review_item(decided)}, 'stale_commit')
         proposal = self._load_proposal_of_kind(proposal_memory_id, "stale")
         target_id = str(proposal.get("steward_target_memory_id") or "")
         target = self._load_current_target(target_id, what="stale")
@@ -443,28 +497,24 @@ class BrainStewardService:
                 "steward_commit_state": "committed",
             }
         )
-        # target demote + proposal 종료 + audit 를 한 트랜잭션으로 묶는다. 중간 실패 시 전부 rollback(#49).
-        with self.ledger._transaction() as tx:
-            demoted = tx.upsert_llm_brain_memory_card(commit_stale(target, timestamp=committed_at))
-            stored_proposal = tx.upsert_llm_brain_memory_card(committed)
-            # audit: stale 확정에 feedback record 를 남긴다(M4).
-            tx.upsert_llm_brain_feedback_record(
-                build_feedback_record(
-                    candidate=committed,
-                    decision_id=decision_id,
-                    proposed_status="needs_review",
-                    final_status="accepted",
-                    user_action="approve",
-                    model_reason="stale proposal committed; target demoted to stale",
-                    confidence=float(committed.get("confidence") or 0),
-                    conflict_state="none",
-                    timestamp=committed_at,
-                )
-            )
+        def transform(current, old):
+            if current.get('steward_proposal_kind') != 'stale' or current.get('lifecycle_state') not in REVIEW_LIFECYCLE_STATES:
+                raise ValueError('stale proposal already committed')
+            if old is None or not _is_accepted(old) or old.get('currentness') != 'current':
+                raise ValueError('stale target is not accepted and current')
+            closed = dict(current)
+            closed.update(lifecycle_state='human_accepted', judgment_state='none', status='accepted',
+                          approval_state='approved', approved_by=approved_by, approved_at=committed_at,
+                          steward_commit_state='committed')
+            return closed, commit_stale(old, timestamp=committed_at)
+        changed = self._pg().steward_decision(decision_id=decision_id, memory_id=proposal_memory_id,
+            content_hash=str(proposal['content_hash']), action='stale', actor=approved_by,
+            target_memory_id=target_id, transform=transform)
+        stored_proposal, demoted = changed['card'], changed['target']
         return {
             "schema_version": "brain_steward_stale_commit.v1",
             "canonical_write_performed": True,
-            "demoted_card": demoted,
+            "demoted_card": self._authority_item(demoted),
             "committed_proposal": self._review_item(stored_proposal),
         }
 
@@ -480,7 +530,7 @@ class BrainStewardService:
         """
 
         safe = dict(result)
-        for field in ("accepted_card", "rejected_card", "new_card"):
+        for field in ("accepted_card", "rejected_card", "new_card", "superseded_card"):
             card = safe.get(field)
             if isinstance(card, Mapping):
                 safe[field] = self._authority_item(card)
@@ -493,7 +543,7 @@ class BrainStewardService:
     def _load_current_target(self, target_id: str, *, what: str) -> dict:
         # commit 대상은 여전히 accepted + current 여야 한다. proposal 생성 후 target 이 이미
         # stale/superseded 가 됐다면 오래된 proposal 로 새 authority 를 만들지 않도록 거부한다.
-        target = self.ledger.get_llm_brain_memory_card(target_id)
+        target = self._get_card(target_id)
         if target is None:
             raise ValueError(f"unknown {what} target memory card")
         if not _is_accepted(target) or str(target.get("currentness") or "") != "current":
@@ -501,7 +551,7 @@ class BrainStewardService:
         return target
 
     def _load_proposal_of_kind(self, proposal_memory_id: str, kind: str) -> dict:
-        card = self.ledger.get_llm_brain_memory_card(proposal_memory_id)
+        card = self._get_card(proposal_memory_id)
         if card is None:
             raise ValueError("unknown proposal memory card")
         if str(card.get("lifecycle_state") or "") not in REVIEW_LIFECYCLE_STATES:
@@ -518,16 +568,15 @@ class BrainStewardService:
             )
 
     def _guard_writable(self) -> None:
-        # 라이브 recall MCP transport 는 read-only ledger 로 서비스를 만든다. 그 위에서
-        # proposal/restricted write 를 시도하면 sqlite 가 깨지므로, write 이전에
-        # 명확한 메시지로 fail-closed 한다(라이브 enablement 는 writable transport 필요).
+        # The transport's read-only flag remains an authorization boundary even
+        # when the card authority is PostgreSQL. A PG connection must not turn
+        # the live read-only MCP transport into a writer.
         if getattr(self.ledger, "read_only", False):
-            raise ValueError(
-                "brain steward writes require a writable ledger; this transport is read-only"
-            )
+            raise ValueError("brain steward writes require a writable transport")
+        self._pg()
 
     def _load_pending_candidate(self, candidate_memory_id: str) -> dict:
-        card = self.ledger.get_llm_brain_memory_card(candidate_memory_id)
+        card = self._get_card(candidate_memory_id)
         if card is None:
             raise ValueError("unknown candidate memory card")
         if str(card.get("lifecycle_state") or "") not in REVIEW_LIFECYCLE_STATES:
@@ -570,49 +619,7 @@ class BrainStewardService:
         # proposal 은 ledger 에 한 줄도 남기지 않으며, 따라서 review queue 읽기를
         # 망가뜨리지(DoS) 않는다.
         assert_public_safe(self._review_item(card), "proposal_persist")
-        memory_id = str(card["memory_id"])
-        if self.pgvector_store is not None:
-            from ..postgres_store.pgvector_store import MemoryCard
-
-            existing = self.pgvector_store.get_card(memory_id)
-            if existing is not None and existing.lifecycle_state in {
-                "accepted",
-                "human_accepted",
-                "auto_accepted",
-            }:
-                raise ValueError("proposal memory_id collides with an accepted card")
-            pg_card = MemoryCard(
-                memory_id=memory_id,
-                project=str(card["project"]),
-                card_type=str(card["card_type"]),
-                title=str(card["title"]),
-                summary=str(card["summary"]),
-                typed_payload=dict(card.get("typed_payload") or {}),
-                lifecycle_state=str(card.get("lifecycle_state") or "candidate"),
-                authorization_status=str(card.get("authorization_status") or "disabled"),
-                currentness=str(card.get("currentness") or "unknown"),
-                confidence=float(card.get("confidence") or 0.0),
-                valid_from=_parse_timestamp(card.get("valid_from")),
-                valid_to=_parse_optional_timestamp(card.get("valid_to")),
-                embedding_state="pending",
-                content_hash=str(card["content_hash"]),
-                source_ref=[
-                    dict(ref) for ref in (card.get("source_refs") or []) if isinstance(ref, Mapping)
-                ],
-            )
-            # upsert_card owns both INSERT/UPDATE and embedding_outbox enqueue
-            # in one transaction. Readback proves the committed row exists in
-            # PostgreSQL before the public proposal response is returned.
-            self.pgvector_store.upsert_card(pg_card)
-            stored = self.pgvector_store.get_card(memory_id)
-            if stored is None or stored.content_hash != pg_card.content_hash:
-                raise RuntimeError("PostgreSQL proposal readback failed")
-            return card
-        existing = self.ledger.get_llm_brain_memory_card(memory_id)
-        if existing is not None and _is_accepted(existing):
-            # 안전망: accepted card 를 proposal 로 덮어쓰지 않는다.
-            raise ValueError("proposal memory_id collides with an accepted card")
-        return self.ledger.upsert_llm_brain_memory_card(card)
+        return self._pg().put_steward_proposal(card)
 
     def _proposal_result(
         self, *, kind: str, card: Mapping[str, Any], target_memory_id: str = ""

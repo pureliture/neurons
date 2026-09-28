@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime
+import json
 import os
-from pathlib import Path
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 from agent_knowledge.ledger import Ledger
@@ -27,150 +27,50 @@ from agent_knowledge.knowledge_search_service import (
 )
 
 
-def _make_card(
-    *,
-    memory_id: str,
-    project: str,
-    card_type: str,
-    title: str,
-    summary: str,
-    typed_payload: dict,
-    content_hash: str,
-    source_refs: list | None = None,
-    evidence_hashes: list | None = None,
-    valid_from: str | None = None,
-    valid_to: str | None = None,
-) -> dict:
-    return {
-        "memory_id": memory_id,
-        "brain_id": f"/project/{project}",
-        "project": project,
-        "scope": "project",
-        "provider": "manual",
-        "card_type": card_type,
-        "title": title,
-        "summary": summary,
-        "render_text": summary,
-        "lifecycle_state": "accepted",
-        "authorization_status": "active",
-        "status": "accepted",
-        "judgment_state": "none",
-        "approval_state": "approved",
-        "governance_tier": "high",
-        "freshness": "current",
-        "currentness": "current",
-        "confidence": 0.95,
-        "confidence_basis": "verified test",
-        "content_hash": content_hash,
-        "source_refs": source_refs or [],
-        "evidence_refs": [],
-        "evidence_hashes": evidence_hashes or [],
-        "derived_from": [],
-        "supersedes": [],
-        "superseded_by": [],
-        "conflicts": [],
-        "active_until": None,
-        "valid_from": valid_from,
-        "valid_to": valid_to,
+from agent_knowledge.postgres_store.pgvector_store import MemoryCard
+
+
+def _make_card(*, memory_id: str, project: str, card_type: str, title: str,
+               summary: str, typed_payload: dict, content_hash: str,
+               source_refs: list | None = None, evidence_hashes: list | None = None,
+               valid_from: str | None = None, valid_to: str | None = None) -> tuple[MemoryCard, dict]:
+    """Seed a real approved steward card in the isolated PG schema."""
+    from datetime import datetime
+    from agent_knowledge.session_memory.llm_brain_service import _build_pg_card
+
+    envelope = {
+        "memory_id": memory_id, "brain_id": f"/project/{project}", "project": project,
+        "scope": "project", "provider": "manual", "card_type": card_type,
+        "title": title, "summary": summary, "render_text": summary,
+        "lifecycle_state": "human_accepted", "authorization_status": "active",
+        "status": "accepted", "judgment_state": "none", "approval_state": "approved",
+        "governance_tier": "high", "freshness": "current", "currentness": "current",
+        "confidence": 0.95, "confidence_basis": "verified test", "content_hash": content_hash,
+        "source_refs": source_refs or [], "evidence_refs": [],
+        "evidence_hashes": evidence_hashes or [], "derived_from": [],
+        "supersedes": [], "superseded_by": [], "conflicts": [],
+        "active_until": None, "valid_from": valid_from, "valid_to": valid_to,
         "typed_payload": typed_payload,
     }
+    card = _build_pg_card(envelope, active=True)
+    if valid_from:
+        card.valid_from = datetime.fromisoformat(valid_from.replace("Z", "+00:00"))
+    if valid_to:
+        card.valid_to = datetime.fromisoformat(valid_to.replace("Z", "+00:00"))
+    return card, envelope
 
 
-class _LedgerStoreAdapter:
-    def __init__(self, ledger: Ledger):
-        self.ledger = ledger
-        self._cards_by_id = {}
-
-    def get_card(self, memory_id: str):
-        c = self._cards_by_id.get(memory_id)
-        if c is None:
-            return None
-        return SimpleNamespace(
-            memory_id=getattr(c, "memory_id", ""),
-            lifecycle_state=getattr(c, "lifecycle_state", "candidate"),
-            content_hash=getattr(c, "content_hash", ""),
-        )
-
-    def upsert_card(self, card):
-        self._cards_by_id[str(getattr(card, "memory_id", ""))] = card
-        card_dict = _make_card(
-            memory_id=getattr(card, "memory_id", ""),
-            project=getattr(card, "project", ""),
-            card_type=getattr(card, "card_type", ""),
-            title=getattr(card, "title", ""),
-            summary=getattr(card, "summary", ""),
-            typed_payload=getattr(card, "typed_payload", {}),
-            content_hash=getattr(card, "content_hash", ""),
-        )
-        card_dict["lifecycle_state"] = getattr(card, "lifecycle_state", "candidate")
-        card_dict["authorization_status"] = getattr(card, "authorization_status", "disabled")
-        card_dict["approval_state"] = getattr(card, "approval_state", "suggested")
-        card_dict["governance_tier"] = "low"
-        self.ledger.upsert_llm_brain_memory_card(card_dict)
-
-    def graph_projection_health(self, project: str, *, as_of: str | None = None) -> dict:
-        return {"unprojected": False, "projection_lag_ms": None}
-
-    def list_authorized_cards(
-        self,
-        project: str,
-        *,
-        memory_ids: list[str] | None = None,
-        as_of: str | None = None,
-        limit: int = 100,
-        after_memory_id: str | None = None,
-    ) -> list[dict]:
-        cards = self.ledger.list_llm_brain_memory_cards(project=project)
-        result = []
-        for c in cards:
-            if memory_ids is not None and c.get("memory_id") not in memory_ids:
-                continue
-            if as_of:
-                try:
-                    dt = datetime.fromisoformat(as_of)
-                    vf = c.get("valid_from")
-                    vt = c.get("valid_to")
-                    if vf and datetime.fromisoformat(vf) > dt:
-                        continue
-                    if vt and datetime.fromisoformat(vt) < dt:
-                        continue
-                except Exception:
-                    pass
-            result.append(c)
-        if after_memory_id:
-            result = [c for c in result if c.get("memory_id", "") > after_memory_id]
-        return result[:limit]
-
-    def hybrid_search(
-        self,
-        project: str,
-        *,
-        query_vector=None,
-        text_query=None,
-        limit: int = 100,
-        as_of: str | None = None,
-        **kwargs,
-    ) -> list[dict]:
-        return self.list_authorized_cards(project=project, limit=limit, as_of=as_of)
-
-    def read_authorized_evidence(
-        self,
-        project: str,
-        *,
-        root_memory_ids: list[str],
-        max_depth: int = 5,
-        **kwargs,
-    ) -> dict:
-        cards = self.list_authorized_cards(project=project)
-        return {
-            "root_hashes": {
-                str(c["memory_id"]): c.get("content_hash")
-                for c in cards
-                if str(c["memory_id"]) in root_memory_ids
-            },
-            "edges": [],
-            "truncated": False,
-        }
+def _seed_card(store, *, with_embedding=False, **kwargs):
+    card, envelope = _make_card(**kwargs)
+    if with_embedding:
+        from agent_knowledge.postgres_store.pgvector_store import make_dummy_vector
+        card.embedding = make_dummy_vector(7)
+        card.embedding_state = "ready"
+    store.upsert_card(card)
+    with store.transaction() as db:
+        db.execute("UPDATE memory_cards SET steward_envelope = %s::jsonb WHERE memory_id = %s",
+                   (json.dumps(envelope), card.memory_id))
+    assert store.get_steward_card(card.memory_id) is not None
 
 
 def _ledger(tmp_path: Path) -> Ledger:
@@ -180,16 +80,15 @@ def _ledger(tmp_path: Path) -> Ledger:
     return Ledger(private / "ledger.sqlite")
 
 
-def _service(tmp_path: Path) -> KnowledgeSearchService:
+def _service(tmp_path: Path, store=None) -> KnowledgeSearchService:
     ledger = _ledger(tmp_path)
     service = KnowledgeSearchService(
         ledger=ledger,
         retired_index_bridge=DisabledRetiredIndexBridgeClient(),
         dataset_ids=[],
         allow_private_results=True,
+        pgvector_store=store,
     )
-    service.pgvector_store = _LedgerStoreAdapter(ledger)
-    service._semantic_ranker = SimpleNamespace(embed_query=lambda _text: [0.1] * 3072)
     return service
 
 
@@ -252,12 +151,12 @@ def test_public_surface_blocks_all_admin_and_steward_tools(tmp_path: Path):
         assert f"unknown tool: {tool_name}" in response["error"]["message"]
 
 
-def test_brain_resolve_context_mode_slim(tmp_path: Path):
-    service = _service(tmp_path)
-    ledger = service.ledger
+def test_brain_resolve_context_mode_slim(tmp_path: Path, isolated_pg_store):
+    service = _service(tmp_path, isolated_pg_store)
+    store = isolated_pg_store
 
     # Seed an accepted decision and preference
-    ledger.upsert_llm_brain_memory_card(_make_card(
+    _seed_card(store,
         memory_id="mem_dec_1",
         project="proj-x",
         card_type="decision",
@@ -271,8 +170,8 @@ def test_brain_resolve_context_mode_slim(tmp_path: Path):
             "consequence": "fast",
             "authority_ref": "arch_doc_1",
         },
-    ))
-    ledger.upsert_llm_brain_memory_card(_make_card(
+    )
+    _seed_card(store,
         memory_id="mem_pref_1",
         project="proj-x",
         card_type="preference",
@@ -286,7 +185,7 @@ def test_brain_resolve_context_mode_slim(tmp_path: Path):
             "confirmation_status": "confirmed",
             "applies_to": "python",
         },
-    ))
+    )
 
     response = handle_jsonrpc_message(
         {
@@ -317,11 +216,11 @@ def test_brain_resolve_context_mode_slim(tmp_path: Path):
     assert "has_more" in payload
 
 
-def test_brain_resolve_context_mode_with_evidence(tmp_path: Path):
-    service = _service(tmp_path)
-    ledger = service.ledger
+def test_brain_resolve_context_mode_with_evidence(tmp_path: Path, isolated_pg_store):
+    service = _service(tmp_path, isolated_pg_store)
+    store = isolated_pg_store
 
-    ledger.upsert_llm_brain_memory_card(_make_card(
+    _seed_card(store,
         memory_id="mem_dec_ev",
         project="proj-ev",
         card_type="decision",
@@ -337,7 +236,7 @@ def test_brain_resolve_context_mode_with_evidence(tmp_path: Path):
             "consequence": "none",
             "authority_ref": "ref_1",
         },
-    ))
+    )
 
     response = handle_jsonrpc_message(
         {
@@ -362,11 +261,13 @@ def test_brain_resolve_context_mode_with_evidence(tmp_path: Path):
     assert "evidence" in payload
 
 
-def test_brain_resolve_query_and_list_modes(tmp_path: Path):
-    service = _service(tmp_path)
-    ledger = service.ledger
+def test_brain_resolve_query_and_list_modes(tmp_path: Path, isolated_pg_store):
+    service = _service(tmp_path, isolated_pg_store)
+    store = isolated_pg_store
+    # Query-mode fallback must use an explicit synthetic vector; no provider calls.
+    service._semantic_ranker = SimpleNamespace(embed_query=lambda _text: [0.1] * 3072)
 
-    ledger.upsert_llm_brain_memory_card(_make_card(
+    _seed_card(store, with_embedding=True,
         memory_id="mem_q_1",
         project="proj-q",
         card_type="decision",
@@ -380,7 +281,7 @@ def test_brain_resolve_query_and_list_modes(tmp_path: Path):
             "consequence": "fast",
             "authority_ref": "ref",
         },
-    ))
+    )
 
     # Query mode: search matching term
     resp_query = handle_jsonrpc_message(
@@ -425,8 +326,8 @@ def test_brain_resolve_query_and_list_modes(tmp_path: Path):
     assert len(list_payload["decisions"]) == 1
 
 
-def test_memory_candidate_create_strict_security_invariants(tmp_path: Path):
-    service = _service(tmp_path)
+def test_memory_candidate_create_strict_security_invariants(tmp_path: Path, isolated_pg_store):
+    service = _service(tmp_path, isolated_pg_store)
 
     hash_val = "sha256:" + "5" * 64
     response = handle_jsonrpc_message(
@@ -478,3 +379,7 @@ def test_memory_candidate_create_strict_security_invariants(tmp_path: Path):
     assert len(queue["items"]) == 1
     assert queue["items"][0]["memory_id"] == res["memory_id"]
     assert queue["items"][0]["lifecycle_state"] == "candidate"
+    stored = isolated_pg_store.get_steward_card(res["memory_id"])
+    assert stored["lifecycle_state"] == "candidate"
+    assert stored["authorization_status"] == "disabled"
+    assert stored["approval_state"] == "suggested"

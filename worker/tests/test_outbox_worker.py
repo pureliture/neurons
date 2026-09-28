@@ -148,7 +148,7 @@ def test_live_workers_leave_other_schema_queues_untouched(pg_store, isolated_pg_
 
         class Adapter:
             def upsert_episode(self, payload):
-                received.append(payload["authority_memory_id"])
+                received.append(payload.payload["authority_memory_id"])
                 return "inserted"
 
         assert _worker(store, "owned").run_once() == 1
@@ -383,10 +383,31 @@ def test_live_graph_projection_worker_happy_path(pg_store):
     )
 
     assert worker.run_once() == 1
-    assert [p["authority_memory_id"] for p in received_payloads] == [memory_id]
+    assert [p.payload["authority_memory_id"] for p in received_payloads] == [memory_id]
 
     graph_jobs = [job for job in store.list_graph_projection_jobs() if job.source_id == memory_id]
     assert graph_jobs[0].status == "completed"
+
+
+@live_pg
+@pytest.mark.parametrize("outcome", ["skipped_disabled", None])
+def test_live_graph_projection_skip_never_completes(pg_store, outcome):
+    from agent_knowledge.postgres_store.outbox_worker import GraphProjectionWorker
+
+    store, tag = pg_store
+    memory_id = f"{tag}_not_saved"
+    store.upsert_card(_pending_card(memory_id, tag, "sha256:not_saved"))
+
+    class NoWriteAdapter:
+        def upsert_episode(self, _episode):
+            return outcome
+
+    worker = GraphProjectionWorker(store, graph_adapter=NoWriteAdapter(), worker_id=f"{tag}_no_write")
+    assert worker.run_once() == 1
+    assert worker.last_batch_failed == 1
+    job = next(job for job in store.list_graph_projection_jobs() if job.source_id == memory_id)
+    assert job.status == "failed"
+    assert job.retry_count == 1
 
 
 @live_pg
@@ -400,7 +421,7 @@ def test_live_graph_projection_worker_retry_to_dead_letter(pg_store):
 
     class FailingAdapter:
         def upsert_episode(self, payload):
-            assert payload["authority_memory_id"] == memory_id
+            assert payload.payload["authority_memory_id"] == memory_id
             raise ConnectionError("Neo4j down")
 
     worker = GraphProjectionWorker(
@@ -423,7 +444,8 @@ def test_live_graph_projection_worker_retry_to_dead_letter(pg_store):
     assert len(jobs) == 1
     assert jobs[0].status == "dead_letter"
     assert jobs[0].retry_count >= 3
-    assert "Neo4j down" in (jobs[0].last_error or "")
+    assert jobs[0].last_error == "ConnectionError"
+    assert "Neo4j down" not in (jobs[0].last_error or "")
 
 
 # ==============================================================================
@@ -518,6 +540,55 @@ def test_graph_projection_episode_carries_source_card_hash_not_derived_hash():
     assert episode.payload["content_hash"] == "sha256:card_xyz_hash"
     # Explicitly: the derived episode hash is a DIFFERENT value.
     assert episode.content_hash != "sha256:card_xyz_hash"
+
+
+@pytest.mark.parametrize("outcome", ["skipped_disabled", "failed", None, "ok", "completed"])
+def test_graph_projection_worker_does_not_complete_unpersisted_episode(outcome):
+    from types import SimpleNamespace
+    from agent_knowledge.postgres_store.outbox_worker import GraphProjectionWorker
+
+    class Store:
+        def __init__(self):
+            self.completed = 0
+            self.failed = 0
+
+        def claim_graph_projection_leases(self, **_kwargs):
+            return [SimpleNamespace(projection_id=1, episode_payload=_card_outbox_payload())]
+
+        def mark_graph_projection_completed(self, **_kwargs):
+            self.completed += 1
+
+        def mark_graph_projection_failed(self, **_kwargs):
+            self.failed += 1
+
+    class Adapter:
+        def upsert_episode(self, _episode):
+            return outcome
+
+    from unittest.mock import Mock
+
+    store = Store()
+    worker = GraphProjectionWorker(Mock(), Adapter())
+    worker.store = store  # type: ignore[assignment] -- minimal lease seam
+    assert worker.run_once() == 1
+    assert store.completed == 0
+    assert store.failed == 1
+    assert worker.last_batch_failed == 1
+
+
+@pytest.mark.parametrize("field", ["source_type", "source_id", "source_revision", "content_hash", "authority_memory_id"])
+def test_graph_projection_worker_rejects_mismatched_authority_key(field):
+    from agent_knowledge.postgres_store.outbox_worker import GraphProjectionWorker
+
+    adapter = _DataclassOnlyAdapter()
+    from unittest.mock import Mock
+
+    worker = GraphProjectionWorker(store=Mock(), graph_adapter=adapter)
+    payload = _card_outbox_payload()
+    payload[field] = "mismatch"
+    with pytest.raises(ValueError, match="graph_projection_authority_key_mismatch"):
+        worker.process_job(_graph_job(payload))
+    assert adapter.episodes == []
 
 
 def test_graph_projection_worker_rejects_non_mapping_payload():

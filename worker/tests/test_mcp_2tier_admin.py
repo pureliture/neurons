@@ -35,7 +35,7 @@ def _ledger(tmp_path: Path) -> Ledger:
     return Ledger(private / "ledger.sqlite")
 
 
-def _service(tmp_path: Path, allow_restricted: bool = True) -> KnowledgeSearchService:
+def _service(tmp_path: Path, store=None, allow_restricted: bool = True) -> KnowledgeSearchService:
     ledger = _ledger(tmp_path)
     return KnowledgeSearchService(
         ledger=ledger,
@@ -43,6 +43,7 @@ def _service(tmp_path: Path, allow_restricted: bool = True) -> KnowledgeSearchSe
         dataset_ids=[],
         allow_private_results=True,
         allow_restricted_steward=allow_restricted,
+        pgvector_store=store,
     )
 
 
@@ -113,8 +114,8 @@ def test_admin_surface_call_requires_auth(tmp_path: Path):
     assert "unauthorized" in resp["error"]["message"]
 
 
-def test_admin_surface_authorized_call_execution(tmp_path: Path):
-    service = _service(tmp_path, allow_restricted=True)
+def test_admin_surface_authorized_call_execution(tmp_path: Path, isolated_pg_store):
+    service = _service(tmp_path, isolated_pg_store, allow_restricted=True)
     steward = service.brain_steward()
 
     # 1. Create a candidate proposal via steward directly
@@ -196,3 +197,9 @@ def test_admin_surface_authorized_call_execution(tmp_path: Path):
     pack_items = resp_pack["result"]["structuredContent"]["items"]
     assert len(pack_items) == 1
     assert pack_items[0]["title"] == "Admin Test Card"
+    stored = isolated_pg_store.get_steward_card(cand_id)
+    assert stored["approval_state"] == "approved"
+    assert stored["lifecycle_state"] == "human_accepted"
+    pg_card = isolated_pg_store.get_card(cand_id)
+    assert pg_card.authorization_status == "active"
+    assert pg_card.lifecycle_state == "human_accepted"

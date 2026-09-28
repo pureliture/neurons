@@ -27,14 +27,9 @@ def main(argv: list[str] | None = None) -> int:
         help="PostgreSQL DSN (or set NEURON_LBRAIN_PGVECTOR_DSN env)",
     )
     parser.add_argument(
-        "--enable-graph",
-        action="store_true",
-        help="Enable graph backend (best-effort, degrades to unavailable on failure)",
-    )
-    parser.add_argument(
         "--graph-required",
         action="store_true",
-        help="Graph backend must initialize and pass connectivity probe (fail-fast)",
+        help="Compatibility option; graph connectivity is always required for this consumer",
     )
     parser.add_argument(
         "--worker-id",
@@ -88,9 +83,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         from ..llm_brain_core.runtime_graph import build_graph_adapter_from_env
 
+        # Outbox consumption must fail closed: an unavailable/disabled graph
+        # must not claim jobs or let a skip count as a successful projection.
         graph_adapter = build_graph_adapter_from_env(
-            enable_flag=True if args.enable_graph else None,
-            required_flag=bool(args.graph_required),
+            enable_flag=True,
+            required_flag=True,
         )
     except Exception as exc:
         print(f"error: failed to build graph adapter: {exc}", file=sys.stderr)
@@ -107,8 +104,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.once:
         processed = worker.run_once()
-        print(f"processed {processed} graph projection job(s)")
-        return 0
+        failed = worker.last_batch_failed
+        print(f"claimed {processed} graph projection job(s); failed {failed}")
+        return 1 if failed else 0
 
     try:
         worker.run_loop(max_iterations=args.max_iterations)

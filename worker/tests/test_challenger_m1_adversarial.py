@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 from agent_knowledge.ledger import Ledger
+from agent_knowledge.postgres_store.pgvector_store import make_dummy_vector
 from agent_knowledge.mcp_jsonrpc import (
     ADMIN_AUTH_IDENTITY,
     dispatch_tool_call,
@@ -32,90 +33,7 @@ from agent_knowledge.knowledge_search_service import (
 )
 
 
-class _LedgerStoreAdapter:
-    def __init__(self, ledger: Ledger):
-        self.ledger = ledger
-        self._cards_by_id = {}
-
-    def get_card(self, memory_id: str):
-        c = self._cards_by_id.get(memory_id)
-        if c is None:
-            return None
-        return SimpleNamespace(
-            memory_id=getattr(c, "memory_id", ""),
-            lifecycle_state=getattr(c, "lifecycle_state", "candidate"),
-            content_hash=getattr(c, "content_hash", ""),
-        )
-
-    def upsert_card(self, card):
-        self._cards_by_id[str(getattr(card, "memory_id", ""))] = card
-
-    def graph_projection_health(self, project: str, *, as_of: str | None = None) -> dict:
-        return {"unprojected": False, "projection_lag_ms": None}
-
-    def list_authorized_cards(
-        self,
-        project: str,
-        *,
-        memory_ids: list[str] | None = None,
-        as_of: str | None = None,
-        limit: int = 100,
-        after_memory_id: str | None = None,
-    ) -> list[dict]:
-        cards = self.ledger.list_llm_brain_memory_cards(project=project)
-        result = []
-        for c in cards:
-            if memory_ids is not None and c.get("memory_id") not in memory_ids:
-                continue
-            if as_of:
-                try:
-                    dt = datetime.fromisoformat(as_of)
-                    vf = c.get("valid_from")
-                    vt = c.get("valid_to")
-                    if vf and datetime.fromisoformat(vf) > dt:
-                        continue
-                    if vt and datetime.fromisoformat(vt) < dt:
-                        continue
-                except Exception:
-                    pass
-            result.append(c)
-        if after_memory_id:
-            result = [c for c in result if c.get("memory_id", "") > after_memory_id]
-        return result[:limit]
-
-    def hybrid_search(
-        self,
-        project: str,
-        *,
-        query_vector=None,
-        text_query=None,
-        limit: int = 100,
-        as_of: str | None = None,
-        **kwargs,
-    ) -> list[dict]:
-        return self.list_authorized_cards(project=project, limit=limit, as_of=as_of)
-
-    def read_authorized_evidence(
-        self,
-        project: str,
-        *,
-        root_memory_ids: list[str],
-        max_depth: int = 5,
-        **kwargs,
-    ) -> dict:
-        cards = self.list_authorized_cards(project=project)
-        return {
-            "root_hashes": {
-                str(c["memory_id"]): c.get("content_hash")
-                for c in cards
-                if str(c["memory_id"]) in root_memory_ids
-            },
-            "edges": [],
-            "truncated": False,
-        }
-
-
-def _create_test_service(tmp_path: Path) -> KnowledgeSearchService:
+def _create_test_service(tmp_path: Path, store=None) -> KnowledgeSearchService:
     private = tmp_path / "private"
     private.mkdir(parents=True, exist_ok=True)
     os.chmod(private, 0o700)
@@ -125,10 +43,43 @@ def _create_test_service(tmp_path: Path) -> KnowledgeSearchService:
         retired_index_bridge=DisabledRetiredIndexBridgeClient(),
         dataset_ids=[],
         allow_private_results=True,
+        pgvector_store=store,
     )
-    service.pgvector_store = _LedgerStoreAdapter(ledger)
     service._semantic_ranker = SimpleNamespace(embed_query=lambda _text: [0.1] * 3072)
     return service
+
+
+def _seed_accepted(store, *, memory_id: str, project: str, title: str, summary: str,
+                   content_hash: str, typed_payload: dict, source_refs=None,
+                   evidence_hashes=None, valid_from=None, valid_to=None, embedding=False):
+    """Use SQL-backed authority/evidence, not an adapter over SQLite cards."""
+    from agent_knowledge.session_memory.llm_brain_service import _build_pg_card
+    envelope = {
+        "memory_id": memory_id, "brain_id": f"/project/{project}", "scope": "project",
+        "project": project, "provider": "codex", "card_type": "decision", "title": title,
+        "summary": summary, "render_text": summary, "lifecycle_state": "human_accepted",
+        "authorization_status": "active", "approval_state": "approved", "status": "accepted",
+        "judgment_state": "none", "governance_tier": "medium", "freshness": "current",
+        "currentness": "current", "confidence": 1.0, "confidence_basis": "verified",
+        "source_refs": source_refs or [], "evidence_refs": [],
+        "evidence_hashes": evidence_hashes or [], "derived_from": [], "supersedes": [],
+        "superseded_by": [], "conflicts": [], "active_until": None,
+        "valid_from": valid_from, "valid_to": valid_to, "typed_payload": typed_payload,
+        "content_hash": content_hash,
+    }
+    card = _build_pg_card(envelope, active=True)
+    if valid_from:
+        card.valid_from = datetime.fromisoformat(valid_from.replace("Z", "+00:00"))
+    if valid_to:
+        card.valid_to = datetime.fromisoformat(valid_to.replace("Z", "+00:00"))
+    if embedding:
+        card.embedding = make_dummy_vector(7)
+        card.embedding_state = "ready"
+    store.upsert_card(card)
+    with store.transaction() as db:
+        db.execute("UPDATE memory_cards SET steward_envelope = %s::jsonb WHERE memory_id = %s",
+                   (json.dumps(envelope), memory_id))
+    assert store.get_steward_card(memory_id) is not None
 
 
 # =============================================================================
@@ -255,8 +206,8 @@ class TestAdminSurfaceAuthentication:
 class TestMemoryCandidateCreateTampering:
     """Stress-test proposal invariants and parameter injection defense."""
 
-    def test_privilege_escalation_lifecycle_tampering(self, tmp_path: Path):
-        service = _create_test_service(tmp_path)
+    def test_privilege_escalation_lifecycle_tampering(self, tmp_path: Path, isolated_pg_store):
+        service = _create_test_service(tmp_path, isolated_pg_store)
         valid_hash = "sha256:" + "0" * 64
         payload = {
             "card_type": "decision",
@@ -298,9 +249,13 @@ class TestMemoryCandidateCreateTampering:
         assert sc["authoritative_memory_changed"] is False
         assert sc["accepted"] is False
 
-        # Verify in ledger that the card is NOT in accepted authority pack
+        # Verify the PG proposal is NOT in the accepted authority pack
         authority_pack = service.brain_steward().authority_pack_read(project="proj-tamper")
         assert authority_pack["count"] == 0
+        stored = isolated_pg_store.get_steward_card(sc["memory_id"])
+        assert stored["lifecycle_state"] == "candidate"
+        assert stored["authorization_status"] == "disabled"
+        assert stored["approval_state"] == "suggested"
 
     @pytest.mark.parametrize("bad_hash", [
         "not_a_hash",
@@ -309,8 +264,8 @@ class TestMemoryCandidateCreateTampering:
         "   ",
         "SHA256:" + "a" * 64,  # uppercase prefix
     ])
-    def test_non_sha256_prefix_hash_rejected(self, tmp_path: Path, bad_hash: str):
-        service = _create_test_service(tmp_path)
+    def test_non_sha256_prefix_hash_rejected(self, tmp_path: Path, isolated_pg_store, bad_hash: str):
+        service = _create_test_service(tmp_path, isolated_pg_store)
         payload = {
             "card_type": "decision",
             "project": "proj-hash",
@@ -340,9 +295,9 @@ class TestMemoryCandidateCreateTampering:
         "sha256:" + "a" * 63,  # 63 chars
         "sha256:" + "a" * 65,  # 65 chars
     ])
-    def test_empirical_bug_malformed_sha256_hash_bypasses_validation(self, tmp_path: Path, malformed_hash: str):
+    def test_empirical_bug_malformed_sha256_hash_bypasses_validation(self, tmp_path: Path, isolated_pg_store, malformed_hash: str):
         """EMPIRICAL VERIFICATION: validate_content_hash strictly enforces SHA256_HEX_PATTERN regex."""
-        service = _create_test_service(tmp_path)
+        service = _create_test_service(tmp_path, isolated_pg_store)
         from agent_knowledge.session_memory.memory_card import SHA256_HEX_PATTERN, validate_content_hash
 
         # Directly demonstrate that malformed_hash fails regex
@@ -360,8 +315,8 @@ class TestMemoryCandidateCreateTampering:
         ("summary", "API_KEY: abcdef1234567890"),
         ("summary", "~/sensitive/data.txt"),
     ])
-    def test_poisoned_forbidden_content_rejected(self, tmp_path: Path, poisoned_field: str, poisoned_value: str):
-        service = _create_test_service(tmp_path)
+    def test_poisoned_forbidden_content_rejected(self, tmp_path: Path, isolated_pg_store, poisoned_field: str, poisoned_value: str):
+        service = _create_test_service(tmp_path, isolated_pg_store)
         valid_hash = "sha256:" + "f" * 64
         payload = {
             "card_type": "decision",
@@ -390,8 +345,8 @@ class TestMemoryCandidateCreateTampering:
         assert queue["count"] == 0
 
     @pytest.mark.parametrize("bad_confidence", [-0.1, 1.1, 999, "high"])
-    def test_invalid_confidence_rejected(self, tmp_path: Path, bad_confidence):
-        service = _create_test_service(tmp_path)
+    def test_invalid_confidence_rejected(self, tmp_path: Path, isolated_pg_store, bad_confidence):
+        service = _create_test_service(tmp_path, isolated_pg_store)
         payload = {
             "card_type": "decision",
             "project": "proj-conf",
@@ -415,9 +370,9 @@ class TestMemoryCandidateCreateTampering:
         assert "error" in resp
         assert resp["error"]["code"] == -32602
 
-    def test_empirical_bug_boolean_confidence_silently_coerced(self, tmp_path: Path):
+    def test_empirical_bug_boolean_confidence_silently_coerced(self, tmp_path: Path, isolated_pg_store):
         """EMPIRICAL FINDING: memory_miner float() silently coerces True to 1.0."""
-        service = _create_test_service(tmp_path)
+        service = _create_test_service(tmp_path, isolated_pg_store)
         payload = {
             "card_type": "decision",
             "project": "proj-conf-bool",
@@ -441,8 +396,8 @@ class TestMemoryCandidateCreateTampering:
         assert "result" in resp
         assert resp["result"]["structuredContent"]["proposal"]["confidence"] == 1.0
 
-    def test_proposer_normalization_and_attribution(self, tmp_path: Path):
-        service = _create_test_service(tmp_path)
+    def test_proposer_normalization_and_attribution(self, tmp_path: Path, isolated_pg_store):
+        service = _create_test_service(tmp_path, isolated_pg_store)
         for proposer in ["codex", "claude-code", "gemini", "hermes", "unspecified"]:
             payload = {
                 "card_type": "decision",
@@ -515,8 +470,15 @@ class TestBrainResolveEdgeCases:
             assert "error" in resp
             assert resp["error"]["code"] == -32602
 
-    def test_brain_resolve_sql_and_regex_injection_query_strings(self, tmp_path: Path):
-        service = _create_test_service(tmp_path)
+    def test_brain_resolve_sql_and_regex_injection_query_strings(self, tmp_path: Path, isolated_pg_store):
+        service = _create_test_service(tmp_path, isolated_pg_store)
+        _seed_accepted(
+            isolated_pg_store, memory_id="private_decision", project="other-project",
+            title="Private decision", summary="Must not leak across projects",
+            content_hash="sha256:" + "8" * 64,
+            typed_payload={"decision": "private", "rationale": "private", "alternatives": [],
+                           "consequence": "none", "authority_ref": "private"}, embedding=True,
+        )
         injection_queries = [
             "' OR '1'='1",
             "'; DROP TABLE memory_cards; --",
@@ -543,50 +505,23 @@ class TestBrainResolveEdgeCases:
             )
             assert resp is not None
             assert "error" not in resp, f"Query {q!r} triggered unhandled error: {resp.get('error')}"
-            assert resp["result"]["structuredContent"]["schema_version"] == "lbrain_slim_context.v1"
+            payload = resp["result"]["structuredContent"]
+            assert payload["schema_version"] == "lbrain_slim_context.v1"
+            assert payload["decisions"] == []
+            assert "Private decision" not in json.dumps(payload)
+        assert isolated_pg_store.get_steward_card("private_decision") is not None
 
-    def test_brain_resolve_temporal_as_of_variants(self, tmp_path: Path):
-        service = _create_test_service(tmp_path)
-        # Create an accepted card first via steward with explicit date bounds
-        ledger = service.ledger
-        with ledger._transaction() as tx:
-            tx.upsert_llm_brain_memory_card({
-                "memory_id": "mem_temporal_001",
-                "brain_id": "brain_test",
-                "card_type": "decision",
-                "scope": "project",
-                "project": "proj-temporal",
-                "provider": "codex",
-                "title": "Temporal Architecture Decision",
-                "summary": "Valid during 2026",
-                "render_text": "Valid during 2026",
-                "lifecycle_state": "accepted",
-                "judgment_state": "none",
-                "status": "accepted",
-                "approval_state": "approved",
-                "governance_tier": "medium",
-                "freshness": "current",
-                "currentness": "current",
-                "confidence": 1.0,
-                "confidence_basis": "verified",
-                "source_refs": [],
-                "evidence_refs": [],
-                "evidence_hashes": [],
-                "derived_from": [],
-                "supersedes": [],
-                "superseded_by": [],
-                "conflicts": [],
-                "active_until": "",
-                "valid_from": "2026-01-01T00:00:00+00:00",
-                "valid_to": "2026-12-31T23:59:59+00:00",
-                "typed_payload": {
-                    "decision": "Use PostgreSQL pgvector",
-                    "rationale": "Unified storage",
-                    "alternatives": [],
-                    "consequence": "none",
-                    "authority_ref": "RFC-2026",
-                },
-            })
+    def test_brain_resolve_temporal_as_of_variants(self, tmp_path: Path, isolated_pg_store):
+        service = _create_test_service(tmp_path, isolated_pg_store)
+        _seed_accepted(
+            isolated_pg_store, memory_id="mem_temporal_001", project="proj-temporal",
+            title="Temporal Architecture Decision", summary="Valid during 2026",
+            content_hash="sha256:" + "6" * 64,
+            valid_from="2026-01-01T00:00:00+00:00",
+            valid_to="2026-12-31T23:59:59+00:00",
+            typed_payload={"decision": "Use PostgreSQL pgvector", "rationale": "Unified storage",
+                           "alternatives": [], "consequence": "none", "authority_ref": "RFC-2026"},
+        )
 
         # 1. Query within valid window (2026-06-01) -> card is returned
         resp1 = handle_jsonrpc_message(
@@ -652,44 +587,17 @@ class TestBrainResolveEdgeCases:
         )
         assert resp4.get("error", {}).get("code") == -32602
 
-    def test_brain_resolve_response_mode_slim_vs_with_evidence(self, tmp_path: Path):
-        service = _create_test_service(tmp_path)
-        with service.ledger._transaction() as tx:
-            tx.upsert_llm_brain_memory_card({
-                "memory_id": "mem_ev_001",
-                "brain_id": "brain_test",
-                "card_type": "decision",
-                "scope": "project",
-                "project": "proj-ev",
-                "provider": "codex",
-                "title": "Evidence Chain Decision",
-                "summary": "Has full SHA256 chain",
-                "render_text": "Has full SHA256 chain",
-                "lifecycle_state": "accepted",
-                "judgment_state": "none",
-                "status": "accepted",
-                "approval_state": "approved",
-                "governance_tier": "medium",
-                "freshness": "current",
-                "currentness": "current",
-                "confidence": 1.0,
-                "confidence_basis": "verified",
-                "source_refs": [{"source_id": "src_1", "content_hash": "sha256:" + "3" * 64}],
-                "evidence_refs": [],
-                "evidence_hashes": ["sha256:" + "4" * 64, "sha256:" + "5" * 64],
-                "derived_from": [],
-                "supersedes": [],
-                "superseded_by": [],
-                "conflicts": [],
-                "active_until": "",
-                "typed_payload": {
-                    "decision": "Hash verified",
-                    "rationale": "r",
-                    "alternatives": [],
-                    "consequence": "c",
-                    "authority_ref": "RFC",
-                },
-            })
+    def test_brain_resolve_response_mode_slim_vs_with_evidence(self, tmp_path: Path, isolated_pg_store):
+        service = _create_test_service(tmp_path, isolated_pg_store)
+        _seed_accepted(
+            isolated_pg_store, memory_id="mem_ev_001", project="proj-ev",
+            title="Evidence Chain Decision", summary="Has full SHA256 chain",
+            content_hash="sha256:" + "7" * 64,
+            source_refs=[{"source_id": "src_1", "content_hash": "sha256:" + "3" * 64}],
+            evidence_hashes=["sha256:" + "4" * 64, "sha256:" + "5" * 64],
+            typed_payload={"decision": "Hash verified", "rationale": "r", "alternatives": [],
+                           "consequence": "c", "authority_ref": "RFC"},
+        )
 
         # 1. Default response_mode="slim"
         slim_resp = handle_jsonrpc_message(

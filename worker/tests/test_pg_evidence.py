@@ -104,29 +104,66 @@ def test_sql_evidence_batch_roots_row_limit_and_caller_guc_preserved(graph):
 
 
 def test_public_with_evidence_contains_real_sql_edge_within_wire_budget(graph, tmp_path):
+    from agent_knowledge.session_memory.brain_steward import BrainStewardService
+
     store, project, ids, start = graph
-    edge(store, ids, "a", "b", start)
     private = tmp_path / "private"
     private.mkdir(mode=0o700)
-    service = KnowledgeSearchService(
-        ledger=Ledger(private / "ledger.sqlite"), pgvector_store=store,
-        retired_index_bridge=DisabledRetiredIndexBridgeClient(), dataset_ids=[],
-    )
-    response = handle_jsonrpc_message({
-        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-        "params": {"name": "brain.resolve", "arguments": {
-            "project": project, "mode": "list", "limit": 1, "response_mode": "with_evidence",
-        }},
-    }, service)
-    result = response["result"]
-    assert result["isError"] is False
-    payload = result["structuredContent"]
-    assert payload["items"][0]["id"] == ids["a"]
-    assert payload["decisions"][0]["decision"] == "명시적 근거"
-    assert payload["has_more"] is True
-    assert payload["next_cursor"]
-    assert payload["evidence"]["explicit_edges"][0]["provenance_hash"] == digest("ab")
-    assert len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()) <= 3072
+    ledger = Ledger(private / "ledger.sqlite")
+    steward = BrainStewardService(ledger, pgvector_store=store, allow_restricted=True)
+    approved = []
+    for label in ("a", "b"):
+        source_span = {
+            "card_type": "decision", "project": project, "provider": "hermes", "scope": "project",
+            "title": "근거", "redacted_summary": "명시적 근거",
+            "typed_payload": {"decision": "명시적 근거", "rationale": "확인된 근거",
+                              "alternatives": [], "consequence": "검증된 결정", "authority_ref": "synthetic-adr"},
+            "source_ref": {"source_id": "src_" + label}, "span_ref": {"span_id": "span_" + label},
+            "content_hash": digest(project + label), "confidence": 0.9,
+            "confidence_basis": "operator confirmed",
+        }
+        card_id = steward.candidate_create(source_span=source_span)["memory_id"]
+        steward.candidate_approve(candidate_memory_id=card_id, approved_by="test", decision_id="approve-" + label)
+        approved.append(card_id)
+    edge_id = None
+    try:
+        edge_id = store.insert_edge(MemoryEdge(src_id=min(approved), dst_id=max(approved),
+            rel_type="derived_from", provenance_hash=digest("ab"), valid_from=start))
+        service = KnowledgeSearchService(
+            ledger=ledger, pgvector_store=store,
+            retired_index_bridge=DisabledRetiredIndexBridgeClient(), dataset_ids=[],
+        )
+        response = handle_jsonrpc_message({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "brain.resolve", "arguments": {
+                "project": project, "mode": "list", "limit": 1, "response_mode": "with_evidence",
+            }},
+        }, service)
+        result = response["result"]
+        assert result["isError"] is False
+        payload = result["structuredContent"]
+        assert payload["items"][0]["id"] == min(approved)
+        assert payload["decisions"][0]["decision"] == "명시적 근거"
+        assert payload["has_more"] is True
+        assert payload["next_cursor"]
+        # The SQL edge exists; the public wire budget may remove its summary
+        # rather than return an oversized response. Truncation must be explicit.
+        sql_evidence = store.read_authorized_evidence(project=project, root_memory_ids=[min(approved)])
+        assert sql_evidence["edges"][0]["provenance_hash"] == digest("ab")
+        public_edges = payload["evidence"]["explicit_edges"]
+        if public_edges:
+            assert public_edges[0]["provenance_hash"] == digest("ab")
+        else:
+            assert payload["metadata"]["evidence_truncated"] is True
+        assert len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()) <= 3072
+    finally:
+        with store.transaction() as conn:
+            if edge_id is not None:
+                conn.execute("DELETE FROM memory_edges WHERE edge_id = %s", (edge_id,))
+            conn.execute("DELETE FROM graph_projection_outbox WHERE source_id = ANY(%s)", (approved,))
+            conn.execute("DELETE FROM embedding_outbox WHERE target_id = ANY(%s)", (approved,))
+            conn.execute("DELETE FROM steward_card_decisions WHERE memory_id = ANY(%s)", (approved,))
+            conn.execute("DELETE FROM memory_cards WHERE memory_id = ANY(%s)", (approved,))
 
 
 def test_explicit_as_of_recalls_superseded_with_current_authorization(graph):
