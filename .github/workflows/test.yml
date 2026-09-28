@@ -209,3 +209,23 @@ jobs:
         # mcp-http는 optional extra라 base worker job에서는 skip된다.
         # 이 job은 transport 보안/Host-Origin 회귀를 PR status로 고정한다.
         run: uv run --group dev --extra mcp-http pytest tests/test_neuron_mcp_http.py -q
+
+  worker-perf-budget:
+    name: worker perf budget (uv)
+    runs-on: ubuntu-latest
+    env:
+      # 인메모리 지연시간 예산(P95<=20ms)은 공유 GoCD 에이전트 부하에 흔들리므로
+      # 기본 레인에서는 강제하지 않고, 전용 GitHub-hosted 레인에서 항상 강제한다.
+      LBRAIN_ENFORCE_PERF_BUDGET: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Enforce latency budgets
+        working-directory: worker
+        run: uv run --group dev --extra mcp-http pytest -q tests/test_dual_read_shadow.py tests/test_challenger_m4_benchmark.py tests/e2e/test_tier4_scenarios.py tests/e2e/test_tier5_adversarial.py
