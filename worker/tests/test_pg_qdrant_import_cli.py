@@ -690,7 +690,12 @@ cli.read_approved = lambda *a: {}
 cli.code_revision = lambda: "synthetic-revision"
 class Boundary:
     def __init__(self, *args):
-        Path(pidfile).write_text(str(os.getpid()))
+        # The supervisor SIGKILLs this worker at the deadline, so the pid must
+        # be published atomically: a truncate-then-write window would leave an
+        # empty file and fail the parent assertion with a bare int('') error.
+        probe = Path(pidfile + ".tmp")
+        probe.write_text(str(os.getpid()))
+        os.replace(probe, pidfile)
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
     def collection_metadata(self):
         if stage == "rollback":
@@ -717,9 +722,12 @@ print(json.dumps({"elapsed": time.monotonic() - start, "rc": rc}))
     assert timing["elapsed"] < 0.35
     assert report["status"] == ("mutation_unknown" if apply else "rejected")
     assert report.get("deadline_exceeded") is True
+    assert report.get("worker_reaped") is True
     import os
+    # The worker published its pid before the deadline; by now it must be gone.
+    pid = int(pidfile.read_text().strip())
     with pytest.raises(ProcessLookupError):
-        os.kill(int(pidfile.read_text()), 0)
+        os.kill(pid, 0)
 
 
 def test_supervised_main_reports_success_only_after_cleanup(lane, capsys):
