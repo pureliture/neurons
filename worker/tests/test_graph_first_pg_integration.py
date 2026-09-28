@@ -91,6 +91,8 @@ def test_public_query_graph_authority_join_and_explicit_pg_fallback(tmp_path, gr
     try:
         store.insert_card(card)
         with store.transaction() as conn:
+            conn.execute("UPDATE memory_cards SET steward_envelope = %s::jsonb WHERE memory_id = %s",
+                         (json.dumps({"approval_state": "approved", "memory_id": memory_id}), memory_id))
             conn.execute(
                 """INSERT INTO graph_projection_outbox
                        (source_type, source_id, source_revision, content_hash, episode_payload, status)
@@ -164,6 +166,8 @@ def test_public_list_keyset_crosses_100_rows_with_actual_mcp_wire_budget(tmp_pat
                     content_hash="sha256:" + hashlib.sha256(memory_id.encode()).hexdigest(),
                     lifecycle_state="human_accepted", authorization_status="active",
                 ), conn=conn)
+                conn.execute("UPDATE memory_cards SET steward_envelope = %s::jsonb WHERE memory_id = %s",
+                             (json.dumps({"approval_state": "approved", "memory_id": memory_id}), memory_id))
         cursor = None
         observed = []
         for _ in range(len(ids) + 1):

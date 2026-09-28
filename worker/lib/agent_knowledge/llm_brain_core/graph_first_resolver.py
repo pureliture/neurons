@@ -155,6 +155,7 @@ class GraphFirstResolver:
                 as_of=request.as_of or None,
                 limit=request.limit + 1,
                 after_memory_id=cursor.after_id,
+                steward_only=True,
             )
         except Exception:
             return self._error_payload(request, error_code="authority_store_unavailable")
@@ -186,7 +187,8 @@ class GraphFirstResolver:
                 graph_status = "unavailable"
 
         try:
-            health = self._store.graph_projection_health(request.project, as_of=request.as_of or None)
+            health = self._store.graph_projection_health(request.project, as_of=request.as_of or None,
+                                                         steward_only=True)
             unprojected = bool(health.get("unprojected"))
             lag = _lag(health.get("projection_lag_ms"))
         except Exception:
@@ -287,6 +289,7 @@ class GraphFirstResolver:
                 memory_ids=ids,
                 as_of=request.as_of or None,
                 limit=_CARD_LIMIT,
+                steward_only=True,
             )
         except Exception:
             return None, "unavailable"
@@ -346,6 +349,7 @@ class GraphFirstResolver:
                 query_vector=vector,
                 limit=_CARD_LIMIT,
                 as_of=request.as_of or None,
+                steward_only=True,
             )
         except Exception:
             return None, "authority_store_unavailable", True, "unavailable"
@@ -360,6 +364,7 @@ class GraphFirstResolver:
                 memory_ids=[memory_id for memory_id, _ in rank_keys],
                 as_of=request.as_of or None,
                 limit=_CARD_LIMIT,
+                steward_only=True,
             )
         except Exception:
             return None, "authority_store_unavailable", True, "unavailable"

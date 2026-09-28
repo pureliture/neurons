@@ -153,6 +153,30 @@ class OutboxWorker:
         self._stop_event.set()
 
 
+def _card_mapping_from_outbox_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Bridge the outbox payload's field names to the card mapper's contract.
+
+    `PgVectorStore.upsert_card` enqueues the card's identity under
+    ``authority_memory_id`` (plus ``source_id``), while
+    `episode_from_memory_card` reads ``memory_id`` and fails closed without it.
+    The two conventions exist in different layers, so the rename belongs here at
+    the seam rather than in either layer. The already-correct canonical key
+    ``content_hash`` is passed through untouched -- the PG authority join
+    compares it for equality against `memory_cards.content_hash`.
+    """
+
+    card = dict(payload)
+    memory_id = str(
+        card.get("memory_id")
+        or card.get("authority_memory_id")
+        or card.get("source_id")
+        or ""
+    )
+    if memory_id:
+        card["memory_id"] = memory_id
+    return card
+
+
 class GraphProjectionWorker:
     """Leased worker for graph_projection_outbox projecting episodes to Graphiti / Neo4j."""
 
@@ -176,17 +200,42 @@ class GraphProjectionWorker:
         self.poll_interval = poll_interval_seconds
         self.max_retries = max_retries
         self._stop_event = threading.Event()
+        self.last_batch_failed = 0
 
     def process_job(self, job: Any) -> None:
         """Project one episode payload through the Graphiti adapter seam."""
+        from ..llm_brain_core.ontology import episode_from_memory_card
         from .graph_replay import call_adapter_seam
 
-        outcome = call_adapter_seam(self.graph_adapter, job.episode_payload)
-        if outcome == "failed":
-            raise RuntimeError(f"adapter returned failed outcome for projection {job.projection_id}")
+        payload = job.episode_payload
+        if not isinstance(payload, dict):
+            raise TypeError("graph_projection_payload_must_be_mapping")
+        # The leased row and the projected payload must refer to the same
+        # authority revision. Do not mark a mismatched job completed.
+        if any(
+            str(payload.get(key) or "") != str(getattr(job, key, ""))
+            for key in ("source_type", "source_id", "source_revision", "content_hash")
+        ) or str(payload.get("authority_memory_id") or "") != str(job.source_id):
+            raise ValueError("graph_projection_authority_key_mismatch")
+        # The adapter contract is `upsert_episode(OntologyEpisode)`, NOT a raw
+        # mapping. Passing the dict straight through raised AttributeError on
+        # the first attribute access inside the real adapter, so every claimed
+        # job failed, retried OUTBOX_RETRY_LIMIT times, and landed in
+        # dead_letter. Map the stored payload into the episode the adapter
+        # actually expects.
+        episode = episode_from_memory_card(
+            _card_mapping_from_outbox_payload(payload),
+            project=str(payload.get("project") or ""),
+        )
+        outcome = call_adapter_seam(self.graph_adapter, episode, require_explicit_result=True)
+        # A disabled/unavailable graph did not persist an episode. Do not retire
+        # the leased job as completed: it must remain retryable or dead-letter.
+        if outcome not in {"inserted", "duplicate"}:
+            raise RuntimeError(f"graph_projection_not_persisted:{outcome}")
 
     def run_once(self) -> int:
         """Claim and process a single batch of graph projection outbox jobs."""
+        self.last_batch_failed = 0
         jobs = self.store.claim_graph_projection_leases(
             worker_id=self.worker_id,
             batch_size=self.batch_size,
@@ -204,14 +253,17 @@ class GraphProjectionWorker:
                     worker_id=self.worker_id,
                 )
             except Exception as e:
+                self.last_batch_failed += 1
                 logger.error(
-                    f"[{self.worker_id}] Error projecting outbox job {job.projection_id}: {e}",
-                    exc_info=True,
+                    "[%s] graph projection job %s failed (%s)",
+                    self.worker_id,
+                    job.projection_id,
+                    type(e).__name__,
                 )
                 try:
                     self.store.mark_graph_projection_failed(
                         projection_id=job.projection_id,
-                        error_message=str(e),
+                        error_message=type(e).__name__,
                         max_retries=self.max_retries,
                         worker_id=self.worker_id,
                     )

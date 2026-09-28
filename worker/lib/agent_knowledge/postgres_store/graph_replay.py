@@ -142,15 +142,25 @@ def save_checkpoint(path: str | Path | None, state: ReplayCheckpoint) -> None:
 # --- adapter seam ---
 
 class GraphProjectionSeam(Protocol):
-    def upsert_episode(self, payload: Mapping[str, Any]) -> Any: ...  # pragma: no cover
+    # The real Graphiti adapter takes an ``OntologyEpisode`` dataclass
+    # (llm_brain_core.graphiti_adapter.GraphitiNeo4jAdapter.upsert_episode).
+    # Type-checking that concrete type here would import the adapter layer into
+    # this sidecar, so the seam stays structural: any adapter exposing
+    # ``upsert_episode`` is acceptable, and it is the CALLER's job to hand over
+    # the type the adapter actually expects.
+    def upsert_episode(self, episode: Any) -> Any: ...  # pragma: no cover
 
 
-def call_adapter_seam(adapter: Any, payload: Mapping[str, Any]) -> str:
+def call_adapter_seam(adapter: Any, payload: Any, *, require_explicit_result: bool = False) -> str:
     """Deliver one redacted payload via the Graphiti adapter seam.
 
     Accepts (in order): ``upsert_episode`` (repo canonical seam),
     ``add_episode`` (design 6.1 wording), or a plain callable. Returns a
     normalized outcome string.
+
+    ``payload`` is whatever the bound adapter expects -- a mapping for the
+    one-off replay payloads, or an ``OntologyEpisode`` for the steady-state
+    outbox worker. This function only forwards; it does not reshape the value.
     """
     if hasattr(adapter, "upsert_episode"):
         result = adapter.upsert_episode(payload)
@@ -161,8 +171,10 @@ def call_adapter_seam(adapter: Any, payload: Mapping[str, Any]) -> str:
     else:
         raise TypeError("unsupported_adapter_seam")
     if result is None:
-        return "inserted"
+        return "failed" if require_explicit_result else "inserted"
     text = str(result).strip().lower()
+    if require_explicit_result:
+        return text if text in {"inserted", "duplicate"} else "failed"
     if text in {"inserted", "projected", "ok", "success", "completed"}:
         return "inserted"
     if text == "duplicate":

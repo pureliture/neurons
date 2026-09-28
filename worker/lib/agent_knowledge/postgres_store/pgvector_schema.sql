@@ -53,6 +53,28 @@ CREATE TABLE IF NOT EXISTS memory_cards (
     CONSTRAINT chk_memory_cards_emb_state CHECK (embedding_state IN ('pending', 'ready', 'stale', 'failed'))
 );
 
+-- Steward envelope is separate from the legacy memory_cards lane. Additive and
+-- repeatable on databases created before steward promotion.
+ALTER TABLE memory_cards ADD COLUMN IF NOT EXISTS steward_envelope JSONB;
+CREATE INDEX IF NOT EXISTS idx_steward_review_queue
+    ON memory_cards(project, created_at DESC, memory_id)
+    WHERE steward_envelope IS NOT NULL AND lifecycle_state IN ('candidate', 'needs_review', 'suggested_accept');
+
+CREATE TABLE IF NOT EXISTS steward_card_decisions (
+    decision_id TEXT PRIMARY KEY,
+    memory_id VARCHAR(64) NOT NULL REFERENCES memory_cards(memory_id),
+    content_hash VARCHAR(71) NOT NULL,
+    action VARCHAR(32) NOT NULL CHECK (action IN ('approve', 'auto_accept', 'reject', 'supersede', 'stale')),
+    actor TEXT NOT NULL,
+    target_memory_id VARCHAR(64),
+    result_card JSONB,
+    result_target JSONB,
+    decided_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE steward_card_decisions ADD COLUMN IF NOT EXISTS result_card JSONB;
+ALTER TABLE steward_card_decisions ADD COLUMN IF NOT EXISTS result_target JSONB;
+CREATE INDEX IF NOT EXISTS idx_steward_card_decisions_memory_id ON steward_card_decisions(memory_id);
+
 -- Indexes for memory_cards
 CREATE INDEX IF NOT EXISTS idx_memory_cards_active 
     ON memory_cards(project, authorization_status, currentness);

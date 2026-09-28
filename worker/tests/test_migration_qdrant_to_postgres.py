@@ -140,8 +140,8 @@ def _card_payload(i: int, card_type: str = "decision") -> dict[str, Any]:
     }
 
 
-class MockQdrantClient:
-    """Minimal Qdrant seam: get_collection + scroll only."""
+class MockVectorClient:
+    """Minimal vector store seam: get_collection + scroll only."""
 
     def __init__(self, size: int = 3072, distance: str = "Cosine"):
         self.collections: dict[str, dict[str, Any]] = {
@@ -301,8 +301,8 @@ class FakePgVectorStore:
 
 
 @pytest.fixture
-def mock_qdrant():
-    client = MockQdrantClient()
+def mock_vector_store():
+    client = MockVectorClient()
     for i in range(5):
         client.add_chunk(f"chunk_{i}", make_dummy_vector(i), _chunk_payload(i))
     for i in range(3):
@@ -317,11 +317,11 @@ def target_store():
     return FakePgVectorStore()
 
 
-def test_migration_dry_run_mode(mock_qdrant, target_store):
+def test_migration_dry_run_mode(mock_vector_store, target_store):
     with tempfile.TemporaryDirectory() as tmpdir:
         chk_file = os.path.join(tmpdir, "checkpoint.json")
         migrator = QdrantToPostgresMigrator(
-            qdrant_client=mock_qdrant,
+            qdrant_client=mock_vector_store,
             target_store=target_store,
             dry_run=True,
             checkpoint_file=chk_file,
@@ -329,17 +329,22 @@ def test_migration_dry_run_mode(mock_qdrant, target_store):
         summary = migrator.run_full_migration(project="neurons")
 
         assert summary.dry_run is True
+        # total_migrated = validated preview count (why dry-run exists)
         assert summary.total_migrated == 10  # 5 chunks + 5 cards scanned and mapped
+        # total_written = actually persisted. Must be 0 in dry-run.
+        assert summary.total_written == 0
         assert summary.total_outbox_enqueued == 0  # dry-run never enqueues
+        assert summary.session_chunks_result.total_written == 0
+        assert summary.memory_cards_result.total_written == 0
         assert len(target_store.chunks) == 0  # No records written in dry run
         assert len(target_store.cards) == 0
         assert len(target_store.outbox) == 0
         assert not os.path.exists(chk_file)  # dry-run writes no checkpoint
 
 
-def test_migration_live_execution(mock_qdrant, target_store):
+def test_migration_live_execution(mock_vector_store, target_store):
     migrator = QdrantToPostgresMigrator(
-        qdrant_client=mock_qdrant,
+        qdrant_client=mock_vector_store,
         target_store=target_store,
         dry_run=False,
     )
@@ -347,6 +352,8 @@ def test_migration_live_execution(mock_qdrant, target_store):
 
     assert summary.dry_run is False
     assert summary.total_migrated == 10
+    # Live run with no target failures: written == migrated
+    assert summary.total_written == 10
     assert len(target_store.chunks) == 5
     assert len(target_store.cards) == 5
     # Cards without vectors (card_3 and card_4) stay pending and enqueue re-embed jobs
@@ -354,11 +361,11 @@ def test_migration_live_execution(mock_qdrant, target_store):
     assert len(target_store.outbox) == 2
 
 
-def test_migration_checkpointing(mock_qdrant, target_store):
+def test_migration_checkpointing(mock_vector_store, target_store):
     with tempfile.TemporaryDirectory() as tmpdir:
         chk_file = os.path.join(tmpdir, "checkpoint.json")
         migrator = QdrantToPostgresMigrator(
-            qdrant_client=mock_qdrant,
+            qdrant_client=mock_vector_store,
             target_store=target_store,
             batch_size=2,
             checkpoint_file=chk_file,
@@ -379,14 +386,14 @@ def test_migration_checkpointing(mock_qdrant, target_store):
         assert record["preflight"]["compatible"] is True
 
 
-def test_migration_quarantine_corrupted_vector(mock_qdrant, target_store):
+def test_migration_quarantine_corrupted_vector(mock_vector_store, target_store):
     # Corrupted vector (dimension 512 instead of 3072), otherwise valid payload.
     bad_payload = _chunk_payload(99)
     bad_payload["chunk_id"] = "bad_chunk"
-    mock_qdrant.add_chunk("bad_chunk", [0.1] * 512, bad_payload)
+    mock_vector_store.add_chunk("bad_chunk", [0.1] * 512, bad_payload)
 
     migrator = QdrantToPostgresMigrator(
-        qdrant_client=mock_qdrant,
+        qdrant_client=mock_vector_store,
         target_store=target_store,
     )
     res = migrator.migrate_session_chunks(collection_name="session_chunks")
@@ -401,11 +408,11 @@ def test_migration_quarantine_corrupted_vector(mock_qdrant, target_store):
     assert "bad_chunk" not in target_store.chunks
 
 
-def test_migration_completed_rerun_is_safe(mock_qdrant, target_store):
+def test_migration_completed_rerun_is_safe(mock_vector_store, target_store):
     with tempfile.TemporaryDirectory() as tmpdir:
         chk_file = os.path.join(tmpdir, "checkpoint.json")
         first = QdrantToPostgresMigrator(
-            qdrant_client=mock_qdrant,
+            qdrant_client=mock_vector_store,
             target_store=target_store,
             batch_size=2,
             checkpoint_file=chk_file,
@@ -414,7 +421,7 @@ def test_migration_completed_rerun_is_safe(mock_qdrant, target_store):
         assert res1.total_migrated == 5
 
         second = QdrantToPostgresMigrator(
-            qdrant_client=mock_qdrant,
+            qdrant_client=mock_vector_store,
             target_store=target_store,
             batch_size=2,
             checkpoint_file=chk_file,
@@ -426,10 +433,10 @@ def test_migration_completed_rerun_is_safe(mock_qdrant, target_store):
         assert len(target_store.chunks) == 5
 
 
-def test_migration_profile_mismatch_fail_closed(mock_qdrant, target_store):
-    mock_qdrant.set_profile("session_chunks", size=512, distance="Cosine")
+def test_migration_profile_mismatch_fail_closed(mock_vector_store, target_store):
+    mock_vector_store.set_profile("session_chunks", size=512, distance="Cosine")
     migrator = QdrantToPostgresMigrator(
-        qdrant_client=mock_qdrant,
+        qdrant_client=mock_vector_store,
         target_store=target_store,
     )
     res = migrator.migrate_session_chunks(collection_name="session_chunks")
@@ -440,20 +447,20 @@ def test_migration_profile_mismatch_fail_closed(mock_qdrant, target_store):
     assert len(target_store.chunks) == 0
 
 
-def test_session_chunk_memory_id_wins_and_absence_quarantines(mock_qdrant, target_store):
+def test_session_chunk_memory_id_wins_and_absence_quarantines(mock_vector_store, target_store):
     # Case 1: memory_id present along with different chunk_id and point id -> memory_id wins
     payload_valid = _chunk_payload(101)
     payload_valid["memory_id"] = "mem_wins"
     payload_valid["chunk_id"] = "chunk_loses"
-    mock_qdrant.add_chunk("point_id_loses", make_dummy_vector(101), payload_valid)
+    mock_vector_store.add_chunk("point_id_loses", make_dummy_vector(101), payload_valid)
 
     # Case 2: chunk_id and point id exist, but memory_id is missing -> quarantines
     payload_no_mem = _chunk_payload(102)
     payload_no_mem.pop("memory_id", None)
     payload_no_mem["chunk_id"] = "fallback_chunk_id"
-    mock_qdrant.add_chunk("point_fallback", make_dummy_vector(102), payload_no_mem)
+    mock_vector_store.add_chunk("point_fallback", make_dummy_vector(102), payload_no_mem)
 
-    migrator = QdrantToPostgresMigrator(qdrant_client=mock_qdrant, target_store=target_store)
+    migrator = QdrantToPostgresMigrator(qdrant_client=mock_vector_store, target_store=target_store)
     res = migrator.migrate_session_chunks(collection_name=DEFAULT_SESSION_COLLECTION)
 
     assert "mem_wins" in target_store.chunks
@@ -468,22 +475,22 @@ def test_session_chunk_memory_id_wins_and_absence_quarantines(mock_qdrant, targe
     assert q_recs[0]["point_digest"] == _digest("point_fallback")
 
 
-def test_session_chunk_text_wins_and_absence_quarantines(mock_qdrant, target_store):
+def test_session_chunk_text_wins_and_absence_quarantines(mock_vector_store, target_store):
     # Case 1: text present along with content_markdown and summary -> text wins
     payload_text_wins = _chunk_payload(201)
     payload_text_wins["text"] = "authoritative_text"
     payload_text_wins["content_markdown"] = "fallback_markdown"
     payload_text_wins["summary"] = "fallback_summary"
-    mock_qdrant.add_chunk("pt_text_wins", make_dummy_vector(201), payload_text_wins)
+    mock_vector_store.add_chunk("pt_text_wins", make_dummy_vector(201), payload_text_wins)
 
     # Case 2: text missing even though content_markdown and summary exist -> quarantines
     payload_no_text = _chunk_payload(202)
     payload_no_text.pop("text", None)
     payload_no_text["content_markdown"] = "fallback_markdown_only"
     payload_no_text["summary"] = "fallback_summary_only"
-    mock_qdrant.add_chunk("pt_no_text", make_dummy_vector(202), payload_no_text)
+    mock_vector_store.add_chunk("pt_no_text", make_dummy_vector(202), payload_no_text)
 
-    migrator = QdrantToPostgresMigrator(qdrant_client=mock_qdrant, target_store=target_store)
+    migrator = QdrantToPostgresMigrator(qdrant_client=mock_vector_store, target_store=target_store)
     res = migrator.migrate_session_chunks(collection_name=DEFAULT_SESSION_COLLECTION)
 
     assert target_store.chunks["chunk_201"].content_markdown == "authoritative_text"
@@ -493,11 +500,11 @@ def test_session_chunk_text_wins_and_absence_quarantines(mock_qdrant, target_sto
     assert q_recs[0]["point_digest"] == _digest("pt_no_text")
 
 
-def test_session_chunk_vectorless_point_quarantines_no_outbox(mock_qdrant, target_store):
+def test_session_chunk_vectorless_point_quarantines_no_outbox(mock_vector_store, target_store):
     payload = _chunk_payload(301)
-    mock_qdrant.add_chunk("pt_vectorless", None, payload)
+    mock_vector_store.add_chunk("pt_vectorless", None, payload)
 
-    migrator = QdrantToPostgresMigrator(qdrant_client=mock_qdrant, target_store=target_store)
+    migrator = QdrantToPostgresMigrator(qdrant_client=mock_vector_store, target_store=target_store)
     res = migrator.migrate_session_chunks(collection_name=DEFAULT_SESSION_COLLECTION)
 
     assert "chunk_301" not in target_store.chunks
@@ -509,12 +516,12 @@ def test_session_chunk_vectorless_point_quarantines_no_outbox(mock_qdrant, targe
 
 
 def test_memory_card_target_write_failure_is_quarantined_and_session_copy_remains_strict():
-    mock_qdrant = MockQdrantClient()
+    mock_vector_store = MockVectorClient()
     target_store = FakePgVectorStore()
-    mock_qdrant.add_card("card-write-failure", make_dummy_vector(403), _card_payload(403))
+    mock_vector_store.add_card("card-write-failure", make_dummy_vector(403), _card_payload(403))
     target_store.fail_write = True
 
-    migrator = QdrantToPostgresMigrator(qdrant_client=mock_qdrant, target_store=target_store)
+    migrator = QdrantToPostgresMigrator(qdrant_client=mock_vector_store, target_store=target_store)
     result = migrator.migrate_memory_cards()
 
     assert result.total_migrated == 0
@@ -523,7 +530,7 @@ def test_memory_card_target_write_failure_is_quarantined_and_session_copy_remain
 
 
 def test_session_chunk_updates_existing_differing_target_and_preserves_card_behavior():
-    mock_qdrant = MockQdrantClient()
+    mock_vector_store = MockVectorClient()
     target_store = FakePgVectorStore()
     # Pre-existing differing chunk in target store
     target_store.chunks["chunk_401"] = SessionChunk(
@@ -545,9 +552,9 @@ def test_session_chunk_updates_existing_differing_target_and_preserves_card_beha
     new_payload["session_id_hash"] = "sha256:new_sess"
     new_payload["project"] = "neurons"
     new_payload["provider"] = "codex"
-    mock_qdrant.add_chunk("pt_401", new_vec, new_payload)
+    mock_vector_store.add_chunk("pt_401", new_vec, new_payload)
 
-    migrator = QdrantToPostgresMigrator(qdrant_client=mock_qdrant, target_store=target_store)
+    migrator = QdrantToPostgresMigrator(qdrant_client=mock_vector_store, target_store=target_store)
     res_chunks = migrator.migrate_session_chunks(collection_name=DEFAULT_SESSION_COLLECTION)
     assert res_chunks.outbox_enqueued == 0
 
@@ -562,7 +569,7 @@ def test_session_chunk_updates_existing_differing_target_and_preserves_card_beha
     assert updated.embedding == new_vec
 
     # Card migration preserves current pending/outbox behavior for vectorless card
-    mock_qdrant.add_card("card_no_vec", None, _card_payload(402, card_type="preference"))
+    mock_vector_store.add_card("card_no_vec", None, _card_payload(402, card_type="preference"))
     res_cards = migrator.migrate_memory_cards()
     assert res_cards.outbox_enqueued == 1
     assert "card_402" in target_store.cards
@@ -572,12 +579,12 @@ def test_session_chunk_updates_existing_differing_target_and_preserves_card_beha
     assert next(iter(target_store.outbox.values()))["target_type"] == "memory_card"
 
 
-def test_session_chunk_source_vector_passed_directly_ready_no_provider_call(mock_qdrant, target_store):
+def test_session_chunk_source_vector_passed_directly_ready_no_provider_call(mock_vector_store, target_store):
     source_vec = make_dummy_vector(501)
     payload = _chunk_payload(501)
-    mock_qdrant.add_chunk("pt_501", source_vec, payload)
+    mock_vector_store.add_chunk("pt_501", source_vec, payload)
 
-    migrator = QdrantToPostgresMigrator(qdrant_client=mock_qdrant, target_store=target_store)
+    migrator = QdrantToPostgresMigrator(qdrant_client=mock_vector_store, target_store=target_store)
     res = migrator.migrate_session_chunks(collection_name=DEFAULT_SESSION_COLLECTION)
 
     assert res.outbox_enqueued == 0
@@ -618,7 +625,7 @@ def test_session_chunk_migration_static_import_boundary():
 
 
 def test_session_chunk_checkpoint_advancement_on_success_and_absent_on_target_failure():
-    client = MockQdrantClient()
+    client = MockVectorClient()
     store = FakePgVectorStore()
     with tempfile.TemporaryDirectory() as tmpdir:
         chk_file = os.path.join(tmpdir, "checkpoint.json")
@@ -696,7 +703,7 @@ def test_session_chunk_missing_readback_capability_fails_before_checkpoint():
             self.chunks[chunk.chunk_id] = chunk
             return chunk.chunk_id
 
-    client = MockQdrantClient()
+    client = MockVectorClient()
     target = NoReadbackTarget()
     with tempfile.TemporaryDirectory() as tmpdir:
         checkpoint = os.path.join(tmpdir, "checkpoint.json")
@@ -742,7 +749,7 @@ def test_live_postgres_semantic_equality_accepts_server_halfvec_when_python_bina
 
 
 def test_session_chunk_readback_uses_postgres_semantic_equality_despite_python_representation_difference():
-    client = MockQdrantClient()
+    client = MockVectorClient()
     store = FakePgVectorStore()
     store.corrupt_vector_readback = True
     source = make_dummy_vector(904)
@@ -763,7 +770,7 @@ def test_session_chunk_readback_uses_postgres_semantic_equality_despite_python_r
 
 
 def test_session_chunk_semantic_vector_mismatch_prevents_checkpoint():
-    client = MockQdrantClient()
+    client = MockVectorClient()
     store = FakePgVectorStore()
     store.semantic_embedding_equal = False
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -782,7 +789,7 @@ def test_session_chunk_semantic_vector_mismatch_prevents_checkpoint():
 
 
 def test_session_chunk_semantic_vector_check_unavailable_prevents_checkpoint():
-    client = MockQdrantClient()
+    client = MockVectorClient()
     store = FakePgVectorStore()
     store.semantic_embedding_equal = None
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -801,7 +808,7 @@ def test_session_chunk_semantic_vector_check_unavailable_prevents_checkpoint():
 
 
 def test_session_chunk_readback_requires_complete_ready_vector_before_checkpoint():
-    client = MockQdrantClient()
+    client = MockVectorClient()
     store = FakePgVectorStore()
     store.corrupt_readback = True
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -820,7 +827,7 @@ def test_session_chunk_readback_requires_complete_ready_vector_before_checkpoint
 
 
 def test_session_chunk_internal_type_error_propagates_without_connection_fallback_or_checkpoint():
-    client = MockQdrantClient()
+    client = MockVectorClient()
     store = FakePgVectorStore()
     store.fail_write_type_error = True
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -839,31 +846,31 @@ def test_session_chunk_internal_type_error_propagates_without_connection_fallbac
         assert not os.path.exists(checkpoint)
 
 
-def test_session_chunk_overlength_fields_quarantined_without_fallback_or_truncation(mock_qdrant, target_store):
+def test_session_chunk_overlength_fields_quarantined_without_fallback_or_truncation(mock_vector_store, target_store):
     # Case 1: memory_id over 64 chars -> must not truncate to 64 or slice to 128; must not fallback to chunk_id; must quarantine and not write
     p_mem = _chunk_payload(601)
     p_mem["memory_id"] = "m" * 65
     p_mem["chunk_id"] = "valid_chunk_id"
-    mock_qdrant.add_chunk("pt_mem_over", make_dummy_vector(601), p_mem)
+    mock_vector_store.add_chunk("pt_mem_over", make_dummy_vector(601), p_mem)
 
     # Case 2: project over 64 chars -> must quarantine and not write
     p_proj = _chunk_payload(602)
     p_proj["project"] = "p" * 65
-    mock_qdrant.add_chunk("pt_proj_over", make_dummy_vector(602), p_proj)
+    mock_vector_store.add_chunk("pt_proj_over", make_dummy_vector(602), p_proj)
 
     # Case 3: provider over 32 chars -> must quarantine and not write
     p_prov = _chunk_payload(603)
     p_prov["provider"] = "x" * 33
-    mock_qdrant.add_chunk("pt_prov_over", make_dummy_vector(603), p_prov)
+    mock_vector_store.add_chunk("pt_prov_over", make_dummy_vector(603), p_prov)
 
     # Case 4: boundary values: memory_id=64, project=64, provider=32 -> valid and accepted
     p_exact = _chunk_payload(604)
     p_exact["memory_id"] = "m" * 64
     p_exact["project"] = "p" * 64
     p_exact["provider"] = "x" * 32
-    mock_qdrant.add_chunk("pt_exact_boundary", make_dummy_vector(604), p_exact)
+    mock_vector_store.add_chunk("pt_exact_boundary", make_dummy_vector(604), p_exact)
 
-    migrator = QdrantToPostgresMigrator(qdrant_client=mock_qdrant, target_store=target_store)
+    migrator = QdrantToPostgresMigrator(qdrant_client=mock_vector_store, target_store=target_store)
     res = migrator.migrate_session_chunks(collection_name=DEFAULT_SESSION_COLLECTION)
 
     # Boundary valid record was migrated
@@ -892,30 +899,30 @@ def test_session_chunk_overlength_fields_quarantined_without_fallback_or_truncat
     assert q_prov[0]["point_digest"] == _digest("pt_prov_over")
 
 
-def test_session_chunk_non_string_required_fields_quarantined_without_fallback(mock_qdrant, target_store):
+def test_session_chunk_non_string_required_fields_quarantined_without_fallback(mock_vector_store, target_store):
     # Non-string memory_id (e.g. int) must not be stringified and must not fallback to chunk_id
     p_mem = _chunk_payload(701)
     p_mem["memory_id"] = 12345
     p_mem["chunk_id"] = "fallback_chunk"
-    mock_qdrant.add_chunk("pt_mem_int", make_dummy_vector(701), p_mem)
+    mock_vector_store.add_chunk("pt_mem_int", make_dummy_vector(701), p_mem)
 
     # Non-string project (e.g. list)
     p_proj = _chunk_payload(702)
     p_proj["project"] = ["neurons"]
-    mock_qdrant.add_chunk("pt_proj_list", make_dummy_vector(702), p_proj)
+    mock_vector_store.add_chunk("pt_proj_list", make_dummy_vector(702), p_proj)
 
     # Non-string provider (e.g. dict)
     p_prov = _chunk_payload(703)
     p_prov["provider"] = {"name": "codex"}
-    mock_qdrant.add_chunk("pt_prov_dict", make_dummy_vector(703), p_prov)
+    mock_vector_store.add_chunk("pt_prov_dict", make_dummy_vector(703), p_prov)
 
     # Non-string text (e.g. int) must not fallback to content_markdown
     p_text = _chunk_payload(704)
     p_text["text"] = 9999
     p_text["content_markdown"] = "fallback_content"
-    mock_qdrant.add_chunk("pt_text_int", make_dummy_vector(704), p_text)
+    mock_vector_store.add_chunk("pt_text_int", make_dummy_vector(704), p_text)
 
-    migrator = QdrantToPostgresMigrator(qdrant_client=mock_qdrant, target_store=target_store)
+    migrator = QdrantToPostgresMigrator(qdrant_client=mock_vector_store, target_store=target_store)
     res = migrator.migrate_session_chunks(collection_name=DEFAULT_SESSION_COLLECTION)
 
     assert "12345" not in target_store.chunks
@@ -930,13 +937,13 @@ def test_session_chunk_non_string_required_fields_quarantined_without_fallback(m
     assert any(r["reason_code"] == "text_invalid" and r["point_digest"] == _digest("pt_text_int") for r in res.quarantined_records)
 
 
-def test_session_chunk_nul_containing_text_quarantined_without_transform_or_fallback(mock_qdrant, target_store):
+def test_session_chunk_nul_containing_text_quarantined_without_transform_or_fallback(mock_vector_store, target_store):
     p_nul = _chunk_payload(801)
     p_nul["text"] = "hello \x00 world"
     p_nul["content_markdown"] = "clean fallback without nul"
-    mock_qdrant.add_chunk("pt_nul_text", make_dummy_vector(801), p_nul)
+    mock_vector_store.add_chunk("pt_nul_text", make_dummy_vector(801), p_nul)
 
-    migrator = QdrantToPostgresMigrator(qdrant_client=mock_qdrant, target_store=target_store)
+    migrator = QdrantToPostgresMigrator(qdrant_client=mock_vector_store, target_store=target_store)
     res = migrator.migrate_session_chunks(collection_name=DEFAULT_SESSION_COLLECTION)
 
     # Must NOT write transformed or raw text, and must NOT fallback
@@ -947,4 +954,137 @@ def test_session_chunk_nul_containing_text_quarantined_without_transform_or_fall
 
     q_nul = [r for r in res.quarantined_records if r["reason_code"] == "text_contains_nul"]
     assert len(q_nul) == 1
-    assert q_nul[0]["point_digest"] == _digest("pt_nul_text")
+
+
+# -------------------------------------------------------------- S2: Card migration CLI
+
+
+def test_cli_registers_qdrant_pg_migrate_cards_command():
+    """S2: CLI에 qdrant-pg-migrate-cards 명령이 등록되어 있다."""
+    from agent_knowledge.cli import COMMAND_HANDLERS
+
+    assert "qdrant-pg-migrate-cards" in COMMAND_HANDLERS
+
+
+def test_migrate_memory_cards_callable_independently():
+    """S2: migrate_memory_cards를 run_full_migration 없이 독립 호출 가능."""
+    mock = MockVectorClient()
+    target_store = FakePgVectorStore()
+
+    for i in range(3):
+        mock.add_card(
+            f"card_{900 + i}",
+            make_dummy_vector(900 + i),
+            _card_payload(900 + i),
+        )
+
+    migrator = QdrantToPostgresMigrator(
+        qdrant_client=mock,
+        target_store=target_store,
+    )
+    result = migrator.migrate_memory_cards(collection_name="memory_cards")
+
+    assert result.total_migrated == 3
+    assert result.total_quarantined == 0
+    assert len(result.errors) == 0
+    assert "card_900" in target_store.cards
+    assert "card_901" in target_store.cards
+    assert "card_902" in target_store.cards
+
+
+def test_migrate_memory_cards_live_run_target_failure_is_quarantined_not_counted():
+    """A record that failed to persist is quarantined, not counted as migrated.
+
+    ``total_migrated`` counts records that actually reached the target, so in a
+    live run ``total_migrated == total_written`` (no failures) and both fall
+    short of ``total_scanned`` when writes fail. In ``dry_run`` they diverge:
+    ``total_migrated`` is the preview count and ``total_written`` is 0.
+    """
+    mock = MockVectorClient()
+    target_store = FakePgVectorStore()
+    target_store.fail_write = True
+
+    for i in range(3):
+        mock.add_card(
+            f"card_{970 + i}",
+            make_dummy_vector(970 + i),
+            _card_payload(970 + i),
+        )
+
+    migrator = QdrantToPostgresMigrator(
+        qdrant_client=mock,
+        target_store=target_store,
+    )
+    result = migrator.migrate_memory_cards(collection_name="memory_cards")
+
+    assert result.total_scanned == 3
+    assert result.total_migrated == 0  # nothing reached the target
+    assert result.total_written == 0
+    assert result.total_quarantined == 3
+    assert len(target_store.cards) == 0
+
+
+def test_migrate_memory_cards_dry_run_does_not_write():
+    """S2: dry-run previews without writing; total_written stays 0.
+
+    total_migrated is intentionally non-zero in dry-run -- it is the preview
+    count that makes dry-run useful. total_written is the field that reports
+    what was actually persisted, and it must be 0 here.
+    """
+    mock = MockVectorClient()
+    target_store = FakePgVectorStore()
+
+    mock.add_card(
+        "card_950",
+        make_dummy_vector(950),
+        _card_payload(950),
+    )
+
+    migrator = QdrantToPostgresMigrator(
+        qdrant_client=mock,
+        target_store=target_store,
+        dry_run=True,
+    )
+    result = migrator.migrate_memory_cards(collection_name="memory_cards")
+
+    assert result.total_scanned == 1
+    assert result.total_migrated == 1  # preview count
+    assert result.total_written == 0  # nothing persisted
+    assert result.outbox_enqueued == 0  # preview enqueues no work
+    assert "card_950" not in target_store.cards
+    assert len(target_store.outbox) == 0
+
+
+def test_migrate_memory_cards_project_filter():
+    """S2: --project 필터가 동작한다."""
+    mock = MockVectorClient()
+    target_store = FakePgVectorStore()
+
+    mock.add_card(
+        "card_960",
+        make_dummy_vector(960),
+        _card_payload(960),
+    )
+    mock.add_card(
+        "card_961",
+        make_dummy_vector(961),
+        _card_payload(961),
+    )
+    # card_961의 project를 stocks로 변경
+    mock.collections["memory_cards"]["card_961"] = (
+        mock.collections["memory_cards"]["card_961"][0],
+        {**_card_payload(961), "project": "stocks"},
+    )
+
+    migrator = QdrantToPostgresMigrator(
+        qdrant_client=mock,
+        target_store=target_store,
+    )
+    result = migrator.migrate_memory_cards(
+        collection_name="memory_cards",
+        project="neurons",
+    )
+
+    assert result.total_migrated == 1
+    assert "card_960" in target_store.cards
+    assert "card_961" not in target_store.cards

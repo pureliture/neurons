@@ -31,8 +31,13 @@ def run_autopilot_cycle(
     supersede_detector: SupersedeDetector | None = None,
     projection_client: Any | None = None,
     timestamp: str | None = None,
+    pgvector_store: Any | None = None,
 ) -> dict:
-    service = LLMBrainMemoryService(ledger)
+    if pgvector_store is None:
+        raise ValueError("PostgreSQL steward store is required for autopilot")
+    if projection_client is not None:
+        raise ValueError("autopilot projection is unsupported with PostgreSQL steward store")
+    service = LLMBrainMemoryService(ledger, pgvector_store=pgvector_store)
     accepted: list[dict] = []
     needs_review: list[dict] = []
     superseded: list[dict] = []
@@ -49,10 +54,27 @@ def run_autopilot_cycle(
                 conflict_state="conflict" if block_reason == "conflict" else "none",
                 timestamp=timestamp,
             )
-            needs_review.append(review["review_card"])
+            stored_review = pgvector_store.put_steward_proposal(review["review_card"])
+            if stored_review != review["review_card"]:
+                raise ValueError("PostgreSQL steward proposal differs from blocked candidate")
+            needs_review.append(stored_review)
             continue
 
-        old_card = supersede_detector(candidate, ledger) if supersede_detector else None
+        old_card = supersede_detector(candidate, pgvector_store) if supersede_detector else None
+        if old_card:
+            current_old = pgvector_store.get_steward_card(str(old_card["memory_id"]))
+            if (current_old is None or current_old.get("approval_state") not in ("approved", "auto_accepted")
+                    or current_old.get("currentness") != "current"):
+                raise ValueError("unknown PostgreSQL supersede target or target is not current and approved")
+            old_card = current_old
+        proposal = dict(candidate)
+        proposal["authorization_status"] = "disabled"
+        if old_card:
+            proposal["steward_proposal_kind"] = "supersede"
+            proposal["steward_target_memory_id"] = old_card["memory_id"]
+        stored_proposal = pgvector_store.put_steward_proposal(proposal)
+        if stored_proposal != proposal:
+            raise ValueError("PostgreSQL steward proposal differs from candidate")
         if old_card:
             committed = service.supersede_accepted_card(
                 old_card=old_card,

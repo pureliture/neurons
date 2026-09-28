@@ -101,7 +101,57 @@ jobs:
           fi
       - name: 실제 PostgreSQL 권위 저장 및 공개 Graph-first 조회 검증
         working-directory: worker
-        run: uv run --group dev --extra mcp-http pytest -q tests/test_lbrain_pgvector_contract.py tests/test_graph_first_pg_integration.py tests/test_graph_first_resolver.py tests/test_pg_evidence.py tests/test_pg_session_memory_integration.py tests/test_pg_backfill.py tests/test_pg_representation.py tests/test_pg_projection_privacy.py tests/test_pg_qdrant_import.py tests/test_pg_qdrant_import_cli.py tests/test_pg_import_underflow.py tests/test_pg_projection_locking.py tests/test_pg_import_canonical_preflight.py tests/test_pg_embedding_named_credentials.py tests/test_pg_import_selection.py
+        run: uv run --group dev --extra mcp-http pytest -q tests/test_lbrain_pgvector_contract.py tests/test_graph_first_pg_integration.py tests/test_graph_first_resolver.py tests/test_pg_evidence.py tests/test_pg_session_memory_integration.py tests/test_pg_backfill.py tests/test_pg_representation.py tests/test_pg_projection_privacy.py tests/test_pg_qdrant_import.py tests/test_pg_qdrant_import_cli.py tests/test_pg_import_underflow.py tests/test_pg_projection_locking.py tests/test_pg_import_canonical_preflight.py tests/test_pg_embedding_named_credentials.py tests/test_pg_import_selection.py tests/test_outbox_worker.py tests/test_pg_graph_projection_cli.py tests/test_pg_steward_authority.py tests/test_pg_steward_service_wiring.py tests/test_pg_steward_graph_authority.py tests/test_golden_grader.py
+
+  worker-lbrain-pg-neo4j:
+    name: worker LBrain PG + Neo4j live (uv)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: neurons_test
+          POSTGRES_PASSWORD: neurons_test
+          POSTGRES_DB: neurons_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U neurons_test -d neurons_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 15
+      neo4j:
+        image: neo4j:5.26.30-community
+        env:
+          NEO4J_AUTH: none
+          NEO4J_server_http_enabled: "false"
+          NEO4J_server_https_enabled: "false"
+        ports:
+          - 127.0.0.1:17687:7687
+        options: >-
+          --health-cmd "cypher-shell -a bolt://localhost:7687 'RETURN 1'"
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 18
+    env:
+      LBRAIN_TEST_PG_DSN: postgresql://neurons_test:neurons_test@127.0.0.1:5432/neurons_test
+      LBRAIN_TEST_NEO4J_URI: bolt://127.0.0.1:17687
+      LLM_BRAIN_NEO4J_URI: bolt://127.0.0.1:17687
+      LLM_BRAIN_GRAPH_EXTRACT_ENTITIES: "false"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Reject missing disposable database endpoints
+        run: test -n "$LBRAIN_TEST_PG_DSN" && test -n "$LBRAIN_TEST_NEO4J_URI"
+      - name: Actual PG authority and Neo4j graph card round trip
+        working-directory: worker
+        run: uv run --group dev --extra mcp-http pytest -q -rs tests/test_pg_neo4j_card_e2e.py
 
   worker-postgres-parity:
     name: worker PostgreSQL parity (uv)

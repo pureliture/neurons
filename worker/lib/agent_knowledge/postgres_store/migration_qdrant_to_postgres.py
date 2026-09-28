@@ -44,11 +44,27 @@ def _timestamp(value: object, required: bool) -> datetime | None:
 
 @dataclass
 class MigrationResult:
-    """Redacted report: no source payload, source ID, or exception text."""
+    """Redacted report: no source payload, source ID, or exception text.
+
+    Counter semantics (read before trusting any count in a report):
+
+    - ``total_scanned``   -- points read from the source collection.
+    - ``total_migrated``  -- records that passed validation AND reached the
+      target. In a live run this equals ``total_written``; a record whose write
+      failed is quarantined and counted in neither. In ``dry_run`` it is a
+      *preview* count -- nothing is written, but the number tells you how many
+      rows a live run WOULD import. That preview is why dry-run is useful.
+    - ``total_written``   -- records actually persisted to the target. Always 0
+      in ``dry_run``. Track this, not ``total_migrated``, to judge what a live
+      run really did.
+    - ``outbox_enqueued`` -- embedding re-embed jobs queued. Always 0 in
+      ``dry_run`` (a preview must not enqueue work).
+    """
 
     collection_name: str
     total_scanned: int = 0
     total_migrated: int = 0
+    total_written: int = 0
     total_skipped: int = 0
     total_quarantined: int = 0
     outbox_enqueued: int = 0
@@ -70,6 +86,7 @@ class FullMigrationSummary:
     session_chunks_result: MigrationResult
     memory_cards_result: MigrationResult
     total_migrated: int = 0
+    total_written: int = 0
     total_quarantined: int = 0
     total_outbox_enqueued: int = 0
     total_elapsed_seconds: float = 0.0
@@ -77,7 +94,8 @@ class FullMigrationSummary:
 
     def to_dict(self) -> dict[str, Any]:
         return {"started_at": self.started_at, "completed_at": self.completed_at, "dry_run": self.dry_run,
-                "total_migrated": self.total_migrated, "total_quarantined": self.total_quarantined,
+                "total_migrated": self.total_migrated, "total_written": self.total_written,
+                "total_quarantined": self.total_quarantined,
                 "total_outbox_enqueued": self.total_outbox_enqueued, "total_elapsed_seconds": self.total_elapsed_seconds,
                 "success": self.success, "session_chunks": self.session_chunks_result.to_dict(),
                 "memory_cards": self.memory_cards_result.to_dict()}
@@ -251,6 +269,7 @@ class QdrantToPostgresMigrator:
                         if getattr(record, "embedding", None) is None:
                             result.outbox_enqueued += 1
                         result.total_migrated += 1
+                        result.total_written += 1
             else:
                 for item in points:
                     point_id = None
@@ -270,6 +289,7 @@ class QdrantToPostgresMigrator:
                             verify(record)
                         if getattr(record, "embedding", None) is None:
                             result.outbox_enqueued += 1
+                        result.total_written += 1
                     result.total_migrated += 1
             offset = next_offset
             if not self.dry_run:
@@ -374,6 +394,18 @@ class QdrantToPostgresMigrator:
     def run_full_migration(self, project: str | None = None) -> FullMigrationSummary:
         started_at, started = datetime.now(timezone.utc).isoformat(), time.time()
         chunks, cards = self.migrate_session_chunks(project=project), self.migrate_memory_cards(project=project)
-        return FullMigrationSummary(started_at, datetime.now(timezone.utc).isoformat(), self.dry_run, chunks, cards,
-            chunks.total_migrated + cards.total_migrated, chunks.total_quarantined + cards.total_quarantined,
-            chunks.outbox_enqueued + cards.outbox_enqueued, round(time.time() - started, 4), not chunks.errors and not cards.errors)
+        # Keyword args on purpose: the field set grows over time, and a
+        # positional list silently mis-binds as soon as one field is inserted.
+        return FullMigrationSummary(
+            started_at=started_at,
+            completed_at=datetime.now(timezone.utc).isoformat(),
+            dry_run=self.dry_run,
+            session_chunks_result=chunks,
+            memory_cards_result=cards,
+            total_migrated=chunks.total_migrated + cards.total_migrated,
+            total_written=chunks.total_written + cards.total_written,
+            total_quarantined=chunks.total_quarantined + cards.total_quarantined,
+            total_outbox_enqueued=chunks.outbox_enqueued + cards.outbox_enqueued,
+            total_elapsed_seconds=round(time.time() - started, 4),
+            success=not chunks.errors and not cards.errors,
+        )
