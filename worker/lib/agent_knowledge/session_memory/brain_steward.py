@@ -376,7 +376,18 @@ class BrainStewardService:
             return self._safe_restricted_result({
                 'schema_version': 'llm_brain_human_acceptance_commit.v1', 'promotion_path': 'human_approval',
                 'canonical_write_performed': True, 'accepted_card': decided})
-        candidate = self._load_pending_candidate(candidate_memory_id)
+        try:
+            candidate = self._load_pending_candidate(candidate_memory_id)
+        except ValueError:
+            # A concurrent request may commit after the first decision read but
+            # before this pending-card read. Recheck the decision, never accept
+            # a different decision or silently return a later card state.
+            decided = self._load_decided(decision_id, candidate_memory_id, 'approve', approved_by)
+            if decided is None:
+                raise
+            return self._safe_restricted_result({
+                'schema_version': 'llm_brain_human_acceptance_commit.v1', 'promotion_path': 'human_approval',
+                'canonical_write_performed': True, 'accepted_card': decided})
         result = LLMBrainMemoryService(self.ledger, pgvector_store=self.pgvector_store).accept_human_approved_candidate(
             candidate, approved_by=approved_by, decision_id=decision_id
         )
@@ -394,7 +405,15 @@ class BrainStewardService:
                 'canonical_write_performed': True, 'rejected_card': decided})
         from .memory_promotion import human_reject_memory_card_candidate
 
-        candidate = self._load_pending_candidate(candidate_memory_id)
+        try:
+            candidate = self._load_pending_candidate(candidate_memory_id)
+        except ValueError:
+            decided = self._load_decided(decision_id, candidate_memory_id, 'reject', rejected_by)
+            if decided is None:
+                raise
+            return self._safe_restricted_result({
+                'schema_version': 'brain_steward_candidate_rejection.v1',
+                'canonical_write_performed': True, 'rejected_card': decided})
         if not reason or not reason.strip():
             raise ValueError('rejection reason required')
         def transform(current, target):
@@ -429,7 +448,16 @@ class BrainStewardService:
             return self._safe_restricted_result({
                 'schema_version': 'llm_brain_auto_acceptance_commit.v1', 'promotion_path': 'auto_policy',
                 'canonical_write_performed': True, 'accepted_card': decided})
-        candidate = self._load_pending_candidate(candidate_memory_id)
+        try:
+            candidate = self._load_pending_candidate(candidate_memory_id)
+        except ValueError:
+            decided = self._load_decided(operator_approval_ref, candidate_memory_id,
+                                        'auto_accept', operator_approval_ref)
+            if decided is None:
+                raise
+            return self._safe_restricted_result({
+                'schema_version': 'llm_brain_auto_acceptance_commit.v1', 'promotion_path': 'auto_policy',
+                'canonical_write_performed': True, 'accepted_card': decided})
         result = LLMBrainMemoryService(self.ledger, pgvector_store=self.pgvector_store).accept_auto_policy_candidate(
             candidate, evaluation, operator_approval_ref=operator_approval_ref
         )
@@ -450,9 +478,21 @@ class BrainStewardService:
                 return self._safe_restricted_result({
                     'schema_version': 'llm_brain_supersession_commit.v1', 'canonical_write_performed': True,
                     'new_card': decided, 'superseded_card': self._pg().get_steward_decision(decision_id)['result_target']})
-        proposal = self._load_proposal_of_kind(proposal_memory_id, "supersede")
-        old_id = str(proposal.get("steward_target_memory_id") or "")
-        old = self._load_current_target(old_id, what="supersede")
+        try:
+            proposal = self._load_proposal_of_kind(proposal_memory_id, "supersede")
+            old_id = str(proposal.get("steward_target_memory_id") or "")
+            old = self._load_current_target(old_id, what="supersede")
+        except ValueError:
+            # Re-read only the same decision's immutable result; unrelated
+            # commits remain failures rather than successful retries.
+            existing = self._get_card(proposal_memory_id)
+            target_id = str((existing or {}).get('steward_target_memory_id') or '')
+            decided = self._load_decided(decision_id, proposal_memory_id, 'supersede', approved_by, target_id)
+            if decided is None:
+                raise
+            return self._safe_restricted_result({
+                'schema_version': 'llm_brain_supersession_commit.v1', 'canonical_write_performed': True,
+                'new_card': decided, 'superseded_card': self._pg().get_steward_decision(decision_id)['result_target']})
         # 교체 후보(proposal)를 accept 하면서 old card 를 superseded 로 atomically demote 한다.
         result = LLMBrainMemoryService(self.ledger, pgvector_store=self.pgvector_store).supersede_accepted_card(
             old_card=old,
@@ -478,9 +518,20 @@ class BrainStewardService:
                     'schema_version': 'brain_steward_stale_commit.v1', 'canonical_write_performed': True,
                     'demoted_card': self._authority_item(self._pg().get_steward_decision(decision_id)['result_target'] or {}),
                     'committed_proposal': self._review_item(decided)}, 'stale_commit')
-        proposal = self._load_proposal_of_kind(proposal_memory_id, "stale")
-        target_id = str(proposal.get("steward_target_memory_id") or "")
-        target = self._load_current_target(target_id, what="stale")
+        try:
+            proposal = self._load_proposal_of_kind(proposal_memory_id, "stale")
+            target_id = str(proposal.get("steward_target_memory_id") or "")
+            target = self._load_current_target(target_id, what="stale")
+        except ValueError:
+            existing = self._get_card(proposal_memory_id)
+            target_id = str((existing or {}).get('steward_target_memory_id') or '')
+            decided = self._load_decided(decision_id, proposal_memory_id, 'stale', approved_by, target_id)
+            if decided is None:
+                raise
+            return assert_public_safe({
+                'schema_version': 'brain_steward_stale_commit.v1', 'canonical_write_performed': True,
+                'demoted_card': self._authority_item(self._pg().get_steward_decision(decision_id)['result_target'] or {}),
+                'committed_proposal': self._review_item(decided)}, 'stale_commit')
         committed_at = datetime.now(timezone.utc).isoformat()
         # proposal 을 검토 큐에서 제거하기 위해 종료(committed) 상태로 전이한다. currentness=stale 은
         # 유지되어 authority/recall lane 에는 들어가지 않는다. 다른 accepted card 와 일관되게

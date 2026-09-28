@@ -92,6 +92,33 @@ def test_pg_supersede_and_stale(isolated_pg_store):
         steward.supersede_commit(proposal_memory_id=proposal_id, approved_by="other", decision_id="replace")
 
 
+def test_approval_retry_when_other_request_commits_between_reads(isolated_pg_store, monkeypatch):
+    store = isolated_pg_store
+    first = BrainStewardService(NoCardLedger(), pgvector_store=store, allow_restricted=True)
+    second = BrainStewardService(NoCardLedger(), pgvector_store=store, allow_restricted=True)
+    memory_id = first.candidate_create(source_span=SPAN)["memory_id"]
+    real_load = second._load_decided
+    called = False
+    def interleaved_load(*args, **kwargs):
+        nonlocal called
+        if not called:
+            called = True
+            # This commits on an independent PG connection after the retry's
+            # first decision read and before it checks the pending candidate.
+            first.candidate_approve(candidate_memory_id=memory_id, approved_by="operator", decision_id="race")
+            return None
+        return real_load(*args, **kwargs)
+    monkeypatch.setattr(second, "_load_decided", interleaved_load)
+    result = second.candidate_approve(candidate_memory_id=memory_id, approved_by="operator", decision_id="race")
+    assert called
+    assert result == first.candidate_approve(candidate_memory_id=memory_id, approved_by="operator", decision_id="race")
+    assert store.get_steward_decision("race")["result_card"]["memory_id"] == memory_id
+    with store._scope() as db:
+        with db.cursor() as cur:
+            cur.execute("SELECT count(*) FROM steward_card_decisions WHERE decision_id = %s", ("race",))
+            assert cur.fetchone()["count"] == 1
+
+
 def test_pg_proposal_collision_and_permission_boundary(isolated_pg_store):
     store = isolated_pg_store
     steward = BrainStewardService(NoCardLedger(), pgvector_store=store)
