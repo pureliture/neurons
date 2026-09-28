@@ -61,7 +61,7 @@ from .session_memory.brain_query import (
     resolve_brain_ids,
     run_brain_query_v2,
 )
-from .session_memory.brain_read_model import LegacyLedgerBrainReadModel, build_semantic_recall
+from .session_memory.brain_read_model import LegacyLedgerBrainReadModel, PgStewardBrainReadModel, build_semantic_recall
 
 
 _SYNTHETIC_CANARY_PROVIDER = "lbrain-temporal-canary"
@@ -1013,7 +1013,11 @@ class KnowledgeSearchService:
         )
         self.read_pipeline = self.authorized_reader
         # Session-lifetime accepted-card snapshot shared across brain tool calls.
-        self._brain_card_cache = _SessionCardCache(LegacyLedgerBrainReadModel(self.ledger))
+        self._brain_card_cache = _SessionCardCache(
+            PgStewardBrainReadModel(self.pgvector_store)
+            if self.pgvector_store is not None
+            else LegacyLedgerBrainReadModel(self.ledger)
+        )
 
     def invalidate_brain_card_cache(self) -> None:
         """세션 card snapshot을 비워 다음 brain tool 호출이 ledger를 다시 읽게 한다."""
@@ -2270,7 +2274,11 @@ class KnowledgeSearchService:
                 brain_id=brain_id,
                 temporal_response=temporal_response,
             )
-        read_model = LegacyLedgerBrainReadModel(self.ledger)
+        read_model = (
+            PgStewardBrainReadModel(self.pgvector_store)
+            if self.pgvector_store is not None
+            else LegacyLedgerBrainReadModel(self.ledger)
+        )
         index_search = self._mirror_search or (
             self._brain_query_index_search if self.dataset_ids else None
         )
@@ -2352,7 +2360,12 @@ class KnowledgeSearchService:
         return results
 
     def brain_resolve(self, *, query: str = "") -> dict:
-        return resolve_brain_ids(read_model=LegacyLedgerBrainReadModel(self.ledger), query=query)
+        read_model = (
+            PgStewardBrainReadModel(self.pgvector_store)
+            if self.pgvector_store is not None
+            else LegacyLedgerBrainReadModel(self.ledger)
+        )
+        return resolve_brain_ids(read_model=read_model, query=query)
 
     def brain_memory_resolve(self, **arguments: Any) -> dict:
         """프로젝트 메모리 공개 read 경로. Graphiti 검색 후 PG 권위를 검증한다."""

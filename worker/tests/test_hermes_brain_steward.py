@@ -28,13 +28,15 @@ from agent_knowledge.mcp_server import (
     dispatch_tool_call,
 )
 from agent_knowledge.session_memory.brain_steward import BrainStewardService
+from agent_knowledge.postgres_store.pgvector_store import PgVectorStore
 
 PROJECT = "workspace-steward"
 
 
-def _service(tmp_path: Path, *, allow_restricted: bool = False) -> KnowledgeSearchService:
+def _service(tmp_path: Path, store: PgVectorStore, *, allow_restricted: bool = False) -> KnowledgeSearchService:
     return KnowledgeSearchService(
         ledger=_ledger(tmp_path),
+        pgvector_store=store,
         retired_index_bridge=DisabledRetiredIndexBridgeClient(),
         dataset_ids=[],
         allow_restricted_steward=allow_restricted,
@@ -80,9 +82,9 @@ def _span(**overrides) -> dict:
 # ------------------------------------------------------------------- M2 proposer
 
 
-def test_proposer_is_recorded_on_candidate_and_surfaced_in_queue(tmp_path):
+def test_proposer_is_recorded_on_candidate_and_surfaced_in_queue(isolated_pg_store, tmp_path):
     ledger = _ledger(tmp_path)
-    steward = BrainStewardService(ledger)
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store)
 
     result = steward.candidate_create(source_span=_span(), proposer="hermes")
 
@@ -92,30 +94,26 @@ def test_proposer_is_recorded_on_candidate_and_surfaced_in_queue(tmp_path):
     assert item["proposed_by"] == "hermes"
 
 
-def test_proposer_defaults_to_unspecified_when_omitted(tmp_path):
-    steward = BrainStewardService(_ledger(tmp_path))
+def test_proposer_defaults_to_unspecified_when_omitted(isolated_pg_store, tmp_path):
+    steward = BrainStewardService(_ledger(tmp_path), pgvector_store=isolated_pg_store)
     result = steward.candidate_create(source_span=_span())
     assert result["proposal"]["proposed_by"] == "unspecified"
 
 
-def test_proposer_is_normalized(tmp_path):
-    steward = BrainStewardService(_ledger(tmp_path))
+def test_proposer_is_normalized(isolated_pg_store, tmp_path):
+    steward = BrainStewardService(_ledger(tmp_path), pgvector_store=isolated_pg_store)
     result = steward.candidate_create(source_span=_span(), proposer="  Hermes ")
     assert result["proposal"]["proposed_by"] == "hermes"
 
 
-def test_stale_and_supersede_record_proposer(tmp_path):
-    from agent_knowledge.session_memory.llm_brain_service import LLMBrainMemoryService
-    from agent_knowledge.session_memory.memory_miner import (
-        build_memory_card_candidate_from_source_span,
-    )
-
+def test_stale_and_supersede_record_proposer(isolated_pg_store, tmp_path):
     ledger = _ledger(tmp_path)
-    steward = BrainStewardService(ledger)
-    candidate = build_memory_card_candidate_from_source_span(_span(), refresh_watermark="test")
-    accepted = LLMBrainMemoryService(ledger).accept_human_approved_candidate(
-        candidate, approved_by="ddalkak", decision_id="d0"
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store, allow_restricted=True)
+    candidate_id = steward.candidate_create(source_span=_span())["proposal"]["memory_id"]
+    accepted = steward.candidate_approve(
+        candidate_memory_id=candidate_id, approved_by="ddalkak", decision_id="d0"
     )["accepted_card"]
+    assert isolated_pg_store.get_steward_card(candidate_id)["lifecycle_state"] == "human_accepted"
 
     stale = steward.stale_mark(
         memory_id=accepted["memory_id"], reason="근거 교체로 stale", proposer="hermes"
@@ -130,8 +128,8 @@ def test_stale_and_supersede_record_proposer(tmp_path):
     assert superseded["proposal"]["proposed_by"] == "hermes"
 
 
-def test_proposer_flows_through_mcp_dispatch(tmp_path):
-    service = _service(tmp_path)
+def test_proposer_flows_through_mcp_dispatch(isolated_pg_store, tmp_path):
+    service = _service(tmp_path, isolated_pg_store)
     created = _text(
         dispatch_tool_call(
             {
@@ -152,9 +150,9 @@ def test_proposer_flows_through_mcp_dispatch(tmp_path):
     assert item["proposed_by"] == "hermes"
 
 
-def test_proposed_by_does_not_leak_raw_or_private(tmp_path):
+def test_proposed_by_does_not_leak_raw_or_private(isolated_pg_store, tmp_path):
     # 안전망: proposer 라벨도 forbidden-content fail-closed 를 통과해야 한다.
-    steward = BrainStewardService(_ledger(tmp_path))
+    steward = BrainStewardService(_ledger(tmp_path), pgvector_store=isolated_pg_store)
     result = steward.candidate_create(source_span=_span(), proposer="hermes")
     serialized = json.dumps(steward.review_queue_list(), ensure_ascii=False)
     assert "/Users/" not in serialized
@@ -165,11 +163,11 @@ def test_proposed_by_does_not_leak_raw_or_private(tmp_path):
 # ----------------------------------------------------- M4 restricted Hermes role
 
 
-def test_hermes_default_role_denies_all_restricted_tools(tmp_path):
+def test_hermes_default_role_denies_all_restricted_tools(isolated_pg_store, tmp_path):
     # Hermes 가 연결하는 기본 transport(allow_restricted_steward=False)에서 restricted
     # 도구(approve/reject/auto_accept/supersede_commit/stale_commit)는 모두 거부되고
     # 어떤 write 도 일어나지 않는다.
-    service = _service(tmp_path)  # default: allow_restricted=False (Hermes role)
+    service = _service(tmp_path, isolated_pg_store)  # default: allow_restricted=False (Hermes role)
     created = _text(
         dispatch_tool_call(
             {"name": MEMORY_CANDIDATE_CREATE_TOOL_NAME, "arguments": {**_span(), "proposer": "hermes"}},
@@ -213,15 +211,15 @@ def test_hermes_default_role_denies_all_restricted_tools(tmp_path):
         assert denied["authoritative_memory_changed"] is False
 
     # candidate 는 여전히 non-accepted 다(어떤 restricted write 도 없었다).
-    card = service.ledger.get_llm_brain_memory_card(candidate_id)
+    card = isolated_pg_store.get_steward_card(candidate_id)
     assert card["lifecycle_state"] not in {"accepted", "human_accepted", "auto_accepted"}
 
 
-def test_restricted_write_response_is_public_safe(tmp_path):
+def test_restricted_write_response_is_public_safe(isolated_pg_store, tmp_path):
     # human-gate 가 열린(allow_restricted=True) 경우에도 restricted write 응답은 raw/private
     # 필드를 노출하지 않고 안전 projection 으로 반환된다(C4).
     ledger = _ledger(tmp_path)
-    steward = BrainStewardService(ledger, allow_restricted=True)
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store, allow_restricted=True)
     created = steward.candidate_create(source_span=_span(), proposer="hermes")
     promoted = steward.candidate_approve(
         candidate_memory_id=created["proposal"]["memory_id"],
@@ -264,9 +262,9 @@ def test_safe_restricted_result_drops_nested_application_card(tmp_path):
 # ------------------------------------------------------------ M3 Korean round-trip
 
 
-def test_korean_free_text_round_trips_through_proposal(tmp_path):
+def test_korean_free_text_round_trips_through_proposal(isolated_pg_store, tmp_path):
     # 프로젝트 기본이 한국어이므로 redaction 이 한글 Unicode 를 훼손하지 않아야 한다.
-    steward = BrainStewardService(_ledger(tmp_path))
+    steward = BrainStewardService(_ledger(tmp_path), pgvector_store=isolated_pg_store)
     korean_title = "한국어 응답 선호 규칙"
     korean_summary = "사용자는 모든 자연어 응답을 한국어로 받기를 원한다"
     result = steward.candidate_create(

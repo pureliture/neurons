@@ -30,13 +30,14 @@ def _ledger(tmp_path: Path) -> Ledger:
     return Ledger(private / "ledger.sqlite")
 
 
-def _service(tmp_path: Path) -> KnowledgeSearchService:
+def _service(tmp_path: Path, store=None) -> KnowledgeSearchService:
     ledger = _ledger(tmp_path)
     return KnowledgeSearchService(
         ledger=ledger,
         retired_index_bridge=DisabledRetiredIndexBridgeClient(),
         dataset_ids=[],
         allow_private_results=True,
+        pgvector_store=store,
     )
 
 
@@ -68,8 +69,8 @@ def test_adversarial_public_surface_blocks_admin_and_steward_tools(tmp_path: Pat
         assert f"unknown tool: {tool}" in response["error"]["message"]
 
 
-def test_adversarial_candidate_create_injection_prevention(tmp_path: Path):
-    service = _service(tmp_path)
+def test_adversarial_candidate_create_injection_prevention(tmp_path: Path, isolated_pg_store):
+    service = _service(tmp_path, isolated_pg_store)
     # Attacker tries to inject accepted lifecycle and active authorization status
     malicious_args = {
         "card_type": "decision",
@@ -112,6 +113,12 @@ def test_adversarial_candidate_create_injection_prevention(tmp_path: Path):
     assert result["proposal_write_performed"] is True
     assert result["authoritative_memory_changed"] is False
     assert result["accepted"] is False
+    stored = isolated_pg_store.get_steward_card(result["memory_id"])
+    assert stored["lifecycle_state"] == "candidate"
+    assert stored["authorization_status"] == "disabled"
+    assert stored["approval_state"] == "suggested"
+    assert service.brain_steward().authority_pack_read(project="project-omega")["items"] == []
+    assert service.brain_steward().review_queue_list(project="project-omega")["items"][0]["memory_id"] == result["memory_id"]
 
 
 def test_adversarial_candidate_create_invalid_hash(tmp_path: Path):

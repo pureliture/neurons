@@ -33,13 +33,15 @@ class Store:
         self.failure = failure
         self.evidence = evidence if evidence is not None else {"edges": [], "truncated": False}
 
-    def graph_projection_health(self, project, *, as_of=None):
+    def graph_projection_health(self, project, *, as_of=None, steward_only=False):
+        assert steward_only is True
         self.calls.append("health")
         if self.failure == "health":
             raise RuntimeError("database down")
         return {"unprojected": self.unprojected, "projection_lag_ms": 42 if self.unprojected else None}
 
     def list_authorized_cards(self, **kwargs):
+        assert kwargs["steward_only"] is True
         self.calls.append(("list", kwargs.get("memory_ids")))
         if self.failure == "list":
             raise RuntimeError("database down")
@@ -51,6 +53,7 @@ class Store:
         return cards[:kwargs.get("limit", 100)]
 
     def hybrid_search(self, **kwargs):
+        assert kwargs["steward_only"] is True
         self.calls.append("hybrid")
         if self.failure == "hybrid":
             raise RuntimeError("database down")

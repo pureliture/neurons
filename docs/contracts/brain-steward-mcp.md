@@ -21,13 +21,13 @@ sanctioned proposal-only extension이며, SoT는 `specs/brain-steward-hardening/
 
 ## Authority model
 
-- `neurons` ledger가 authority다. Qdrant/graph/RetiredIndexBridge는 canonical authority가 아니다.
+- 승인 카드 steward lane의 authority는 PostgreSQL `memory_cards` + `steward_card_decisions`다. Qdrant/graph/RetiredIndexBridge는 canonical authority가 아니다. 세션 ledger와 별도 레거시 카드 lane은 이번 전환 대상이 아니다.
 - **accepted + current** MemoryCard만 authoritative memory다.
 - candidate/proposal은 recall에서 정답처럼 쓰이지 않는다. authority pack에 포함되지 않는다.
 - stale/superseded memory는 authority pack에서 빠지고, review queue에서 downgraded
   evidence로만 노출된다.
 - 이 표면은 기존 `brain_context_resolve` read path와 충돌하지 않는다. authority pack은
-  ledger의 accepted+current card만 직접 읽는 별도 read다.
+  PG steward lane의 accepted+current card만 직접 읽는 별도 read다.
 
 ## Tool classification
 
@@ -60,8 +60,8 @@ opaque `memory_id`, sha256 evidence hash 개수, source ref 개수, 그리고 pr
 - write 경계: `validate_memory_card_envelope`는 `summary`/`render_text`뿐 아니라
   agent-supplied free text인 `title`/`confidence_basis`도 forbidden-content scan한다.
   `/Users/`·`~/`·`/private/`·`/Volumes/` private path, raw transcript, Bearer/secret
-  assignment가 들어간 card는 ledger에 **저장되지 않는다**.
-- proposal write: `_persist_proposal`은 ledger upsert **이전에** review-queue projection을
+  assignment가 들어간 card는 PG steward 저장소에 **저장되지 않는다**.
+- proposal write: `_persist_proposal`은 PostgreSQL 저장 **이전에** review-queue projection을
   `assert_public_safe`로 검증한다. 안전하지 않은 proposal은 한 줄도 저장되지 않으므로 review
   queue 읽기를 망가뜨리지 않는다.
 - 잔여 한계: redacted summary/title는 agent-authored free text다. 무작위 hex처럼 보이는
@@ -71,7 +71,7 @@ opaque `memory_id`, sha256 evidence hash 개수, source ref 개수, 그리고 pr
 
 ### Proposal tools
 
-proposal tool은 항상 **non-accepted lifecycle**(candidate/needs_review)로만 ledger에 남는다.
+proposal tool은 항상 **non-accepted lifecycle**(candidate/needs_review)로만 PostgreSQL steward lane에 남는다.
 
 - 후보 `memory_id`는 `mem_steward_` prefix로 발급되어 accepted/miner candidate id와 분리된다.
 - proposal은 idempotent하다(같은 입력 → 같은 후보).
@@ -94,10 +94,12 @@ proposal은 restricted commit으로만 authoritative truth가 된다 — 따라�
   `currentness=superseded`(+`superseded_by`)로 atomically demote한다. proposal은 accept되며
   review queue를 떠난다.
 - `memory_stale_commit`은 stale proposal을 확정해 대상 accepted card를 `currentness=stale`로
-  demote한다. proposal은 committed 상태로 전이되어 queue를 떠나고, 대상은 authority/recall lane에서
-  빠진다. commit에는 audit feedback record가 남는다.
-- 완결 verb는 `memory_promotion`(`commit_supersession`/`commit_stale`)과
-  `LLMBrainMemoryService.supersede_accepted_card`를 재사용한다.
+  demote한다. proposal은 committed 상태로 전이되어 queue를 떠나고, 대상은 현재 authority/recall lane에서
+  빠진다. 결정 감사와 당시 반환 결과는 PG에 저장된다.
+- 승인 시 `valid_from`을 결정 시각으로 설정하고 교체/stale 시 이전 카드의 `valid_to`를 닫는다.
+  결정 ID 재시도는 이후 카드 상태가 바뀌어도 당시 감사 결과를 반환한다.
+- 완결 전이에는 `memory_promotion`(`commit_supersession`/`commit_stale`)과
+  `LLMBrainMemoryService.supersede_accepted_card`의 상태 전이 함수를 재사용하지만 저장은 PG 트랜잭션이다.
 
 `memory_candidate_create` / `memory_supersede_propose`의 입력은 raw transcript가 아니라
 **redacted source_span**이다: `card_type`, `project`, `provider`, `typed_payload`,
@@ -116,35 +118,40 @@ restricted tool은 Hermes가 바로 쓰면 안 된다. 기본 권한에서는 **
   `BrainStewardService(allow_auto_accept=True)`로만 열리며, review_commit 허용만으로는 열리지
   않는다. `operator_approval_ref`가 비어 있으면 `apply_auto_acceptance_plan`이 차단한다.
 
-두 capability 모두 기본값 `False`다. 부족하면 `StewardPermissionError`가 ledger write
+두 capability 모두 기본값 `False`다. 부족하면 `StewardPermissionError`가 PG write
 **이전에** raise된다. authority를 바꾸는 commit(approve/reject/stale_commit/supersede_commit)은
-audit feedback record를 남기고 `list_llm_brain_feedback_records`로 조회된다. identity/permission
-profile 바인딩은 transport 계층 책임으로 범위 밖이다.
+PG의 `steward_card_decisions`에 감사와 결정 당시 결과를 남긴다. SQLite
+`list_llm_brain_feedback_records`는 이 steward 결정의 권위 조회가 아니다.
+identity/permission profile 바인딩은 transport 계층 책임으로 범위 밖이다.
 
 ## Code map
 
 - 서비스/proposal·read 로직: `worker/lib/agent_knowledge/session_memory/brain_steward.py`
 - tool contract(schema): `worker/lib/agent_knowledge/mcp_tools.py`
 - JSON-RPC dispatch: `worker/lib/agent_knowledge/mcp_jsonrpc.py`
-- review-queue ledger read: `worker/lib/agent_knowledge/ledger_native_memory_mixin.py`
-  (`list_llm_brain_review_queue`)
+- steward PG 권위/감사/review queue: `worker/lib/agent_knowledge/postgres_store/pgvector_store.py`
+  (`memory_cards.steward_envelope`, `steward_card_decisions`)
 - 서비스 wiring/flag: `worker/lib/agent_knowledge/knowledge_search_service.py`
-- 재사용한 기존 모델: MemoryCard envelope/validation(`session_memory/memory_card.py`),
+- 재사용한 상태 전이: MemoryCard envelope/validation(`session_memory/memory_card.py`),
   candidate builder(`session_memory/memory_miner.py`), promotion(`session_memory/memory_promotion.py`,
   `session_memory/llm_brain_service.py`)
-- 완결/stale verb: `session_memory/memory_promotion.py`(`commit_stale`, `build_stale_proposal_card`,
+- 완결/stale 상태 함수: `session_memory/memory_promotion.py`(`commit_stale`, `build_stale_proposal_card`,
   `commit_supersession`)
 - 공유 lifecycle 상수: `session_memory/memory_card.py`(`REVIEW_LIFECYCLE_STATES`)
 - spec(SoT): `specs/brain-steward-hardening/{requirements,design}.md`
 - tests: `worker/tests/test_brain_steward.py`
 
+## PG 단일 카드 권위 전환 (PR #271 수정 중)
+
+**현재 코드의 steward 카드 경로는 PG 단일 권위**로 후보·검토·결정 감사·교체·stale·조회 및 outbox를 처리한다. 카드·감사·outbox 상태 전이는 하나의 PG 트랜잭션이며, 승인 전 후보는 outbox에 들어가지 않는다. 이 구현은 운영에 아직 배포되지 않았으므로 운영 동작으로 해석하면 안 된다. 정확한 범위와 운영 컷오버 경계는 `specs/lbrain-architecture-rationalization/approved-card-pg-single-store.md`를 따른다. 기존 SQLite 카드의 이관·삭제는 별도 승인 단계다.
+
 ## Transport / writability
 
 라이브 recall MCP transport는 read-only ledger(`Ledger.open_read_only`)로 서비스를 만든다.
-proposal/restricted write는 read-only ledger 위에서 fail-closed로 거부된다(`_guard_writable`).
-라이브 proposal write를 켜려면 writable ledger를 쓰는 별도 transport 배선이 필요하다 — 이는
-의도적 다음 단계이며, read 경로(authority pack/review queue)는 read-only transport에서 그대로
-동작한다.
+이 transport의 쓰기 거부 권한은 PG 연결 여부와 독립적이다. proposal/restricted write는
+read-only transport에서 fail-closed로 거부된다(`_guard_writable`).
+라이브 proposal write를 켜려면 writable transport와 PG 연결 및 권한 승인이 별도로 필요하다.
+read 경로(authority pack/review queue)는 PG가 배선된 read-only transport에서 동작한다.
 
 ## Next steps (out of scope)
 

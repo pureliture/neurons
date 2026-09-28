@@ -54,6 +54,34 @@ class LegacyLedgerBrainReadModel:
         return [(str(row["project"] or ""), int(row["n"])) for row in rows]
 
 
+class PgStewardBrainReadModel:
+    """Steward-only PG read entrypoint; legacy SQLite memory_cards stay separate."""
+
+    def __init__(self, pgvector_store):
+        if pgvector_store is None:
+            raise ValueError('PostgreSQL steward store is required')
+        self._store = pgvector_store
+
+    def get_card_meta(self, card_id: str) -> dict | None:
+        card = self._store.get_steward_card(card_id)
+        if (card is None or card.get("approval_state") not in {"approved", "auto_accepted"}
+                or card.get("currentness") != "current"
+                or card.get("lifecycle_state") not in {"accepted", "human_accepted", "auto_accepted"}
+                or card.get("steward_proposal_kind") == "stale"):
+            return None
+        return card
+
+    def list_recent_cards(self, *, project: str, limit: int) -> list[dict]:
+        return self._store.list_steward_cards(project=project, accepted_only=True,
+                                               current_only=True, limit=limit)
+
+    def list_accepted_cards(self, *, project: str, limit: int) -> list[dict]:
+        return self._store.list_steward_cards(project=project, accepted_only=True, limit=limit)
+
+    def list_project_card_counts(self) -> list[tuple[str, int]]:
+        return self._store.list_steward_project_counts()
+
+
 def build_semantic_recall(*, ledger, retired_index_bridge, memory_id: str):
     """(query, brain_id) -> hits 클로저. store는 lazy 생성 —
     read-only ledger 등 구성 예외가 run 시점 fallback으로 흡수되게 한다."""

@@ -322,6 +322,171 @@ class PgVectorStore:
             )
         return card.memory_id
 
+    def put_steward_proposal(self, card: Mapping[str, Any]) -> dict[str, Any]:
+        """Persist a non-authoritative steward envelope; never overwrite a committed card."""
+        from ..session_memory.llm_brain_service import _build_pg_card
+
+        envelope = dict(card)
+        from ..session_memory.memory_card import validate_memory_card_envelope
+        validate_memory_card_envelope(envelope)
+        if envelope.get('lifecycle_state') not in ('candidate', 'needs_review', 'suggested_accept') or envelope.get('authorization_status') != 'disabled':
+            raise ValueError('steward proposal must be pending and disabled')
+        pg_card = _build_pg_card(envelope, active=False)
+        with self.transaction() as db:
+            with db.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (pg_card.memory_id,))
+                cur.execute("SELECT steward_envelope, content_hash, lifecycle_state FROM memory_cards WHERE memory_id = %s FOR UPDATE", (pg_card.memory_id,))
+                row = cur.fetchone()
+                if row is not None:
+                    if (_row_value(row, "steward_envelope", 0) is None or
+                        _row_value(row, "content_hash", 1) != pg_card.content_hash or
+                        _row_value(row, "lifecycle_state", 2) in ('accepted', 'human_accepted', 'auto_accepted', 'human_rejected', 'rejected')):
+                        raise ValueError("proposal identity collision or already committed")
+                    stored = _json_value(_row_value(row, "steward_envelope", 0))
+                    if (stored.get('steward_proposal_kind') != envelope.get('steward_proposal_kind') or
+                        stored.get('steward_target_memory_id') != envelope.get('steward_target_memory_id')):
+                        raise ValueError('conflicting steward proposal')
+                    return stored
+            # A proposal is not approved. Do not enqueue embedding/graph work
+            # before the restricted decision commits the accepted authority.
+            self.insert_card(pg_card, conn=db)
+            with db.cursor() as cur:
+                cur.execute("UPDATE memory_cards SET steward_envelope = %s::jsonb WHERE memory_id = %s", (_json_text(envelope), pg_card.memory_id))
+        return envelope
+
+    def get_steward_card(self, memory_id: str, *, conn: Any | None = None) -> dict[str, Any] | None:
+        with self._scope(conn=conn) as db:
+            with db.cursor() as cur:
+                cur.execute("SELECT steward_envelope FROM memory_cards WHERE memory_id = %s AND steward_envelope IS NOT NULL", (memory_id,))
+                row = cur.fetchone()
+        return _json_value(_row_value(row, "steward_envelope", 0)) if row else None
+
+    def list_steward_cards(self, *, project: str = "", review_only: bool = False, accepted_only: bool = False, current_only: bool = False, limit: int = 20) -> list[dict[str, Any]]:
+        if not 1 <= int(limit) <= 100:
+            raise ValueError("bounded steward limit required")
+        clauses = ["steward_envelope IS NOT NULL"]
+        params: list[Any] = []
+        if project:
+            clauses.append("project = %s")
+            params.append(project)
+        if review_only:
+            clauses.append("lifecycle_state IN ('candidate', 'needs_review', 'suggested_accept')")
+        if accepted_only:
+            clauses.extend(("lifecycle_state IN ('accepted', 'human_accepted', 'auto_accepted')", "steward_envelope->>'approval_state' IN ('approved', 'auto_accepted')", "authorization_status = 'active'", "valid_from <= NOW()", "(valid_to IS NULL OR valid_to > NOW())"))
+        if current_only:
+            clauses.append("currentness = 'current'")
+        if accepted_only:
+            clauses.append("coalesce(steward_envelope->>'steward_proposal_kind', '') <> 'stale'")
+        with self._scope() as db:
+            with db.cursor() as cur:
+                cur.execute(f"SELECT steward_envelope FROM memory_cards WHERE {' AND '.join(clauses)} ORDER BY created_at DESC, memory_id LIMIT %s", (*params, int(limit)))
+                return [_json_value(_row_value(row, "steward_envelope", 0)) for row in cur.fetchall()]
+
+    def list_steward_project_counts(self) -> list[tuple[str, int]]:
+        with self._scope() as db:
+            with db.cursor() as cur:
+                cur.execute("""SELECT project, count(*) AS n FROM memory_cards
+                    WHERE steward_envelope IS NOT NULL AND authorization_status = 'active'
+                      AND lifecycle_state IN ('accepted', 'human_accepted', 'auto_accepted')
+                    GROUP BY project ORDER BY project""")
+                return [(str(_row_value(row, 'project', 0)), int(_row_value(row, 'n', 1)))
+                        for row in cur.fetchall()]
+
+    def get_steward_decision(self, decision_id: str) -> dict[str, Any] | None:
+        with self._scope() as db:
+            with db.cursor() as cur:
+                cur.execute("SELECT decision_id, memory_id, content_hash, action, actor, target_memory_id, result_card, result_target FROM steward_card_decisions WHERE decision_id = %s", (decision_id,))
+                row = cur.fetchone()
+                if row is None:
+                    return None
+                return {name: _row_value(row, name, index) for index, name in enumerate(
+                    ('decision_id', 'memory_id', 'content_hash', 'action', 'actor', 'target_memory_id', 'result_card', 'result_target'))}
+
+    def steward_decision(self, *, decision_id: str, memory_id: str, action: str, actor: str,
+                         content_hash: str, target_memory_id: str = "", transform: Any) -> dict[str, Any]:
+        """Lock, validate and change steward rows, audit and outboxes in one PG transaction."""
+        if not decision_id or not actor or action not in {'approve', 'auto_accept', 'reject', 'supersede', 'stale'}:
+            raise ValueError("steward decision identity required")
+        with self.transaction() as db:
+            with db.cursor() as cur:
+                # Serialize same-decision retries before checking the audit row.
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (decision_id,))
+                cur.execute("SELECT decision_id, memory_id, content_hash, action, actor, target_memory_id, result_card, result_target FROM steward_card_decisions WHERE decision_id = %s", (decision_id,))
+                previous = cur.fetchone()
+                if previous:
+                    values = tuple(_row_value(previous, name, i) for i, name in enumerate(('memory_id', 'content_hash', 'action', 'actor', 'target_memory_id'), 1))
+                    if values != (memory_id, content_hash, action, actor, target_memory_id or None):
+                        raise ValueError("conflicting steward decision id")
+                    # An idempotent retry must return the decision-time result,
+                    # not a card that may have since become stale or superseded.
+                    stored_card = _row_value(previous, 'result_card', 6)
+                    if stored_card is None:
+                        raise ValueError('steward decision result unavailable for safe retry')
+                    stored_target = _row_value(previous, 'result_target', 7)
+                    return {'card': _json_value(stored_card),
+                            'target': _json_value(stored_target) if stored_target is not None else None}
+                # Consistent lock ordering across competing decisions.
+                ids = sorted({memory_id, *([target_memory_id] if target_memory_id else [])})
+                for card_id in ids:
+                    cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (card_id,))
+                cur.execute("SELECT memory_id, steward_envelope, content_hash FROM memory_cards WHERE memory_id = ANY(%s) ORDER BY memory_id FOR UPDATE", (ids,))
+                rows = {str(_row_value(row, 'memory_id', 0)): row for row in cur.fetchall()}
+                if len(rows) != len(ids) or any(_row_value(row, 'steward_envelope', 1) is None for row in rows.values()):
+                    raise ValueError("unknown steward card or target")
+                if _row_value(rows[memory_id], 'content_hash', 2) != content_hash:
+                    raise ValueError("steward card content hash changed")
+                card = _json_value(_row_value(rows[memory_id], 'steward_envelope', 1))
+                target = _json_value(_row_value(rows[target_memory_id], 'steward_envelope', 1)) if target_memory_id else None
+                changed_card, changed_target = transform(card, target)
+                # Use one DB timestamp inside the decision transaction for every
+                # formerly-current card. The envelope and SQL validity must agree.
+                cur.execute("SELECT clock_timestamp()")
+                committed_at = _row_value(cur.fetchone(), 'clock_timestamp', 0)
+                for changed in (changed_card, changed_target):
+                    if changed is None:
+                        continue
+                    original = card if changed['memory_id'] == memory_id else target
+                    if changed.get('currentness') in ('superseded', 'stale'):
+                        if original is not None and original.get('currentness') == 'current':
+                            changed['valid_to'] = committed_at.isoformat()
+                    elif (changed.get('approval_state') in ('approved', 'auto_accepted')
+                          and original is not None and original.get('approval_state') not in ('approved', 'auto_accepted')
+                          and changed.get('steward_proposal_kind') != 'stale'):
+                        # A pending proposal had no authority before this decision.
+                        changed['valid_from'] = committed_at.isoformat()
+                for changed in (changed_card, changed_target):
+                    if changed is None:
+                        continue
+                    card_id = str(changed['memory_id'])
+                    if changed['content_hash'] != _row_value(rows[card_id], 'content_hash', 2):
+                        raise ValueError("steward content hash cannot change during transition")
+                    cur.execute("""UPDATE memory_cards SET steward_envelope = %s::jsonb, lifecycle_state = %s,
+                        authorization_status = %s, currentness = %s, valid_from = COALESCE(%s::timestamptz, valid_from), valid_to = %s, updated_at = NOW()
+                        WHERE memory_id = %s""", (_json_text(changed), changed['lifecycle_state'],
+                        'active' if changed.get('approval_state') in ('approved', 'auto_accepted') else 'disabled',
+                        changed.get('currentness') or 'unknown', changed.get('valid_from'), changed.get('valid_to'), card_id))
+                    if (changed.get('approval_state') in ('approved', 'auto_accepted')
+                            and changed.get('currentness') == 'current'
+                            and changed.get('steward_proposal_kind') != 'stale'):
+                        self._enqueue_outbox_on(db, target_type='memory_card', target_id=card_id,
+                                                content_hash=changed['content_hash'], payload_text=str(changed.get('summary') or ''))
+                        revision = f"{changed['content_hash']}:{changed['lifecycle_state']}:current"
+                        self._enqueue_graph_outbox_on(db, source_type='memory_card', source_id=card_id,
+                            source_revision=revision,
+                            content_hash=changed['content_hash'], episode_payload={
+                                'source_type': 'memory_card', 'source_id': card_id, 'source_revision': revision,
+                                'content_hash': changed['content_hash'], 'authority_memory_id': card_id,
+                                'project': changed['project'], 'card_type': changed['card_type'],
+                                'title': changed['title'], 'summary': changed['summary'],
+                                'typed_payload': changed.get('typed_payload') or {},
+                                'lifecycle_state': changed['lifecycle_state'], 'currentness': 'current'})
+                cur.execute("""INSERT INTO steward_card_decisions
+                    (decision_id, memory_id, content_hash, action, actor, target_memory_id, result_card, result_target)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)""",
+                    (decision_id, memory_id, content_hash, action, actor, target_memory_id or None,
+                     _json_text(changed_card), _json_text(changed_target) if changed_target is not None else None))
+                return {'card': changed_card, 'target': changed_target}
+
     def get_card(self, memory_id: str, conn: Any | None = None) -> MemoryCard | None:
         """Read one card back from PostgreSQL."""
 
@@ -999,12 +1164,16 @@ class PgVectorStore:
     def list_authorized_cards(
         self, *, project: str, memory_ids: list[str] | None = None,
         as_of: datetime | date | str | None = None, limit: int = 100,
-        after_memory_id: str | None = None,
+        after_memory_id: str | None = None, steward_only: bool = False,
     ) -> list[dict[str, Any]]:
-        """공개 조회와 graph join의 권위 필터를 SQL 한 번으로 적용한다."""
+        """Apply authority SQL; steward-only reads explicitly exclude legacy cards."""
         if not project or not 1 <= limit <= 100:
             raise ValueError("project and bounded limit required")
         clauses, params = _authority_filter(project, as_of)
+        if steward_only:
+            clauses.extend(("steward_envelope IS NOT NULL",
+                            "steward_envelope->>'approval_state' IN ('approved', 'auto_accepted')",
+                            "coalesce(steward_envelope->>'steward_proposal_kind', '') <> 'stale'"))
         if memory_ids is not None:
             clauses.append("memory_id = ANY(%s)")
             params.append(list(memory_ids)[:100])
@@ -1025,9 +1194,14 @@ class PgVectorStore:
                 return [dict(row) if isinstance(row, Mapping) else dict(zip(names, row))
                         for row in cur.fetchall()]
 
-    def graph_projection_health(self, project: str, *, as_of: Any = None) -> dict[str, Any]:
+    def graph_projection_health(self, project: str, *, as_of: Any = None,
+                                steward_only: bool = False) -> dict[str, Any]:
         """현재 권위 revision의 투영 누락만 측정한다. 검색 무응답은 lag 증거가 아니다."""
         clauses, params = _authority_filter(project, as_of)
+        if steward_only:
+            clauses.extend(("steward_envelope IS NOT NULL",
+                            "steward_envelope->>'approval_state' IN ('approved', 'auto_accepted')",
+                            "coalesce(steward_envelope->>'steward_proposal_kind', '') <> 'stale'"))
         with self._scope() as db:
             with db.cursor() as cur:
                 cur.execute(
@@ -1063,6 +1237,7 @@ class PgVectorStore:
         currentness: str | None = "current",
         as_of: datetime | date | str | None = None,
         text_query: str | None = None,
+        steward_only: bool = False,
         **kwargs: Any,
     ) -> list[dict[str, Any]]:
         """Run filtered pgvector search with deterministic tie-breaking."""
@@ -1086,11 +1261,15 @@ class PgVectorStore:
         if actual_project:
             clauses.append("project = %s")
             params.append(actual_project)
+        if steward_only:
+            clauses.extend(("steward_envelope IS NOT NULL",
+                            "steward_envelope->>'approval_state' IN ('approved', 'auto_accepted')",
+                            "coalesce(steward_envelope->>'steward_proposal_kind', '') <> 'stale'"))
         if authorization_status:
             clauses.append("authorization_status = %s")
             params.append(authorization_status)
         if currentness == "current" and as_of:
-            clauses.append("currentness IN ('current', 'superseded')")
+            clauses.append("(currentness IN ('current', 'superseded') OR (currentness = 'stale' AND valid_to IS NOT NULL))")
         elif currentness:
             clauses.append("currentness = %s")
             params.append(currentness)
@@ -1668,7 +1847,7 @@ def _authority_filter(project: str, as_of: Any) -> tuple[list[str], list[Any]]:
     instant = _parse_as_of(as_of) or datetime.now(timezone.utc)
     return [
         "project = %s", "authorization_status = 'active'",
-        "currentness IN ('current', 'superseded')" if as_of else "currentness = 'current'",
+        "(currentness IN ('current', 'superseded') OR (currentness = 'stale' AND valid_to IS NOT NULL))" if as_of else "currentness = 'current'",
         "lifecycle_state IN ('accepted', 'human_accepted', 'auto_accepted')",
         "valid_from <= %s", "(valid_to IS NULL OR valid_to > %s)",
     ], [project, instant, instant]

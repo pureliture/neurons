@@ -341,19 +341,39 @@ def test_live_brain_steward_candidate_uses_pg_store(tmp_path: Path):
         "confidence": 0.9,
         "confidence_basis": "integration test",
     }
-    result = BrainStewardService(ledger, pgvector_store=store).candidate_create(
-        source_span=source_span,
-    )
-    memory_id = str(result["memory_id"])
+    steward = BrainStewardService(ledger, pgvector_store=store, allow_restricted=True)
+    result = steward.candidate_create(source_span=source_span, proposer="hermes")
+    memory_id = str(result["proposal"]["memory_id"])
     try:
-        stored = store.get_card(memory_id)
+        stored = store.get_steward_card(memory_id)
         assert stored is not None
-        assert stored.lifecycle_state == "candidate"
-        assert stored.authorization_status == "disabled"
+        assert stored["lifecycle_state"] == "candidate"
+        assert stored["authorization_status"] == "disabled"
+        assert stored["steward_proposed_by"] == "hermes"
+        assert any(item["memory_id"] == memory_id for item in steward.review_queue_list(project="lbrain-pg-contract")["items"])
+        assert all(item["memory_id"] != memory_id for item in steward.authority_pack_read(project="lbrain-pg-contract")["items"])
+        # Pending proposals have no projection work until a restricted decision commits.
+        assert all(job.target_id != memory_id for job in store.list_outbox_jobs())
+        approved = steward.candidate_approve(
+            candidate_memory_id=memory_id, approved_by="ddalkak", decision_id=f"approve_{suffix}"
+        )
+        assert approved["accepted_card"]["memory_id"] == memory_id
+        assert store.get_steward_card(memory_id)["lifecycle_state"] == "human_accepted"
+        decision = store.get_steward_decision(f"approve_{suffix}")
+        assert decision is not None
+        assert decision["memory_id"] == memory_id
+        assert decision["action"] == "approve"
+        assert decision["actor"] == "ddalkak"
         assert any(job.target_id == memory_id for job in store.list_outbox_jobs())
+        assert any(item["memory_id"] == memory_id for item in steward.authority_pack_read(project="lbrain-pg-contract")["items"])
+        assert all(item["memory_id"] != memory_id for item in steward.review_queue_list(project="lbrain-pg-contract")["items"])
+        # The old SQLite ledger never receives this card or the review decision.
+        assert ledger.get_llm_brain_memory_card(memory_id) is None
+        assert ledger.list_llm_brain_feedback_records(limit=10) == []
     finally:
         with store.transaction() as conn:
             with conn.cursor() as cur:
+                cur.execute("DELETE FROM steward_card_decisions WHERE decision_id = %s", (f"approve_{suffix}",))
                 cur.execute("DELETE FROM embedding_outbox WHERE target_id = %s", (memory_id,))
                 cur.execute("DELETE FROM graph_projection_outbox WHERE source_id = %s", (memory_id,))
                 cur.execute("DELETE FROM memory_cards WHERE memory_id = %s", (memory_id,))
@@ -615,12 +635,11 @@ def test_live_duplicate_cas_commits_once_and_old_dead_letter_preserves_new_conte
 
 
 @live_pg
-def test_live_graph_join_and_vector_search_enforce_authority_filters():
+def test_live_graph_join_and_vector_search_enforce_authority_filters(isolated_pg_store):
     from dataclasses import replace
     from datetime import timedelta
 
-    store = PgVectorStore(dsn=PG_DSN)
-    store.execute_ddl()
+    store = isolated_pg_store
     prefix = f"m3_{uuid.uuid4().hex[:12]}"
     now = datetime.now(timezone.utc)
     base = _card(prefix + "_visible", summary="transaction vector search")

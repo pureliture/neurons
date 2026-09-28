@@ -5,10 +5,13 @@ import sys
 
 import agent_knowledge.session_memory.autopilot_cli as autopilot_cli
 
+import pytest
+
 from agent_knowledge.ledger import Ledger
 from agent_knowledge.session_memory.memory_miner import build_memory_card_candidate_from_source_span
 from agent_knowledge.session_memory.autopilot_cli import (
     RETIRED_BRIDGE_LIVE_MINING_BLOCKED_EXIT,
+    PG_STORE_REQUIRED_EXIT,
     main,
     mine_live_candidates,
     run_autopilot_command,
@@ -59,23 +62,24 @@ def _candidate(**overrides):
     return build_memory_card_candidate_from_source_span(span, refresh_watermark="wm")
 
 
-def test_run_autopilot_command_populates_ledger_and_returns_recall_snapshot(tmp_path):
+def test_run_autopilot_command_uses_pg_for_recall(tmp_path):
+    from test_autopilot_loop import _StewardStore
+
+    store = _StewardStore()
     ledger = Ledger(tmp_path / "ledger.sqlite")
-    candidates = [
-        _candidate(),
-        _candidate(source_ref={"source_id": "s2"}, span_ref={"span_id": "p2"}, content_hash="sha256:d4735e3a265e16eee03f59718b9b5d03019c07d8b6c51f90da3a666eec13ab35"),
-    ]
+    result = run_autopilot_command(ledger=ledger, pgvector_store=store,
+                                   candidates=[_candidate()], project=PROJECT, refresh_watermark="wm")
+    assert result["cycle"]["accepted_count"] == 1
+    assert result["recall"]["current_count"] == 1
+    assert ledger.list_llm_brain_memory_cards() == []
 
-    result = run_autopilot_command(
-        ledger=ledger,
-        candidates=candidates,
-        project=PROJECT,
-        refresh_watermark="wm",
-    )
 
-    assert result["cycle"]["accepted_count"] == 2
-    assert result["cycle"]["needs_review_count"] == 0
-    assert result["recall"]["current_count"] == 2
+def test_run_autopilot_command_requires_pg_before_any_sqlite_write(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    with pytest.raises(ValueError, match="PostgreSQL steward store is required"):
+        run_autopilot_command(ledger=ledger, candidates=[_candidate()], project=PROJECT,
+                              refresh_watermark="wm")
+    assert ledger.list_llm_brain_memory_cards() == []
 
 
 _ENVELOPE_COMPLETION = (
@@ -100,11 +104,24 @@ def test_mine_live_candidates_then_run_command_end_to_end(tmp_path):
     assert candidates[0].get("memory_id")
 
     ledger = Ledger(tmp_path / "ledger.sqlite")
-    result = run_autopilot_command(
-        ledger=ledger, candidates=candidates, project=PROJECT, refresh_watermark="live"
-    )
-    assert result["cycle"]["accepted_count"] == 1
-    assert result["recall"]["current_count"] == 1
+    with pytest.raises(ValueError, match="PostgreSQL steward store is required"):
+        run_autopilot_command(
+            ledger=ledger, candidates=candidates, project=PROJECT, refresh_watermark="live"
+        )
+    assert ledger.list_llm_brain_memory_cards() == []
+
+
+def test_main_with_candidates_json_blocks_without_pg_before_ledger_construction(tmp_path, capsys, monkeypatch):
+    candidates_path = tmp_path / "candidates.json"
+    candidates_path.write_text(json.dumps([_candidate()]), encoding="utf-8")
+    def should_not_construct(*args, **kwargs):
+        raise AssertionError("SQLite ledger must not be constructed")
+    monkeypatch.setattr(autopilot_cli, "Ledger", should_not_construct)
+    rc = main(["--ledger", str(tmp_path / "ledger.sqlite"), "--project", PROJECT,
+               "--refresh-watermark", "wm", "--candidates-json", str(candidates_path)])
+    assert rc != 0
+    assert not (tmp_path / "ledger.sqlite").exists()
+    assert json.loads(capsys.readouterr().out)["mutation_performed"] is False
 
 
 def test_main_reads_candidates_json_and_writes_ledger(tmp_path, capsys):
@@ -123,11 +140,11 @@ def test_main_reads_candidates_json_and_writes_ledger(tmp_path, capsys):
         "--candidates-json", str(candidates_path),
     ])
 
-    assert rc == 0
+    assert rc == PG_STORE_REQUIRED_EXIT
     out = json.loads(capsys.readouterr().out)
-    assert out["cycle"]["accepted_count"] == 2
-    stored = Ledger(ledger_path).list_llm_brain_memory_cards(accepted_only=True, current_only=True)
-    assert len(stored) == 2
+    assert out["status"] == "blocked_pg_steward_store_required"
+    assert out["mutation_performed"] is False
+    assert not ledger_path.exists()
 
 
 def test_main_without_candidates_json_blocks_before_retired_bridge_or_ledger_construction(tmp_path, capsys, monkeypatch):

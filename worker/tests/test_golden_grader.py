@@ -6,7 +6,7 @@ from agent_knowledge.ledger import Ledger
 from agent_knowledge.session_memory.memory_miner import build_memory_card_candidate_from_source_span
 from agent_knowledge.session_memory.autopilot_loop import run_autopilot_cycle
 from agent_knowledge.session_memory.brain_query import run_brain_query_v2
-from agent_knowledge.session_memory.brain_read_model import LegacyLedgerBrainReadModel
+from agent_knowledge.session_memory.brain_read_model import PgStewardBrainReadModel
 
 from golden_grader import build_cosine_match_fn, grade_recall_against_golden
 
@@ -40,11 +40,12 @@ def _candidate(**overrides):
     return build_memory_card_candidate_from_source_span(span, refresh_watermark="wm")
 
 
-def test_grader_scores_zero_silent_lie_when_superseded_card_is_demoted(tmp_path):
+def test_grader_scores_zero_silent_lie_when_superseded_card_is_demoted(tmp_path, isolated_pg_store):
     ledger = Ledger(tmp_path / "ledger.sqlite")
+    store = isolated_pg_store
 
     old_card = run_autopilot_cycle(
-        candidates=[_candidate()], ledger=ledger, refresh_watermark="w1"
+        candidates=[_candidate()], ledger=ledger, pgvector_store=store, refresh_watermark="w1"
     )["accepted"][0]
     new_candidate = _candidate(
         source_ref={"source_id": "src_new"},
@@ -55,12 +56,13 @@ def test_grader_scores_zero_silent_lie_when_superseded_card_is_demoted(tmp_path)
     run_autopilot_cycle(
         candidates=[new_candidate],
         ledger=ledger,
+        pgvector_store=store,
         refresh_watermark="w2",
         supersede_detector=lambda c, _l: old_card,
     )
 
     recall = run_brain_query_v2(
-        read_model=LegacyLedgerBrainReadModel(ledger),
+        read_model=PgStewardBrainReadModel(store),
         brain_id=f"/project/{PROJECT}",
         query="현재 인증 방식",
         query_intent="current_work",

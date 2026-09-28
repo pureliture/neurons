@@ -36,7 +36,7 @@ from typing import Any, Mapping, Sequence
 from ..ledger import Ledger
 from .autopilot_loop import run_autopilot_cycle
 from .brain_query import run_brain_query_v2
-from .brain_read_model import LegacyLedgerBrainReadModel
+from .brain_read_model import PgStewardBrainReadModel
 from .extraction_llm import build_vertex_wrapper_completion_fn
 from .llm_brain_miner import LlmBrainEnvelopeMiner
 
@@ -46,6 +46,7 @@ AUTOPILOT_PREAPPROVED = True
 
 
 RETIRED_BRIDGE_LIVE_MINING_BLOCKED_EXIT = 2
+PG_STORE_REQUIRED_EXIT = 3
 
 
 def retired_bridge_live_mining_blocked_report(*, project: str, refresh_watermark: str) -> dict[str, Any]:
@@ -101,17 +102,21 @@ def run_autopilot_command(
     supersede_detector: Any | None = None,
     projection_client: Any | None = None,
     timestamp: str | None = None,
+    pgvector_store: Any | None = None,
 ) -> dict:
+    if pgvector_store is None:
+        raise ValueError("PostgreSQL steward store is required for autopilot")
     cycle = run_autopilot_cycle(
         candidates=candidates,
         ledger=ledger,
+        pgvector_store=pgvector_store,
         refresh_watermark=refresh_watermark,
         supersede_detector=supersede_detector,
         projection_client=projection_client,
         timestamp=timestamp,
     )
     recall = run_brain_query_v2(
-        read_model=LegacyLedgerBrainReadModel(ledger),
+        read_model=PgStewardBrainReadModel(pgvector_store),
         brain_id=f"/project/{project}",
         query="현재 진행중인 작업과 최신 결정 알려줘",
         query_intent="current_work",
@@ -174,13 +179,14 @@ def main(argv: list[str] | None = None) -> int:
     if not isinstance(candidates, list):
         raise ValueError("--candidates-json must contain a JSON array of candidates")
 
-    ledger = Ledger(args.ledger)
-
-    result = run_autopilot_command(
-        ledger=ledger,
-        candidates=candidates,
-        project=args.project,
-        refresh_watermark=args.refresh_watermark,
-    )
-    print(json.dumps(result, sort_keys=True))
-    return 0
+    # This CLI has no configured PostgreSQL steward store. Never turn a supplied
+    # SQLite path into a successful approval; an explicit PG integration is required.
+    print(json.dumps({
+        "schema_version": "llm_brain_autopilot_command.v1",
+        "project": args.project,
+        "refresh_watermark": args.refresh_watermark,
+        "status": "blocked_pg_steward_store_required",
+        "network_used": False,
+        "mutation_performed": False,
+    }, sort_keys=True))
+    return PG_STORE_REQUIRED_EXIT

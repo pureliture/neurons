@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 import pytest
+import psycopg
 
 from agent_knowledge.ledger import Ledger
 from agent_knowledge.mcp_server import (
@@ -28,7 +29,6 @@ from agent_knowledge.mcp_server import (
     list_tools,
 )
 from agent_knowledge.session_memory.brain_steward import assert_public_safe
-from agent_knowledge.session_memory.llm_brain_service import LLMBrainMemoryService
 from agent_knowledge.session_memory.memory_miner import (
     build_memory_card_candidate_from_source_span,
 )
@@ -79,19 +79,19 @@ def _span(**overrides) -> dict:
     return span
 
 
-def _accept_card(ledger: Ledger, **span_overrides) -> dict:
-    candidate = build_memory_card_candidate_from_source_span(
-        _span(**span_overrides), refresh_watermark="test"
-    )
-    result = LLMBrainMemoryService(ledger).accept_human_approved_candidate(
-        candidate, approved_by="ddalkak", decision_id="decision_steward"
-    )
-    return result["accepted_card"]
+def _accept_card(ledger: Ledger, store, **span_overrides) -> dict:
+    steward = BrainStewardService(ledger, pgvector_store=store, allow_restricted=True)
+    proposal = steward.candidate_create(source_span=_span(**span_overrides))
+    return steward.candidate_approve(
+        candidate_memory_id=proposal["memory_id"], approved_by="ddalkak",
+        decision_id="decision_" + proposal["memory_id"],
+    )["accepted_card"]
 
 
-def _service(tmp_path: Path, *, allow_restricted: bool = False) -> KnowledgeSearchService:
+def _service(tmp_path: Path, store, *, allow_restricted: bool = False) -> KnowledgeSearchService:
     return KnowledgeSearchService(
         ledger=_ledger(tmp_path),
+        pgvector_store=store,
         retired_index_bridge=DisabledRetiredIndexBridgeClient(),
         dataset_ids=[],
         allow_restricted_steward=allow_restricted,
@@ -115,14 +115,14 @@ def test_review_lifecycle_states_single_source():
     assert brain_steward.REVIEW_LIFECYCLE_STATES is memory_card.REVIEW_LIFECYCLE_STATES
 
 
-def test_review_queue_lists_only_review_lifecycles(tmp_path):
+def test_review_queue_lists_only_review_lifecycles(isolated_pg_store, tmp_path):
     from agent_knowledge.session_memory.memory_card import REVIEW_LIFECYCLE_STATES
 
     ledger = _ledger(tmp_path)
-    steward = BrainStewardService(ledger)
-    _accept_card(ledger)  # accepted card 는 큐에 나오면 안 된다
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store)
+    _accept_card(ledger, isolated_pg_store)  # accepted card 는 큐에 나오면 안 된다
     steward.candidate_create(source_span=_span(content_hash="sha256:q"))
-    rows = ledger.list_llm_brain_review_queue(project=PROJECT, limit=50)
+    rows = isolated_pg_store.list_steward_cards(project=PROJECT, review_only=True, limit=50)
     assert rows  # candidate 가 존재한다
     for card in rows:
         assert card["lifecycle_state"] in REVIEW_LIFECYCLE_STATES
@@ -148,9 +148,9 @@ def test_list_tools_exposes_steward_surface():
 # -------------------------------------------------------------- proposal-only
 
 
-def test_candidate_create_does_not_create_accepted_memory(tmp_path):
+def test_candidate_create_does_not_create_accepted_memory(isolated_pg_store, tmp_path):
     ledger = _ledger(tmp_path)
-    steward = BrainStewardService(ledger)
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store)
 
     result = steward.candidate_create(source_span=_span())
 
@@ -160,7 +160,7 @@ def test_candidate_create_does_not_create_accepted_memory(tmp_path):
     assert proposal_id.startswith("mem_steward_")
 
     # accepted/current authoritative lane 은 비어 있어야 한다.
-    assert ledger.list_llm_brain_memory_cards(
+    assert isolated_pg_store.list_steward_cards(
         project=PROJECT, accepted_only=True, current_only=True, limit=50
     ) == []
     # candidate 는 review queue 에서만 보인다.
@@ -168,25 +168,25 @@ def test_candidate_create_does_not_create_accepted_memory(tmp_path):
     assert proposal_id in queue_ids
 
 
-def test_candidate_create_is_idempotent(tmp_path):
+def test_candidate_create_is_idempotent(isolated_pg_store, tmp_path):
     ledger = _ledger(tmp_path)
-    steward = BrainStewardService(ledger)
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store)
     first = steward.candidate_create(source_span=_span())
     second = steward.candidate_create(source_span=_span())
     assert first["proposal"]["memory_id"] == second["proposal"]["memory_id"]
     assert len(steward.review_queue_list()["items"]) == 1
 
 
-def test_stale_mark_does_not_delete_or_mutate_target(tmp_path):
+def test_stale_mark_does_not_delete_or_mutate_target(isolated_pg_store, tmp_path):
     ledger = _ledger(tmp_path)
-    steward = BrainStewardService(ledger)
-    target = _accept_card(ledger)
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store)
+    target = _accept_card(ledger, isolated_pg_store)
     target_id = target["memory_id"]
 
     result = steward.stale_mark(memory_id=target_id, reason="근거 문서가 교체되어 stale")
 
     # target 은 그대로 살아남는다.
-    reloaded = ledger.get_llm_brain_memory_card(target_id)
+    reloaded = isolated_pg_store.get_steward_card(target_id)
     assert reloaded is not None
     assert reloaded["lifecycle_state"] == target["lifecycle_state"]
     assert reloaded["currentness"] == "current"
@@ -202,20 +202,20 @@ def test_stale_mark_does_not_delete_or_mutate_target(tmp_path):
     assert proposal["memory_id"] not in pack_ids
 
 
-def test_stale_mark_unknown_target_is_rejected(tmp_path):
-    steward = BrainStewardService(_ledger(tmp_path))
+def test_stale_mark_unknown_target_is_rejected(isolated_pg_store, tmp_path):
+    steward = BrainStewardService(_ledger(tmp_path), pgvector_store=isolated_pg_store)
     with pytest.raises(ValueError):
         steward.stale_mark(memory_id="mem_missing", reason="x")
 
 
-def test_stale_proposal_is_reference_only_not_a_target_copy(tmp_path):
+def test_stale_proposal_is_reference_only_not_a_target_copy(isolated_pg_store, tmp_path):
     ledger = _ledger(tmp_path)
-    steward = BrainStewardService(ledger)
-    target = _accept_card(ledger)
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store)
+    target = _accept_card(ledger, isolated_pg_store)
     target_id = target["memory_id"]
 
     result = steward.stale_mark(memory_id=target_id, reason="근거 문서 교체로 stale")
-    stored = ledger.get_llm_brain_memory_card(result["proposal"]["memory_id"])
+    stored = isolated_pg_store.get_steward_card(result["proposal"]["memory_id"])
 
     # proposal 은 target 의 raw ref / typed_payload 를 복제하지 않는다.
     assert stored["card_type"] == "status"
@@ -229,10 +229,10 @@ def test_stale_proposal_is_reference_only_not_a_target_copy(tmp_path):
     assert stored["currentness"] == "stale"
 
 
-def test_stale_proposal_id_is_idempotent_per_target_and_reason(tmp_path):
+def test_stale_proposal_id_is_idempotent_per_target_and_reason(isolated_pg_store, tmp_path):
     ledger = _ledger(tmp_path)
-    steward = BrainStewardService(ledger)
-    target_id = _accept_card(ledger)["memory_id"]
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store)
+    target_id = _accept_card(ledger, isolated_pg_store)["memory_id"]
 
     a1 = steward.stale_mark(memory_id=target_id, reason="reason one")["proposal"]["memory_id"]
     a2 = steward.stale_mark(memory_id=target_id, reason="reason one")["proposal"]["memory_id"]
@@ -241,10 +241,10 @@ def test_stale_proposal_id_is_idempotent_per_target_and_reason(tmp_path):
     assert a1 != b  # 다른 reason → 별개 proposal(reason 이 조용히 덮어써지지 않음)
 
 
-def test_supersede_propose_does_not_replace_target(tmp_path):
+def test_supersede_propose_does_not_replace_target(isolated_pg_store, tmp_path):
     ledger = _ledger(tmp_path)
-    steward = BrainStewardService(ledger)
-    target = _accept_card(ledger)
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store)
+    target = _accept_card(ledger, isolated_pg_store)
     target_id = target["memory_id"]
 
     result = steward.supersede_propose(
@@ -263,7 +263,7 @@ def test_supersede_propose_does_not_replace_target(tmp_path):
     )
 
     # old card 는 그대로이며 여전히 current/accepted 다.
-    reloaded = ledger.get_llm_brain_memory_card(target_id)
+    reloaded = isolated_pg_store.get_steward_card(target_id)
     assert reloaded["currentness"] == "current"
     assert reloaded["lifecycle_state"] == target["lifecycle_state"]
     # 교체 후보는 supersede 의도를 기록한 non-accepted proposal 이다.
@@ -273,7 +273,7 @@ def test_supersede_propose_does_not_replace_target(tmp_path):
     assert target_id in proposal["supersedes"]
     accepted_ids = [
         card["memory_id"]
-        for card in ledger.list_llm_brain_memory_cards(accepted_only=True, current_only=True, limit=50)
+        for card in isolated_pg_store.list_steward_cards(accepted_only=True, current_only=True, limit=50)
     ]
     assert proposal["memory_id"] not in accepted_ids
 
@@ -281,17 +281,21 @@ def test_supersede_propose_does_not_replace_target(tmp_path):
 # ------------------------------------------------------------------- read safety
 
 
-def test_authority_pack_contains_only_accepted_current(tmp_path):
+def test_authority_pack_contains_only_accepted_current(isolated_pg_store, tmp_path):
     ledger = _ledger(tmp_path)
-    steward = BrainStewardService(ledger)
-    accepted = _accept_card(ledger)
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store)
+    accepted = _accept_card(ledger, isolated_pg_store)
 
     # candidate(non-accepted)와 superseded(accepted-but-not-current) 카드.
     steward.candidate_create(source_span=_span(content_hash="sha256:cand"))
-    from agent_knowledge.session_memory.memory_promotion import commit_supersession
-
-    demoted = commit_supersession(_accept_card(ledger, content_hash="sha256:old"), superseded_by=accepted["memory_id"])
-    ledger.upsert_llm_brain_memory_card(demoted)
+    old = _accept_card(ledger, isolated_pg_store, content_hash="sha256:old")
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store, allow_restricted=True)
+    replacement = _supersede_span()
+    replacement["content_hash"] = _h("authority-pack-demotion")
+    proposal_id = steward.supersede_propose(old_memory_id=old["memory_id"], source_span=replacement)["memory_id"]
+    steward.supersede_commit(proposal_memory_id=proposal_id, approved_by="op", decision_id="pack_demote")
+    demoted = isolated_pg_store.get_steward_card(old["memory_id"])
+    assert demoted["currentness"] == "superseded"
 
     pack = steward.authority_pack_read(project=PROJECT)
     ids = [item["memory_id"] for item in pack["items"]]
@@ -302,9 +306,9 @@ def test_authority_pack_contains_only_accepted_current(tmp_path):
         assert item["currentness"] == "current"
 
 
-def test_review_queue_returns_no_raw_or_private(tmp_path):
+def test_review_queue_returns_no_raw_or_private(isolated_pg_store, tmp_path):
     ledger = _ledger(tmp_path)
-    steward = BrainStewardService(ledger)
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store)
     steward.candidate_create(source_span=_span())
     queue = steward.review_queue_list()
     serialized = json.dumps(queue, ensure_ascii=False)
@@ -348,15 +352,15 @@ def test_poisoned_title_or_basis_is_rejected_at_envelope_validation():
             validate_memory_card_envelope(poisoned)
 
 
-def test_candidate_create_with_poisoned_field_writes_nothing_and_does_not_dos_queue(tmp_path):
+def test_candidate_create_with_poisoned_field_writes_nothing_and_does_not_dos_queue(isolated_pg_store, tmp_path):
     ledger = _ledger(tmp_path)
-    steward = BrainStewardService(ledger)
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store)
 
     with pytest.raises(ValueError):
         steward.candidate_create(source_span=_span(title="/Volumes/usb/private/x"))
 
     # row 가 안 써져서 project review queue 는 깨끗하게 읽힌다.
-    assert ledger.list_llm_brain_review_queue(project=PROJECT, limit=50) == []
+    assert isolated_pg_store.list_steward_cards(project=PROJECT, limit=50) == []
     clean = steward.candidate_create(source_span=_span(content_hash="sha256:clean"))
     queue = steward.review_queue_list(project=PROJECT)
     assert [item["memory_id"] for item in queue["items"]] == [clean["proposal"]["memory_id"]]
@@ -415,8 +419,8 @@ def test_mcp_cli_object_authority_production_write_flag_requires_explicit_runtim
     assert enabled_service.allow_steward_auto_accept is False
 
 
-def test_restricted_tools_blocked_by_default_service(tmp_path):
-    service = _service(tmp_path)  # allow_restricted_steward 기본값 False
+def test_restricted_tools_blocked_by_default_service(isolated_pg_store, tmp_path):
+    service = _service(tmp_path, isolated_pg_store)  # allow_restricted_steward 기본값 False
     created = _text(
         dispatch_tool_call(
             {"name": MEMORY_CANDIDATE_CREATE_TOOL_NAME, "arguments": _span()},
@@ -441,12 +445,12 @@ def test_restricted_tools_blocked_by_default_service(tmp_path):
     assert denied["permission"] == "denied"
     assert denied["write_performed"] is False
     # write 가 없었다: candidate 는 여전히 non-accepted 다.
-    card = service.ledger.get_llm_brain_memory_card(candidate_id)
+    card = isolated_pg_store.get_steward_card(candidate_id)
     assert card["lifecycle_state"] not in {"accepted", "human_accepted", "auto_accepted"}
 
 
-def test_restricted_methods_raise_without_flag(tmp_path):
-    steward = BrainStewardService(_ledger(tmp_path), allow_restricted=False)
+def test_restricted_methods_raise_without_flag(isolated_pg_store, tmp_path):
+    steward = BrainStewardService(_ledger(tmp_path), pgvector_store=isolated_pg_store, allow_restricted=False)
     with pytest.raises(StewardPermissionError):
         steward.candidate_approve(candidate_memory_id="x", approved_by="a", decision_id="d")
     with pytest.raises(StewardPermissionError):
@@ -455,9 +459,9 @@ def test_restricted_methods_raise_without_flag(tmp_path):
         steward.candidate_auto_accept(candidate_memory_id="x", evaluation={}, operator_approval_ref="op")
 
 
-def test_restricted_approve_promotes_only_when_explicitly_enabled(tmp_path):
+def test_restricted_approve_promotes_only_when_explicitly_enabled(isolated_pg_store, tmp_path):
     ledger = _ledger(tmp_path)
-    steward = BrainStewardService(ledger, allow_restricted=True)
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store, allow_restricted=True)
     created = steward.candidate_create(source_span=_span())
     candidate_id = created["proposal"]["memory_id"]
 
@@ -470,10 +474,10 @@ def test_restricted_approve_promotes_only_when_explicitly_enabled(tmp_path):
     assert promoted["accepted_card"]["memory_id"] in pack_ids
 
 
-def test_auto_accept_needs_its_own_capability_not_review_commit(tmp_path):
+def test_auto_accept_needs_its_own_capability_not_review_commit(isolated_pg_store, tmp_path):
     ledger = _ledger(tmp_path)
     # review_commit 켜고 auto_accept 끔 → auto_accept 는 계속 막힌다.
-    review_only = BrainStewardService(ledger, allow_restricted=True, allow_auto_accept=False)
+    review_only = BrainStewardService(ledger, pgvector_store=isolated_pg_store, allow_restricted=True, allow_auto_accept=False)
     cand_id = review_only.candidate_create(source_span=_span())["proposal"]["memory_id"]
     with pytest.raises(StewardPermissionError):
         review_only.candidate_auto_accept(
@@ -483,7 +487,7 @@ def test_auto_accept_needs_its_own_capability_not_review_commit(tmp_path):
     review_only.candidate_approve(candidate_memory_id=cand_id, approved_by="op", decision_id="d")
 
     # auto_accept 를 명시적으로 켜면 gate 를 통과한다(permission error 없음).
-    full = BrainStewardService(ledger, allow_restricted=True, allow_auto_accept=True)
+    full = BrainStewardService(ledger, pgvector_store=isolated_pg_store, allow_restricted=True, allow_auto_accept=True)
     cand2 = full.candidate_create(source_span=_span(content_hash="sha256:aa"))["proposal"]["memory_id"]
     result = full.candidate_auto_accept(
         candidate_memory_id=cand2, evaluation={}, operator_approval_ref="op"
@@ -491,51 +495,58 @@ def test_auto_accept_needs_its_own_capability_not_review_commit(tmp_path):
     assert isinstance(result, dict)  # gate 통과(차단 정책 결과일 수 있고 raise 아님)
 
 
-def test_commits_write_audit_feedback_records(tmp_path):
+def test_commits_write_audit_feedback_records(isolated_pg_store, tmp_path):
     ledger = _ledger(tmp_path)
-    steward = BrainStewardService(ledger, allow_restricted=True)
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store, allow_restricted=True)
+    target_id = _accept_card(ledger, isolated_pg_store)["memory_id"]
+    prop_id = steward.stale_mark(memory_id=target_id, reason="stale 사유")["memory_id"]
+    steward.stale_commit(proposal_memory_id=prop_id, approved_by="op", decision_id="d_stale")
+    stale_audit = isolated_pg_store.get_steward_decision("d_stale")
+    assert stale_audit is not None
+    assert stale_audit["memory_id"] == prop_id
+    assert stale_audit["target_memory_id"] == target_id
+    assert stale_audit["action"] == "stale" and stale_audit["actor"] == "op"
 
-    # stale commit 은 audit feedback record 를 남긴다.
-    stale_target = _accept_card(ledger)["memory_id"]
-    stale_prop = steward.stale_mark(memory_id=stale_target, reason="stale 사유")["proposal"]["memory_id"]
-    steward.stale_commit(proposal_memory_id=stale_prop, approved_by="op", decision_id="d_stale")
-    assert ledger.list_llm_brain_feedback_records(limit=100)
-
-    # reject 도 feedback record 를 남긴다.
-    cand_id = steward.candidate_create(source_span=_span(content_hash="sha256:rj"))["proposal"]["memory_id"]
+    cand_id = steward.candidate_create(source_span=_span(content_hash="sha256:rj"))["memory_id"]
     steward.candidate_reject(candidate_memory_id=cand_id, rejected_by="op", decision_id="d_rej", reason="no")
-    rej_records = [r for r in ledger.list_llm_brain_feedback_records(limit=100) if r["final_status"] == "rejected"]
-    assert rej_records
+    reject_audit = isolated_pg_store.get_steward_decision("d_rej")
+    assert reject_audit is not None
+    assert reject_audit["memory_id"] == cand_id
+    assert reject_audit["action"] == "reject" and reject_audit["actor"] == "op"
+    assert isolated_pg_store.get_steward_card(cand_id)["lifecycle_state"] == "human_rejected"
+    assert ledger.list_llm_brain_feedback_records(limit=100) == []
 
 
-def test_knowledge_service_auto_accept_flag_defaults_closed(tmp_path):
-    service = _service(tmp_path)  # auto_accept flag 없음
+def test_knowledge_service_auto_accept_flag_defaults_closed(isolated_pg_store, tmp_path):
+    service = _service(tmp_path, isolated_pg_store)  # auto_accept flag 없음
     steward = service.brain_steward()
     assert steward.allow_auto_accept is False
     assert steward.allow_review_commit is False
 
 
-def test_proposal_persist_guard_refuses_to_overwrite_accepted(tmp_path):
+def test_proposal_persist_guard_refuses_to_overwrite_accepted(isolated_pg_store, tmp_path):
     ledger = _ledger(tmp_path)
-    steward = BrainStewardService(ledger)
-    accepted = _accept_card(ledger)
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store)
+    accepted = _accept_card(ledger, isolated_pg_store)
     # accepted card 와 memory_id 가 충돌하는 proposal 을 위조한다.
     forged = build_memory_card_candidate_from_source_span(_span(content_hash="sha256:forge"), refresh_watermark="t")
     forged["memory_id"] = accepted["memory_id"]
     with pytest.raises(ValueError):
         steward._persist_proposal(forged)
     # accepted card 는 그대로다.
-    assert ledger.get_llm_brain_memory_card(accepted["memory_id"])["lifecycle_state"] == accepted["lifecycle_state"]
+    assert isolated_pg_store.get_steward_card(accepted["memory_id"])["lifecycle_state"] == accepted["lifecycle_state"]
 
 
-def test_proposal_write_fails_closed_on_read_only_ledger(tmp_path):
+def test_proposal_write_denied_on_read_only_transport_even_with_pg(isolated_pg_store, tmp_path):
     ledger = _ledger(tmp_path)
-    ledger.read_only = True  # 라이브 recall MCP transport 를 흉내
-    steward = BrainStewardService(ledger, allow_restricted=True)
-    with pytest.raises(ValueError):
+    ledger.read_only = True
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store, allow_restricted=True)
+    with pytest.raises(ValueError, match="writable transport"):
         steward.candidate_create(source_span=_span())
-    with pytest.raises(ValueError):
-        steward.candidate_approve(candidate_memory_id="x", approved_by="a", decision_id="d")
+    with pytest.raises(ValueError, match="writable transport"):
+        steward.candidate_approve(candidate_memory_id="missing", approved_by="op", decision_id="pg_only")
+    assert isolated_pg_store.list_steward_cards(project=PROJECT, limit=10) == []
+    assert isolated_pg_store.get_steward_decision("pg_only") is None
 
 
 def test_assert_public_safe_blocks_credential_output_keys():
@@ -544,10 +555,10 @@ def test_assert_public_safe_blocks_credential_output_keys():
             assert_public_safe({key: "anything"})
 
 
-def test_stale_and_rejected_proposals_are_not_approvable(tmp_path):
+def test_stale_and_rejected_proposals_are_not_approvable(isolated_pg_store, tmp_path):
     ledger = _ledger(tmp_path)
-    steward = BrainStewardService(ledger, allow_restricted=True)
-    target = _accept_card(ledger)
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store, allow_restricted=True)
+    target = _accept_card(ledger, isolated_pg_store)
 
     stale = steward.stale_mark(memory_id=target["memory_id"], reason="근거 교체로 stale")
     with pytest.raises(ValueError):
@@ -555,7 +566,7 @@ def test_stale_and_rejected_proposals_are_not_approvable(tmp_path):
             candidate_memory_id=stale["proposal"]["memory_id"], approved_by="a", decision_id="d"
         )
     # stale proposal 은 그대로이고 target 은 current 를 유지한다.
-    assert ledger.get_llm_brain_memory_card(target["memory_id"])["currentness"] == "current"
+    assert isolated_pg_store.get_steward_card(target["memory_id"])["currentness"] == "current"
 
     created = steward.candidate_create(source_span=_span(content_hash="sha256:rej"))
     cand_id = created["proposal"]["memory_id"]
@@ -578,41 +589,41 @@ def _supersede_span():
     )
 
 
-def test_stale_commit_blocked_by_default(tmp_path):
+def test_stale_commit_blocked_by_default(isolated_pg_store, tmp_path):
     ledger = _ledger(tmp_path)
-    steward = BrainStewardService(ledger)  # allow_restricted 기본값 False
-    target_id = _accept_card(ledger)["memory_id"]
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store)  # allow_restricted 기본값 False
+    target_id = _accept_card(ledger, isolated_pg_store)["memory_id"]
     prop = steward.stale_mark(memory_id=target_id, reason="stale 사유")["proposal"]["memory_id"]
     with pytest.raises(StewardPermissionError):
         steward.stale_commit(proposal_memory_id=prop, approved_by="op", decision_id="d")
     # target 은 그대로.
-    assert ledger.get_llm_brain_memory_card(target_id)["currentness"] == "current"
+    assert isolated_pg_store.get_steward_card(target_id)["currentness"] == "current"
 
 
-def test_stale_commit_demotes_target_and_clears_queue(tmp_path):
+def test_stale_commit_demotes_target_and_clears_queue(isolated_pg_store, tmp_path):
     ledger = _ledger(tmp_path)
-    steward = BrainStewardService(ledger, allow_restricted=True)
-    target_id = _accept_card(ledger)["memory_id"]
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store, allow_restricted=True)
+    target_id = _accept_card(ledger, isolated_pg_store)["memory_id"]
     prop_id = steward.stale_mark(memory_id=target_id, reason="stale 사유")["proposal"]["memory_id"]
 
     steward.stale_commit(proposal_memory_id=prop_id, approved_by="op", decision_id="d")
 
     # target accepted card 가 stale 로 demote → authority pack 에서 빠진다.
-    assert ledger.get_llm_brain_memory_card(target_id)["currentness"] == "stale"
+    assert isolated_pg_store.get_steward_card(target_id)["currentness"] == "stale"
     assert target_id not in [i["memory_id"] for i in steward.authority_pack_read(project=PROJECT)["items"]]
     # proposal 은 review queue 를 떠난다.
     assert prop_id not in [i["memory_id"] for i in steward.review_queue_list(project=PROJECT)["items"]]
 
 
-def test_supersede_commit_accepts_new_and_demotes_old(tmp_path):
+def test_supersede_commit_accepts_new_and_demotes_old(isolated_pg_store, tmp_path):
     ledger = _ledger(tmp_path)
-    steward = BrainStewardService(ledger, allow_restricted=True)
-    old_id = _accept_card(ledger)["memory_id"]
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store, allow_restricted=True)
+    old_id = _accept_card(ledger, isolated_pg_store)["memory_id"]
     prop_id = steward.supersede_propose(old_memory_id=old_id, source_span=_supersede_span())["proposal"]["memory_id"]
 
     steward.supersede_commit(proposal_memory_id=prop_id, approved_by="op", decision_id="d")
 
-    old = ledger.get_llm_brain_memory_card(old_id)
+    old = isolated_pg_store.get_steward_card(old_id)
     assert old["currentness"] == "superseded"
     assert prop_id in old["superseded_by"]
     # 새(교체) card 가 이제 accepted+current authority 이고 old 는 아니다.
@@ -623,16 +634,16 @@ def test_supersede_commit_accepts_new_and_demotes_old(tmp_path):
     assert prop_id not in [i["memory_id"] for i in steward.review_queue_list(project=PROJECT)["items"]]
 
 
-def test_stale_committed_card_excluded_from_brain_query_recall(tmp_path):
+def test_stale_committed_card_excluded_from_brain_query_recall(isolated_pg_store, tmp_path):
     from agent_knowledge.session_memory.brain_query import build_brain_query_response_v2
 
     ledger = _ledger(tmp_path)
-    steward = BrainStewardService(ledger, allow_restricted=True)
-    target_id = _accept_card(ledger)["memory_id"]
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store, allow_restricted=True)
+    target_id = _accept_card(ledger, isolated_pg_store)["memory_id"]
     prop = steward.stale_mark(memory_id=target_id, reason="stale 사유")["proposal"]["memory_id"]
     steward.stale_commit(proposal_memory_id=prop, approved_by="op", decision_id="d")
 
-    demoted = ledger.get_llm_brain_memory_card(target_id)
+    demoted = isolated_pg_store.get_steward_card(target_id)
     resp = build_brain_query_response_v2(
         brain_id=f"/project/{PROJECT}", query_intent="x", ledger_cards=[demoted]
     )
@@ -641,60 +652,62 @@ def test_stale_committed_card_excluded_from_brain_query_recall(tmp_path):
     assert target_id not in [c["memory_id"] for c in resp["current"]]
 
 
-def test_stale_commit_records_approver_and_timestamp(tmp_path):
+def test_stale_commit_records_approver_and_timestamp(isolated_pg_store, tmp_path):
     ledger = _ledger(tmp_path)
-    steward = BrainStewardService(ledger, allow_restricted=True)
-    target_id = _accept_card(ledger)["memory_id"]
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store, allow_restricted=True)
+    target_id = _accept_card(ledger, isolated_pg_store)["memory_id"]
     prop = steward.stale_mark(memory_id=target_id, reason="stale 사유")["proposal"]["memory_id"]
     steward.stale_commit(proposal_memory_id=prop, approved_by="op", decision_id="d")
-    committed = ledger.get_llm_brain_memory_card(prop)
+    committed = isolated_pg_store.get_steward_card(prop)
     assert committed["approved_by"] == "op"
     assert committed["approved_at"]
 
 
-def test_commit_rejects_non_current_target(tmp_path):
-    from agent_knowledge.session_memory.memory_promotion import commit_stale
-
+def test_commit_rejects_non_current_target(isolated_pg_store, tmp_path):
     ledger = _ledger(tmp_path)
-    steward = BrainStewardService(ledger, allow_restricted=True)
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store, allow_restricted=True)
     # supersede: proposal 생성 후 target 이 stale 로 demote → commit 은 거부해야 한다.
-    old_id = _accept_card(ledger)["memory_id"]
+    old_id = _accept_card(ledger, isolated_pg_store)["memory_id"]
     sup = steward.supersede_propose(old_memory_id=old_id, source_span=_supersede_span())["proposal"]["memory_id"]
-    ledger.upsert_llm_brain_memory_card(commit_stale(ledger.get_llm_brain_memory_card(old_id)))
+    old_stale = steward.stale_mark(memory_id=old_id, reason="old stale")["memory_id"]
+    steward.stale_commit(proposal_memory_id=old_stale, approved_by="op", decision_id="demote_old")
     with pytest.raises(ValueError):
         steward.supersede_commit(proposal_memory_id=sup, approved_by="op", decision_id="d")
 
     # stale: target 이 이미 stale → commit 은 거부해야 한다(non-current 재-stale 금지).
-    other_id = _accept_card(ledger, content_hash="sha256:other")["memory_id"]
+    other_id = _accept_card(ledger, isolated_pg_store, content_hash="sha256:other")["memory_id"]
     st = steward.stale_mark(memory_id=other_id, reason="r")["proposal"]["memory_id"]
-    ledger.upsert_llm_brain_memory_card(commit_stale(ledger.get_llm_brain_memory_card(other_id)))
+    other_stale = steward.stale_mark(memory_id=other_id, reason="other stale")["memory_id"]
+    steward.stale_commit(proposal_memory_id=other_stale, approved_by="op", decision_id="demote_other")
     with pytest.raises(ValueError):
         steward.stale_commit(proposal_memory_id=st, approved_by="op", decision_id="d")
 
 
-def test_stale_card_excluded_from_persona_but_kept_for_history(tmp_path):
-    from agent_knowledge.session_memory.memory_promotion import commit_stale
-
-    service = _service(tmp_path)
-    target_id = _accept_card(service.ledger)["memory_id"]  # a preference (persona) card
+def test_stale_card_excluded_from_persona_but_kept_for_history(isolated_pg_store, tmp_path):
+    service = _service(tmp_path, isolated_pg_store)
+    target_id = _accept_card(service.ledger, isolated_pg_store)["memory_id"]  # a preference (persona) card
     # 현재-권위일 때 persona fact 로 노출된다(캐시 prime).
     assert len(service.core_brain(project=PROJECT).brain_persona_get(project=PROJECT)["facts"]) == 1
     # stale 로 demote → persona fact 에서 빠져야 한다(컨텍스트 read leak 방지).
-    service.ledger.upsert_llm_brain_memory_card(
-        commit_stale(service.ledger.get_llm_brain_memory_card(target_id))
+    steward = service.brain_steward()
+    proposal_id = steward.stale_mark(memory_id=target_id, reason="persona stale")["memory_id"]
+    BrainStewardService(service.ledger, pgvector_store=isolated_pg_store, allow_restricted=True).stale_commit(
+        proposal_memory_id=proposal_id, approved_by="op", decision_id="persona_demote"
     )
     service.invalidate_brain_card_cache()
     assert service.core_brain(project=PROJECT).brain_persona_get(project=PROJECT)["facts"] == []
     # history 소비자(read model accepted lane)는 여전히 stale 카드를 본다(drift_explain 용).
-    accepted = service.ledger.list_llm_brain_memory_cards(project=PROJECT, accepted_only=True, limit=50)
-    assert target_id in [c["memory_id"] for c in accepted]
+    accepted_history = isolated_pg_store.get_steward_card(target_id)
+    assert accepted_history["memory_id"] == target_id
+    assert accepted_history["lifecycle_state"] == "human_accepted"
+    assert accepted_history["currentness"] == "stale"
 
 
-def test_restricted_commit_invalidates_session_card_cache(tmp_path):
-    service = _service(tmp_path, allow_restricted=True)
+def test_restricted_commit_invalidates_session_card_cache(isolated_pg_store, tmp_path):
+    service = _service(tmp_path, isolated_pg_store, allow_restricted=True)
     calls: list[int] = []
     service.invalidate_brain_card_cache = lambda: calls.append(1)  # spy(호출 감시)
-    target_id = _accept_card(service.ledger)["memory_id"]
+    target_id = _accept_card(service.ledger, isolated_pg_store)["memory_id"]
     prop = service.brain_steward().stale_mark(memory_id=target_id, reason="r")["proposal"]["memory_id"]
     dispatch_tool_call(
         {"name": MEMORY_STALE_COMMIT_TOOL_NAME,
@@ -704,8 +717,8 @@ def test_restricted_commit_invalidates_session_card_cache(tmp_path):
     assert calls  # 성공한 restricted commit 이 캐시를 무효화함(read-after-write)
 
 
-def test_denied_restricted_call_does_not_invalidate_cache(tmp_path):
-    service = _service(tmp_path)  # restricted 꺼짐 → denied, write 없음
+def test_denied_restricted_call_does_not_invalidate_cache(isolated_pg_store, tmp_path):
+    service = _service(tmp_path, isolated_pg_store)  # restricted 꺼짐 → denied, write 없음
     calls: list[int] = []
     service.invalidate_brain_card_cache = lambda: calls.append(1)
     dispatch_tool_call(
@@ -716,9 +729,9 @@ def test_denied_restricted_call_does_not_invalidate_cache(tmp_path):
     assert not calls  # denied 경로는 write 도 invalidation 도 없다
 
 
-def test_commit_rejects_mismatched_proposal_kind(tmp_path):
+def test_commit_rejects_mismatched_proposal_kind(isolated_pg_store, tmp_path):
     ledger = _ledger(tmp_path)
-    steward = BrainStewardService(ledger, allow_restricted=True)
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store, allow_restricted=True)
     cand_id = steward.candidate_create(source_span=_span(content_hash="sha256:mk"))["proposal"]["memory_id"]
     with pytest.raises(ValueError):
         steward.stale_commit(proposal_memory_id=cand_id, approved_by="op", decision_id="d")
@@ -726,56 +739,71 @@ def test_commit_rejects_mismatched_proposal_kind(tmp_path):
         steward.supersede_commit(proposal_memory_id=cand_id, approved_by="op", decision_id="d")
 
 
-def test_stale_commit_is_atomic_rolls_back_on_mid_failure(tmp_path, monkeypatch):
-    from agent_knowledge.ledger import _LedgerTransaction
+def _pg_graph_outbox_count(store, memory_id):
+    with store._scope() as db:
+        with db.cursor() as cur:
+            cur.execute("SELECT count(*) FROM graph_projection_outbox WHERE source_id = %s", (memory_id,))
+            return cur.fetchone()["count"]
 
+
+def _assert_pg_decision_rollback(store, steward, *, target_id, proposal_id, decision_id,
+                                  pending_state, graph_counts_before):
+    assert store.get_steward_card(target_id)["currentness"] == "current"
+    assert store.get_steward_card(proposal_id)["lifecycle_state"] == pending_state
+    assert proposal_id in [i["memory_id"] for i in steward.review_queue_list(project=PROJECT)["items"]]
+    assert proposal_id not in [i["memory_id"] for i in steward.authority_pack_read(project=PROJECT)["items"]]
+    assert store.get_steward_decision(decision_id) is None
+    assert {card_id: _pg_graph_outbox_count(store, card_id) for card_id in (target_id, proposal_id)} == graph_counts_before
+
+
+def _inject_pg_audit_failure(store):
+    # Fixture-owned schema only: fail after card UPDATEs but before audit INSERT completes.
+    with store.transaction() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""CREATE FUNCTION reject_steward_audit_test() RETURNS trigger
+                LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected audit failure'; END $$""")
+            cur.execute("""CREATE TRIGGER reject_steward_audit_test
+                BEFORE INSERT ON steward_card_decisions FOR EACH ROW
+                EXECUTE FUNCTION reject_steward_audit_test()""")
+
+
+def test_stale_commit_is_atomic_rolls_back_on_mid_failure(isolated_pg_store, tmp_path):
     ledger = _ledger(tmp_path)
-    steward = BrainStewardService(ledger, allow_restricted=True)
-    target_id = _accept_card(ledger)["memory_id"]
-    prop = steward.stale_mark(memory_id=target_id, reason="stale 사유")["proposal"]["memory_id"]
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store, allow_restricted=True)
+    target_id = _accept_card(ledger, isolated_pg_store)["memory_id"]
+    prop = steward.stale_mark(memory_id=target_id, reason="stale 사유")["memory_id"]
+    pending_state = isolated_pg_store.get_steward_card(prop)["lifecycle_state"]
+    graph_counts_before = {card_id: _pg_graph_outbox_count(isolated_pg_store, card_id)
+                           for card_id in (target_id, prop)}
 
-    # fault injection: 트랜잭션 중간(audit write)에서 실패시킨다.
-    def boom(self, record):
-        raise RuntimeError("injected audit failure")
-
-    # _accept_card 가 이미 자체 acceptance feedback 1건을 남겼으므로 baseline 을 잡는다.
-    feedback_before = len(ledger.list_llm_brain_feedback_records(limit=100))
-    monkeypatch.setattr(_LedgerTransaction, "upsert_llm_brain_feedback_record", boom)
-    with pytest.raises(RuntimeError):
-        steward.stale_commit(proposal_memory_id=prop, approved_by="op", decision_id="d")
-
-    # 전부 rollback: target 미demote, proposal 그대로 pending, 새 audit 0 — 부분 커밋 없음.
-    assert ledger.get_llm_brain_memory_card(target_id)["currentness"] == "current"
-    assert prop in [i["memory_id"] for i in steward.review_queue_list(project=PROJECT)["items"]]
-    assert len(ledger.list_llm_brain_feedback_records(limit=100)) == feedback_before
+    _inject_pg_audit_failure(isolated_pg_store)
+    with pytest.raises(psycopg.errors.RaiseException, match="injected audit failure"):
+        steward.stale_commit(proposal_memory_id=prop, approved_by="op", decision_id="rollback_stale")
+    _assert_pg_decision_rollback(isolated_pg_store, steward, target_id=target_id,
+                                  proposal_id=prop, decision_id="rollback_stale",
+                                  pending_state=pending_state, graph_counts_before=graph_counts_before)
 
 
-def test_supersede_commit_is_atomic_rolls_back_on_mid_failure(tmp_path, monkeypatch):
-    from agent_knowledge.ledger import _LedgerTransaction
-
+def test_supersede_commit_is_atomic_rolls_back_on_mid_failure(isolated_pg_store, tmp_path):
     ledger = _ledger(tmp_path)
-    steward = BrainStewardService(ledger, allow_restricted=True)
-    old_id = _accept_card(ledger)["memory_id"]
-    prop = steward.supersede_propose(old_memory_id=old_id, source_span=_supersede_span())["proposal"]["memory_id"]
-
-    def boom(self, record):
-        raise RuntimeError("injected audit failure")
-
-    monkeypatch.setattr(_LedgerTransaction, "upsert_llm_brain_feedback_record", boom)
-    with pytest.raises(RuntimeError):
-        steward.supersede_commit(proposal_memory_id=prop, approved_by="op", decision_id="d")
-
-    # 전부 rollback: old 는 그대로 current, 교체 후보는 accept되지 않고 pending — 두 카드 동시 current 없음.
-    assert ledger.get_llm_brain_memory_card(old_id)["currentness"] == "current"
-    assert prop in [i["memory_id"] for i in steward.review_queue_list(project=PROJECT)["items"]]
-    pack_ids = [i["memory_id"] for i in steward.authority_pack_read(project=PROJECT)["items"]]
-    assert prop not in pack_ids
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store, allow_restricted=True)
+    old_id = _accept_card(ledger, isolated_pg_store)["memory_id"]
+    prop = steward.supersede_propose(old_memory_id=old_id, source_span=_supersede_span())["memory_id"]
+    pending_state = isolated_pg_store.get_steward_card(prop)["lifecycle_state"]
+    graph_counts_before = {card_id: _pg_graph_outbox_count(isolated_pg_store, card_id)
+                           for card_id in (old_id, prop)}
+    _inject_pg_audit_failure(isolated_pg_store)
+    with pytest.raises(psycopg.errors.RaiseException, match="injected audit failure"):
+        steward.supersede_commit(proposal_memory_id=prop, approved_by="op", decision_id="rollback_supersede")
+    _assert_pg_decision_rollback(isolated_pg_store, steward, target_id=old_id,
+                                  proposal_id=prop, decision_id="rollback_supersede",
+                                  pending_state=pending_state, graph_counts_before=graph_counts_before)
 
 
-def test_projection_field_sets_are_stable(tmp_path):
+def test_projection_field_sets_are_stable(isolated_pg_store, tmp_path):
     ledger = _ledger(tmp_path)
-    steward = BrainStewardService(ledger)
-    _accept_card(ledger)
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store)
+    _accept_card(ledger, isolated_pg_store)
     steward.candidate_create(source_span=_span(content_hash="sha256:proj"))
 
     auth_item = steward.authority_pack_read(project=PROJECT)["items"][0]
@@ -797,8 +825,8 @@ def test_projection_field_sets_are_stable(tmp_path):
     }
 
 
-def test_service_owns_source_span_selection_and_denial(tmp_path):
-    steward = BrainStewardService(_ledger(tmp_path))
+def test_service_owns_source_span_selection_and_denial(isolated_pg_store, tmp_path):
+    steward = BrainStewardService(_ledger(tmp_path), pgvector_store=isolated_pg_store)
     # source_span 필드 선택을 service 가 소유한다(dispatch 의 중복 튜플 제거).
     selected = steward.select_source_span(
         {"card_type": "status", "project": "p", "junk": 1, "limit": 5}
@@ -812,9 +840,9 @@ def test_service_owns_source_span_selection_and_denial(tmp_path):
     assert denied["tool"] == "memory_candidate_approve"
 
 
-def test_dispatch_round_trip_read_and_proposal(tmp_path):
-    service = _service(tmp_path)
-    _accept_card(service.ledger)
+def test_dispatch_round_trip_read_and_proposal(isolated_pg_store, tmp_path):
+    service = _service(tmp_path, isolated_pg_store)
+    _accept_card(service.ledger, isolated_pg_store)
     pack = _text(
         dispatch_tool_call(
             {"name": MEMORY_AUTHORITY_PACK_READ_TOOL_NAME, "arguments": {"project": PROJECT}},
@@ -836,3 +864,62 @@ def test_dispatch_round_trip_read_and_proposal(tmp_path):
         )
     )
     assert proposal["proposal"]["memory_id"] in [item["memory_id"] for item in queue["items"]]
+
+
+# -------------------------------------------------------------- PG authority write
+
+def test_accepted_card_written_to_pg_with_active_status(isolated_pg_store, tmp_path):
+    ledger = _ledger(tmp_path)
+    accepted = _accept_card(ledger, isolated_pg_store)
+    memory_id = accepted["memory_id"]
+    stored = isolated_pg_store.get_card(memory_id)
+    assert stored is not None
+    assert stored.authorization_status == "active"
+    assert stored.lifecycle_state in {"accepted", "human_accepted", "auto_accepted"}
+    assert stored.content_hash == isolated_pg_store.get_steward_card(memory_id)["content_hash"]
+    assert {item["memory_id"] for item in BrainStewardService(
+        ledger, pgvector_store=isolated_pg_store).authority_pack_read(project=PROJECT)["items"]} == {memory_id}
+    assert ledger.get_llm_brain_memory_card(memory_id) is None
+
+
+def test_auto_accept_card_written_to_pg(isolated_pg_store, tmp_path):
+    steward = BrainStewardService(_ledger(tmp_path), pgvector_store=isolated_pg_store,
+                                  allow_auto_accept=True)
+    memory_id = steward.candidate_create(source_span=_span())["memory_id"]
+    result = steward.candidate_auto_accept(candidate_memory_id=memory_id,
+                                            evaluation={}, operator_approval_ref="auto_pg")
+    assert result["canonical_write_performed"] is False  # 근거 없는 evaluation은 자동 승인 불가
+    assert isolated_pg_store.get_card(memory_id).authorization_status == "disabled"
+    assert isolated_pg_store.get_steward_decision("auto_pg") is None
+    assert isolated_pg_store.get_steward_card(memory_id)["lifecycle_state"] == "candidate"
+
+
+def test_supersede_writes_new_card_to_pg(isolated_pg_store, tmp_path):
+    ledger = _ledger(tmp_path)
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store, allow_restricted=True)
+    old_id = _accept_card(ledger, isolated_pg_store, content_hash="sha256:old")["memory_id"]
+    new_id = steward.supersede_propose(old_memory_id=old_id, source_span=_supersede_span())["memory_id"]
+    result = steward.supersede_commit(proposal_memory_id=new_id, approved_by="ddalkak", decision_id="pg_supersede")
+    assert result["new_card"]["memory_id"] == new_id
+    new = isolated_pg_store.get_card(new_id)
+    old = isolated_pg_store.get_card(old_id)
+    assert new is not None and new.authorization_status == "active"
+    assert new.lifecycle_state == "human_accepted" and new.currentness == "current"
+    assert old is not None and old.currentness == "superseded"
+    assert isolated_pg_store.get_steward_decision("pg_supersede")["target_memory_id"] == old_id
+
+
+def test_pg_write_failure_raises_runtime_error(isolated_pg_store, tmp_path, monkeypatch):
+    ledger = _ledger(tmp_path)
+    steward = BrainStewardService(ledger, pgvector_store=isolated_pg_store, allow_restricted=True)
+    memory_id = steward.candidate_create(source_span=_span())["memory_id"]
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("injected PG write failure")
+
+    monkeypatch.setattr(isolated_pg_store, "_enqueue_graph_outbox_on", boom)
+    with pytest.raises(RuntimeError, match="injected PG write failure"):
+        steward.candidate_approve(candidate_memory_id=memory_id, approved_by="op", decision_id="failed_pg")
+    assert isolated_pg_store.get_card(memory_id).lifecycle_state == "candidate"
+    assert isolated_pg_store.get_steward_decision("failed_pg") is None
+    assert ledger.get_llm_brain_memory_card(memory_id) is None

@@ -41,7 +41,6 @@ from agent_knowledge.llm_brain_core.slim_serializer import (
     SlimSerializer,
 )
 from agent_knowledge.postgres_store.pgvector_store import (
-    PgVectorStore,
     MemoryCard,
     MemoryEdge,
     SessionChunk,
@@ -65,7 +64,7 @@ live_pg = pytest.mark.skipif(
 )
 
 
-def _service(tmp_path: Path) -> KnowledgeSearchService:
+def _service(tmp_path: Path, store=None) -> KnowledgeSearchService:
     private = tmp_path / "private"
     private.mkdir(parents=True, exist_ok=True)
     os.chmod(private, 0o700)
@@ -75,6 +74,7 @@ def _service(tmp_path: Path) -> KnowledgeSearchService:
         retired_index_bridge=DisabledRetiredIndexBridgeClient(),
         dataset_ids=[],
         allow_private_results=True,
+        pgvector_store=store,
     )
 
 
@@ -109,9 +109,9 @@ def test_tier5_adversarial_admin_tool_disguise_injection(tmp_path: Path):
         assert res["error"]["code"] in (-32601, -32600, -32602)
 
 
-def test_tier5_adversarial_proposal_tampering_isolation(tmp_path: Path):
+def test_tier5_adversarial_proposal_tampering_isolation(tmp_path: Path, isolated_pg_store):
     """Agent cannot inject active authorization_status or approved lifecycle into candidate creation."""
-    service = _service(tmp_path)
+    service = _service(tmp_path, isolated_pg_store)
 
     req = {
         "jsonrpc": "2.0",
@@ -148,6 +148,11 @@ def test_tier5_adversarial_proposal_tampering_isolation(tmp_path: Path):
     assert result_data["authorization_status"] == "disabled"
     assert result_data["lifecycle_state"] == "candidate"
     assert result_data["proposal_write_performed"] is True
+    stored = isolated_pg_store.get_steward_card(result_data["memory_id"])
+    assert stored["lifecycle_state"] == "candidate"
+    assert stored["authorization_status"] == "disabled"
+    assert service.brain_steward().authority_pack_read(project="neurons")["items"] == []
+    assert service.brain_steward().review_queue_list(project="neurons")["items"][0]["memory_id"] == result_data["memory_id"]
 
 
 
@@ -381,93 +386,85 @@ def test_tier5_adversarial_high_concurrency_cas_stress(isolated_pg_store):
 # ==============================================================================
 
 @live_pg
-def test_tier5_adversarial_deep_cyclic_provenance_dag():
+def test_tier5_adversarial_deep_cyclic_provenance_dag(isolated_pg_store):
     """Traverses complex multi-hop DAG with diamond convergence, cycles, and temporal filters."""
-    store = PgVectorStore(dsn=PG_DSN)
-    store.execute_ddl()
+    store = isolated_pg_store
 
     tag = f"t5_dag_{uuid.uuid4().hex[:8]}"
     node_map = {n: f"{tag}_{n}" for n in ["R", "A1", "A2", "B", "C", "D", "E"]}
 
-    try:
-        # Create nodes: R -> A1, R -> A2; A1 -> B, A2 -> B (diamond); B -> C -> D -> E -> R (cycle!)
-        for n, nid in node_map.items():
-            store.insert_card(
-                MemoryCard(
-                    memory_id=nid,
-                    project="neurons",
-                    card_type="decision",
-                    title=f"Node {n}",
-                    summary=f"Summary {n}",
-                    content_hash=f"sha256:{hashlib.sha256(nid.encode()).hexdigest()}",
-                    lifecycle_state="human_accepted",
-                    authorization_status="active",
-                    currentness="current",
-                    valid_from=datetime(2026, 7, 1, tzinfo=timezone.utc),
-                )
+    # Create nodes: R -> A1, R -> A2; A1 -> B, A2 -> B (diamond); B -> C -> D -> E -> R (cycle!)
+    for n, nid in node_map.items():
+        store.insert_card(
+            MemoryCard(
+                memory_id=nid,
+                project="neurons",
+                card_type="decision",
+                title=f"Node {n}",
+                summary=f"Summary {n}",
+                content_hash=f"sha256:{hashlib.sha256(nid.encode()).hexdigest()}",
+                lifecycle_state="human_accepted",
+                authorization_status="active",
+                currentness="current",
+                valid_from=datetime(2026, 7, 1, tzinfo=timezone.utc),
             )
-
-        edges = [
-            ("R", "A1", "derived_from", datetime(2026, 8, 1, tzinfo=timezone.utc)),
-            ("R", "A2", "derived_from", datetime(2026, 8, 1, tzinfo=timezone.utc)),
-            ("A1", "B", "supports", datetime(2026, 8, 5, tzinfo=timezone.utc)),
-            ("A2", "B", "supports", datetime(2026, 8, 5, tzinfo=timezone.utc)),
-            ("B", "C", "supersedes", datetime(2026, 8, 10, tzinfo=timezone.utc)),
-            ("C", "D", "derived_from", datetime(2026, 8, 15, tzinfo=timezone.utc)),
-            ("D", "E", "derived_from", datetime(2026, 8, 20, tzinfo=timezone.utc)),
-            ("E", "R", "contradicts", datetime(2026, 8, 25, tzinfo=timezone.utc)),  # Cycle!
-        ]
-
-        for src, dst, rel, valid_from in edges:
-            src_id = node_map[src]
-            dst_id = node_map[dst]
-            store.insert_edge(
-                MemoryEdge(
-                    src_id=src_id,
-                    dst_id=dst_id,
-                    rel_type=rel,
-                    valid_from=valid_from,
-                    provenance_hash=f"sha256:{hashlib.sha256(f'{src_id}_{dst_id}'.encode()).hexdigest()}",
-                )
-            )
-
-        # 1. Full traversal from root R (max_depth=5)
-        results = store.traverse_provenance_dag(root_memory_id=node_map["R"], max_depth=5)
-        assert len(results) > 0
-        assert max(r["depth"] for r in results) <= 5
-
-        # 2. Point-in-time traversal as of 2026-08-08 (should only include R->A1, R->A2, A1->B, A2->B)
-        pit_results = store.traverse_provenance_dag(
-            root_memory_id=node_map["R"],
-            max_depth=5,
-            as_of="2026-08-08T00:00:00Z",
         )
-        pit_dsts = {r["dst_id"] for r in pit_results}
-        assert node_map["A1"] in pit_dsts
-        assert node_map["A2"] in pit_dsts
-        assert node_map["B"] in pit_dsts
-        assert node_map["C"] not in pit_dsts  # Created after 2026-08-08
-        assert node_map["D"] not in pit_dsts
-    finally:
-        with store.transaction() as conn:
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM memory_edges WHERE src_id LIKE %s OR dst_id LIKE %s", (f"{tag}%", f"{tag}%"))
-                cur.execute("DELETE FROM graph_projection_outbox WHERE source_id LIKE %s", (f"{tag}%",))
-                cur.execute("DELETE FROM memory_cards WHERE memory_id LIKE %s", (f"{tag}%",))
 
+    edges = [
+        ("R", "A1", "derived_from", datetime(2026, 8, 1, tzinfo=timezone.utc)),
+        ("R", "A2", "derived_from", datetime(2026, 8, 1, tzinfo=timezone.utc)),
+        ("A1", "B", "supports", datetime(2026, 8, 5, tzinfo=timezone.utc)),
+        ("A2", "B", "supports", datetime(2026, 8, 5, tzinfo=timezone.utc)),
+        ("B", "C", "supersedes", datetime(2026, 8, 10, tzinfo=timezone.utc)),
+        ("C", "D", "derived_from", datetime(2026, 8, 15, tzinfo=timezone.utc)),
+        ("D", "E", "derived_from", datetime(2026, 8, 20, tzinfo=timezone.utc)),
+        ("E", "R", "contradicts", datetime(2026, 8, 25, tzinfo=timezone.utc)),  # Cycle!
+    ]
+
+    for src, dst, rel, valid_from in edges:
+        src_id = node_map[src]
+        dst_id = node_map[dst]
+        store.insert_edge(
+            MemoryEdge(
+                src_id=src_id,
+                dst_id=dst_id,
+                rel_type=rel,
+                valid_from=valid_from,
+                provenance_hash=f"sha256:{hashlib.sha256(f'{src_id}_{dst_id}'.encode()).hexdigest()}",
+            )
+        )
+
+    # 1. Full traversal from root R (max_depth=5)
+    results = store.traverse_provenance_dag(root_memory_id=node_map["R"], max_depth=5)
+    assert len(results) > 0
+    assert max(r["depth"] for r in results) <= 5
+
+    # 2. Point-in-time traversal as of 2026-08-08 (should only include R->A1, R->A2, A1->B, A2->B)
+    pit_results = store.traverse_provenance_dag(
+        root_memory_id=node_map["R"],
+        max_depth=5,
+        as_of="2026-08-08T00:00:00Z",
+    )
+    pit_dsts = {r["dst_id"] for r in pit_results}
+    assert node_map["A1"] in pit_dsts
+    assert node_map["A2"] in pit_dsts
+    assert node_map["B"] in pit_dsts
+    assert node_map["C"] not in pit_dsts  # Created after 2026-08-08
+    assert node_map["D"] not in pit_dsts
 
 # ==============================================================================
 # 5. Full End-to-End Migration & Dual-Read Cutover Verification
 # ==============================================================================
 
 @live_pg
-def test_tier5_adversarial_full_backfill_and_dual_read_cutover():
+def test_tier5_adversarial_full_backfill_and_dual_read_cutover(isolated_pg_store):
     """Simulates full zero-downtime cutover: migrate 100 items and verify Recall@5 >= 0.95."""
     project = f"t5_cutover_{uuid.uuid4().hex[:8]}"
 
     source_qdrant = QdrantClient(":memory:")
+    from agent_knowledge.postgres_store.migration_qdrant_to_postgres import DEFAULT_SESSION_COLLECTION
     source_qdrant.create_collection(
-        "session_chunks",
+        DEFAULT_SESSION_COLLECTION,
         vectors_config=models.VectorParams(size=3072, distance=models.Distance.COSINE),
     )
     source_qdrant.create_collection(
@@ -499,50 +496,42 @@ def test_tier5_adversarial_full_backfill_and_dual_read_cutover():
         points.append(models.PointStruct(id=i + 1, vector=vec, payload=payload))
     source_qdrant.upsert("memory_cards", points)
 
-    pg_target = PgVectorStore(dsn=PG_DSN)
-    pg_target.execute_ddl()
+    pg_target = isolated_pg_store
 
-    try:
-        # Step 1: Run Backfill Migration
-        migrator = QdrantToPostgresMigrator(
-            qdrant_client=source_qdrant,
-            target_store=pg_target,
-            batch_size=25,
-        )
-        summary = migrator.run_full_migration(project=project)
-        assert summary.total_migrated == 100
-        migrated_cards = pg_target.list_authorized_cards(project=project)
-        assert len(migrated_cards) == 100
+    # Step 1: Run Backfill Migration
+    migrator = QdrantToPostgresMigrator(
+        qdrant_client=source_qdrant,
+        target_store=pg_target,
+        batch_size=25,
+    )
+    summary = migrator.run_full_migration(project=project)
+    assert summary.total_migrated == 100
+    migrated_cards = pg_target.list_authorized_cards(project=project)
+    assert len(migrated_cards) == 100
 
-        # Step 2: Run Dual-Read Shadow Benchmark
-        harness = DualReadShadowHarness(
-            qdrant_client=source_qdrant,
-            pg_store=pg_target,
-            default_limit=5,
-            recall_gate_threshold=0.95,
-            p95_latency_gate_ms=20.0,
-            evidence_class="test_harness",
-        )
-        benchmark_queries = [make_dummy_vector(q * 11) for q in range(50)]
-        bench_res = harness.run_benchmark(benchmark_queries, project=project)
+    # Step 2: Run Dual-Read Shadow Benchmark
+    harness = DualReadShadowHarness(
+        qdrant_client=source_qdrant,
+        pg_store=pg_target,
+        default_limit=5,
+        recall_gate_threshold=0.95,
+        p95_latency_gate_ms=20.0,
+        evidence_class="test_harness",
+    )
+    benchmark_queries = [make_dummy_vector(q * 11) for q in range(50)]
+    bench_res = harness.run_benchmark(benchmark_queries, project=project)
 
-        assert bench_res.mean_recall_at_k >= 0.95
-        assert bench_res.recall_gate_passed is True
-        assert bench_res.p95_pgvector_latency_ms <= 20.0
-        assert bench_res.overall_gate_passed is False
-        assert "test_harness_not_cutover_evidence" in bench_res.cutover_blockers
+    assert bench_res.mean_recall_at_k >= 0.95
+    assert bench_res.recall_gate_passed is True
+    assert bench_res.p95_pgvector_latency_ms <= 20.0
+    assert bench_res.overall_gate_passed is False
+    assert "test_harness_not_cutover_evidence" in bench_res.cutover_blockers
 
-        # Step 3: Verify Cutover Search on Target Store
-        resolved = pg_target.hybrid_search(
-            project=project,
-            query_vector=make_dummy_vector(0),
-            limit=5,
-        )
-        assert len(resolved) == 5
-        assert resolved[0]["similarity_score"] >= 0.99
-    finally:
-        with pg_target.transaction() as conn:
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM embedding_outbox WHERE target_id LIKE %s", (f"{project}%",))
-                cur.execute("DELETE FROM graph_projection_outbox WHERE source_id LIKE %s", (f"{project}%",))
-                cur.execute("DELETE FROM memory_cards WHERE project = %s", (project,))
+    # Step 3: Verify Cutover Search on Target Store
+    resolved = pg_target.hybrid_search(
+        project=project,
+        query_vector=make_dummy_vector(0),
+        limit=5,
+    )
+    assert len(resolved) == 5
+    assert resolved[0]["similarity_score"] >= 0.99
