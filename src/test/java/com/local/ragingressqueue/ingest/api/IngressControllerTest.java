@@ -48,6 +48,21 @@ class IngressControllerTest {
     }
 
     @Test
+    void nullSourceFieldsReturnBadRequestWithoutPublishing() throws Exception {
+        for (String field : new String[] {"provider", "project"}) {
+            String request = validRequest(null).replace("\"" + field + "\":\"" +
+                (field.equals("provider") ? "codex" : "workspace-index-advisor") + "\"",
+                "\"" + field + "\":null");
+            mockMvc.perform(post("/v1/ingest/enqueue")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content(request))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.accepted").value(false));
+        }
+        assertThat(publisher.publishCount).isZero();
+    }
+
+    @Test
     void explicitIdempotencyKeyIsAccepted() throws Exception {
         mockMvc.perform(post("/v1/ingest/enqueue")
                 .contentType(MediaType.APPLICATION_JSON)
