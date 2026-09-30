@@ -347,6 +347,7 @@ class GraphFirstResolver:
             ranked = self._store.hybrid_search(
                 project=request.project,
                 query_vector=vector,
+                text_query=request.query,
                 limit=_CARD_LIMIT,
                 as_of=request.as_of or None,
                 steward_only=True,
