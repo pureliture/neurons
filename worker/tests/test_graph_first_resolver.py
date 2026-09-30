@@ -176,6 +176,25 @@ def test_single_unicode_item_fits_final_default_json_with_cursor_and_keeps_ident
     assert result["items"][0]["content_hash"] == HASH_A
 
 
+def test_fallback_uses_query_text_to_rank_equally_embedded_authorized_cards():
+    class TextRankingStore(Store):
+        def hybrid_search(self, **kwargs):
+            assert kwargs["steward_only"] is True
+            assert kwargs["project"] == "neurons"
+            assert kwargs["text_query"] == "postgres authority"
+            # The PG hybrid scorer ranks the lexical match ahead of a vector tie.
+            return [self.cards[1], self.cards[0]]
+
+    cards = [_card("mem_a", HASH_A), _card("mem_b", HASH_B)]
+    cards[0]["title"] = "unrelated topic"
+    cards[1]["title"] = "postgres authority"
+    result = GraphFirstResolver(TextRankingStore(cards=cards), None, lambda _: [0.1]).resolve(
+        project="neurons", query="postgres authority", limit=1,
+    )
+    assert [item["id"] for item in result["items"]] == ["mem_b"]
+    assert result["metadata"]["retrieval_path"] == "pgvector_fallback"
+
+
 def test_fallback_drops_stale_ranked_hash_and_labels_embedding_failure():
     store = Store(cards=[_card("mem_a", HASH_A)])
     store.hybrid_search = lambda **kwargs: [_card("mem_a", HASH_B)]
