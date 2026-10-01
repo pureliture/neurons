@@ -204,6 +204,145 @@ class IngressControllerTest {
             .doesNotContain("/Users/");
     }
 
+    @Test
+    void validValidationReturnsOkWithoutPublish() throws Exception {
+        mockMvc.perform(post("/v1/ingest/validate")
+                .contentType(MediaType.APPLICATION_JSON).content(validRequest(null)))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.status").value("valid"))
+            .andExpect(jsonPath("$.errors").isEmpty())
+            .andExpect(jsonPath("$.jobId").doesNotExist())
+            .andExpect(jsonPath("$.accepted").doesNotExist());
+        assertThat(publisher.publishCount).isZero();
+    }
+
+    @Test
+    void invalidValidationMatchesEnqueueStaticErrors() throws Exception {
+        for (String invalid : new String[] {
+            validRequest(null).replace("rag_ingress_enqueue.v1", "unsupported_schema"),
+            validRequest(null).replace("\"kind\": \"conversation_chunk\"", "\"kind\": \"unknown_kind\""),
+            validRequest(null).replace("index-transcript-memory", "unsupported_profile"),
+            validRequest(null).replace("\"contentHash\":", "\"missingHash\":")
+        }) {
+            var submitted = mockMvc.perform(post("/v1/ingest/enqueue")
+                .contentType(MediaType.APPLICATION_JSON).content(invalid)).andExpect(status().isBadRequest())
+                .andReturn().getResponse().getContentAsString();
+            var checked = mockMvc.perform(post("/v1/ingest/validate")
+                .contentType(MediaType.APPLICATION_JSON).content(invalid)).andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value("rejected")).andReturn().getResponse().getContentAsString();
+            assertThat(checked).contains(submitted.contains("schemaVersion must")
+                ? "schemaVersion must be rag_ingress_enqueue.v1" : "request rejected");
+        }
+        assertThat(publisher.publishCount).isZero();
+    }
+
+    @Test
+    void reservedDocumentReferenceValidationReturnsUnprocessableEntity() throws Exception {
+        mockMvc.perform(post("/v1/ingest/validate").contentType(MediaType.APPLICATION_JSON)
+                .content(validRequest(null).replace("redacted_rag_ready_document", "redacted_document_ref")))
+            .andExpect(status().isUnprocessableEntity())
+            .andExpect(jsonPath("$.status").value("unsupported_payload"))
+            .andExpect(jsonPath("$.errors[0]").value("redacted_document_ref is reserved but disabled"));
+        assertThat(publisher.publishCount).isZero();
+    }
+
+    @Test
+    void validationNeverCallsIdempotencyStore() throws Exception {
+        var store = new com.local.ragingressqueue.ingest.service.IdempotencyStore() {
+            @Override public boolean conflicts(String key, String hash) {
+                throw new AssertionError("validation must not access mutable store");
+            }
+        };
+        var isolated = MockMvcBuilders.standaloneSetup(new IngressController(publisher,
+            new com.local.ragingressqueue.status.service.StatusService(),
+            new com.local.ragingressqueue.ingest.domain.validation.IngestJobValidator(),
+            new com.local.ragingressqueue.ingest.domain.validation.RedactionGuard(), store)).build();
+        for (String input : new String[] {validRequest(null), validRequestWithoutSource(),
+            validRequest(null).replace("redacted_rag_ready_document", "redacted_document_ref")}) {
+            isolated.perform(post("/v1/ingest/validate").contentType(MediaType.APPLICATION_JSON).content(input));
+        }
+        String checked = validRequest("\"idempotencyKey\":\"preflight-key\",");
+        mockMvc.perform(post("/v1/ingest/validate").contentType(MediaType.APPLICATION_JSON).content(checked))
+            .andExpect(status().isOk());
+        mockMvc.perform(post("/v1/ingest/enqueue").contentType(MediaType.APPLICATION_JSON)
+                .content(validRequestWithBody("\"idempotencyKey\":\"preflight-key\",", body() + "changed")))
+            .andExpect(status().isAccepted());
+    }
+
+    @Test
+    void missingOrNullSourceValidationReturnsBadRequest() throws Exception {
+        for (String input : new String[] {validRequestWithoutSource(),
+            validRequest(null).replace("\"provider\":\"codex\"", "\"provider\":null"),
+            validRequest(null).replace("\"project\":\"workspace-index-advisor\"", "\"project\":null")}) {
+            mockMvc.perform(post("/v1/ingest/validate").contentType(MediaType.APPLICATION_JSON).content(input))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.status").value("rejected"));
+        }
+        assertThat(publisher.publishCount).isZero();
+    }
+
+    @Test
+    void sensitiveValidationErrorsNeverEchoInput() throws Exception {
+        String syntheticBody = body() + " Bearer synthetic.nonsecret.fixture";
+        for (String input : new String[] {validRequestWithBody("\"idempotencyKey\":\"private-fixture-key\",", syntheticBody),
+            validRequest(null).replace("\"result_type\":\"conversation_chunk\"",
+                "\"authHeader\":\"Bearer synthetic.nonsecret.fixture\"")}) {
+            String response = mockMvc.perform(post("/v1/ingest/validate").contentType(MediaType.APPLICATION_JSON)
+                    .content(input)).andExpect(status().isBadRequest()).andReturn().getResponse().getContentAsString();
+            assertThat(response).doesNotContain("synthetic", "redacted body", "codex", "workspace-index-advisor",
+                "private-fixture-key", "contentHash", "payload", "source", "stack", "jobId");
+        }
+        assertThat(publisher.publishCount).isZero();
+    }
+
+    @Test
+    void malformedJsonValidationDoesNotEchoRequest() throws Exception {
+        for (String input : new String[] {"{\"source\":\"synthetic-private-marker", "null", ""}) {
+            String response = mockMvc.perform(post("/v1/ingest/validate").contentType(MediaType.APPLICATION_JSON)
+                .content(input)).andExpect(status().isBadRequest()).andReturn().getResponse().getContentAsString();
+            assertThat(response).doesNotContain("synthetic-private-marker", "source", "exception", "stack");
+        }
+        assertThat(publisher.publishCount).isZero();
+    }
+
+    @Test
+    void validationIsIndependentOfQueueAndDatabaseAvailability() throws Exception {
+        IngestPublisher unavailable = job -> { throw new AssertionError("queue access forbidden"); };
+        var unavailableStatus = new com.local.ragingressqueue.status.service.StatusService() {
+            @Override public java.util.Map<String, Object> currentStatus() {
+                throw new AssertionError("status/backend access forbidden");
+            }
+        };
+        var isolated = MockMvcBuilders.standaloneSetup(new IngressController(unavailable, unavailableStatus)).build();
+        isolated.perform(post("/v1/ingest/validate").contentType(MediaType.APPLICATION_JSON).content(validRequest(null)))
+            .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("valid"));
+    }
+
+    @Test
+    void enqueueContractRemainsUnchanged() throws Exception {
+        String first = validRequest("\"idempotencyKey\":\"enqueue-regression\",");
+        mockMvc.perform(post("/v1/ingest/enqueue").contentType(MediaType.APPLICATION_JSON).content(first))
+            .andExpect(status().isAccepted()).andExpect(jsonPath("$.accepted").value(true));
+        mockMvc.perform(post("/v1/ingest/validate").contentType(MediaType.APPLICATION_JSON)
+                .content(validRequestWithBody("\"idempotencyKey\":\"enqueue-regression\",", body() + "changed")))
+            .andExpect(status().isOk());
+        mockMvc.perform(post("/v1/ingest/enqueue").contentType(MediaType.APPLICATION_JSON)
+                .content(validRequestWithBody("\"idempotencyKey\":\"enqueue-regression\",", body() + "changed")))
+            .andExpect(status().isConflict());
+        publisher.nextResult = PublishResult.failed("synthetic offline");
+        mockMvc.perform(post("/v1/ingest/enqueue").contentType(MediaType.APPLICATION_JSON).content(validRequest(null)))
+            .andExpect(status().isServiceUnavailable());
+    }
+
+    @Test
+    void validationRouteUsesExistingIngressProtection() throws Exception {
+        // Application-level scope is shared; actual gateway policy needs separate deployment evidence.
+        assertThat(IngressController.class.getAnnotation(org.springframework.context.annotation.Profile.class).value())
+            .containsExactly("api");
+        var mapping = IngressController.class.getMethod("validate", com.local.ragingressqueue.ingest.dto.EnqueueRequest.class)
+            .getAnnotation(org.springframework.web.bind.annotation.PostMapping.class);
+        assertThat(mapping.value()).containsExactly("/v1/ingest/validate");
+    }
+
     private String validRequest(String optionalField) {
         return validRequestWithBody(optionalField, body());
     }
