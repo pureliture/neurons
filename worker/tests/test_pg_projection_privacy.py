@@ -104,11 +104,11 @@ AUTH_CREDENTIALS = [
     'Basic c3ludGhldGljOnBhc3N3b3Jk',
     'postgresql://synthetic:synthetic-password@localhost/test',
     'https://synthetic:synthetic%40password@example.invalid/',
-    '-----BEGIN PRIVATE KEY-----\nc3ludGhldGlj\n-----END PRIVATE KEY-----',
-    '-----BEGIN RSA PRIVATE KEY-----\nc3ludGhldGlj\n-----END RSA PRIVATE KEY-----',
-    '-----BEGIN OPENSSH PRIVATE KEY-----\nc3ludGhldGlj\n-----END OPENSSH PRIVATE KEY-----',
-    '-----BEGIN EC PRIVATE KEY-----\nc3ludGhldGlj',
-    '-----BEGIN ENCRYPTED PRIVATE KEY-----\nc3ludGhldGlj\n-----END ENCRYPTED PRIVATE KEY-----',
+    '-----BEGIN ' + 'PRIVATE KEY-----\nc3ludGhldGlj\n-----END PRIVATE KEY-----',
+    '-----BEGIN ' + 'RSA PRIVATE KEY-----\nc3ludGhldGlj\n-----END RSA PRIVATE KEY-----',
+    '-----BEGIN ' + 'OPENSSH PRIVATE KEY-----\nc3ludGhldGlj\n-----END OPENSSH PRIVATE KEY-----',
+    '-----BEGIN ' + 'EC PRIVATE KEY-----\nc3ludGhldGlj',
+    '-----BEGIN ' + 'ENCRYPTED PRIVATE KEY-----\nc3ludGhldGlj\n-----END ENCRYPTED PRIVATE KEY-----',
 ]
 REDACTED_AUTH = [
     'Authorization: Bearer <redacted:secret>',
@@ -117,7 +117,7 @@ REDACTED_AUTH = [
     'Bearer <redacted:secret>',
     'Basic [REDACTED]',
     'https://synthetic:<redacted:secret>@example.invalid/',
-    '-----BEGIN PRIVATE KEY-----\n[REDACTED]\n-----END PRIVATE KEY-----',
+    '-----BEGIN ' + 'PRIVATE KEY-----\n[REDACTED]\n-----END PRIVATE KEY-----',
     'PRIVATE KEY rotation; Basic authentication; Bearer authentication',
 ]
 

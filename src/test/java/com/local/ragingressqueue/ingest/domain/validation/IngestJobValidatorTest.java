@@ -5,6 +5,7 @@ import com.local.ragingressqueue.ingest.domain.IngestJob;
 import com.local.ragingressqueue.common.IngestStatus;
 import org.junit.jupiter.api.Test;
 
+import java.util.HashMap;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -85,6 +86,19 @@ class IngestJobValidatorTest {
         IngestJob job = validJob().withIdempotencyKey("operator-provided-key-001");
 
         assertThat(validator.validate(job)).isEmpty();
+    }
+
+    @Test
+    void nullSourceValuesAreRejectedInsteadOfCrashingValidation() {
+        for (String field : new String[] {"provider", "project"}) {
+            Map<String, String> source = new HashMap<>(validJob().source());
+            source.put(field, null);
+            IngestJob valid = validJob();
+            IngestJob malformed = new IngestJob(source, valid.payload(), valid.contentHash(),
+                valid.targetProfile(), valid.kind(), valid.idempotencyKey());
+
+            assertThat(validator.validate(malformed)).contains("source." + field + " is required");
+        }
     }
 
     @Test
