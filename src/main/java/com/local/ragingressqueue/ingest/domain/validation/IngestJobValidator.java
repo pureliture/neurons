@@ -61,10 +61,12 @@ public class IngestJobValidator {
             violations.add("source is required");
             return;
         }
-        if (job.source().getOrDefault("provider", "").isBlank()) {
+        String provider = job.source().get("provider");
+        if (provider == null || provider.isBlank()) {
             violations.add("source.provider is required");
         }
-        if (job.source().getOrDefault("project", "").isBlank()) {
+        String project = job.source().get("project");
+        if (project == null || project.isBlank()) {
             violations.add("source.project is required");
         }
     }
