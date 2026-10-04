@@ -711,7 +711,8 @@ def main(argv=None, *, boundary_factory=None):
                 pass
         print(json.dumps({"status": "mutation_unknown" if args.apply else "rejected",
                           "mutation_started": None if args.apply else False, "applied": None,
-                          "deadline_exceeded": exceeded, "worker_reaped": not worker.is_alive()}))
+                          "deadline_exceeded": exceeded, "worker_reaped": not worker.is_alive(),
+                          "worker_pid": worker.pid}))
         return 1
     finally:
         receive.close()
