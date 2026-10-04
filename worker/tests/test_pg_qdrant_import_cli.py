@@ -670,9 +670,10 @@ def test_sql_connection_enforces_timeouts_and_cleanup(monkeypatch):
     assert conn.closed
 
 
+@pytest.mark.parametrize("startup_delay", [0, 0.08])
 @pytest.mark.parametrize("stage", ["rollback", "close"])
 @pytest.mark.parametrize("apply", [False, True])
-def test_process_deadline_includes_noncooperative_cleanup(lane, stage, apply):
+def test_process_deadline_includes_noncooperative_cleanup(lane, stage, apply, startup_delay):
     import subprocess
     import sys
     boundary, argv, path = lane
@@ -684,7 +685,12 @@ def test_process_deadline_includes_noncooperative_cleanup(lane, stage, apply):
 import json, os, signal, sys, time
 from pathlib import Path
 from agent_knowledge.rag_ingress import pg_qdrant_import_cli as cli
-argv, stage, pidfile = json.loads(sys.argv[1])
+argv, stage, pidfile, startup_delay = json.loads(sys.argv[1])
+original_run = cli._run_worker
+def delayed_run(*args, **kwargs):
+    time.sleep(startup_delay)
+    return original_run(*args, **kwargs)
+cli._run_worker = delayed_run
 # Isolate the process deadline independently of manifest validation.
 cli.read_approved = lambda *a: {}
 cli.code_revision = lambda: "synthetic-revision"
@@ -714,7 +720,7 @@ print(json.dumps({"elapsed": time.monotonic() - start, "rc": rc}))
 '''
     pidfile = path / "worker.pid"
     result = subprocess.run([sys.executable, "-c", script,
-                             json.dumps([argv, stage, str(pidfile)])],
+                             json.dumps([argv, stage, str(pidfile), startup_delay])],
                             text=True, capture_output=True, timeout=8)
     assert result.returncode == 0, result.stderr
     report, timing = [json.loads(line) for line in result.stdout.splitlines()]
@@ -724,8 +730,12 @@ print(json.dumps({"elapsed": time.monotonic() - start, "rc": rc}))
     assert report.get("deadline_exceeded") is True
     assert report.get("worker_reaped") is True
     import os
-    # The worker published its pid before the deadline; by now it must be gone.
-    pid = int(pidfile.read_text().strip())
+    # The supervisor owns the fork PID even if startup loses the 50ms race.
+    # Boundary construction may not run; PID-file presence is not startup proof.
+    pid = report['worker_pid']
+    assert type(pid) is int and pid > 0
+    if pidfile.exists():
+        assert int(pidfile.read_text().strip()) == pid
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
 
