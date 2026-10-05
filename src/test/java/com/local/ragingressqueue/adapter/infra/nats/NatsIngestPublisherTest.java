@@ -27,6 +27,29 @@ class NatsIngestPublisherTest {
     }
 
     @Test
+    void publishAcceptsValidatedRepoUsagePatternOnDocumentSubject() {
+        FakeGateway gateway = new FakeGateway(new JetStreamPublishAck("RAG_INGRESS_QUEUE", 43, false));
+        NatsIngestPublisher publisher = new NatsIngestPublisher(gateway, new SubjectRouter(), new IngestJobMessageCodec());
+        IngestJob original = validJob("stable-key");
+        DocumentPayload payload = original.payload();
+        String body = payload.body().replace("conversation_chunk", "repo_usage_pattern");
+        IngestJob job = new IngestJob(original.source(), new DocumentPayload(payload.kind(),
+            payload.redactionVersion(), payload.filename(), payload.contentType(), body,
+            Map.of("schema_version", "agent_knowledge_document.v2", "result_type", "repo_usage_pattern")),
+            ContentHashVerifier.sha256Hex(body), "index-procedural-memory", "repo_usage_pattern",
+            original.idempotencyKey());
+
+        assertThat(new com.local.ragingressqueue.ingest.domain.validation.IngestJobValidator().validate(job)).isEmpty();
+        PublishResult result = publisher.publish(job);
+
+        assertThat(result.accepted()).isTrue();
+        assertThat(result.jobId()).isEqualTo("RAG_INGRESS_QUEUE:43");
+        assertThat(gateway.subject).isEqualTo("rag.ingress.document");
+        assertThat(gateway.messageId).isEqualTo("stable-key");
+        assertThat(new IngestJobMessageCodec().decode(gateway.payload)).isEqualTo(job);
+    }
+
+    @Test
     void publishFallsBackToContentHashWhenIdempotencyKeyIsAbsent() {
         FakeGateway gateway = new FakeGateway(new JetStreamPublishAck("RAG_INGRESS_QUEUE", 7, false));
         NatsIngestPublisher publisher = new NatsIngestPublisher(gateway, new SubjectRouter(), new IngestJobMessageCodec());
