@@ -63,7 +63,7 @@ def resolve_delivery_payload(
     delivery job's payload_hash, the stored contentHash, and a fresh sha256 of the
     stored document body all agree. Anything else returns ``(None, reason)``.
     """
-    payload = state_db.get_delivery_payload(idempotency_key)
+    payload = state_db.get_effective_delivery_payload(idempotency_key)
     if payload is None:
         return None, PAYLOAD_MISSING
     content_hash = str(payload.get("contentHash") or "")

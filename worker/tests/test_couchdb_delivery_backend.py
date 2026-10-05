@@ -230,6 +230,26 @@ def _backend(state_db: RAGIngressStateDB, store: InMemoryCouchDBSourceStore) -> 
 # 핵심 테스트: 6개 doc 패밀리 기록
 # ---------------------------------------------------------------------------
 
+def test_bare_session_hash_is_terminal_preparation_failure_without_store_writes(tmp_path):
+    state_db = _state_db(tmp_path)
+    request = _payload(session_id_hash=SESSION_ID_HASH.removeprefix("sha256:"))
+    _seed(state_db, request)
+
+    class NoWritesStore(InMemoryCouchDBSourceStore):
+        def put(self, document):
+            pytest.fail("invalid preparation must not reach persistence")
+
+    backend = _backend(state_db, NoWritesStore())
+    outcome = DeliveryExecutor(state_db=state_db, backend=backend, lease_owner="fixture").execute_once(
+        _job_view(state_db, request["idempotencyKey"]).job_id
+    )
+    assert outcome == "quarantined"
+    job = state_db.get_row("delivery_jobs", "idempotency_key", request["idempotencyKey"])
+    assert job["last_error_class"] == "delivery_payload_integrity_mismatch"
+    assert job["index_run_id"] == "prepare_source_documents:ValueError"
+    assert state_db.get_delivery_payload(request["idempotencyKey"]) == request
+
+
 def test_submit_writes_session_chunk_coverage_projection_to_couchdb(tmp_path):
     """submit()이 session, chunk, coverage, projection_state 4개 문서를 CouchDB에 기록한다."""
     state_db = _state_db(tmp_path)

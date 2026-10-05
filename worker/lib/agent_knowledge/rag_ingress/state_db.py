@@ -6,6 +6,9 @@ domain projection, delivery-outbox, and replay payload contracts.
 
 from __future__ import annotations
 
+import copy
+import hashlib
+import re
 import json
 import os
 import sqlite3
@@ -564,6 +567,31 @@ class RAGIngressStateDB:
             )
             return True
 
+    def quarantine_transport_delivery(
+        self, job_id: str, *, expected_updated_at: str, now: datetime | None = None
+    ) -> None:
+        """Terminalize only an unleased exact version; never erase success or payload."""
+        stamp_dt = now or _utc_now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM delivery_jobs WHERE job_id = ?", (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            current = _row_to_dict(row)
+            if current.get("status") in {"succeeded", "quarantined"}:
+                return
+            if current.get("updated_at") != expected_updated_at or _lease_is_live(current, stamp_dt):
+                raise StaleOwnerRejected("transport_quarantine_version_or_lease")
+            if connection.execute("SELECT 1 FROM delivery_payloads WHERE idempotency_key = ?",
+                                  (current["idempotency_key"],)).fetchone() is None:
+                raise StateDBError("transport_quarantine_payload_missing")
+            connection.execute(
+                """UPDATE delivery_jobs SET status = 'quarantined', lease_owner = '', lease_until = '',
+                   next_retry_at = '', last_error_class = CASE WHEN last_error_class = ''
+                   THEN 'transport_max_deliver' ELSE last_error_class END, updated_at = ? WHERE job_id = ?""",
+                (_iso(stamp_dt), job_id),
+            )
+
     def record_replayable_attempt(
         self,
         job_id: str,
@@ -594,7 +622,9 @@ class RAGIngressStateDB:
             attempt_count = int(row["attempt_count"] or 0) + 1
             if attempt_count >= max_attempts:
                 status = "quarantined"
-                last_error_class = "replay_attempt_limit"
+                # The cap explains terminal status, not the remote failure.
+                # Keep uncertainty visible for later read-only reconciliation.
+                last_error_class = row_dict.get("last_error_class") or "remote_outcome_uncertain"
                 next_retry_at = ""
             else:
                 status = IdempotencyOutcome.REPLAYABLE
@@ -695,6 +725,16 @@ class RAGIngressStateDB:
                 """,
                 (status, dataset_ref, document_ref, run, last_error_class, evidence_stamp, stamp, job_id),
             )
+            audit_id = "source-correction:" + job_id
+            if connection.execute("SELECT 1 FROM domain_records WHERE domain_record_id = ?", (audit_id,)).fetchone():
+                connection.execute(
+                    """INSERT INTO command_results (result_id, command_id, decision, domain_versions_written, error_class, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (_new_id("correction_attempt"), row_dict["command_id"], "procedural_source_attempt_" + status,
+                     _json_dumps({"job_id": job_id, "correction_audit_id": audit_id, "run": run,
+                                  "document_ref": document_ref, "dataset_ref": dataset_ref}), last_error_class, stamp),
+                )
+                connection.execute("UPDATE delivery_jobs SET attempt_count = attempt_count + 1 WHERE job_id = ?", (job_id,))
             return True
 
     def record_failed_retryable_attempt(
@@ -873,6 +913,98 @@ class RAGIngressStateDB:
         except json.JSONDecodeError:
             return None
         return payload if isinstance(payload, dict) else None
+
+    def get_effective_delivery_payload(self, idempotency_key: str) -> dict | None:
+        original = self.get_delivery_payload(idempotency_key)
+        job = self.get_row("delivery_jobs", "idempotency_key", idempotency_key)
+        if original is None or job is None:
+            return original
+        audit = self.get_domain_record("source-correction:" + str(job["job_id"]))
+        if audit is None:
+            return original
+        projection = json.loads(audit["projection_json"])
+        corrected = copy.deepcopy(original)
+        old_hash = original["payload"]["document"]["metadata"]["session_id_hash"]
+        if not re.fullmatch(r"[0-9a-f]{64}", old_hash):
+            raise StateDBError("source_correction_original_drift")
+        corrected["payload"]["document"]["metadata"]["session_id_hash"] = "sha256:" + old_hash
+        if (projection["old_payload"] != original or projection["corrected_payload"] != corrected
+                or projection["job_id"] != job["job_id"]
+                or job["document_kind"] != "repo_usage_pattern"
+                or job["target_profile"] != "index-procedural-memory"):
+            raise StateDBError("source_correction_original_drift")
+        return corrected
+
+    def correct_procedural_source_hash(
+        self, job_id: str, *, expected_updated_at: str,
+        expected_payload_identity: str, lease_owner: str, now: datetime | None = None,
+    ) -> str:
+        """One audited metadata correction; preserve the original wire and job key."""
+        stamp_dt = now or _utc_now()
+        stamp = _iso(stamp_dt)
+        if not lease_owner:
+            raise ValueError("source correction lease owner is required")
+        with self.connect() as connection:
+            connection.execute("PRAGMA synchronous=FULL")
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM delivery_jobs WHERE job_id = ?", (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            job = _row_to_dict(row)
+            audit_id = "source-correction:" + job_id
+            if connection.execute("SELECT 1 FROM domain_records WHERE domain_record_id = ?", (audit_id,)).fetchone():
+                raise StateDBError("source_correction_already_recorded_get_only")
+            if (job["updated_at"] != expected_updated_at or _lease_is_live(job, stamp_dt)
+                    or job["status"] != "replayable" or job["attempt_count"] != 1
+                    or job["last_error_class"] != "remote_outcome_uncertain"
+                    or job["document_kind"] != "repo_usage_pattern"
+                    or job["target_profile"] != "index-procedural-memory"):
+                raise StaleOwnerRejected("source_correction_preimage_or_lease")
+            retained = connection.execute("SELECT * FROM delivery_payloads WHERE idempotency_key = ?", (job["idempotency_key"],)).fetchone()
+            if retained is None:
+                raise StateDBError("source_correction_payload_missing")
+            original = json.loads(retained["payload_json"])
+            identity = "sha256:" + hashlib.sha256(_json_dumps(original).encode()).hexdigest()
+            if identity != expected_payload_identity:
+                raise StateDBError("source_correction_payload_identity_mismatch")
+            body = original["payload"]["document"]["body"]
+            content_hash = "sha256:" + hashlib.sha256(body.encode()).hexdigest()
+            if (content_hash != job["payload_hash"] or content_hash != retained["payload_hash"]
+                    or content_hash != original["contentHash"]
+                    or original["idempotencyKey"] != job["idempotency_key"]
+                    or original["kind"] != job["document_kind"]
+                    or original["targetProfile"] != job["target_profile"]):
+                raise StateDBError("source_correction_payload_contract_mismatch")
+            old_hash = original["payload"]["document"]["metadata"]["session_id_hash"]
+            if not re.fullmatch(r"[0-9a-f]{64}", old_hash):
+                raise StateDBError("source_correction_not_bare_sha256")
+            corrected = copy.deepcopy(original)
+            corrected["payload"]["document"]["metadata"]["session_id_hash"] = "sha256:" + old_hash
+            projection = {
+                "schema_version": "procedural_source_correction.v1", "job_id": job_id,
+                "old_job": job, "old_payload": original, "corrected_payload": corrected,
+                "old_payload_identity": identity,
+                "new_payload_identity": "sha256:" + hashlib.sha256(_json_dumps(corrected).encode()).hexdigest(),
+                "changed_field": "payload.document.metadata.session_id_hash",
+                "scope": "raw_source_only", "historical_error": job["last_error_class"],
+            }
+            connection.execute(
+                """INSERT INTO domain_records (domain_record_id, command_id, resource_id_hash,
+                   domain_kind, lifecycle_status, version, payload_hash, projection_json, created_at, updated_at)
+                   VALUES (?, ?, ?, 'procedural_source_correction', 'preserved', 1, ?, ?, ?, ?)""",
+                (audit_id, job["command_id"], job_id, identity, _json_dumps(projection), stamp, stamp),
+            )
+            connection.execute(
+                """INSERT INTO command_results (result_id, command_id, decision, domain_versions_written, created_at)
+                   VALUES (?, ?, 'procedural_source_correction_preserved', ?, ?)""",
+                (audit_id, job["command_id"], _json_dumps({audit_id: 1}), stamp),
+            )
+            connection.execute(
+                """UPDATE delivery_jobs SET status = 'claimed', lease_owner = ?, lease_until = ?,
+                   updated_at = ? WHERE job_id = ? AND updated_at = ?""",
+                (lease_owner, _iso(stamp_dt + timedelta(seconds=600)), stamp, job_id, expected_updated_at),
+            )
+            return audit_id
 
     def get_domain_record(self, domain_record_id: str) -> dict | None:
         return self.get_row("domain_records", "domain_record_id", domain_record_id)

@@ -48,6 +48,7 @@ RETIRED_RETIRED_INDEX_BRIDGE_PROFILE = "transcript-memory"
 class SourceDocType:
     """CouchDB-owned source/evidence and source-revision control documents."""
 
+    REPO_USAGE_PATTERN = "repo_usage_pattern"
     TRANSCRIPT_SESSION = "transcript_session"
     CONVERSATION_CHUNK = "conversation_chunk"
     TOOL_EVIDENCE_BUNDLE = "tool_evidence_bundle"
@@ -60,6 +61,7 @@ class SourceDocType:
 
     _KNOWN = frozenset(
         {
+            REPO_USAGE_PATTERN,
             TRANSCRIPT_SESSION,
             CONVERSATION_CHUNK,
             TOOL_EVIDENCE_BUNDLE,
@@ -465,6 +467,53 @@ def _finalize(document: dict) -> dict:
             "document failed leak check; categories=" + ",".join(sorted(set(leaks)))
         )
     return document
+
+
+def repo_usage_pattern_doc_id(idempotency_key: str) -> str:
+    if not idempotency_key:
+        raise ValueError("original ingress natural key is required")
+    return f"{SourceDocType.REPO_USAGE_PATTERN}:{_hash_hex(sha256_hash(idempotency_key))}"
+
+
+def build_repo_usage_pattern_document(*, payload: Mapping, job_id: str) -> dict:
+    """Preserve a procedural original without publishing any recall authority."""
+    if payload.get("kind") != SourceDocType.REPO_USAGE_PATTERN or payload.get("targetProfile") != "index-procedural-memory":
+        raise ValueError("unsupported procedural source destination")
+    package = payload["payload"]
+    original = package["document"]
+    metadata = original["metadata"]
+    source = payload["source"]
+    body = str(original["body"])
+    assert_source_text_clean(body)
+    if sha256_hash(body) != payload.get("contentHash"):
+        raise ValueError("procedural source content hash mismatch")
+    provider = str(metadata.get("provider") or source.get("provider") or "")
+    project = str(metadata.get("project") or source.get("project") or "")
+    if not provider or not project or not job_id:
+        raise ValueError("procedural source provenance is required")
+    doc = _base_document(
+        doc_type=SourceDocType.REPO_USAGE_PATTERN,
+        doc_id=repo_usage_pattern_doc_id(str(payload.get("idempotencyKey") or "")),
+        provider=provider, project=project,
+        session_id_hash=str(metadata.get("session_id_hash") or ""),
+        source_locator_hash="", redaction_version=str(package["redactionVersion"]),
+    )
+    doc.update({
+        "body": body, "content_hash": str(payload["contentHash"]),
+        "original_document": dict(original), "source": dict(source),
+        "document_kind": SourceDocType.REPO_USAGE_PATTERN,
+        "target_profile": "index-procedural-memory",
+        "processing_stage": "raw_source_stored", "authority": "non_authoritative_original",
+        "recall_eligible": False, "projection_enabled": False,
+        "provenance": {"job_id": job_id,
+                       "original_idempotency_key": str(payload["idempotencyKey"]),
+                       "wire_identity_hash": sha256_hash(json.dumps(dict(payload), sort_keys=True, separators=(",", ":"), ensure_ascii=False))},
+    })
+    if source.get("provider") and source["provider"] != provider:
+        raise ValueError("procedural source provider mismatch")
+    if source.get("project") and source["project"] != project:
+        raise ValueError("procedural source project mismatch")
+    return _finalize(doc)
 
 
 def build_transcript_session_document(*, session: TranscriptSession) -> dict:

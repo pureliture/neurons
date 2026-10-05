@@ -29,6 +29,7 @@ import time
 import uuid
 from itertools import count
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping
 
@@ -76,6 +77,19 @@ class ShadowResult:
     delivered: bool
     dataset_ref: str = ""
     document_ref: str = ""
+
+
+class DeliveryDeferred(RuntimeError):
+    """Canonical state, not broker redelivery count, owns the retry deadline."""
+
+    def __init__(self, *, job_id: str, next_retry_at: str):
+        super().__init__("canonical_delivery_deferred")
+        self.job_id = job_id
+        self.next_retry_at = next_retry_at
+
+    def delay_seconds(self) -> float:
+        deadline = datetime.fromisoformat(self.next_retry_at)
+        return max((deadline - datetime.now(timezone.utc)).total_seconds(), 0.01)
 
 
 class IngestStateStore:
@@ -283,6 +297,11 @@ def process_payload(payload: dict, *, store: IngestStateStore,
                 content_hash_present=bool(document.content_hash), delivered=False,
             )
         if outcome != "succeeded":
+            current = state_db.get_delivery_job(str(accepted["job_id"]))
+            if current is not None:
+                deadline = str(current.get("next_retry_at") or current.get("lease_until") or "")
+                if deadline:
+                    raise DeliveryDeferred(job_id=str(accepted["job_id"]), next_retry_at=deadline)
             raise RuntimeError(f"canonical delivery did not succeed: {outcome}")
         job = state_db.get_delivery_job(str(accepted["job_id"]))
         if job is None:
@@ -393,18 +412,31 @@ async def run_consume(*, nats_url: str, stream: str, subject: str, durable: str,
             await js.stream_info(stream)
         except Exception:
             await js.add_stream(name=stream, subjects=[subject])
-    if allow_live:
-        # Live takeover from the retired Java worker: delete its durable so we
-        # create a fresh pull consumer with our own config (avoids a bind config
-        # mismatch). WorkQueue retains all un-acked messages across the delete,
-        # so no queued work is lost; rollback re-provisions the durable when the
-        # Java worker restarts.
+    if stream == "RAG_INGRESS_QUEUE":
+        # The existing durable owns its ACK floor and pending work. Binding must
+        # not call pull_subscribe, which may create/update the consumer.
         try:
-            await js.delete_consumer(stream, durable)
-            log(f"deleted existing durable {durable} for fresh live takeover")
+            stream_info = await js.stream_info(stream)
+            if subject not in (stream_info.config.subjects or []):
+                raise ValueError("live_stream_subject_mismatch")
+            consumer_info = await js.consumer_info(stream, durable)
+            config = consumer_info.config
+            if (
+                consumer_info.name != durable
+                or config.durable_name != durable
+                or config.filter_subject != subject
+                or getattr(config, "filter_subjects", None)
+                or config.deliver_subject
+                or config.ack_policy != "explicit"
+                or config.max_deliver != max_deliver
+            ):
+                raise ValueError("live_consumer_configuration_mismatch")
+            sub = await js.pull_subscribe_bind(consumer=durable, stream=stream)
         except Exception:
-            pass
-    sub = await js.pull_subscribe(subject, durable=durable, stream=stream)
+            await nc.drain()
+            raise  # Missing consumer, permissions or drift never trigger create.
+    else:
+        sub = await js.pull_subscribe(subject, durable=durable, stream=stream)
     processed = 0
     results: list[str] = []
     fetch_batch = max(int(fetch_batch), 1)
@@ -434,11 +466,20 @@ async def run_consume(*, nats_url: str, stream: str, subject: str, durable: str,
                 await msg.ack()
                 log(f"worker processed status={res.status} delivered={res.delivered}")
                 return res.status
+            except DeliveryDeferred as exc:
+                await msg.nak(delay=exc.delay_seconds())
+                log("worker deferred canonical_retry_deadline")
+                return "nak"
             except Exception as exc:  # noqa: BLE001
                 attempts = _num_delivered(msg)
                 if attempts >= max_deliver:
-                    await msg.ack()  # drop: matches Java quarantineCandidate("max deliver exceeded")
-                    _record_poison(store, msg, attempts)
+                    try:
+                        _record_poison(store, msg, attempts)
+                    except Exception as record_error:
+                        await msg.nak(delay=60)
+                        log(f"worker quarantine_record_failed error={type(record_error).__name__}")
+                        return "nak"
+                    await msg.ack()  # Durable terminal evidence must precede removal.
                     log(f"worker quarantine(max_deliver={attempts}) error={type(exc).__name__}")
                     return "quarantined_max_deliver"
                 await msg.nak()
@@ -476,14 +517,33 @@ def _record_poison(store: IngestStateStore, msg, attempts: int) -> None:
         seq = int(msg.metadata.sequence.stream)
     except Exception:
         seq = 0
-    try:
-        store.record(
-            idempotency_key=f"poison:{seq}", content_hash="", document_kind="unknown",
-            target_profile="unknown", status="quarantined_max_deliver", delivered=False,
-            now_iso=_now_iso(),
-        )
-    except Exception:
-        pass
+    if getattr(store, "_canonical_state", False):
+        try:
+            payload = json.loads(msg.data.decode("utf-8"))
+        except (UnicodeError, ValueError, AttributeError):
+            payload = None
+        if isinstance(payload, dict) and payload.get("idempotencyKey"):
+            key = str(payload["idempotencyKey"])
+            job = store.state_db.get_row("delivery_jobs", "idempotency_key", key)
+            if job is not None:
+                retained = store.state_db.get_delivery_payload(key)
+                if retained != payload:
+                    raise RuntimeError("transport_quarantine_payload_identity")
+                store.state_db.quarantine_transport_delivery(
+                    str(job["job_id"]), expected_updated_at=str(job["updated_at"])
+                )
+                current = store.state_db.get_delivery_job(str(job["job_id"]))
+                if current is None or current["status"] not in {"succeeded", "quarantined"}:
+                    raise RuntimeError("transport_quarantine_not_terminal")
+                if current["status"] == "quarantined":
+                    store.record(idempotency_key=key, content_hash=str(job["payload_hash"]),
+                        document_kind=str(job["document_kind"]), target_profile=str(job["target_profile"]),
+                        status="quarantined_max_deliver", delivered=False, now_iso=_now_iso())
+    store.record(
+        idempotency_key=f"poison:{seq}", content_hash="", document_kind="unknown",
+        target_profile="unknown", status="quarantined_max_deliver", delivered=False,
+        now_iso=_now_iso(),
+    )
 
 
 def build_synthetic_event(*, tag: str) -> dict:
