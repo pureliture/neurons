@@ -49,6 +49,7 @@ class SourceStoreConflict(SourceStoreError):
 
 IMMUTABLE_SOURCE_REVISION_DOC_TYPES = frozenset(
     {
+        SourceDocType.REPO_USAGE_PATTERN,
         SourceDocType.SOURCE_REVISION_MEMBER,
         SourceDocType.SOURCE_REVISION_MANIFEST,
     }
@@ -273,6 +274,8 @@ def payload_hash(document: dict) -> str:
     """
 
     doc_type = str(document.get("doc_type") or "")
+    if doc_type == SourceDocType.REPO_USAGE_PATTERN:
+        return _structured_payload_hash({k: v for k, v in document.items() if k not in ("_id", "_rev", "idempotency_key", "payload_hash")})
     if doc_type == SourceDocType.TOOL_EVIDENCE_BUNDLE:
         return _structured_payload_hash(
             {
@@ -347,6 +350,22 @@ def validate_for_write(document: dict) -> None:
         raise SourceStoreError("document is missing a deterministic _id")
     doc_type = document.get("doc_type", "")
     assert_couchdb_owned(doc_type)
+    if doc_type == SourceDocType.REPO_USAGE_PATTERN:
+        from .document_model import repo_usage_pattern_doc_id, _finalize, sha256_hash
+        provenance = document.get("provenance") or {}
+        if (str(doc_id) != repo_usage_pattern_doc_id(str(provenance.get("original_idempotency_key") or ""))
+                or document.get("authority") != "non_authoritative_original"
+                or document.get("recall_eligible") is not False
+                or document.get("projection_enabled") is not False
+                or document.get("processing_stage") != "raw_source_stored"
+                or document.get("document_kind") != SourceDocType.REPO_USAGE_PATTERN
+                or document.get("target_profile") != "index-procedural-memory"
+                or any(key in document for key in ("accepted", "current", "card_type", "typed_payload"))
+                or document.get("content_hash") != sha256_hash(str(document.get("body") or ""))
+                or (document.get("original_document") or {}).get("body") != document.get("body")):
+            raise SourceStoreError("procedural original authority contract is invalid")
+        assert_hash_like("session_id_hash", str(document.get("session_id_hash") or ""))
+        _finalize(document)
     if doc_type == SourceDocType.ACTIVE_SOURCE_REVISION:
         session_id_hash = str(document.get("session_id_hash") or "")
         try:
@@ -705,7 +724,7 @@ class InMemoryCouchDBSourceStore:
             copy.deepcopy(doc)
             for doc in self._docs.values()
             if doc.get("session_id_hash") == session_id_hash
-            and (not doc_type or doc.get("doc_type") == doc_type)
+            and (doc.get("doc_type") == doc_type if doc_type else doc.get("doc_type") != SourceDocType.REPO_USAGE_PATTERN)
         ]
         results.sort(key=lambda d: str(d.get("_id")))
         return results
