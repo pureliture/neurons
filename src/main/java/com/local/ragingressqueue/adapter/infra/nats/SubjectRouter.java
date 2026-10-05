@@ -10,7 +10,8 @@ public class SubjectRouter {
         "session_recap", "rag.ingress.document",
         "project_context_snapshot", "rag.ingress.document",
         "task_summary", "rag.ingress.document",
-        "approved_memory_card", "rag.ingress.document"
+        "approved_memory_card", "rag.ingress.document",
+        "repo_usage_pattern", "rag.ingress.document"
     );
 
     public String subjectFor(String kind) {
