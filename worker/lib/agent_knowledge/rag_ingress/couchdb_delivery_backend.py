@@ -504,10 +504,18 @@ class CouchDBDeliveryBackend:
         dataset_ref = f"couchdb:{db_name}"
         doc_ref = session_doc_id(session_id_hash)
 
-        active_duplicate = False
+        # Pure preparation cannot have issued a write. Do not classify its
+        # deterministic contract errors as an unknown remote write outcome.
         try:
             session_doc = build_transcript_session_document(session=session)
             chunk_doc = build_conversation_chunk_document(chunk=chunk, source_locator_hash="")
+        except _PAYLOAD_PREPARATION_ERRORS as exc:
+            return _payload_integrity_evidence(
+                job, run="prepare_source_documents:" + type(exc).__name__
+            )
+
+        active_duplicate = False
+        try:
             active_revision = _active_source_revision_before_ingress(
                 store=self._store,
                 session_id_hash=session_id_hash,
