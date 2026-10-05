@@ -456,6 +456,33 @@ def test_record_poison_links_original_canonical_job_and_retains_payload(tmp_path
             (payload["idempotencyKey"],)).fetchone() == ("quarantined_max_deliver",)
 
 
+@pytest.mark.parametrize("live_lease", [False, True])
+def test_transport_quarantine_preserves_uncertainty_and_rejects_live_owner(tmp_path, live_lease):
+    from agent_knowledge.rag_ingress.shadow_worker import _record_poison
+    from agent_knowledge.rag_ingress.state_db import StaleOwnerRejected
+    store = IngestStateStore(tmp_path / "ingress.sqlite", canonical_state=True)
+    payload = _couchdb_payload(tag="transport-preserved-uncertainty")
+    accepted = StateDBIngressSink(state_db=store.state_db).accept_payload(payload)
+    job_id = accepted["job_id"]
+    assert store.state_db.record_replayable_attempt(job_id, next_retry_seconds=0) == "replayable"
+    if live_lease:
+        assert store.state_db.claim_delivery_job(job_id, lease_owner="active-owner")
+    before = store.state_db.get_delivery_job(job_id)
+    msg = SimpleNamespace(data=__import__("json").dumps(payload).encode(),
+        metadata=SimpleNamespace(sequence=SimpleNamespace(stream=8)))
+    if live_lease:
+        with pytest.raises(StaleOwnerRejected):
+            _record_poison(store, msg, 5)
+        assert store.state_db.get_delivery_job(job_id) == before
+    else:
+        _record_poison(store, msg, 5)
+        after = store.state_db.get_delivery_job(job_id)
+        assert after["status"] == "quarantined"
+        assert after["attempt_count"] == before["attempt_count"] == 1
+        assert after["last_error_class"] == "remote_outcome_uncertain"
+    assert store.state_db.get_delivery_payload(payload["idempotencyKey"]) == payload
+
+
 def test_record_poison_failure_is_not_swallowed():
     from agent_knowledge.rag_ingress.shadow_worker import _record_poison
 

@@ -412,18 +412,31 @@ async def run_consume(*, nats_url: str, stream: str, subject: str, durable: str,
             await js.stream_info(stream)
         except Exception:
             await js.add_stream(name=stream, subjects=[subject])
-    if allow_live:
-        # Live takeover from the retired Java worker: delete its durable so we
-        # create a fresh pull consumer with our own config (avoids a bind config
-        # mismatch). WorkQueue retains all un-acked messages across the delete,
-        # so no queued work is lost; rollback re-provisions the durable when the
-        # Java worker restarts.
+    if stream == "RAG_INGRESS_QUEUE":
+        # The existing durable owns its ACK floor and pending work. Binding must
+        # not call pull_subscribe, which may create/update the consumer.
         try:
-            await js.delete_consumer(stream, durable)
-            log(f"deleted existing durable {durable} for fresh live takeover")
+            stream_info = await js.stream_info(stream)
+            if subject not in (stream_info.config.subjects or []):
+                raise ValueError("live_stream_subject_mismatch")
+            consumer_info = await js.consumer_info(stream, durable)
+            config = consumer_info.config
+            if (
+                consumer_info.name != durable
+                or config.durable_name != durable
+                or config.filter_subject != subject
+                or getattr(config, "filter_subjects", None)
+                or config.deliver_subject
+                or config.ack_policy != "explicit"
+                or config.max_deliver != max_deliver
+            ):
+                raise ValueError("live_consumer_configuration_mismatch")
+            sub = await js.pull_subscribe_bind(consumer=durable, stream=stream)
         except Exception:
-            pass
-    sub = await js.pull_subscribe(subject, durable=durable, stream=stream)
+            await nc.drain()
+            raise  # Missing consumer, permissions or drift never trigger create.
+    else:
+        sub = await js.pull_subscribe(subject, durable=durable, stream=stream)
     processed = 0
     results: list[str] = []
     fetch_batch = max(int(fetch_batch), 1)
