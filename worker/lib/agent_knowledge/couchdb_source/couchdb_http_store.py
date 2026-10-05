@@ -633,6 +633,8 @@ class CouchDBHttpSourceStore:
             if not next_bookmark or next_bookmark == bookmark:
                 break
             bookmark = next_bookmark
+        if not doc_type:
+            docs = [doc for doc in docs if doc.get("doc_type") != SourceDocType.REPO_USAGE_PATTERN]
         docs.sort(key=lambda d: str(d.get("_id")))
         return docs
 

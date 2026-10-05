@@ -56,6 +56,7 @@ from ..couchdb_source.document_model import (
     SourceDocType,
     active_source_revision_pointer_doc_id,
     build_conversation_chunk_document,
+    build_repo_usage_pattern_document,
     build_transcript_session_document,
     conversation_chunk_doc_id,
     session_doc_id,
@@ -78,6 +79,7 @@ from ..couchdb_source.source_store import (
     CouchDBSourceStore,
     SourceStoreConflict,
     payload_hash,
+    payload_hash as source_payload_hash,
 )
 from ..session_memory.transcript_model import REDACTION_VERSION, TranscriptChunk, TranscriptSession
 from .delivery_backend import (
@@ -338,6 +340,25 @@ class CouchDBDeliveryBackend:
     # DeliveryBackend Protocol
     # ------------------------------------------------------------------
 
+    def preflight_procedural_correction(self, job: DeliveryJobView, original: dict, corrected: dict) -> None:
+        """GET-only exact corrected natural-key conflict check before auditing."""
+        import re
+        old_hash = original["payload"]["document"]["metadata"]["session_id_hash"]
+        if not re.fullmatch(r"[0-9a-f]{64}", old_hash):
+            raise ValueError("correction requires original pre-write hash failure")
+        # The historical transcript owner rejects this exact preimage before PUT.
+        from ..couchdb_source.document_model import assert_hash_like
+        try:
+            assert_hash_like("session_id_hash", old_hash)
+        except ValueError:
+            pass
+        else:
+            raise ValueError("correction historical failure is not pre-write")
+        expected = build_repo_usage_pattern_document(payload=corrected, job_id=job.job_id)
+        existing = self._store.get(expected["_id"])
+        if existing is not None and payload_hash(existing) != payload_hash(expected):
+            raise SourceStoreConflict("procedural correction natural key conflict")
+
     def submit(self, job: DeliveryJobView) -> DeliveryBackendEvidence:
         # --- Gate 1: payload availability + integrity -------------------------
         try:
@@ -358,6 +379,34 @@ class CouchDBDeliveryBackend:
                 document_ref="",
                 run="",
                 status="payload_unavailable" if gate == PAYLOAD_MISSING else "payload_integrity_mismatch",
+            )
+
+        if job.document_kind == SourceDocType.REPO_USAGE_PATTERN:
+            try:
+                raw_document = build_repo_usage_pattern_document(payload=payload, job_id=job.job_id)
+            except (KeyError, *_PAYLOAD_PREPARATION_ERRORS) as exc:
+                return _payload_integrity_evidence(job, run="prepare_procedural_source:" + type(exc).__name__)
+            try:
+                existing_raw = self._store.get(raw_document["_id"])
+                if existing_raw is not None:
+                    if payload_hash(existing_raw) != payload_hash(raw_document):
+                        return _payload_integrity_evidence(job, run="procedural_natural_key_conflict")
+                else:
+                    self._store.put_if_absent(raw_document)
+                confirmed = self._store.get(raw_document["_id"])
+                if confirmed is None or payload_hash(confirmed) != payload_hash(raw_document):
+                    raise DeliveryOutcomeUncertain("procedural_source_readback_mismatch")
+            except SourceStoreConflict:
+                raced = self._store.get(raw_document["_id"])
+                if raced is not None and payload_hash(raced) != payload_hash(raw_document):
+                    return _payload_integrity_evidence(job, run="procedural_natural_key_conflict")
+                raise DeliveryOutcomeUncertain("procedural_source_conflict")
+            except Exception as exc:
+                raise DeliveryOutcomeUncertain(type(exc).__name__) from exc
+            return DeliveryBackendEvidence(
+                idempotency_key=job.idempotency_key, payload_hash=job.payload_hash,
+                dataset_ref=f"couchdb:{getattr(self._store, 'db', 'couchdb')}",
+                document_ref=raw_document["_id"], run="raw_source_stored", status="succeeded",
             )
 
         # --- Gate 2: detect an idempotent retry --------------------------------
@@ -770,9 +819,24 @@ class CouchDBDeliveryBackend:
             return None
         job = DeliveryJobView.from_row(row)
 
-        payload = self._state_db.get_delivery_payload(idempotency_key)
+        payload = self._state_db.get_effective_delivery_payload(idempotency_key)
         if payload is None:
             return None
+        if job.document_kind == SourceDocType.REPO_USAGE_PATTERN:
+            try:
+                expected = build_repo_usage_pattern_document(payload=payload, job_id=job.job_id)
+            except (KeyError, *_PAYLOAD_PREPARATION_ERRORS):
+                return None
+            existing = self._store.get(expected["_id"])
+            if existing is None:
+                return None
+            if source_payload_hash(existing) != source_payload_hash(expected):
+                return _payload_integrity_evidence(job, run="procedural_natural_key_conflict")
+            return DeliveryBackendEvidence(
+                idempotency_key=idempotency_key, payload_hash=payload_hash,
+                dataset_ref=f"couchdb:{getattr(self._store, 'db', 'couchdb')}",
+                document_ref=expected["_id"], run="raw_source_stored", status="succeeded",
+            )
         expected_chunk = _chunk_document_for_payload_identity(payload)
         if expected_chunk is None:
             return None
