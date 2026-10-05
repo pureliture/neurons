@@ -338,7 +338,9 @@ def test_delivery_replayable_attempts_have_terminal_cap(tmp_path):
     assert db.record_replayable_attempt("job_replay", now=NOW + timedelta(seconds=1), max_attempts=3) == "replayable"
     assert db.record_replayable_attempt("job_replay", now=NOW + timedelta(seconds=2), max_attempts=3) == "quarantined"
     row = db.get_row("delivery_jobs", "job_id", "job_replay")
-    assert row["last_error_class"] == "replay_attempt_limit"
+    assert row["last_error_class"] == "remote_outcome_uncertain"
+    assert row["attempt_count"] == 3
+    assert row["status"] == "quarantined"
     assert row["next_retry_at"] == ""
 
 

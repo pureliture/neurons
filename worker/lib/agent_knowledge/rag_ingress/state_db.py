@@ -619,7 +619,9 @@ class RAGIngressStateDB:
             attempt_count = int(row["attempt_count"] or 0) + 1
             if attempt_count >= max_attempts:
                 status = "quarantined"
-                last_error_class = "replay_attempt_limit"
+                # The cap explains terminal status, not the remote failure.
+                # Keep uncertainty visible for later read-only reconciliation.
+                last_error_class = row_dict.get("last_error_class") or "remote_outcome_uncertain"
                 next_retry_at = ""
             else:
                 status = IdempotencyOutcome.REPLAYABLE
