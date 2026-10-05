@@ -78,6 +78,43 @@ class DeliveryExecutor:
         self._lease_owner = lease_owner
         self._lease_seconds = max(int(lease_seconds), 60)
 
+    def correct_and_execute_procedural_once(
+        self, job_id: str, *, expected_updated_at: str,
+        expected_payload_identity: str, now: datetime | None = None,
+    ) -> DeliveryExecutionReceipt:
+        """Public bounded correction/reprocessing; never creates another queue message.
+
+        An existing audit is GET-only: callers must reconcile, never resend this
+        operation after an uncertain transport result.
+        """
+        from ..couchdb_source.document_model import build_repo_usage_pattern_document
+        from .state_db import StateDBError
+        import copy
+        row = self._state_db.get_delivery_job(job_id)
+        if row is None:
+            raise KeyError(job_id)
+        if self._state_db.get_domain_record("source-correction:" + job_id) is not None:
+            raise StateDBError("source_correction_already_recorded_get_only")
+        original = self._state_db.get_delivery_payload(str(row["idempotency_key"]))
+        if original is None:
+            raise StateDBError("source_correction_payload_missing")
+        corrected = copy.deepcopy(original)
+        old_hash = corrected["payload"]["document"]["metadata"]["session_id_hash"]
+        corrected["payload"]["document"]["metadata"]["session_id_hash"] = "sha256:" + old_hash
+        # Pure preparation before the audit/state mutation catches unsupported
+        # contract, hash, privacy and destination without any remote write.
+        build_repo_usage_pattern_document(payload=corrected, job_id=job_id)
+        preflight = getattr(self._backend, "preflight_procedural_correction", None)
+        if preflight is None:
+            raise StateDBError("source_correction_backend_not_supported")
+        preflight(DeliveryJobView.from_row(row), original, corrected)
+        self._state_db.correct_procedural_source_hash(
+            job_id, expected_updated_at=expected_updated_at,
+            expected_payload_identity=expected_payload_identity,
+            lease_owner=self._lease_owner, now=now,
+        )
+        return self.execute_once_with_receipt(job_id, now=now)
+
     def execute_once(self, job_id: str, *, now: datetime | None = None, max_attempts: int = 3) -> str:
         return self.execute_once_with_receipt(
             job_id, now=now, max_attempts=max_attempts
@@ -92,6 +129,11 @@ class DeliveryExecutor:
         status = str(row.get("status") or "")
         if status in {"succeeded", "quarantined"}:
             return DeliveryExecutionReceipt(status)
+        correction = self._state_db.get_domain_record("source-correction:" + job_id)
+        if correction is not None and status != "claimed":
+            return DeliveryExecutionReceipt("correction_reconcile_required")
+        if correction is not None and row.get("lease_owner") != self._lease_owner:
+            return DeliveryExecutionReceipt("stale_owner_rejected")
         if status in {"pending", "replayable", "failed_retryable", "claimed", "executing"}:
             if not self._state_db.claim_delivery_job(
                 job_id,

@@ -92,6 +92,10 @@ public class IngestJobValidator {
         if (payload.body() == null || payload.body().isBlank()) {
             violations.add("payload.document.body is required");
         }
+        if (payload.metadata() != null && payload.metadata().containsKey("session_id_hash")
+            && !ContentHashVerifier.hasCanonicalShape(payload.metadata().get("session_id_hash"))) {
+            violations.add("payload.document.metadata.session_id_hash must be sha256:<64 lowercase hex chars>");
+        }
     }
 
     private void validateContentHash(IngestJob job, List<String> violations) {

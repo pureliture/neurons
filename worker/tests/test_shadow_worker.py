@@ -404,7 +404,99 @@ def test_process_payload_conflict_preserves_canonical_and_legacy_delivery_observ
     assert store.get_delivered(original["idempotencyKey"]) == legacy_before
 
 
-def test_run_consume_naks_uncertain_delivery_and_keeps_canonical_job_replayable(tmp_path, monkeypatch):
+@pytest.mark.parametrize("record_failure", [False, True])
+def test_max_delivery_records_before_ack_and_does_not_ack_failed_record(tmp_path, monkeypatch, record_failure):
+    from agent_knowledge.rag_ingress.shadow_worker import run_consume
+    events = []
+    store = IngestStateStore(tmp_path / "ingress.sqlite")
+    class Message:
+        data = b"invalid JSON"
+        metadata = SimpleNamespace(num_delivered=5, sequence=SimpleNamespace(stream=7))
+        async def ack(self): events.append("ack")
+        async def nak(self, delay=None): events.append("nak")
+    class Subscription:
+        used = False
+        async def fetch(self, count, timeout):
+            if self.used: raise TimeoutError()
+            self.used = True
+            return [Message()]
+    class JetStream:
+        async def stream_info(self, stream): return object()
+        async def pull_subscribe(self, subject, **kwargs): return Subscription()
+    class Connection:
+        def jetstream(self): return JetStream()
+        async def drain(self): pass
+    async def connect(url): return Connection()
+    def record(**kwargs):
+        events.append("record")
+        if record_failure: raise OSError("fixture durable failure")
+    store.record = record
+    store.counts = lambda: {}
+    monkeypatch.setitem(sys.modules, "nats", SimpleNamespace(connect=connect))
+    result = asyncio.run(run_consume(nats_url="nats://fixture", stream="RAG_INGRESS_SHADOW",
+        subject="rag.shadow.>", durable="fixture", store=store, backend=None, deliver=False,
+        max_messages=1, log=lambda line: None))
+    assert events == (["record", "nak"] if record_failure else ["record", "ack"])
+    assert result["statuses"] == (["nak"] if record_failure else ["quarantined_max_deliver"])
+
+
+def test_record_poison_links_original_canonical_job_and_retains_payload(tmp_path):
+    from agent_knowledge.rag_ingress.shadow_worker import _record_poison
+    store = IngestStateStore(tmp_path / "ingress.sqlite", canonical_state=True)
+    payload = _couchdb_payload(tag="poison-original")
+    accepted = StateDBIngressSink(state_db=store.state_db).accept_payload(payload)
+    msg = SimpleNamespace(data=__import__("json").dumps(payload).encode(),
+        metadata=SimpleNamespace(sequence=SimpleNamespace(stream=7)))
+    _record_poison(store, msg, 5)
+    job = store.state_db.get_delivery_job(accepted["job_id"])
+    assert job["status"] == "quarantined"
+    assert store.state_db.get_delivery_payload(payload["idempotencyKey"]) == payload
+    with sqlite3.connect(store.path) as conn:
+        assert conn.execute("SELECT status FROM shadow_ingest_log WHERE idempotency_key=?",
+            (payload["idempotencyKey"],)).fetchone() == ("quarantined_max_deliver",)
+
+
+@pytest.mark.parametrize("live_lease", [False, True])
+def test_transport_quarantine_preserves_uncertainty_and_rejects_live_owner(tmp_path, live_lease):
+    from agent_knowledge.rag_ingress.shadow_worker import _record_poison
+    from agent_knowledge.rag_ingress.state_db import StaleOwnerRejected
+    store = IngestStateStore(tmp_path / "ingress.sqlite", canonical_state=True)
+    payload = _couchdb_payload(tag="transport-preserved-uncertainty")
+    accepted = StateDBIngressSink(state_db=store.state_db).accept_payload(payload)
+    job_id = accepted["job_id"]
+    assert store.state_db.record_replayable_attempt(job_id, next_retry_seconds=0) == "replayable"
+    if live_lease:
+        assert store.state_db.claim_delivery_job(job_id, lease_owner="active-owner")
+    before = store.state_db.get_delivery_job(job_id)
+    msg = SimpleNamespace(data=__import__("json").dumps(payload).encode(),
+        metadata=SimpleNamespace(sequence=SimpleNamespace(stream=8)))
+    if live_lease:
+        with pytest.raises(StaleOwnerRejected):
+            _record_poison(store, msg, 5)
+        assert store.state_db.get_delivery_job(job_id) == before
+    else:
+        _record_poison(store, msg, 5)
+        after = store.state_db.get_delivery_job(job_id)
+        assert after["status"] == "quarantined"
+        assert after["attempt_count"] == before["attempt_count"] == 1
+        assert after["last_error_class"] == "remote_outcome_uncertain"
+    assert store.state_db.get_delivery_payload(payload["idempotencyKey"]) == payload
+
+
+def test_record_poison_failure_is_not_swallowed():
+    from agent_knowledge.rag_ingress.shadow_worker import _record_poison
+
+    class BrokenStore:
+        def record(self, **kwargs):
+            raise OSError("fixture durable state unavailable")
+
+    msg = SimpleNamespace(metadata=SimpleNamespace(sequence=SimpleNamespace(stream=7)))
+    with pytest.raises(OSError, match="fixture durable state unavailable"):
+        _record_poison(BrokenStore(), msg, 5)
+
+
+@pytest.mark.parametrize("broker_deliveries", [1, 5])
+def test_run_consume_naks_uncertain_delivery_and_keeps_canonical_job_replayable(tmp_path, monkeypatch, broker_deliveries):
     from agent_knowledge.rag_ingress.shadow_worker import run_consume
 
     store = IngestStateStore(tmp_path / "ingress.sqlite", canonical_state=True)
@@ -420,7 +512,7 @@ def test_run_consume_naks_uncertain_delivery_and_keeps_canonical_job_replayable(
         def __init__(self):
             self.data = __import__("json").dumps(payload).encode("utf-8")
             self.metadata = SimpleNamespace(
-                num_delivered=1,
+                num_delivered=broker_deliveries,
                 sequence=SimpleNamespace(stream=1),
             )
             self.ack_calls = 0
@@ -429,8 +521,9 @@ def test_run_consume_naks_uncertain_delivery_and_keeps_canonical_job_replayable(
         async def ack(self):
             self.ack_calls += 1
 
-        async def nak(self):
+        async def nak(self, delay=None):
             self.nak_calls += 1
+            self.nak_delay = delay
 
     message = FakeMessage()
 
@@ -482,6 +575,8 @@ def test_run_consume_naks_uncertain_delivery_and_keeps_canonical_job_replayable(
     assert result["statuses"] == ["nak"]
     assert message.ack_calls == 0
     assert message.nak_calls == 1
+    assert message.nak_delay is not None
+    assert 0 < message.nak_delay <= 60
     assert job["status"] == "replayable"
     assert store.get_delivered(payload["idempotencyKey"]) is None
 
@@ -568,8 +663,9 @@ def test_run_consume_assigns_unique_handler_leases_for_concurrent_exact_duplicat
         async def ack(self):
             self.ack_calls += 1
 
-        async def nak(self):
+        async def nak(self, delay=None):
             self.nak_calls += 1
+            self.nak_delay = delay
 
     first, competing, redelivery = FakeMessage(delivered=1), FakeMessage(delivered=1), FakeMessage(delivered=2)
 
