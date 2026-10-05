@@ -22,6 +22,21 @@ class IngestJobValidatorTest {
     }
 
     @Test
+    void rejectsPresentNonCanonicalSessionHashWithoutEchoingItsValue() {
+        IngestJob valid = validJob();
+        DocumentPayload p = valid.payload();
+        for (String hash : new String[] {"a".repeat(64), "sha256:bad", "", "sha256:" + "A".repeat(64)}) {
+            DocumentPayload invalid = new DocumentPayload(p.kind(), p.redactionVersion(),
+                p.filename(), p.contentType(), p.body(), Map.of("session_id_hash", hash));
+            assertThat(validator.validate(valid.withPayload(invalid)))
+                .contains("payload.document.metadata.session_id_hash must be sha256:<64 lowercase hex chars>");
+        }
+        DocumentPayload canonical = new DocumentPayload(p.kind(), p.redactionVersion(),
+            p.filename(), p.contentType(), p.body(), Map.of("session_id_hash", "sha256:" + "a".repeat(64)));
+        assertThat(validator.validate(valid.withPayload(canonical))).isEmpty();
+    }
+
+    @Test
     void constructorRejectsNullTargetProfileRegistry() {
         assertThatThrownBy(() -> new IngestJobValidator(null))
             .isInstanceOf(NullPointerException.class)

@@ -564,6 +564,31 @@ class RAGIngressStateDB:
             )
             return True
 
+    def quarantine_transport_delivery(
+        self, job_id: str, *, expected_updated_at: str, now: datetime | None = None
+    ) -> None:
+        """Terminalize only an unleased exact version; never erase success or payload."""
+        stamp_dt = now or _utc_now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM delivery_jobs WHERE job_id = ?", (job_id,)).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            current = _row_to_dict(row)
+            if current.get("status") in {"succeeded", "quarantined"}:
+                return
+            if current.get("updated_at") != expected_updated_at or _lease_is_live(current, stamp_dt):
+                raise StaleOwnerRejected("transport_quarantine_version_or_lease")
+            if connection.execute("SELECT 1 FROM delivery_payloads WHERE idempotency_key = ?",
+                                  (current["idempotency_key"],)).fetchone() is None:
+                raise StateDBError("transport_quarantine_payload_missing")
+            connection.execute(
+                """UPDATE delivery_jobs SET status = 'quarantined', lease_owner = '', lease_until = '',
+                   next_retry_at = '', last_error_class = CASE WHEN last_error_class = ''
+                   THEN 'transport_max_deliver' ELSE last_error_class END, updated_at = ? WHERE job_id = ?""",
+                (_iso(stamp_dt), job_id),
+            )
+
     def record_replayable_attempt(
         self,
         job_id: str,
