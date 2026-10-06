@@ -12,6 +12,7 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -181,8 +182,10 @@ class IngressControllerTest {
     void healthzReturnsApiStatus() throws Exception {
         mockMvc.perform(get("/healthz"))
             .andExpect(status().isOk())
+            .andExpect(header().string("Cache-Control", "no-store"))
             .andExpect(jsonPath("$.status").value("ok"))
             .andExpect(jsonPath("$.component").value("ingress-api"));
+        assertThat(publisher.publishCount).isZero();
     }
 
     @Test
