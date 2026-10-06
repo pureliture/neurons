@@ -112,6 +112,7 @@ public class IngressController {
     public ResponseEntity<Map<String, String>> healthz() {
         return ResponseEntity.ok().cacheControl(CacheControl.noStore())
             .contentType(MediaType.APPLICATION_JSON)
+            .header("X-Content-Type-Options", "nosniff")
             .body(Map.of("status", "ok", "component", "ingress-api"));
     }
 
