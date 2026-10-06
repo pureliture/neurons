@@ -48,6 +48,7 @@ class ApiProfileStartupSmokeTest {
         var health = controller.healthz();
         assertThat(health.getStatusCode().value()).isEqualTo(200);
         assertThat(health.getHeaders().getCacheControl()).isEqualTo("no-store");
+        assertThat(health.getHeaders().getContentType()).isEqualTo(org.springframework.http.MediaType.APPLICATION_JSON);
         assertThat(health.getBody()).containsEntry("status", "ok").containsEntry("component", "ingress-api");
     }
 
