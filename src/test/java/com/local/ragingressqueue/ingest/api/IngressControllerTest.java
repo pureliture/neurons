@@ -37,6 +37,16 @@ class IngressControllerTest {
     }
 
     @Test
+    void healthzPreventsMimeSniffingWithoutPublishing() throws Exception {
+        mockMvc.perform(get("/healthz").accept(MediaType.TEXT_PLAIN))
+            .andExpect(status().isOk())
+            .andExpect(header().string("X-Content-Type-Options", "nosniff"))
+            .andExpect(header().string("Content-Type", "application/json"))
+            .andExpect(jsonPath("$.component").value("ingress-api"));
+        assertThat(publisher.publishCount).isZero();
+    }
+
+    @Test
     void validEnqueueReturnsAcceptedQueuedResponse() throws Exception {
         mockMvc.perform(post("/v1/ingest/enqueue")
                 .contentType(MediaType.APPLICATION_JSON)
