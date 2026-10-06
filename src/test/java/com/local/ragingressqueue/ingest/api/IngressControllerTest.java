@@ -27,6 +27,16 @@ class IngressControllerTest {
     }
 
     @Test
+    void healthzHasStableJsonForNonJsonAcceptWithoutPublishing() throws Exception {
+        mockMvc.perform(get("/healthz").accept(MediaType.TEXT_PLAIN))
+            .andExpect(status().isOk())
+            .andExpect(header().string("Content-Type", "application/json"))
+            .andExpect(header().string("Cache-Control", "no-store"))
+            .andExpect(jsonPath("$.status").value("ok"));
+        assertThat(publisher.publishCount).isZero();
+    }
+
+    @Test
     void validEnqueueReturnsAcceptedQueuedResponse() throws Exception {
         mockMvc.perform(post("/v1/ingest/enqueue")
                 .contentType(MediaType.APPLICATION_JSON)
