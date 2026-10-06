@@ -199,6 +199,17 @@ class IngressControllerTest {
     }
 
     @Test
+    void statusPreventsStaleCachingWithoutPublishing() throws Exception {
+        mockMvc.perform(get("/status"))
+            .andExpect(status().isOk())
+            .andExpect(header().string("Cache-Control", "no-store"))
+            .andExpect(header().string("Content-Type", "application/json"))
+            .andExpect(jsonPath("$.externalStatus").value("not_configured"))
+            .andExpect(jsonPath("$.queue.pending").value(0));
+        assertThat(publisher.publishCount).isZero();
+    }
+
+    @Test
     void statusReturnsRedactedQueueAndTargetSummary() throws Exception {
         String response = mockMvc.perform(get("/status"))
             .andExpect(status().isOk())
