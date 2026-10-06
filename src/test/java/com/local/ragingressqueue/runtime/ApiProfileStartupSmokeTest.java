@@ -45,7 +45,10 @@ class ApiProfileStartupSmokeTest {
     @Test
     void apiProfileStartsWithUnavailableTargetAdapterAndHealthzStaysIndependent() {
         assertThat(targetAdapter).isInstanceOf(UnavailableTargetAdapter.class);
-        assertThat(controller.healthz()).containsEntry("status", "ok");
+        var health = controller.healthz();
+        assertThat(health.getStatusCode().value()).isEqualTo(200);
+        assertThat(health.getHeaders().getCacheControl()).isEqualTo("no-store");
+        assertThat(health.getBody()).containsEntry("status", "ok").containsEntry("component", "ingress-api");
     }
 
     static Connection fakeConnection() {
