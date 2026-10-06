@@ -116,8 +116,10 @@ public class IngressController {
     }
 
     @GetMapping("/status")
-    public Map<String, Object> status() {
-        return statusService.currentStatus();
+    public ResponseEntity<Map<String, Object>> status() {
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore())
+            .contentType(MediaType.APPLICATION_JSON)
+            .body(statusService.currentStatus());
     }
 
     private ResponseEntity<EnqueueResponse> badRequest(List<String> errors) {
