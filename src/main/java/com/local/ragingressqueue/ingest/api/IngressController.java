@@ -121,6 +121,7 @@ public class IngressController {
     public ResponseEntity<Map<String, Object>> status() {
         return ResponseEntity.ok().cacheControl(CacheControl.noStore())
             .contentType(MediaType.APPLICATION_JSON)
+            .header("X-Content-Type-Options", "nosniff")
             .body(statusService.currentStatus());
     }
 
