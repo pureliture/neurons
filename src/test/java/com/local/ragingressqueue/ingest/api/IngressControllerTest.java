@@ -57,6 +57,16 @@ class IngressControllerTest {
     }
 
     @Test
+    void statusIsNotCacheableAndNotMimeSniffable() throws Exception {
+        mockMvc.perform(get("/status").accept(MediaType.TEXT_PLAIN))
+            .andExpect(status().isOk())
+            .andExpect(header().string("Cache-Control", "no-store"))
+            .andExpect(header().string("X-Content-Type-Options", "nosniff"))
+            .andExpect(jsonPath("$.externalStatus").exists());
+        assertThat(publisher.publishCount).isZero();
+    }
+
+    @Test
     void validEnqueueReturnsAcceptedQueuedResponse() throws Exception {
         mockMvc.perform(post("/v1/ingest/enqueue")
                 .contentType(MediaType.APPLICATION_JSON)
