@@ -122,6 +122,7 @@ public class IngressController {
         return ResponseEntity.ok().cacheControl(CacheControl.noStore())
             .contentType(MediaType.APPLICATION_JSON)
             .header("X-Content-Type-Options", "nosniff")
+            .header("Referrer-Policy", "no-referrer")
             .body(statusService.currentStatus());
     }
 
