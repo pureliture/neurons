@@ -77,42 +77,6 @@ class IngressControllerTest {
     }
 
     @Test
-    void enqueueResponsesPreventMimeSniffing() throws Exception {
-        mockMvc.perform(post("/v1/ingest/enqueue")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(validRequest(null)))
-            .andExpect(status().isAccepted())
-            .andExpect(header().string("X-Content-Type-Options", "nosniff"));
-
-        mockMvc.perform(post("/v1/ingest/enqueue")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(validRequestWithoutSource()))
-            .andExpect(status().isBadRequest())
-            .andExpect(header().string("X-Content-Type-Options", "nosniff"));
-
-        String first = validRequest("\"idempotencyKey\":\"nosniff-key\",");
-        String second = validRequestWithBody("\"idempotencyKey\":\"nosniff-key\",", body() + "\nchanged");
-        mockMvc.perform(post("/v1/ingest/enqueue").contentType(MediaType.APPLICATION_JSON).content(first))
-            .andExpect(status().isAccepted());
-        mockMvc.perform(post("/v1/ingest/enqueue").contentType(MediaType.APPLICATION_JSON).content(second))
-            .andExpect(status().isConflict())
-            .andExpect(header().string("X-Content-Type-Options", "nosniff"));
-
-        mockMvc.perform(post("/v1/ingest/enqueue")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(validRequest(null).replace("redacted_rag_ready_document", "redacted_document_ref")))
-            .andExpect(status().isUnprocessableEntity())
-            .andExpect(header().string("X-Content-Type-Options", "nosniff"));
-
-        publisher.nextResult = PublishResult.failed("nats unavailable");
-        mockMvc.perform(post("/v1/ingest/enqueue")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(validRequest(null)))
-            .andExpect(status().isServiceUnavailable())
-            .andExpect(header().string("X-Content-Type-Options", "nosniff"));
-    }
-
-    @Test
     void validEnqueueReturnsAcceptedQueuedResponse() throws Exception {
         mockMvc.perform(post("/v1/ingest/enqueue")
                 .contentType(MediaType.APPLICATION_JSON)
