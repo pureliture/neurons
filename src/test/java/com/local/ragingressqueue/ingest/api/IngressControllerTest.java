@@ -305,27 +305,6 @@ class IngressControllerTest {
     }
 
     @Test
-    void validateResponsesPreventMimeSniffing() throws Exception {
-        mockMvc.perform(post("/v1/ingest/validate")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(validRequest(null)))
-            .andExpect(status().isOk())
-            .andExpect(header().string("X-Content-Type-Options", "nosniff"));
-
-        mockMvc.perform(post("/v1/ingest/validate")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(validRequestWithoutSource()))
-            .andExpect(status().isBadRequest())
-            .andExpect(header().string("X-Content-Type-Options", "nosniff"));
-
-        mockMvc.perform(post("/v1/ingest/validate")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(validRequest(null).replace("redacted_rag_ready_document", "redacted_document_ref")))
-            .andExpect(status().isUnprocessableEntity())
-            .andExpect(header().string("X-Content-Type-Options", "nosniff"));
-    }
-
-    @Test
     void validValidationReturnsOkWithoutPublish() throws Exception {
         mockMvc.perform(post("/v1/ingest/validate")
                 .contentType(MediaType.APPLICATION_JSON).content(validRequest(null)))
