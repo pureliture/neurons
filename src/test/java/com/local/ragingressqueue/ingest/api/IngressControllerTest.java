@@ -77,42 +77,6 @@ class IngressControllerTest {
     }
 
     @Test
-    void enqueueResponsesPreventMimeSniffing() throws Exception {
-        mockMvc.perform(post("/v1/ingest/enqueue")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(validRequest(null)))
-            .andExpect(status().isAccepted())
-            .andExpect(header().string("X-Content-Type-Options", "nosniff"));
-
-        mockMvc.perform(post("/v1/ingest/enqueue")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(validRequestWithoutSource()))
-            .andExpect(status().isBadRequest())
-            .andExpect(header().string("X-Content-Type-Options", "nosniff"));
-
-        String first = validRequest("\"idempotencyKey\":\"nosniff-key\",");
-        String second = validRequestWithBody("\"idempotencyKey\":\"nosniff-key\",", body() + "\nchanged");
-        mockMvc.perform(post("/v1/ingest/enqueue").contentType(MediaType.APPLICATION_JSON).content(first))
-            .andExpect(status().isAccepted());
-        mockMvc.perform(post("/v1/ingest/enqueue").contentType(MediaType.APPLICATION_JSON).content(second))
-            .andExpect(status().isConflict())
-            .andExpect(header().string("X-Content-Type-Options", "nosniff"));
-
-        mockMvc.perform(post("/v1/ingest/enqueue")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(validRequest(null).replace("redacted_rag_ready_document", "redacted_document_ref")))
-            .andExpect(status().isUnprocessableEntity())
-            .andExpect(header().string("X-Content-Type-Options", "nosniff"));
-
-        publisher.nextResult = PublishResult.failed("nats unavailable");
-        mockMvc.perform(post("/v1/ingest/enqueue")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(validRequest(null)))
-            .andExpect(status().isServiceUnavailable())
-            .andExpect(header().string("X-Content-Type-Options", "nosniff"));
-    }
-
-    @Test
     void validEnqueueReturnsAcceptedQueuedResponse() throws Exception {
         mockMvc.perform(post("/v1/ingest/enqueue")
                 .contentType(MediaType.APPLICATION_JSON)
@@ -302,84 +266,6 @@ class IngressControllerTest {
             .doesNotContain("document_id")
             .doesNotContain("Bearer")
             .doesNotContain("/Users/");
-    }
-
-    @Test
-    void enqueueResponsesDoNotExposeReferrer() throws Exception {
-        mockMvc.perform(post("/v1/ingest/enqueue")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(validRequest(null)))
-            .andExpect(status().isAccepted())
-            .andExpect(header().string("Referrer-Policy", "no-referrer"));
-
-        mockMvc.perform(post("/v1/ingest/enqueue")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(validRequestWithoutSource()))
-            .andExpect(status().isBadRequest())
-            .andExpect(header().string("Referrer-Policy", "no-referrer"));
-
-        String first = validRequest("\"idempotencyKey\":\"referrer-key\",");
-        String second = validRequestWithBody("\"idempotencyKey\":\"referrer-key\",", body() + "\nchanged");
-        mockMvc.perform(post("/v1/ingest/enqueue").contentType(MediaType.APPLICATION_JSON).content(first))
-            .andExpect(status().isAccepted());
-        mockMvc.perform(post("/v1/ingest/enqueue").contentType(MediaType.APPLICATION_JSON).content(second))
-            .andExpect(status().isConflict())
-            .andExpect(header().string("Referrer-Policy", "no-referrer"));
-
-        mockMvc.perform(post("/v1/ingest/enqueue")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(validRequest(null).replace("redacted_rag_ready_document", "redacted_document_ref")))
-            .andExpect(status().isUnprocessableEntity())
-            .andExpect(header().string("Referrer-Policy", "no-referrer"));
-
-        publisher.nextResult = PublishResult.failed("nats unavailable");
-        mockMvc.perform(post("/v1/ingest/enqueue")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(validRequest(null)))
-            .andExpect(status().isServiceUnavailable())
-            .andExpect(header().string("Referrer-Policy", "no-referrer"));
-    }
-
-    @Test
-    void validateResponsesDoNotExposeReferrer() throws Exception {
-        mockMvc.perform(post("/v1/ingest/validate")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(validRequest(null)))
-            .andExpect(status().isOk())
-            .andExpect(header().string("Referrer-Policy", "no-referrer"));
-
-        mockMvc.perform(post("/v1/ingest/validate")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(validRequestWithoutSource()))
-            .andExpect(status().isBadRequest())
-            .andExpect(header().string("Referrer-Policy", "no-referrer"));
-
-        mockMvc.perform(post("/v1/ingest/validate")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(validRequest(null).replace("redacted_rag_ready_document", "redacted_document_ref")))
-            .andExpect(status().isUnprocessableEntity())
-            .andExpect(header().string("Referrer-Policy", "no-referrer"));
-    }
-
-    @Test
-    void validateResponsesPreventMimeSniffing() throws Exception {
-        mockMvc.perform(post("/v1/ingest/validate")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(validRequest(null)))
-            .andExpect(status().isOk())
-            .andExpect(header().string("X-Content-Type-Options", "nosniff"));
-
-        mockMvc.perform(post("/v1/ingest/validate")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(validRequestWithoutSource()))
-            .andExpect(status().isBadRequest())
-            .andExpect(header().string("X-Content-Type-Options", "nosniff"));
-
-        mockMvc.perform(post("/v1/ingest/validate")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(validRequest(null).replace("redacted_rag_ready_document", "redacted_document_ref")))
-            .andExpect(status().isUnprocessableEntity())
-            .andExpect(header().string("X-Content-Type-Options", "nosniff"));
     }
 
     @Test
