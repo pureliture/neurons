@@ -62,20 +62,28 @@ public class IngressController {
     @PostMapping("/v1/ingest/validate")
     public ResponseEntity<ValidationResponse> validate(@RequestBody EnqueueRequest request) {
         if (request == null || !SCHEMA_VERSION.equals(request.schemaVersion())) {
-            return ResponseEntity.badRequest().body(new ValidationResponse("rejected",
+            return ResponseEntity.badRequest()
+                .header("X-Content-Type-Options", "nosniff")
+                .body(new ValidationResponse("rejected",
                 List.of("schemaVersion must be rag_ingress_enqueue.v1")));
         }
         if (request.payload() != null && RESERVED_REF_KIND.equals(request.payload().kind())) {
-            return ResponseEntity.status(422).body(new ValidationResponse("unsupported_payload",
+            return ResponseEntity.status(422)
+                .header("X-Content-Type-Options", "nosniff")
+                .body(new ValidationResponse("unsupported_payload",
                 List.of("redacted_document_ref is reserved but disabled")));
         }
         IngestJob job = request.toIngestJob();
         List<String> violations = new ArrayList<>(validator.validate(job));
         violations.addAll(redactionGuard.inspectJob(job));
         if (!violations.isEmpty()) {
-            return ResponseEntity.badRequest().body(new ValidationResponse("rejected", List.of("request rejected")));
+            return ResponseEntity.badRequest()
+                .header("X-Content-Type-Options", "nosniff")
+                .body(new ValidationResponse("rejected", List.of("request rejected")));
         }
-        return ResponseEntity.ok(new ValidationResponse("valid", List.of()));
+        return ResponseEntity.ok()
+            .header("X-Content-Type-Options", "nosniff")
+            .body(new ValidationResponse("valid", List.of()));
     }
 
     public record ValidationResponse(String status, List<String> errors) {}
