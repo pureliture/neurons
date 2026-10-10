@@ -67,6 +67,16 @@ class IngressControllerTest {
     }
 
     @Test
+    void statusDoesNotExposeReferrerOnBrowserNavigation() throws Exception {
+        mockMvc.perform(get("/status"))
+            .andExpect(status().isOk())
+            .andExpect(header().string("Referrer-Policy", "no-referrer"))
+            .andExpect(header().string("X-Content-Type-Options", "nosniff"))
+            .andExpect(jsonPath("$.externalStatus").exists());
+        assertThat(publisher.publishCount).isZero();
+    }
+
+    @Test
     void validEnqueueReturnsAcceptedQueuedResponse() throws Exception {
         mockMvc.perform(post("/v1/ingest/enqueue")
                 .contentType(MediaType.APPLICATION_JSON)
