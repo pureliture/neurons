@@ -87,7 +87,6 @@ public class IngressController {
         }
         if (request.payload() != null && RESERVED_REF_KIND.equals(request.payload().kind())) {
             return ResponseEntity.status(422)
-                .header("X-Content-Type-Options", "nosniff")
                 .body(EnqueueResponse.rejected("unsupported_payload", List.of("redacted_document_ref is reserved but disabled")));
         }
         IngestJob job = request.toIngestJob();
@@ -98,19 +97,15 @@ public class IngressController {
         }
         if (idempotencyStore.conflicts(request.idempotencyKey(), request.contentHash())) {
             return ResponseEntity.status(409)
-                .header("X-Content-Type-Options", "nosniff")
                 .body(EnqueueResponse.rejected("idempotency_conflict", List.of("idempotencyKey conflict")));
         }
 
         PublishResult result = publisher.publish(job);
         if (!result.accepted()) {
             return ResponseEntity.status(503)
-                .header("X-Content-Type-Options", "nosniff")
                 .body(EnqueueResponse.rejected("publish_failed", List.of("publish ack not received")));
         }
-        return ResponseEntity.status(202)
-            .header("X-Content-Type-Options", "nosniff")
-            .body(EnqueueResponse.queued(result.jobId()));
+        return ResponseEntity.status(202).body(EnqueueResponse.queued(result.jobId()));
     }
 
     @GetMapping("/healthz")
@@ -132,8 +127,6 @@ public class IngressController {
     }
 
     private ResponseEntity<EnqueueResponse> badRequest(List<String> errors) {
-        return ResponseEntity.badRequest()
-            .header("X-Content-Type-Options", "nosniff")
-            .body(EnqueueResponse.rejected("rejected", errors));
+        return ResponseEntity.badRequest().body(EnqueueResponse.rejected("rejected", errors));
     }
 }
