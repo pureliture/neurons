@@ -64,12 +64,14 @@ public class IngressController {
         if (request == null || !SCHEMA_VERSION.equals(request.schemaVersion())) {
             return ResponseEntity.badRequest()
                 .header("X-Content-Type-Options", "nosniff")
+                .header("Referrer-Policy", "no-referrer")
                 .body(new ValidationResponse("rejected",
                 List.of("schemaVersion must be rag_ingress_enqueue.v1")));
         }
         if (request.payload() != null && RESERVED_REF_KIND.equals(request.payload().kind())) {
             return ResponseEntity.status(422)
                 .header("X-Content-Type-Options", "nosniff")
+                .header("Referrer-Policy", "no-referrer")
                 .body(new ValidationResponse("unsupported_payload",
                 List.of("redacted_document_ref is reserved but disabled")));
         }
@@ -79,10 +81,12 @@ public class IngressController {
         if (!violations.isEmpty()) {
             return ResponseEntity.badRequest()
                 .header("X-Content-Type-Options", "nosniff")
+                .header("Referrer-Policy", "no-referrer")
                 .body(new ValidationResponse("rejected", List.of("request rejected")));
         }
         return ResponseEntity.ok()
             .header("X-Content-Type-Options", "nosniff")
+            .header("Referrer-Policy", "no-referrer")
             .body(new ValidationResponse("valid", List.of()));
     }
 
@@ -96,6 +100,7 @@ public class IngressController {
         if (request.payload() != null && RESERVED_REF_KIND.equals(request.payload().kind())) {
             return ResponseEntity.status(422)
                 .header("X-Content-Type-Options", "nosniff")
+                .header("Referrer-Policy", "no-referrer")
                 .body(EnqueueResponse.rejected("unsupported_payload", List.of("redacted_document_ref is reserved but disabled")));
         }
         IngestJob job = request.toIngestJob();
@@ -107,6 +112,7 @@ public class IngressController {
         if (idempotencyStore.conflicts(request.idempotencyKey(), request.contentHash())) {
             return ResponseEntity.status(409)
                 .header("X-Content-Type-Options", "nosniff")
+                .header("Referrer-Policy", "no-referrer")
                 .body(EnqueueResponse.rejected("idempotency_conflict", List.of("idempotencyKey conflict")));
         }
 
@@ -114,10 +120,12 @@ public class IngressController {
         if (!result.accepted()) {
             return ResponseEntity.status(503)
                 .header("X-Content-Type-Options", "nosniff")
+                .header("Referrer-Policy", "no-referrer")
                 .body(EnqueueResponse.rejected("publish_failed", List.of("publish ack not received")));
         }
         return ResponseEntity.status(202)
             .header("X-Content-Type-Options", "nosniff")
+            .header("Referrer-Policy", "no-referrer")
             .body(EnqueueResponse.queued(result.jobId()));
     }
 
@@ -142,6 +150,7 @@ public class IngressController {
     private ResponseEntity<EnqueueResponse> badRequest(List<String> errors) {
         return ResponseEntity.badRequest()
             .header("X-Content-Type-Options", "nosniff")
+            .header("Referrer-Policy", "no-referrer")
             .body(EnqueueResponse.rejected("rejected", errors));
     }
 }
