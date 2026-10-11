@@ -355,6 +355,8 @@ class BrainStewardService:
             refresh_watermark=refresh_watermark,
             mining_reason="steward_supersede",
         )
+        if any(card.get(field) != old.get(field) for field in ("project", "brain_id", "scope")):
+            raise ValueError("supersede requires matching project, brain_id, and scope")
         card["supersedes"] = [old_memory_id]
         card = self._stamp_proposal(
             card, kind="supersede", target_memory_id=old_memory_id, proposer=proposer
