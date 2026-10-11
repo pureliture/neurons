@@ -228,6 +228,46 @@ def test_guc_allowlist_rejected_before_database():
         store.set_local_guc("hnsw.iterative_scan", "sometimes")
 
 
+def test_context_selector_filters_and_ranks_before_its_sql_limit():
+    captured = {}
+
+    class Cursor:
+        description = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, query, params):
+            captured["query"] = query
+            captured["params"] = params
+
+        def fetchall(self):
+            return []
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+    store = PgVectorStore(connection=Connection())
+    store.list_context_cards(
+        project="neurons", query="latest task decision", limit=5,
+        as_of=None, steward_only=True,
+    )
+
+    query = captured["query"]
+    assert "project = %s" in query
+    assert "authorization_status = 'active'" in query
+    assert "lifecycle_state IN ('accepted', 'human_accepted', 'auto_accepted')" in query
+    normalized_query = " ".join(query.upper().split())
+    assert "ROW_NUMBER() OVER ( PARTITION BY CARD_TYPE" in normalized_query
+    assert query.index("WHERE project = %s") < query.rindex("LIMIT %s")
+    assert "ORDER BY type_rank, context_priority" in query
+    assert "latest" in captured["params"] or ["latest", "task", "decision"] in captured["params"]
+
+
 def test_cosine_similarity_is_pure_and_bounded():
     assert compute_cosine_similarity(None, make_dummy_vector(1)) == 0.0
     assert compute_cosine_similarity([0.1] * 4, [0.1] * 5) == 0.0
