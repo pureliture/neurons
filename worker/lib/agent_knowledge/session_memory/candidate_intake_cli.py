@@ -29,7 +29,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
-DEFAULT_BATCH_CANDIDATES = 20
+from .batch_miner import DEFAULT_MAX_CALL_CHARS
+
+DEFAULT_BATCH_CANDIDATES = 5
+DEFAULT_MAX_CANDIDATES_PER_CHUNK = 5
+DEFAULT_MAX_CHUNKS_PER_RUN = 100
+DEFAULT_REVISION_LIMIT = 64
 DEFAULT_CHECKPOINT_VERSION = 1
 _PROPOSAL_ONLY_NOTE = (
     "candidate intake writes review-queue proposals only; accepted authority is unchanged"
@@ -46,6 +51,9 @@ class CandidateIntakeSettings:
 
     project: str
     batch_candidates: int = DEFAULT_BATCH_CANDIDATES
+    max_chunks_per_run: int = DEFAULT_MAX_CHUNKS_PER_RUN
+    max_candidates_per_chunk: int = DEFAULT_MAX_CANDIDATES_PER_CHUNK
+    max_call_chars: int = DEFAULT_MAX_CALL_CHARS
     enable_proposals: bool = False
     checkpoint_path: str = ""
     refresh_watermark: str = ""
@@ -55,6 +63,12 @@ class CandidateIntakeSettings:
             raise CandidateIntakeConfigError("project is required")
         if not 1 <= int(self.batch_candidates) <= 100:
             raise CandidateIntakeConfigError("batch_candidates must be within 1..100")
+        if not 1 <= int(self.max_candidates_per_chunk) <= 100:
+            raise CandidateIntakeConfigError("max_candidates_per_chunk must be within 1..100")
+        if not 1 <= int(self.max_chunks_per_run) <= 1000:
+            raise CandidateIntakeConfigError("max_chunks_per_run must be within 1..1000")
+        if int(self.max_call_chars) < 1:
+            raise CandidateIntakeConfigError("max_call_chars must be positive")
 
 
 @dataclass(frozen=True)
@@ -149,17 +163,36 @@ def already_processed(checkpoint: Mapping[str, Any], *, project: str, source_has
     state = (checkpoint.get("projects") or {}).get(project)
     if not isinstance(state, Mapping):
         return False
+    revisions = state.get("revisions")
+    if isinstance(revisions, list):
+        return str(source_hash or "") in {str(value) for value in revisions}
+    # Legacy single-hash checkpoints stay readable.
     return str(state.get("source_hash") or "") == str(source_hash or "")
 
 
 def record_processed(
     checkpoint: dict[str, Any], *, project: str, source_hash: str, watermark: str
 ) -> dict[str, Any]:
-    checkpoint["projects"] = dict(checkpoint.get("projects") or {})
-    checkpoint["projects"][project] = {
-        "source_hash": source_hash,
+    """Record one processed revision for a project.
+
+    A project has many revisions, so the checkpoint keeps a bounded set rather
+    than a single hash: overwriting one slot would forget the earlier
+    revision and re-mine it on the next run.
+    """
+    projects = dict(checkpoint.get("projects") or {})
+    state = dict(projects.get(project) or {})
+    revisions = [str(value) for value in state.get("revisions") or [] if str(value)]
+    if source_hash not in revisions:
+        revisions.append(source_hash)
+    limit = max(1, int(state.get("revision_limit") or DEFAULT_REVISION_LIMIT))
+    bounded = revisions[-limit:]
+    projects[project] = {
+        "revisions": bounded,
+        "revision_limit": limit,
+        "last_source_hash": bounded[-1],
         "refresh_watermark": watermark,
     }
+    checkpoint["projects"] = projects
     return checkpoint
 
 
@@ -188,20 +221,36 @@ def run_candidate_intake(
     proposals are enabled and this is not a dry run, so a caller can prove the
     exact behaviour without a model or database.
     """
-    from .llm_brain_miner import LlmBrainEnvelopeMiner
-
     state = dict(checkpoint or load_checkpoint(settings.checkpoint_path))
-    bounded = list(chunks)[: max(1, int(settings.batch_candidates))]
+    # ``batch_candidates`` is the per-call batch width, not a cap on how many
+    # chunks one run may examine. The chunk cap is its own bound so a run of
+    # 20 chunks still mines all 20 across four batches.
+    bounded = list(chunks)[: max(1, int(settings.max_chunks_per_run))]
     watermark = settings.refresh_watermark or settings.project
+
+    # A revision already processed on an earlier run is never re-sent to the
+    # model. This is the cost guard: repeat runs stay free instead of paying
+    # again for the same session.
+    fresh = [
+        chunk for chunk in bounded
+        if not already_processed(
+            state,
+            project=settings.project,
+            source_hash=str(chunk.get("content_hash") or ""),
+        )
+    ]
+    already_seen = len(bounded) - len(fresh)
 
     if not bounded:
         # An empty source is reported, never treated as completed production.
         return (
             CandidateIntakeReport(
                 project=settings.project,
-                status="no_source",
+                status="no_source" if not already_seen else "already_processed",
                 dry_run=dry_run,
                 enabled=settings.enable_proposals,
+                examined_chunks=len(bounded),
+                duplicate_count=already_seen,
             ),
             state,
         )
@@ -219,43 +268,64 @@ def run_candidate_intake(
             state,
         )
 
-    miner = LlmBrainEnvelopeMiner(completion_fn=completion_fn, scope="project")
+    # Batched mining: cost scales with batches, not with individual chunks.
+    from .batch_miner import BatchedEnvelopeMiner
+
+    batch_size = max(1, min(int(settings.batch_candidates), 100))
+    miner = BatchedEnvelopeMiner(
+        completion_fn=completion_fn,
+        scope="project",
+        max_candidates=settings.max_candidates_per_chunk,
+        batch_size=batch_size,
+        max_call_chars=max(1, int(settings.max_call_chars or DEFAULT_MAX_CALL_CHARS)),
+    )
+    try:
+        candidates, mining_report = miner.mine_batches(fresh, refresh_watermark=watermark)
+    except Exception:
+        # A model-side failure is reported, never counted as completed work.
+        return (
+            CandidateIntakeReport(
+                project=settings.project,
+                status="mining_failed",
+                dry_run=False,
+                enabled=True,
+                error_code="model_call_failed",
+                examined_chunks=len(bounded),
+            ),
+            state,
+        )
+
     proposed = 0
     duplicates = 0
-    skipped = 0
     seen_ids: set[str] = set()
+    processed_hashes: set[str] = set()
 
-    for chunk in bounded:
-        source_hash = checkpoint_source_hash(settings.project)
-        if already_processed(state, project=settings.project, source_hash=source_hash):
-            duplicates += 1
+    for candidate in candidates:
+        memory_id = str(candidate.get("memory_id") or "")
+        if not memory_id or memory_id in seen_ids:
             continue
-        try:
-            candidates = miner.mine_chunk(chunk, refresh_watermark=watermark)
-        except Exception:
-            skipped += 1
-            continue
-        if not candidates:
-            skipped += 1
-            continue
-        for candidate in candidates:
-            memory_id = str(candidate.get("memory_id") or "")
-            if not memory_id or memory_id in seen_ids:
-                continue
-            seen_ids.add(memory_id)
-            steward.candidate_create(
-                source_span=candidate,
-                refresh_watermark=watermark,
-                mark_needs_review=True,
-                review_reason="session-memory candidate intake",
-                proposer="candidate-intake",
-            )
-            proposed += 1
-        # Only a processed revision is recorded. A failed chunk never advances
-        # the checkpoint and is never reported as a completed projection.
-        record_processed(
-            state, project=settings.project, source_hash=source_hash, watermark=watermark
+        seen_ids.add(memory_id)
+        steward.candidate_create(
+            source_span=candidate,
+            refresh_watermark=watermark,
+            mark_needs_review=True,
+            review_reason="session-memory candidate intake",
+            proposer="candidate-intake",
         )
+        proposed += 1
+
+    # Repeat state is keyed on the chunk's own content hash, so one project has
+    # many revisions and no chunk is ever skipped by a project-level key.
+    for chunk in fresh:
+        revision = str(chunk.get("content_hash") or "")
+        if not revision or already_processed(state, project=settings.project, source_hash=revision):
+            continue
+        processed_hashes.add(revision)
+        record_processed(
+            state, project=settings.project, source_hash=revision, watermark=watermark
+        )
+    duplicates = already_seen + (len(fresh) - len(processed_hashes))
+    skipped = mining_report.chunk_count - len(candidates)
 
     report = CandidateIntakeReport(
         project=settings.project,
@@ -296,7 +366,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--batch-candidates",
         type=int,
         default=DEFAULT_BATCH_CANDIDATES,
-        help="bounded candidates per run (1..100)",
+        help="chunks per model call (1..100); cost scales with batches, not chunks",
+    )
+    parser.add_argument(
+        "--max-chunks-per-run",
+        type=int,
+        default=DEFAULT_MAX_CHUNKS_PER_RUN,
+        help="bounded chunks examined per run (1..1000)",
     )
     parser.add_argument(
         "--checkpoint",
@@ -327,6 +403,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         settings = CandidateIntakeSettings(
             project=args.project,
             batch_candidates=args.batch_candidates,
+            max_chunks_per_run=args.max_chunks_per_run,
             enable_proposals=bool(args.enable),
             checkpoint_path=args.checkpoint,
             refresh_watermark=args.refresh_watermark,
