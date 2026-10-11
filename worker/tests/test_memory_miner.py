@@ -1,6 +1,10 @@
 import json
 
-from agent_knowledge.session_memory.memory_miner import FakeMemoryMiner, LlmMemoryMiner, build_index_completion_fn
+from agent_knowledge.session_memory.memory_miner import (
+    FakeMemoryMiner,
+    LlmMemoryMiner,
+    build_index_completion_fn,
+)
 
 
 PROJECT = "workspace-index-advisor"

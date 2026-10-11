@@ -344,6 +344,8 @@ class PgVectorStore:
                         _row_value(row, "lifecycle_state", 2) in ('accepted', 'human_accepted', 'auto_accepted', 'human_rejected', 'rejected')):
                         raise ValueError("proposal identity collision or already committed")
                     stored = _json_value(_row_value(row, "steward_envelope", 0))
+                    if any(stored.get(field) != envelope.get(field) for field in ("project", "brain_id", "scope")):
+                        raise ValueError("steward proposal scope collision")
                     if (stored.get('steward_proposal_kind') != envelope.get('steward_proposal_kind') or
                         stored.get('steward_target_memory_id') != envelope.get('steward_target_memory_id')):
                         raise ValueError('conflicting steward proposal')
@@ -378,6 +380,8 @@ class PgVectorStore:
             clauses.append("currentness = 'current'")
         if accepted_only:
             clauses.append("coalesce(steward_envelope->>'steward_proposal_kind', '') <> 'stale'")
+            clauses.append(_STATUS_EXPIRY_FILTER)
+            params.append(datetime.now(timezone.utc))
         with self._scope() as db:
             with db.cursor() as cur:
                 cur.execute(f"SELECT steward_envelope FROM memory_cards WHERE {' AND '.join(clauses)} ORDER BY created_at DESC, memory_id LIMIT %s", (*params, int(limit)))
@@ -424,6 +428,8 @@ class PgVectorStore:
                     if stored_card is None:
                         raise ValueError('steward decision result unavailable for safe retry')
                     stored_target = _row_value(previous, 'result_target', 7)
+                    if action == 'supersede':
+                        _require_same_supersede_scope(_json_value(stored_card), _json_value(stored_target))
                     return {'card': _json_value(stored_card),
                             'target': _json_value(stored_target) if stored_target is not None else None}
                 # Consistent lock ordering across competing decisions.
@@ -438,6 +444,8 @@ class PgVectorStore:
                     raise ValueError("steward card content hash changed")
                 card = _json_value(_row_value(rows[memory_id], 'steward_envelope', 1))
                 target = _json_value(_row_value(rows[target_memory_id], 'steward_envelope', 1)) if target_memory_id else None
+                if action == 'supersede':
+                    _require_same_supersede_scope(card, target)
                 changed_card, changed_target = transform(card, target)
                 # Use one DB timestamp inside the decision transaction for every
                 # formerly-current card. The envelope and SQL validity must agree.
@@ -1207,7 +1215,7 @@ class PgVectorStore:
             SELECT count(DISTINCT query_term)
               FROM unnest(%s::text[]) AS query_terms(query_term)
              WHERE query_term = ANY(regexp_split_to_array(
-                 regexp_replace(lower(coalesce(title, '') || ' ' || coalesce(summary, '') || ' ' ||
+                 regexp_replace(lower(coalesce(card_type, '') || ' ' || coalesce(title, '') || ' ' || coalesce(summary, '') || ' ' ||
                                 coalesce(typed_payload::text, '')),
                                 '[^a-z0-9가-힣_-]+', ' ', 'g'),
                  '\\s+'))
@@ -1220,17 +1228,6 @@ class PgVectorStore:
                 "steward_envelope->>'approval_state' IN ('approved', 'auto_accepted')",
                 "coalesce(steward_envelope->>'steward_proposal_kind', '') <> 'stale'",
             ))
-            clauses.append("""(
-                card_type <> 'status'
-                OR NULLIF(typed_payload->>'expires_at', '') IS NULL
-                OR CASE
-                    WHEN typed_payload->>'expires_at' ~
-                         '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?(Z|[+-]\\d{2}:\\d{2})$'
-                    THEN (typed_payload->>'expires_at')::timestamptz > %s
-                    ELSE FALSE
-                   END
-            )""")
-            params.append(instant)
             clauses.append("""(
                 card_type <> 'preference'
                 OR NULLIF(steward_envelope->>'active_until', '') IS NULL
@@ -1265,7 +1262,7 @@ class PgVectorStore:
                   FROM authorized
                  WHERE cardinality(%s::text[]) = 0
                     OR relevance_overlap >= %s
-                    OR card_type IN ('task', 'work', 'work_unit', 'decision', 'status', 'preference')
+                    OR card_type = ANY(%s::text[])
             )
             SELECT memory_id, project, card_type, title, summary, typed_payload,
                    currentness, content_hash, source_ref, lifecycle_state,
@@ -1278,7 +1275,7 @@ class PgVectorStore:
                       updated_at DESC, created_at DESC, memory_id
              LIMIT %s
         """
-        query_params = [terms, *params, terms, threshold, threshold, limit]
+        query_params = [terms, *params, terms, threshold, _context_query_card_types(terms), threshold, limit]
         with self._scope() as db:
             with db.cursor() as cur:
                 cur.execute(query_sql, query_params)
@@ -1348,8 +1345,8 @@ class PgVectorStore:
         if limit < 1:
             raise ValueError("limit must be positive")
         vector_literal = _vector_literal(list(actual_query_vector))
-        clauses = ["embedding IS NOT NULL", "embedding_state = 'ready'"]
-        params: list[Any] = []
+        clauses = ["embedding IS NOT NULL", "embedding_state = 'ready'", "embedding_model = %s"]
+        params: list[Any] = [DEFAULT_EMBEDDING_MODEL]
         if actual_project:
             clauses.append("project = %s")
             params.append(actual_project)
@@ -1361,7 +1358,7 @@ class PgVectorStore:
             clauses.append("authorization_status = %s")
             params.append(authorization_status)
         if currentness == "current" and as_of:
-            clauses.append("(currentness IN ('current', 'superseded') OR (currentness = 'stale' AND valid_to IS NOT NULL))")
+            clauses.append("currentness IN ('current', 'superseded')")
         elif currentness:
             clauses.append("currentness = %s")
             params.append(currentness)
@@ -1372,6 +1369,8 @@ class PgVectorStore:
         as_of_dt = _parse_as_of(as_of) or datetime.now(timezone.utc)
         clauses.append("valid_from <= %s AND (valid_to IS NULL OR valid_to > %s)")
         params.extend((as_of_dt, as_of_dt))
+        clauses.append(_STATUS_EXPIRY_FILTER)
+        params.append(as_of_dt)
         score_expression = "1.0 - distance"
         query_params = [vector_literal, *params, vector_literal, max(50, int(limit) * 5)]
         if text_query and text_query.strip():
@@ -1396,7 +1395,8 @@ class PgVectorStore:
                     )
                     SELECT memory_id, card_type, title, summary, typed_payload,
                            currentness, confidence, content_hash,
-                           {score_expression} AS similarity_score
+                           {score_expression} AS similarity_score,
+                           1.0 - distance AS semantic_score
                       FROM candidates
                      ORDER BY similarity_score DESC, memory_id
                      LIMIT %s
@@ -1415,6 +1415,7 @@ class PgVectorStore:
                 "confidence": float(_row_value(row, "confidence", 6)),
                 "content_hash": str(_row_value(row, "content_hash", 7)),
                 "similarity_score": round(float(_row_value(row, "similarity_score", 8)), 6),
+                "semantic_score": round(float(_row_value(row, "semantic_score", 9)), 6),
             }
             for row in rows
         ]
@@ -1943,14 +1944,46 @@ def _context_query_tokens(query: Any) -> list[str]:
     ))
 
 
+def _context_query_card_types(terms: list[str]) -> list[str]:
+    requested = set(terms)
+    families = (
+        ({"task", "tasks", "work", "work_unit", "작업"}, ("task", "work", "work_unit")),
+        ({"decision", "decisions", "결정"}, ("decision",)),
+        ({"status", "statuses", "상태"}, ("status",)),
+        ({"preference", "preferences", "guardrail", "guardrails", "선호", "제약"}, ("preference",)),
+    )
+    return [card_type for aliases, card_types in families if requested & aliases for card_type in card_types]
+
+
+def _require_same_supersede_scope(card: Mapping[str, Any], target: Mapping[str, Any] | None) -> None:
+    if target is None or any(
+        not card.get(field) or card.get(field) != target.get(field)
+        for field in ("project", "brain_id", "scope")
+    ):
+        raise ValueError("supersede requires matching project, brain_id, and scope")
+
+
+_STATUS_EXPIRY_FILTER = r"""(
+    coalesce(card_type, '') <> 'status'
+    OR NULLIF(typed_payload->>'expires_at', '') IS NULL
+    OR CASE
+        WHEN typed_payload->>'expires_at' ~
+             '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$'
+        THEN (typed_payload->>'expires_at')::timestamptz > %s
+        ELSE FALSE
+       END
+)"""
+
+
 def _authority_filter(project: str, as_of: Any) -> tuple[list[str], list[Any]]:
     instant = _parse_as_of(as_of) or datetime.now(timezone.utc)
     return [
         "project = %s", "authorization_status = 'active'",
-        "(currentness IN ('current', 'superseded') OR (currentness = 'stale' AND valid_to IS NOT NULL))" if as_of else "currentness = 'current'",
+        "currentness IN ('current', 'superseded')" if as_of else "currentness = 'current'",
         "lifecycle_state IN ('accepted', 'human_accepted', 'auto_accepted')",
         "valid_from <= %s", "(valid_to IS NULL OR valid_to > %s)",
-    ], [project, instant, instant]
+        _STATUS_EXPIRY_FILTER,
+    ], [project, instant, instant, instant]
 
 
 def _card_values(card: MemoryCard) -> tuple[Any, ...]:
