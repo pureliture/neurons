@@ -87,16 +87,17 @@ def test_steward_demotion_closes_pg_and_historical_graph_and_fallback(isolated_p
     stale = store.get_card(new_id)
     assert stale.currentness == "stale" and stale.valid_to is not None and stale.valid_to >= stale_before
     prior = (stale.valid_from + (stale.valid_to - stale.valid_from) / 2).isoformat()
-    assert new_id in [c["memory_id"] for c in store.list_authorized_cards(project=stale.project, as_of=prior, steward_only=True)]
+    # R1.7: stale commit은 현재 권한 회수다 — 공개 과거 조회(as_of)로도 되살릴 수 없다.
+    assert new_id not in [c["memory_id"] for c in store.list_authorized_cards(project=stale.project, as_of=prior, steward_only=True)]
     assert new_id not in [c["memory_id"] for c in store.list_authorized_cards(project=stale.project, steward_only=True)]
-    assert new_id in [c["memory_id"] for c in store.hybrid_search(project=stale.project, query_vector=vector,
-                                                                    as_of=prior, steward_only=True)]
+    assert new_id not in [c["memory_id"] for c in store.hybrid_search(project=stale.project, query_vector=vector,
+                                                                        as_of=prior, steward_only=True)]
     stale_episode = OntologyEpisode.from_payload(event_id="event:stale-target", entity_type="Preference",
         natural_id=new_id, payload={"authority_memory_id": new_id, "content_hash": stale.content_hash,
                                    "brain_id": "/project/" + stale.project})
     stale_graph = SimpleNamespace(search_context=lambda **_: GraphMemoryResult(status="available", episodes=(stale_episode,)))
-    assert GraphFirstResolver(store, stale_graph, lambda _: vector).resolve(project=stale.project, query="preference", as_of=prior)["items"]
-    assert GraphFirstResolver(store, None, lambda _: vector).resolve(project=stale.project, query="preference", as_of=prior)["items"]
+    assert GraphFirstResolver(store, stale_graph, lambda _: vector).resolve(project=stale.project, query="preference", as_of=prior)["items"] == []
+    assert GraphFirstResolver(store, None, lambda _: vector).resolve(project=stale.project, query="preference", as_of=prior)["items"] == []
     assert GraphFirstResolver(store, stale_graph, lambda _: vector).resolve(project=stale.project, query="preference")["items"] == []
     assert GraphFirstResolver(store, None, lambda _: vector).resolve(project=stale.project, query="preference")["items"] == []
 
