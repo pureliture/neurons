@@ -118,10 +118,11 @@ def test_live_openai_client_uses_bounded_timeout(monkeypatch):
             return _EmbeddingResponse()
 
     class _OpenAI:
-        def __init__(self, *, base_url, api_key, timeout):
+        def __init__(self, *, base_url, api_key, timeout, max_retries):
             captured["base_url"] = base_url
             captured["api_key"] = api_key
             captured["timeout"] = timeout
+            captured["max_retries"] = max_retries
             self.embeddings = _Embeddings()
 
     monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=_OpenAI))
@@ -133,6 +134,7 @@ def test_live_openai_client_uses_bounded_timeout(monkeypatch):
             "LLM_BRAIN_EMBEDDING_DIM": "3",
             "LLM_BRAIN_EMBEDDING_BASE_URL": "http://embedding/v1",
             "LLM_BRAIN_EMBEDDING_API_KEY": "test-key",
+            "LLM_BRAIN_EMBEDDING_TIMEOUT_SECONDS": "7.5",
         },
     )
 

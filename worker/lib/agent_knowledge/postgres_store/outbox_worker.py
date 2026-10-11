@@ -57,9 +57,17 @@ class OutboxWorker:
         self.embedding_fn = embedding_fn
         self.max_retries = max_retries
         self._stop_event = threading.Event()
+        self.last_batch_failed = 0
+        self.last_batch_completed = 0
+        self.last_batch_stale = 0
+        self.last_batch_attempted = 0
 
     def run_once(self) -> int:
-        """Claim and process a single batch of outbox jobs."""
+        """Claim a batch; returned count is attempts, not successful embeddings."""
+        self.last_batch_failed = 0
+        self.last_batch_completed = 0
+        self.last_batch_stale = 0
+        self.last_batch_attempted = 0
         jobs = self.store.claim_outbox_leases(
             worker_id=self.worker_id,
             batch_size=self.batch_size,
@@ -70,30 +78,31 @@ class OutboxWorker:
 
         processed_count = 0
         for job in jobs:
+            self.last_batch_attempted += 1
             try:
-                self.process_job(job)
+                completed = self.process_job(job)
+                if completed:
+                    self.last_batch_completed += 1
+                else:
+                    self.last_batch_stale += 1
                 processed_count += 1
             except Exception as e:
-                logger.error(
-                    f"[{self.worker_id}] Error processing outbox job {job.outbox_id}: {e}",
-                    exc_info=True,
-                )
+                self.last_batch_failed += 1
+                # Provider/DB exceptions can echo input or connection credentials.
+                # Persist a source-free class code, never their message/traceback.
+                error_code = "embedding_failed:" + type(e).__name__
+                logger.error("Embedding outbox processing failed (%s)", error_code)
                 try:
                     self.store.mark_outbox_failed(
                         job.outbox_id,
-                        error_message=str(e),
+                        error_message=error_code,
                         max_retries=self.max_retries,
                         worker_id=self.worker_id,
                     )
-                except ValueError as lease_error:
+                except ValueError:
                     # Another worker may have reclaimed an expired lease. Do
-                    # not overwrite its retry/terminal state.
-                    logger.warning(
-                        "[%s] outbox job %s was not owned while recording failure: %s",
-                        self.worker_id,
-                        job.outbox_id,
-                        lease_error,
-                    )
+                    # not overwrite its retry/terminal state or echo DB errors.
+                    logger.warning("Embedding failure not recorded: lease_not_owned")
                 processed_count += 1
 
         return processed_count
