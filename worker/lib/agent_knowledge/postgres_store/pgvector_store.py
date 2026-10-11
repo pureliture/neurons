@@ -15,6 +15,7 @@ from datetime import date, datetime, timezone
 import hashlib
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
@@ -1194,6 +1195,97 @@ class PgVectorStore:
                 return [dict(row) if isinstance(row, Mapping) else dict(zip(names, row))
                         for row in cur.fetchall()]
 
+    def list_context_cards(
+        self, *, project: str, query: str = "", as_of: datetime | date | str | None = None,
+        limit: int = 5, steward_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Select a balanced current-work pack in PostgreSQL before applying LIMIT."""
+        if not project or not 1 <= limit <= 100:
+            raise ValueError("project and bounded limit required")
+        terms = _context_query_tokens(query)
+        overlap_sql = """(
+            SELECT count(DISTINCT query_term)
+              FROM unnest(%s::text[]) AS query_terms(query_term)
+             WHERE query_term = ANY(regexp_split_to_array(
+                 regexp_replace(lower(coalesce(title, '') || ' ' || coalesce(summary, '') || ' ' ||
+                                coalesce(typed_payload::text, '')),
+                                '[^a-z0-9가-힣_-]+', ' ', 'g'),
+                 '\\s+'))
+        )"""
+        clauses, params = _authority_filter(project, as_of)
+        instant = _parse_as_of(as_of) or datetime.now(timezone.utc)
+        if steward_only:
+            clauses.extend((
+                "steward_envelope IS NOT NULL",
+                "steward_envelope->>'approval_state' IN ('approved', 'auto_accepted')",
+                "coalesce(steward_envelope->>'steward_proposal_kind', '') <> 'stale'",
+            ))
+            clauses.append("""(
+                card_type <> 'status'
+                OR NULLIF(typed_payload->>'expires_at', '') IS NULL
+                OR CASE
+                    WHEN typed_payload->>'expires_at' ~
+                         '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?(Z|[+-]\\d{2}:\\d{2})$'
+                    THEN (typed_payload->>'expires_at')::timestamptz > %s
+                    ELSE FALSE
+                   END
+            )""")
+            params.append(instant)
+            clauses.append("""(
+                card_type <> 'preference'
+                OR NULLIF(steward_envelope->>'active_until', '') IS NULL
+                OR CASE
+                    WHEN steward_envelope->>'active_until' ~
+                         '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?(Z|[+-]\\d{2}:\\d{2})$'
+                    THEN (steward_envelope->>'active_until')::timestamptz > %s
+                    ELSE FALSE
+                   END
+            )""")
+            params.append(instant)
+        threshold = max(1, (len(terms) + 1) // 2) if terms else 0
+        query_sql = f"""
+            WITH authorized AS (
+                SELECT memory_id, project, card_type, title, summary, typed_payload,
+                       currentness, content_hash, source_ref, lifecycle_state,
+                       authorization_status, created_at, updated_at,
+                       {overlap_sql} AS relevance_overlap
+                  FROM memory_cards
+                 WHERE {' AND '.join(clauses)}
+            ), ranked AS (
+                SELECT *,
+                       CASE card_type
+                           WHEN 'task' THEN 0 WHEN 'work' THEN 0 WHEN 'work_unit' THEN 0
+                           WHEN 'decision' THEN 1 WHEN 'status' THEN 2
+                           WHEN 'preference' THEN 3 ELSE 4
+                       END AS context_priority,
+                       row_number() OVER (
+                           PARTITION BY card_type
+                           ORDER BY relevance_overlap DESC, updated_at DESC, created_at DESC, memory_id
+                       ) AS type_rank
+                  FROM authorized
+                 WHERE cardinality(%s::text[]) = 0
+                    OR relevance_overlap >= %s
+                    OR card_type IN ('task', 'work', 'work_unit', 'decision', 'status', 'preference')
+            )
+            SELECT memory_id, project, card_type, title, summary, typed_payload,
+                   currentness, content_hash, source_ref, lifecycle_state,
+                   authorization_status, created_at, updated_at
+              FROM ranked
+             WHERE (card_type IN ('task', 'work', 'work_unit', 'decision', 'status') AND type_rank <= 2)
+                OR (card_type = 'preference' AND type_rank <= 3)
+                OR (relevance_overlap >= %s AND type_rank <= 3)
+             ORDER BY type_rank, context_priority, relevance_overlap DESC,
+                      updated_at DESC, created_at DESC, memory_id
+             LIMIT %s
+        """
+        query_params = [terms, *params, terms, threshold, threshold, limit]
+        with self._scope() as db:
+            with db.cursor() as cur:
+                cur.execute(query_sql, query_params)
+                names = [column.name for column in cur.description]
+                return [dict(row) if isinstance(row, Mapping) else dict(zip(names, row))
+                        for row in cur.fetchall()]
+
     def graph_projection_health(self, project: str, *, as_of: Any = None,
                                 steward_only: bool = False) -> dict[str, Any]:
         """현재 권위 revision의 투영 누락만 측정한다. 검색 무응답은 lag 증거가 아니다."""
@@ -1841,6 +1933,14 @@ _OUTBOX_SELECT = """
            created_at, updated_at
       FROM embedding_outbox
 """
+
+
+def _context_query_tokens(query: Any) -> list[str]:
+    return list(dict.fromkeys(
+        token.casefold()
+        for token in re.findall(r"[A-Za-z0-9가-힣_-]+", str(query or ""))
+        if len(token) > 1
+    ))
 
 
 def _authority_filter(project: str, as_of: Any) -> tuple[list[str], list[Any]]:

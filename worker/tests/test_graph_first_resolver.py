@@ -26,8 +26,10 @@ def _episode(memory_id: str = "mem_a", content_hash: str = HASH_A):
 
 
 class Store:
-    def __init__(self, cards=None, *, unprojected=False, calls=None, failure=None, evidence=None):
+    def __init__(self, cards=None, *, unprojected=False, calls=None, failure=None, evidence=None,
+                 context_cards=None):
         self.cards = list(cards or [_card()])
+        self.context_cards = list(context_cards) if context_cards is not None else None
         self.unprojected = unprojected
         self.calls = calls if calls is not None else []
         self.failure = failure
@@ -51,6 +53,13 @@ class Store:
             cards = [c for c in sorted(cards, key=lambda c: c["memory_id"])
                      if c["memory_id"] > (kwargs.get("after_memory_id") or "")]
         return cards[:kwargs.get("limit", 100)]
+
+    def list_context_cards(self, **kwargs):
+        assert kwargs["steward_only"] is True
+        self.calls.append(("context", kwargs))
+        if self.failure == "context":
+            raise RuntimeError("database down")
+        return list(self.context_cards or self.cards)[:kwargs.get("limit", 100)]
 
     def hybrid_search(self, **kwargs):
         assert kwargs["steward_only"] is True
@@ -152,6 +161,53 @@ def test_utc_date_as_of_normalizes_to_midnight_and_slim_guardrails_field_is_kept
 
     assert request.as_of == "2026-09-05T00:00:00+00:00"
     assert result["active_guardrails"] == []
+
+
+def test_context_uses_preselected_current_work_decision_status_and_guardrail():
+    task = _card("mem_task", card_type="task")
+    task["typed_payload"] = {"task_state": "Finish latest work", "next_action": "Run tests"}
+    decision = _card("mem_decision", card_type="decision")
+    decision["typed_payload"] = {"decision": "Use the approved current design"}
+    status = _card("mem_status", card_type="status")
+    status["typed_payload"] = {"status_value": "blocked pending verification"}
+    guardrail = _card("mem_guardrail", card_type="preference")
+    guardrail["typed_payload"] = {"rule": "Keep proposal writes review-only", "scope": "neurons"}
+    old_preference = _card("mem_old_preference", card_type="preference")
+    old_preference["summary"] = "old preference " * 700
+    old_preference["typed_payload"] = {"rule": "old preference " * 700, "scope": "general"}
+    selected = [task, decision, status, guardrail, old_preference]
+    store = Store(cards=[old_preference, task, decision, status, guardrail], context_cards=selected)
+
+    result = GraphFirstResolver(store).resolve(
+        project="neurons", query="latest task decision", mode="context", limit=4,
+    )
+
+    assert result.get("error_code") is None, result
+    context_call = next(call for call in store.calls if call[0] == "context")
+    assert context_call[1]["query"] == "latest task decision"
+    assert context_call[1]["limit"] == 5
+    assert [item["id"] for item in result["items"]] == [
+        "mem_task", "mem_decision", "mem_status", "mem_guardrail",
+    ]
+    assert result["tasks"][0]["task"] == "Finish latest work"
+    assert result["decisions"][0]["decision"] == "Use the approved current design"
+    assert result["statuses"][0]["status"] == "blocked pending verification"
+    assert result["active_guardrails"] == ["Keep proposal writes review-only"]
+    assert tool_result_bytes(result) <= 3072
+
+
+def test_list_keeps_stable_memory_id_keyset_contract_after_context_split():
+    cards = [_card("mem_b", HASH_B), _card("mem_a", HASH_A)]
+    store = Store(cards=cards)
+    resolver = GraphFirstResolver(store)
+
+    first = resolver.resolve(project="neurons", mode="list", limit=1)
+    second = resolver.resolve(
+        project="neurons", mode="list", limit=1, cursor=first["next_cursor"],
+    )
+
+    assert [item["id"] for item in first["items"] + second["items"]] == ["mem_a", "mem_b"]
+    assert [call[0] for call in store.calls if isinstance(call, tuple)] == ["list", "list"]
 
 
 def test_query_mode_rejects_missing_or_whitespace_query():
