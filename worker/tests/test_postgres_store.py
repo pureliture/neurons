@@ -26,7 +26,10 @@ from agent_knowledge.postgres_store.pgvector_store import (
     VECTOR_DIMENSION,
     compute_cosine_similarity,
     make_dummy_vector,
+    _authority_filter,
 )
+from agent_knowledge.model_connectors import DEFAULT_EMBEDDING_MODEL
+from agent_knowledge.session_memory.memory_miner import build_memory_card_candidate_from_source_span
 
 # Legacy 1536-dim profile is NOT accepted here; the shared profile is 3072-dim.
 SHARED_EMBEDDING_DIM = 3072
@@ -263,9 +266,130 @@ def test_context_selector_filters_and_ranks_before_its_sql_limit():
     assert "lifecycle_state IN ('accepted', 'human_accepted', 'auto_accepted')" in query
     normalized_query = " ".join(query.upper().split())
     assert "ROW_NUMBER() OVER ( PARTITION BY CARD_TYPE" in normalized_query
+    assert "COALESCE(CARD_TYPE, '')" in normalized_query
+    assert "card_type = ANY(%s::text[])" in query
+    assert "OR card_type IN ('task', 'work', 'work_unit', 'decision', 'status', 'preference')" not in query
     assert query.index("WHERE project = %s") < query.rindex("LIMIT %s")
     assert "ORDER BY type_rank, context_priority" in query
     assert "latest" in captured["params"] or ["latest", "task", "decision"] in captured["params"]
+    assert captured["params"][-3] == ["task", "work", "work_unit", "decision"]
+    assert query.count("%s") == len(captured["params"])
+
+
+def test_authority_filter_excludes_stale_even_for_temporal_reads_and_expires_statuses():
+    clauses, _params = _authority_filter("neurons", "2026-10-01T00:00:00Z")
+    sql = " ".join(clauses)
+
+    assert "currentness IN ('current', 'superseded')" in sql
+    assert "currentness = 'stale'" not in sql
+    assert "expires_at" in sql
+
+
+def test_hybrid_search_uses_the_canonical_embedding_model_filter():
+    captured = {}
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, query, params):
+            captured["query"] = query
+            captured["params"] = params
+
+        def fetchall(self):
+            return []
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+    store = PgVectorStore(connection=Connection())
+    store.set_guc_relaxed_order = lambda **_kwargs: True
+    store.hybrid_search(
+        project="neurons", query_vector=make_dummy_vector(2), limit=5,
+        text_query="current work",
+    )
+
+    assert "embedding_model = %s" in captured["query"]
+    assert DEFAULT_EMBEDDING_MODEL in captured["params"]
+    assert "1.0 - distance AS semantic_score" in captured["query"]
+    assert "expires_at" in captured["query"]
+    assert captured["query"].count("%s") == len(captured["params"])
+
+    store.hybrid_search(
+        project="neurons", query_vector=make_dummy_vector(2), limit=5,
+        text_query="current work", as_of="2026-10-01T00:00:00Z",
+    )
+    assert "currentness IN ('current', 'superseded')" in captured["query"]
+    assert "currentness = 'stale'" not in captured["query"]
+    assert "expires_at" in captured["query"]
+    assert captured["query"].count("%s") == len(captured["params"])
+
+
+def test_put_steward_proposal_rejects_same_idempotency_identity_with_scope_collision():
+    base = build_memory_card_candidate_from_source_span(
+        {
+            "source_ref": {"source_id": "source-session"},
+            "span_ref": {"span_id": "source-session#1-2"},
+            "content_hash": "sha256:" + "d" * 64,
+            "card_type": "decision",
+            "scope": "project",
+            "project": "project-a",
+            "provider": "codex",
+            "title": "Storage decision",
+            "redacted_summary": "Keep PostgreSQL as the authority store.",
+            "typed_payload": {
+                "decision": "Keep PostgreSQL",
+                "rationale": "One authority store",
+                "alternatives": [],
+                "consequence": "Graph is derived",
+                "authority_ref": "design-note",
+            },
+        },
+        refresh_watermark="same",
+    )
+    stored = dict(base)
+    stored.update({
+        "memory_id": "mem_steward_scope_collision",
+        "steward_proposal_kind": "candidate",
+        "steward_proposed_by": "test",
+    })
+    incoming = dict(stored)
+    incoming.update({"project": "project-b", "brain_id": "/project/project-b"})
+
+    class Cursor:
+        def __init__(self):
+            self.query = ""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, query, _params):
+            self.query = query
+
+        def fetchone(self):
+            if "SELECT steward_envelope, content_hash, lifecycle_state" in self.query:
+                return {
+                    "steward_envelope": stored,
+                    "content_hash": stored["content_hash"],
+                    "lifecycle_state": stored["lifecycle_state"],
+                }
+            return None
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+    store = PgVectorStore(connection=Connection())
+
+    with pytest.raises(ValueError, match="scope collision"):
+        store.put_steward_proposal(incoming)
 
 
 def test_cosine_similarity_is_pure_and_bounded():
@@ -274,6 +398,68 @@ def test_cosine_similarity_is_pure_and_bounded():
     vec = make_dummy_vector(42)
     assert compute_cosine_similarity(vec, list(vec)) == pytest.approx(1.0)
     assert 0.0 <= compute_cosine_similarity(vec, make_dummy_vector(43)) <= 1.0
+
+
+@pytest.mark.parametrize("field", ["project", "brain_id", "scope"])
+@pytest.mark.parametrize("retry", [False, True])
+def test_supersede_decision_rejects_cross_scope_before_transform_or_write(field, retry):
+    card = {
+        "memory_id": "mem_new", "content_hash": "sha256:" + "a" * 64,
+        "project": "project-a", "brain_id": "/project/project-a", "scope": "project",
+    }
+    target = dict(card, memory_id="mem_old")
+    target[field] = "another-scope"
+    executed = []
+
+    class Cursor:
+        def __init__(self):
+            self.query = ""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, query, params):
+            self.query = query
+            executed.append((query, params))
+
+        def fetchone(self):
+            if retry and "FROM steward_card_decisions" in self.query:
+                return {
+                    "decision_id": "decision-scope", "memory_id": card["memory_id"],
+                    "content_hash": card["content_hash"], "action": "supersede",
+                    "actor": "reviewer", "target_memory_id": target["memory_id"],
+                    "result_card": card, "result_target": target,
+                }
+            return None
+
+        def fetchall(self):
+            assert "FOR UPDATE" in self.query
+            return [
+                {"memory_id": item["memory_id"], "steward_envelope": item,
+                 "content_hash": item["content_hash"]}
+                for item in (card, target)
+            ]
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+    def forbidden_transform(*_args):
+        pytest.fail("cross-scope supersede must be rejected before transformation")
+
+    store = PgVectorStore(connection=Connection())
+    with pytest.raises(ValueError, match="project, brain_id, and scope"):
+        store.steward_decision(
+            decision_id="decision-scope", memory_id=card["memory_id"],
+            content_hash=card["content_hash"], action="supersede", actor="reviewer",
+            target_memory_id=target["memory_id"], transform=forbidden_transform,
+        )
+    assert executed
+    assert all(query.lstrip().startswith("SELECT") for query, _params in executed)
+    assert card[field] != target[field]
 
 
 # ==============================================================================

@@ -102,6 +102,9 @@ def test_query_is_graph_first_then_authority_join_and_preserves_graph_order():
 def test_unprojected_graph_keeps_verified_graph_order_and_supplements_from_pgvector():
     calls = []
     store = Store(cards=[_card("mem_a", HASH_A), _card("mem_b", HASH_B)], unprojected=True, calls=calls)
+    # The PG scorer supplies finite scores; this test isolates graph/PG ordering.
+    for card in store.cards:
+        card["semantic_score"] = 0.9
     graph = Graph([_episode()], calls=calls)
     embedded = []
 
@@ -260,6 +263,57 @@ def test_fallback_drops_stale_ranked_hash_and_labels_embedding_failure():
 
     failed = GraphFirstResolver(Store(), None, lambda _: (_ for _ in ()).throw(RuntimeError("embed"))).resolve(project="neurons", query="x")
     assert failed["error_code"] == "embedding_unavailable"
+
+
+def test_fallback_rejects_unrelated_negative_semantic_score():
+    card = _card("mem_unrelated", HASH_A)
+    card["title"] = "The current database uses PostgreSQL"
+    card["summary"] = "Storage implementation notes"
+    card["similarity_score"] = -0.18
+    store = Store(cards=[card])
+
+    result = GraphFirstResolver(store, None, lambda _query: [0.1] * 3072).resolve(
+        project="neurons", query="unrelated astronomy question", limit=5
+    )
+
+    assert result["items"] == []
+    assert result["metadata"]["retrieval_path"] == "pgvector_fallback"
+
+
+@pytest.mark.parametrize("score", [None, float("nan"), float("inf"), True, "0.99"])
+def test_fallback_rejects_missing_or_invalid_semantic_score_without_lexical_match(score):
+    card = _card()
+    if score is not None:
+        card["similarity_score"] = score
+    result = GraphFirstResolver(Store(cards=[card]), None, lambda _: [0.1]).resolve(
+        project="neurons", query="unrelated astronomy question",
+    )
+    assert result["items"] == []
+    assert result["metadata"]["authority_join_status"] == "verified"
+
+
+@pytest.mark.parametrize(
+    ("semantic_score", "blended_score", "expected_ids"),
+    [(0.75, 0.6, ["mem_a"]), (0.74, 0.99, [])],
+)
+def test_fallback_uses_existing_semantic_threshold_not_blended_rank(
+    semantic_score, blended_score, expected_ids,
+):
+    card = _card()
+    card.update(semantic_score=semantic_score, similarity_score=blended_score)
+    result = GraphFirstResolver(Store(cards=[card]), None, lambda _: [0.1]).resolve(
+        project="neurons", query="unrelated astronomy question",
+    )
+    assert [item["id"] for item in result["items"]] == expected_ids
+
+
+def test_fallback_keeps_lexically_relevant_card_even_with_negative_semantic_score():
+    card = _card()
+    card.update(title="postgres authority", similarity_score=-0.18)
+    result = GraphFirstResolver(Store(cards=[card]), None, lambda _: [0.1]).resolve(
+        project="neurons", query="postgres authority",
+    )
+    assert [item["id"] for item in result["items"]] == ["mem_a"]
 
 
 def test_partial_graph_error_code_is_capped_and_shrinking_always_progresses():

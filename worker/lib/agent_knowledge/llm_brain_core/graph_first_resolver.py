@@ -12,6 +12,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from agent_knowledge.public_safe_util import ensure_public_safe, public_safe_text
 from agent_knowledge.mcp_payload import tool_result_bytes
+from agent_knowledge.session_memory.brain_query import (
+    SEMANTIC_RESULT_MIN_SCORE,
+    _card_search_text,
+    _finite_score_or_none,
+    _query_tokens,
+)
 
 
 _MAX_BYTES = 3072
@@ -379,6 +385,16 @@ class GraphFirstResolver:
             )
         except Exception:
             return None, "authority_store_unavailable", True, "unavailable"
+        # Reuse brain.query's lexical coverage and finite semantic threshold.
+        # SQL's blended ranking score is not the raw cosine similarity.
+        tokens = _query_tokens(request.query)
+        threshold = max(1, (len(tokens) + 1) // 2)
+        ranked = [
+            card for card in ranked
+            if len(tokens & _query_tokens(_card_search_text(card))) >= threshold
+            or (_finite_score_or_none(card.get("semantic_score", card.get("similarity_score"))) or 0.0)
+            >= SEMANTIC_RESULT_MIN_SCORE
+        ]
         rank_keys = [
             (str(card.get("memory_id") or ""), str(card.get("content_hash") or ""))
             for card in ranked

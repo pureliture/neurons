@@ -160,12 +160,15 @@ class LlmMemoryMiner:
 
 
 def memory_card_candidate_idempotency_key(source_span: Mapping[str, Any]) -> str:
-    """Stable candidate identity from source/span/content, independent of cycle end."""
+    """Scope-bound identity for newly built candidates, independent of cycle end."""
 
     normalized = _normalize_candidate_source_span(source_span)
     seed = _stable_json(
         {
             "schema_version": LLM_BRAIN_CANDIDATE_SCHEMA_VERSION,
+            "project": normalized["project"],
+            "brain_id": normalized["brain_id"],
+            "scope": normalized["scope"],
             "source_ref": normalized["source_ref"],
             "span_ref": normalized["span_ref"],
             "content_hash": normalized["content_hash"],
