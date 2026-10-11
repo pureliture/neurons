@@ -27,6 +27,28 @@ class IngressControllerTest {
     }
 
     @Test
+    void validateResponsePreventsCachingWithoutPublishing() throws Exception {
+        mockMvc.perform(post("/v1/ingest/validate")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(validRequest(null)))
+            .andExpect(status().isOk())
+            .andExpect(header().string("Cache-Control", "no-store"))
+            .andExpect(jsonPath("$.status").value("valid"));
+        assertThat(publisher.publishCount).isZero();
+    }
+
+    @Test
+    void enqueueResponsePreventsCaching() throws Exception {
+        mockMvc.perform(post("/v1/ingest/enqueue")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(validRequest(null)))
+            .andExpect(status().isAccepted())
+            .andExpect(header().string("Cache-Control", "no-store"))
+            .andExpect(jsonPath("$.status").value("queued"));
+        assertThat(publisher.publishCount).isEqualTo(1);
+    }
+
+    @Test
     void healthzHasStableJsonForNonJsonAcceptWithoutPublishing() throws Exception {
         mockMvc.perform(get("/healthz").accept(MediaType.TEXT_PLAIN))
             .andExpect(status().isOk())
@@ -82,13 +104,15 @@ class IngressControllerTest {
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(validRequest(null)))
             .andExpect(status().isAccepted())
-            .andExpect(header().string("X-Content-Type-Options", "nosniff"));
+            .andExpect(header().string("X-Content-Type-Options", "nosniff"))
+            .andExpect(header().string("Cache-Control", "no-store"));
 
         mockMvc.perform(post("/v1/ingest/enqueue")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(validRequestWithoutSource()))
             .andExpect(status().isBadRequest())
-            .andExpect(header().string("X-Content-Type-Options", "nosniff"));
+            .andExpect(header().string("X-Content-Type-Options", "nosniff"))
+            .andExpect(header().string("Cache-Control", "no-store"));
 
         String first = validRequest("\"idempotencyKey\":\"nosniff-key\",");
         String second = validRequestWithBody("\"idempotencyKey\":\"nosniff-key\",", body() + "\nchanged");
@@ -96,20 +120,23 @@ class IngressControllerTest {
             .andExpect(status().isAccepted());
         mockMvc.perform(post("/v1/ingest/enqueue").contentType(MediaType.APPLICATION_JSON).content(second))
             .andExpect(status().isConflict())
-            .andExpect(header().string("X-Content-Type-Options", "nosniff"));
+            .andExpect(header().string("X-Content-Type-Options", "nosniff"))
+            .andExpect(header().string("Cache-Control", "no-store"));
 
         mockMvc.perform(post("/v1/ingest/enqueue")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(validRequest(null).replace("redacted_rag_ready_document", "redacted_document_ref")))
             .andExpect(status().isUnprocessableEntity())
-            .andExpect(header().string("X-Content-Type-Options", "nosniff"));
+            .andExpect(header().string("X-Content-Type-Options", "nosniff"))
+            .andExpect(header().string("Cache-Control", "no-store"));
 
         publisher.nextResult = PublishResult.failed("nats unavailable");
         mockMvc.perform(post("/v1/ingest/enqueue")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(validRequest(null)))
             .andExpect(status().isServiceUnavailable())
-            .andExpect(header().string("X-Content-Type-Options", "nosniff"));
+            .andExpect(header().string("X-Content-Type-Options", "nosniff"))
+            .andExpect(header().string("Cache-Control", "no-store"));
     }
 
     @Test
@@ -367,19 +394,22 @@ class IngressControllerTest {
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(validRequest(null)))
             .andExpect(status().isOk())
-            .andExpect(header().string("X-Content-Type-Options", "nosniff"));
+            .andExpect(header().string("X-Content-Type-Options", "nosniff"))
+            .andExpect(header().string("Cache-Control", "no-store"));
 
         mockMvc.perform(post("/v1/ingest/validate")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(validRequestWithoutSource()))
             .andExpect(status().isBadRequest())
-            .andExpect(header().string("X-Content-Type-Options", "nosniff"));
+            .andExpect(header().string("X-Content-Type-Options", "nosniff"))
+            .andExpect(header().string("Cache-Control", "no-store"));
 
         mockMvc.perform(post("/v1/ingest/validate")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(validRequest(null).replace("redacted_rag_ready_document", "redacted_document_ref")))
             .andExpect(status().isUnprocessableEntity())
-            .andExpect(header().string("X-Content-Type-Options", "nosniff"));
+            .andExpect(header().string("X-Content-Type-Options", "nosniff"))
+            .andExpect(header().string("Cache-Control", "no-store"));
     }
 
     @Test
