@@ -101,12 +101,15 @@ def build_openai_embedding_provider(
     size = int(config["dim"])
     if embed_fn is None:
         api_key = env.get("LLM_BRAIN_EMBEDDING_API_KEY") or env.get("OPENAI_API_KEY") or ""
-        embed_fn = _openai_embed_fn(model=model, base_url=str(config["base_url"]), api_key=api_key)
+        embed_fn = _openai_embed_fn(model=model, base_url=str(config["base_url"]), api_key=api_key, environ=env)
     return OpenAICompatibleEmbeddingProvider(embed_fn=embed_fn, size=size, model=model)
 
 
-def _openai_embed_fn(*, model: str, base_url: str, api_key: str) -> EmbedFn:
+def _openai_embed_fn(*, model: str, base_url: str, api_key: str, environ: Mapping[str, str] | None = None) -> EmbedFn:
     import os
+    import math
+
+    env = environ if environ is not None else os.environ
 
     if not model:
         raise SearchableMirrorUnavailable(
@@ -119,12 +122,13 @@ def _openai_embed_fn(*, model: str, base_url: str, api_key: str) -> EmbedFn:
             "openai client is not installed; install the searchable mirror dependencies"
         ) from exc
     try:
-        timeout_seconds = float(os.environ.get("LLM_BRAIN_EMBEDDING_TIMEOUT_SECONDS", "30"))
-    except ValueError:
+        timeout_seconds = float(env.get("LLM_BRAIN_EMBEDDING_TIMEOUT_SECONDS", "30"))
+    except (TypeError, ValueError):
         timeout_seconds = 30.0
-    if timeout_seconds <= 0:
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         timeout_seconds = 30.0
-    client = OpenAI(base_url=base_url or None, api_key=api_key or "", timeout=timeout_seconds)
+    # Keep the retry budget explicit for the consumer's lease calculation.
+    client = OpenAI(base_url=base_url or None, api_key=api_key or "", timeout=timeout_seconds, max_retries=2)
 
     def _embed(text: str) -> list[float]:
         response = client.embeddings.create(model=model, input=text)

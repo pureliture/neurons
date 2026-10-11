@@ -145,7 +145,7 @@ def test_consumer_attempt_ceiling_survives_multiple_batches(monkeypatch, capsys)
     monkeypatch.setattr(cli, "PgVectorStore", lambda **kwargs: store)
     monkeypatch.setattr(cli, "build_openai_embedding_provider", lambda **kwargs: provider)
     env = {"NEURON_LBRAIN_PGVECTOR_DSN": "fixture", "LLM_BRAIN_EMBEDDING_MODEL": "gemini-embedding-2", "LLM_BRAIN_EMBEDDING_DIM": "3072", "LLM_BRAIN_EMBEDDING_BASE_URL": "http://invalid.example.invalid/v1"}
-    assert cli.main(["--execute", "--allow-model-calls", "--batch-size", "2", "--max-jobs", "3"], environ=env) == 0
+    assert cli.main(["--execute", "--allow-model-calls", "--batch-size", "2", "--max-jobs", "3", "--lease-seconds", "300"], environ=env) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["attempted"] == 3
     assert len(embeds) == 3
