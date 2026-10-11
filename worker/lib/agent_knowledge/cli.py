@@ -178,6 +178,7 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "transcript-migration": migration_cli.main,
     "qdrant-pg-migrate-cards": _lazy_handler(".postgres_store.migration_qdrant_to_postgres_cli"),
     "pg-graph-project": _lazy_handler(".postgres_store.graph_projection_cli"),
+    "pg-embedding-outbox": _lazy_handler(".postgres_store.embedding_outbox_cli"),
     "transcript-quality": _pending_server_command("transcript-quality"),
     "transcript-resources": _pending_server_command("transcript-resources"),
     "transcript-retrieval": _pending_server_command("transcript-retrieval"),
