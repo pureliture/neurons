@@ -22,7 +22,17 @@ from agent_knowledge.session_memory.candidate_intake_cli import (
 PROJECT = "neurons"
 
 
-def _chunk(content_hash: str = "sha256:" + "a" * 64) -> dict:
+def _hash(tag: int) -> str:
+    """A valid 71-char sha256 hash for fixture chunk identities."""
+    return "sha256:" + str(tag) * 64
+
+
+def default_chunk_hash() -> str:
+    """The hash of the default fixture chunk."""
+    return _hash(0)
+
+
+def _chunk(content_hash: str = _hash(0)) -> dict:
     return {
         "content": "The team decided to keep PostgreSQL as the authority store.",
         "content_hash": content_hash,
@@ -51,7 +61,32 @@ def _completion(messages):
                 },
             }
         ]
-    )
+        )
+
+
+class CountingCompletion:
+    def __init__(self, items_per_call: int = 1):
+        self.calls = 0
+        self.items_per_call = items_per_call
+
+    def __call__(self, messages):
+        self.calls += 1
+        return json.dumps([_decision() for _ in range(self.items_per_call)])
+
+
+def _decision() -> dict:
+    return {
+        "card_type": "decision",
+        "title": "Authority store",
+        "statement": "PostgreSQL is the authority store.",
+        "typed_payload": {
+            "decision": "Use PostgreSQL",
+            "rationale": "One authority store",
+            "alternatives": [],
+            "consequence": "Graph stays derived",
+            "authority_ref": "design-note",
+        },
+    }
 
 
 class RecordingSteward:
@@ -161,7 +196,7 @@ def test_enabled_run_writes_review_queue_proposals_only():
     assert call["proposer"] == "candidate-intake"
     assert call["source_span"]["project"] == PROJECT
     assert call["source_span"]["brain_id"] == f"/project/{PROJECT}"
-    assert call["source_span"]["content_hash"] == "sha256:" + "a" * 64
+    assert call["source_span"]["content_hash"] == default_chunk_hash()
 
 
 def test_miner_failure_is_skipped_and_never_counted_as_projection_complete():
@@ -200,6 +235,32 @@ def test_checkpoint_roundtrip_is_atomic_and_repeat_safe(tmp_path):
     assert already_processed(reloaded, project=PROJECT, source_hash=source_hash) is True
     assert already_processed(reloaded, project="other", source_hash=source_hash) is False
     assert not (tmp_path / "nested" / "checkpoint.json.tmp").exists()
+
+
+def test_checkpoint_keeps_many_revisions_of_one_project(tmp_path):
+    """One project has many revisions; none of them may silently vanish."""
+    path = tmp_path / "checkpoint.json"
+    checkpoint = {"version": 1, "projects": {}}
+    revisions = [checkpoint_source_hash(f"{PROJECT}-{index}") for index in range(5)]
+    for revision in revisions:
+        record_processed(checkpoint, project=PROJECT, source_hash=revision, watermark="wm")
+    save_checkpoint(str(path), checkpoint)
+
+    reloaded = load_checkpoint(str(path))
+    for revision in revisions:
+        assert already_processed(reloaded, project=PROJECT, source_hash=revision) is True
+
+
+def test_legacy_single_hash_checkpoint_is_still_readable(tmp_path):
+    path = tmp_path / "legacy.json"
+    source_hash = checkpoint_source_hash(PROJECT)
+    path.write_text(
+        json.dumps({"version": 1, "projects": {PROJECT: {"source_hash": source_hash}}}),
+        encoding="utf-8",
+    )
+
+    reloaded = load_checkpoint(str(path))
+    assert already_processed(reloaded, project=PROJECT, source_hash=source_hash) is True
 
 
 def test_missing_checkpoint_file_is_an_empty_checkpoint(tmp_path):
@@ -283,3 +344,99 @@ def test_cli_once_without_enable_writes_no_proposals(tmp_path, capsys):
     assert code == 0
     assert payload["status"] == "disabled"
     assert payload["proposed_count"] == 0
+
+
+# ----------------------------------------------------------- batching and cost shape
+
+
+def test_enabled_run_batches_chunks_into_fewer_model_calls():
+    completion = CountingCompletion(items_per_call=1)
+    steward = RecordingSteward()
+    report, _state = run_candidate_intake(
+        settings=_settings(enable_proposals=True, batch_candidates=5),
+        chunks=[_chunk(_hash(i)) for i in range(3)],
+        completion_fn=completion,
+        steward=steward,
+    )
+
+    # Three chunks in one batch cost one model call, not three.
+    assert completion.calls == 1
+    assert report.proposed_count >= 1
+
+
+def test_twenty_chunks_cost_four_model_calls():
+    completion = CountingCompletion(items_per_call=1)
+    steward = RecordingSteward()
+    report, _state = run_candidate_intake(
+        settings=_settings(enable_proposals=True, batch_candidates=5),
+        chunks=[_chunk(_hash(i)) for i in range(20)],
+        completion_fn=completion,
+        steward=steward,
+    )
+
+    assert completion.calls == 4
+    assert report.examined_chunks == 20
+
+
+def test_every_distinct_chunk_is_processed_not_dropped_by_a_project_key():
+    """Three different chunks in one project must yield three proposals."""
+    steward = RecordingSteward()
+    report, _state = run_candidate_intake(
+        settings=_settings(enable_proposals=True, batch_candidates=5),
+        chunks=[_chunk(_hash(i)) for i in range(3)],
+        completion_fn=CountingCompletion(items_per_call=3),
+        steward=steward,
+    )
+
+    assert len(steward.calls) == 3
+    assert report.duplicate_count == 0
+    hashes = {call["source_span"]["content_hash"] for call in steward.calls}
+    assert len(hashes) == 3
+
+
+def test_revision_within_the_same_project_is_processed_once():
+    """A repeated revision is skipped; a new revision is not."""
+    steward = RecordingSteward()
+    settings = _settings(enable_proposals=True, batch_candidates=5)
+    first, state = run_candidate_intake(
+        settings=settings,
+        chunks=[_chunk(_hash(1))],
+        completion_fn=CountingCompletion(items_per_call=1),
+        steward=steward,
+        checkpoint={"version": 1, "projects": {}},
+    )
+    assert len(steward.calls) == 1
+
+    again = RecordingSteward()
+    second, _state = run_candidate_intake(
+        settings=settings,
+        chunks=[_chunk(_hash(1)), _chunk(_hash(2))],
+        completion_fn=CountingCompletion(items_per_call=2),
+        steward=again,
+        checkpoint=state,
+    )
+
+    # The seen revision stays a duplicate; the new one is processed.
+    assert second.duplicate_count == 1
+    assert len(again.calls) == 1
+    assert again.calls[0]["source_span"]["content_hash"] == _hash(2)
+
+
+def test_model_failure_is_reported_not_counted_as_completed():
+    def broken(_messages):
+        raise RuntimeError("model unavailable")
+
+    steward = RecordingSteward()
+    report, state = run_candidate_intake(
+        settings=_settings(enable_proposals=True),
+        chunks=[_chunk(_hash(1))],
+        completion_fn=broken,
+        steward=steward,
+    )
+
+    assert report.status == "mining_failed"
+    assert report.error_code == "model_call_failed"
+    assert steward.calls == []
+    assert already_processed(
+        state, project=PROJECT, source_hash=_hash(1)
+    ) is False
