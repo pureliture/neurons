@@ -65,7 +65,11 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
             raise ValueError("configuration_required")
         if (spec.model, spec.dim) != (DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIM):
             raise ValueError("unsupported_embedding_profile")
-        if not math.isfinite(timeout) or not 0 < timeout <= 30 or args.lease_seconds < timeout * 3 + 15:
+        batch_bound = min(args.batch_size, args.max_jobs)
+        # Every job is leased together but provider calls are serial. Reserve
+        # the configured SDK attempts plus write/backoff margin for ALL jobs.
+        minimum_lease = (timeout * 3 + 15) * batch_bound
+        if not math.isfinite(timeout) or not 0 < timeout <= 30 or args.lease_seconds < minimum_lease:
             raise ValueError("unsafe_provider_timeout_or_lease")
     except (ValueError, TypeError):
         emit("configuration_rejected", network_used=False, mutation_performed=False)
@@ -94,11 +98,15 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
             if stop.is_set() or remaining <= 0:
                 break
             worker.batch_size = min(args.batch_size, remaining)
-            attempted = worker.run_once()
-            report["attempted"] += attempted
-            report["completed"] += worker.last_batch_completed
-            report["failed"] += worker.last_batch_failed
-            report["stale"] += worker.last_batch_stale
+            # Preserve confirmed progress even if failure recording raises a DB
+            # error after an earlier job has already committed successfully.
+            try:
+                attempted = worker.run_once()
+            finally:
+                report["attempted"] += worker.last_batch_attempted
+                report["completed"] += worker.last_batch_completed
+                report["failed"] += worker.last_batch_failed
+                report["stale"] += worker.last_batch_stale
             if args.once:
                 break
             if attempted == 0:

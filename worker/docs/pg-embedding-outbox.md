@@ -26,8 +26,10 @@ neuron-knowledge pg-embedding-outbox --execute --allow-model-calls --batch-size 
 
 ## 상한·실패·종료
 
-- `--max-jobs`는 **한 프로세스의 처리 시도 상한**이며 일일/금액 한도가 아니다. SDK 내부 재시도는 별도일 수 있으므로 통화 비용 상한으로 설명하면 안 된다. 상시 스케줄은 별도 비용·활성화 승인을 요구한다.
-- 출력의 `attempted`, `completed`, `failed`, `stale`을 구분한다. 처리 시도 수를 임베딩 성공 수로 계산하지 않는다. `model_calls`는 provider 함수 호출 수이며 SDK 내부 HTTP 재시도 수가 아니다.
+- `--max-jobs`는 **한 프로세스의 처리 시도 상한**이며 일일/금액 한도가 아니다. SDK 재시도는 최대 2회(요청은 최초 포함 최대 3회)로 명시하지만, 통화 비용 상한으로 설명하면 안 된다. 상시 스케줄은 별도 비용·활성화 승인을 요구한다.
+- 모델 timeout은 검증에 사용한 환경과 실제 SDK에 같은 값으로 전달한다. 외부 프로세스의 다른 timeout 설정이 주입된 실행 환경을 덮어쓰지 않는다.
+- 여러 작업을 함께 임대하면 순서대로 처리하므로 최소 lease는 `(timeout × 3 + 15초) × min(batch-size, max-jobs)`이다. 부족하면 DB/provider 생성 전 거부한다. 기본 batch 1은 유지하며 batch 2/timeout 30초에는 lease 최소 210초가 필요하다. 이 검사는 설정 기반 최소 여유이며 네트워크/DB 지연의 무제한 연장을 보장하지 않는다.
+- 출력의 `attempted`, `completed`, `failed`, `stale`을 구분한다. 처리 시도 수를 임베딩 성공 수로 계산하지 않는다. 중간 DB 오류로 batch가 종료돼도 그전에 확인된 처리 수는 보존하며, 확인되지 않은 저장을 완료로 세지 않는다. `model_calls`는 provider 함수 호출 수이며 SDK 내부 HTTP 재시도 수가 아니다.
 - provider 실패는 기존 재시도/lease 규칙으로 기록하며 실패가 있으면 비정상 종료한다. 처리 오류/DSN/입력 원문은 출력하지 않고 고정된 오류 종류만 기록한다.
 - credential 형태 입력은 provider 호출 전에 거부한다. 입력은 해시 대응을 깨뜨리지 않도록 자동 재작성하지 않는다.
 - SIGTERM은 다음 batch 시작을 막고 진행 중 batch가 끝난 뒤 종료한다. 최대 provider timeout과 lease 관계를 검증한다. 재시작은 기존 임대·CAS 상태를 사용한다.

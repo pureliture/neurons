@@ -60,12 +60,14 @@ class OutboxWorker:
         self.last_batch_failed = 0
         self.last_batch_completed = 0
         self.last_batch_stale = 0
+        self.last_batch_attempted = 0
 
     def run_once(self) -> int:
         """Claim a batch; returned count is attempts, not successful embeddings."""
         self.last_batch_failed = 0
         self.last_batch_completed = 0
         self.last_batch_stale = 0
+        self.last_batch_attempted = 0
         jobs = self.store.claim_outbox_leases(
             worker_id=self.worker_id,
             batch_size=self.batch_size,
@@ -76,6 +78,7 @@ class OutboxWorker:
 
         processed_count = 0
         for job in jobs:
+            self.last_batch_attempted += 1
             try:
                 completed = self.process_job(job)
                 if completed:
