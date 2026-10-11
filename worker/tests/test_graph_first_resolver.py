@@ -26,8 +26,10 @@ def _episode(memory_id: str = "mem_a", content_hash: str = HASH_A):
 
 
 class Store:
-    def __init__(self, cards=None, *, unprojected=False, calls=None, failure=None, evidence=None):
+    def __init__(self, cards=None, *, unprojected=False, calls=None, failure=None, evidence=None,
+                 context_cards=None):
         self.cards = list(cards or [_card()])
+        self.context_cards = list(context_cards) if context_cards is not None else None
         self.unprojected = unprojected
         self.calls = calls if calls is not None else []
         self.failure = failure
@@ -51,6 +53,13 @@ class Store:
             cards = [c for c in sorted(cards, key=lambda c: c["memory_id"])
                      if c["memory_id"] > (kwargs.get("after_memory_id") or "")]
         return cards[:kwargs.get("limit", 100)]
+
+    def list_context_cards(self, **kwargs):
+        assert kwargs["steward_only"] is True
+        self.calls.append(("context", kwargs))
+        if self.failure == "context":
+            raise RuntimeError("database down")
+        return list(self.context_cards or self.cards)[:kwargs.get("limit", 100)]
 
     def hybrid_search(self, **kwargs):
         assert kwargs["steward_only"] is True
@@ -93,6 +102,9 @@ def test_query_is_graph_first_then_authority_join_and_preserves_graph_order():
 def test_unprojected_graph_keeps_verified_graph_order_and_supplements_from_pgvector():
     calls = []
     store = Store(cards=[_card("mem_a", HASH_A), _card("mem_b", HASH_B)], unprojected=True, calls=calls)
+    # The PG scorer supplies finite scores; this test isolates graph/PG ordering.
+    for card in store.cards:
+        card["semantic_score"] = 0.9
     graph = Graph([_episode()], calls=calls)
     embedded = []
 
@@ -154,6 +166,53 @@ def test_utc_date_as_of_normalizes_to_midnight_and_slim_guardrails_field_is_kept
     assert result["active_guardrails"] == []
 
 
+def test_context_uses_preselected_current_work_decision_status_and_guardrail():
+    task = _card("mem_task", card_type="task")
+    task["typed_payload"] = {"task_state": "Finish latest work", "next_action": "Run tests"}
+    decision = _card("mem_decision", card_type="decision")
+    decision["typed_payload"] = {"decision": "Use the approved current design"}
+    status = _card("mem_status", card_type="status")
+    status["typed_payload"] = {"status_value": "blocked pending verification"}
+    guardrail = _card("mem_guardrail", card_type="preference")
+    guardrail["typed_payload"] = {"rule": "Keep proposal writes review-only", "scope": "neurons"}
+    old_preference = _card("mem_old_preference", card_type="preference")
+    old_preference["summary"] = "old preference " * 700
+    old_preference["typed_payload"] = {"rule": "old preference " * 700, "scope": "general"}
+    selected = [task, decision, status, guardrail, old_preference]
+    store = Store(cards=[old_preference, task, decision, status, guardrail], context_cards=selected)
+
+    result = GraphFirstResolver(store).resolve(
+        project="neurons", query="latest task decision", mode="context", limit=4,
+    )
+
+    assert result.get("error_code") is None, result
+    context_call = next(call for call in store.calls if call[0] == "context")
+    assert context_call[1]["query"] == "latest task decision"
+    assert context_call[1]["limit"] == 5
+    assert [item["id"] for item in result["items"]] == [
+        "mem_task", "mem_decision", "mem_status", "mem_guardrail",
+    ]
+    assert result["tasks"][0]["task"] == "Finish latest work"
+    assert result["decisions"][0]["decision"] == "Use the approved current design"
+    assert result["statuses"][0]["status"] == "blocked pending verification"
+    assert result["active_guardrails"] == ["Keep proposal writes review-only"]
+    assert tool_result_bytes(result) <= 3072
+
+
+def test_list_keeps_stable_memory_id_keyset_contract_after_context_split():
+    cards = [_card("mem_b", HASH_B), _card("mem_a", HASH_A)]
+    store = Store(cards=cards)
+    resolver = GraphFirstResolver(store)
+
+    first = resolver.resolve(project="neurons", mode="list", limit=1)
+    second = resolver.resolve(
+        project="neurons", mode="list", limit=1, cursor=first["next_cursor"],
+    )
+
+    assert [item["id"] for item in first["items"] + second["items"]] == ["mem_a", "mem_b"]
+    assert [call[0] for call in store.calls if isinstance(call, tuple)] == ["list", "list"]
+
+
 def test_query_mode_rejects_missing_or_whitespace_query():
     resolver = GraphFirstResolver(Store(), Graph([]))
     with pytest.raises(ValidationError, match="non-empty query"):
@@ -204,6 +263,57 @@ def test_fallback_drops_stale_ranked_hash_and_labels_embedding_failure():
 
     failed = GraphFirstResolver(Store(), None, lambda _: (_ for _ in ()).throw(RuntimeError("embed"))).resolve(project="neurons", query="x")
     assert failed["error_code"] == "embedding_unavailable"
+
+
+def test_fallback_rejects_unrelated_negative_semantic_score():
+    card = _card("mem_unrelated", HASH_A)
+    card["title"] = "The current database uses PostgreSQL"
+    card["summary"] = "Storage implementation notes"
+    card["similarity_score"] = -0.18
+    store = Store(cards=[card])
+
+    result = GraphFirstResolver(store, None, lambda _query: [0.1] * 3072).resolve(
+        project="neurons", query="unrelated astronomy question", limit=5
+    )
+
+    assert result["items"] == []
+    assert result["metadata"]["retrieval_path"] == "pgvector_fallback"
+
+
+@pytest.mark.parametrize("score", [None, float("nan"), float("inf"), True, "0.99"])
+def test_fallback_rejects_missing_or_invalid_semantic_score_without_lexical_match(score):
+    card = _card()
+    if score is not None:
+        card["similarity_score"] = score
+    result = GraphFirstResolver(Store(cards=[card]), None, lambda _: [0.1]).resolve(
+        project="neurons", query="unrelated astronomy question",
+    )
+    assert result["items"] == []
+    assert result["metadata"]["authority_join_status"] == "verified"
+
+
+@pytest.mark.parametrize(
+    ("semantic_score", "blended_score", "expected_ids"),
+    [(0.75, 0.6, ["mem_a"]), (0.74, 0.99, [])],
+)
+def test_fallback_uses_existing_semantic_threshold_not_blended_rank(
+    semantic_score, blended_score, expected_ids,
+):
+    card = _card()
+    card.update(semantic_score=semantic_score, similarity_score=blended_score)
+    result = GraphFirstResolver(Store(cards=[card]), None, lambda _: [0.1]).resolve(
+        project="neurons", query="unrelated astronomy question",
+    )
+    assert [item["id"] for item in result["items"]] == expected_ids
+
+
+def test_fallback_keeps_lexically_relevant_card_even_with_negative_semantic_score():
+    card = _card()
+    card.update(title="postgres authority", similarity_score=-0.18)
+    result = GraphFirstResolver(Store(cards=[card]), None, lambda _: [0.1]).resolve(
+        project="neurons", query="postgres authority",
+    )
+    assert [item["id"] for item in result["items"]] == ["mem_a"]
 
 
 def test_partial_graph_error_code_is_capped_and_shrinking_always_progresses():
