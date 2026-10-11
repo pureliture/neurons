@@ -12,6 +12,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from agent_knowledge.public_safe_util import ensure_public_safe, public_safe_text
 from agent_knowledge.mcp_payload import tool_result_bytes
+from agent_knowledge.session_memory.brain_query import (
+    SEMANTIC_RESULT_MIN_SCORE,
+    _card_search_text,
+    _finite_score_or_none,
+    _query_tokens,
+)
 
 
 _MAX_BYTES = 3072
@@ -140,8 +146,10 @@ class GraphFirstResolver:
         )
         if self._store is None:
             return self._error_payload(request, error_code="authority_store_unavailable")
-        if request.mode in {"list", "context"}:
+        if request.mode == "list":
             return self._resolve_authority_only(request)
+        if request.mode == "context":
+            return self._resolve_context(request)
         return self._resolve_query(request)
 
     def _resolve_authority_only(self, request: _ResolveRequest) -> dict[str, Any]:
@@ -170,6 +178,29 @@ class GraphFirstResolver:
                 projection_lag_ms=None,
             ),
             keyset=True,
+        )
+
+    def _resolve_context(self, request: _ResolveRequest) -> dict[str, Any]:
+        try:
+            cards = self._store.list_context_cards(
+                project=request.project,
+                query=request.query,
+                as_of=request.as_of or None,
+                limit=request.limit + 1,
+                steward_only=True,
+            )
+        except Exception:
+            return self._error_payload(request, error_code="authority_store_unavailable")
+        return self._serialize(
+            request,
+            list(cards),
+            metadata=self._metadata(
+                retrieval_path="none",
+                graph_status="unavailable",
+                authority_join_status="verified",
+                fallback_used=False,
+                projection_lag_ms=None,
+            ),
         )
 
     def _resolve_query(self, request: _ResolveRequest) -> dict[str, Any]:
@@ -354,6 +385,16 @@ class GraphFirstResolver:
             )
         except Exception:
             return None, "authority_store_unavailable", True, "unavailable"
+        # Reuse brain.query's lexical coverage and finite semantic threshold.
+        # SQL's blended ranking score is not the raw cosine similarity.
+        tokens = _query_tokens(request.query)
+        threshold = max(1, (len(tokens) + 1) // 2)
+        ranked = [
+            card for card in ranked
+            if len(tokens & _query_tokens(_card_search_text(card))) >= threshold
+            or (_finite_score_or_none(card.get("semantic_score", card.get("similarity_score"))) or 0.0)
+            >= SEMANTIC_RESULT_MIN_SCORE
+        ]
         rank_keys = [
             (str(card.get("memory_id") or ""), str(card.get("content_hash") or ""))
             for card in ranked
@@ -412,11 +453,17 @@ class GraphFirstResolver:
         # 선택적 evidence 확장을 먼저 줄여 기본 결정/요약을 보존한다.
         while tool_result_bytes(payload) > _MAX_BYTES and _drop_last_evidence_edge(evidence, page):
             payload = self._final_payload(request, page, metadata, offset, len(deduped), fingerprint, error_code, keyset, evidence)
-        while tool_result_bytes(payload) > _MAX_BYTES and len(page) > 1:
-            page.pop()
-            payload = self._final_payload(request, page, metadata, offset, len(deduped), fingerprint, error_code, keyset, evidence)
-        while tool_result_bytes(payload) > _MAX_BYTES and page and _shrink_card(page[0]):
-            payload = self._final_payload(request, page, metadata, offset, len(deduped), fingerprint, error_code, keyset, evidence)
+        if request.mode == "context":
+            while tool_result_bytes(payload) > _MAX_BYTES and _shrink_context_page(page):
+                payload = self._final_payload(request, page, metadata, offset, len(deduped), fingerprint, error_code, keyset, evidence)
+            while tool_result_bytes(payload) > _MAX_BYTES and _drop_optional_context_card(page):
+                payload = self._final_payload(request, page, metadata, offset, len(deduped), fingerprint, error_code, keyset, evidence)
+        else:
+            while tool_result_bytes(payload) > _MAX_BYTES and len(page) > 1:
+                page.pop()
+                payload = self._final_payload(request, page, metadata, offset, len(deduped), fingerprint, error_code, keyset, evidence)
+            while tool_result_bytes(payload) > _MAX_BYTES and page and _shrink_card(page[0]):
+                payload = self._final_payload(request, page, metadata, offset, len(deduped), fingerprint, error_code, keyset, evidence)
         if tool_result_bytes(payload) > _MAX_BYTES:
             return self._error_payload(request, error_code="response_budget_exceeded")
         ensure_public_safe(payload, "GraphFirstResolver response")
@@ -454,19 +501,29 @@ class GraphFirstResolver:
         decisions: list[dict[str, Any]] = []
         preferences: list[dict[str, Any]] = []
         tasks: list[dict[str, Any]] = []
+        statuses: list[dict[str, Any]] = []
         items: list[dict[str, Any]] = []
         evidence_hashes: list[str] = []
         for card in cards:
-            item = _item(card)
+            context_mode = request.mode == "context"
+            item = _context_item(card) if context_mode else _item(card)
             items.append(item)
-            typed = card.get("typed_payload") if isinstance(card.get("typed_payload"), Mapping) else {}
+            raw_typed = card.get("typed_payload")
+            typed: dict[str, Any] = dict(raw_typed) if isinstance(raw_typed, Mapping) else {}
             card_type = str(card.get("card_type") or "")
+            section_identity = {"id": item["id"]} if context_mode else item
             if card_type == "decision":
-                decisions.append({**item, "decision": _safe(typed.get("decision") or card.get("summary"), 144), "rationale": _safe(typed.get("rationale"), 96)})
+                decisions.append({**section_identity, "decision": _safe(typed.get("decision") or card.get("summary"), 144), "rationale": _safe(typed.get("rationale"), 96)})
             elif card_type == "preference":
-                preferences.append({**item, "rule": _safe(typed.get("rule") or typed.get("preference") or card.get("summary"), 144), "scope": _safe(typed.get("scope") or "general", 64)})
+                preferences.append({**section_identity, "rule": _safe(typed.get("rule") or typed.get("preference") or card.get("summary"), 144), "scope": _safe(typed.get("scope") or "general", 64)})
             elif card_type in {"task", "work", "work_unit"}:
-                tasks.append({**item, "task": _safe(typed.get("task") or typed.get("next_action") or card.get("summary"), 144)})
+                tasks.append({**section_identity, "task": _safe(typed.get("task") or typed.get("task_state") or typed.get("next_action") or card.get("summary"), 144)})
+            elif card_type == "status":
+                statuses.append({
+                    **section_identity,
+                    "status": _safe(typed.get("status_value") or typed.get("status") or card.get("summary"), 144),
+                    "observed_at": _safe(typed.get("observed_at"), 64),
+                })
             content_hash = str(card.get("content_hash") or "")
             if content_hash:
                 evidence_hashes.append(content_hash)
@@ -476,6 +533,7 @@ class GraphFirstResolver:
             "decisions": decisions,
             "preferences": preferences,
             "tasks": tasks,
+            "statuses": statuses,
             "items": items,
             "active_guardrails": [preference["rule"] for preference in preferences],
             "metadata": {**metadata, "has_more": has_more},
@@ -569,6 +627,18 @@ class GraphFirstResolver:
 
 def _item(card: Mapping[str, Any]) -> dict[str, Any]:
     return {"id": _safe(card.get("memory_id") or card.get("id"), 180), "card_type": _safe(card.get("card_type"), 64), "title": _safe(card.get("title"), 96), "summary": _safe(card.get("summary"), 144), "currentness": _safe(card.get("currentness") or "current", 32), "content_hash": _safe(card.get("content_hash"), 80)}
+
+
+def _context_item(card: Mapping[str, Any]) -> dict[str, Any]:
+    card_type = str(card.get("card_type") or "")
+    if card_type not in {"decision", "preference", "task", "work", "work_unit", "status"}:
+        return _item(card)
+    return {
+        "id": _safe(card.get("memory_id") or card.get("id"), 180),
+        "card_type": _safe(card_type, 64),
+        "currentness": _safe(card.get("currentness") or "current", 32),
+        "content_hash": _safe(card.get("content_hash"), 80),
+    }
 
 
 def _normalized_evidence_edges(edges: list[Any], root_ids: set[str]) -> list[dict[str, Any]]:
@@ -669,7 +739,8 @@ def _shrink_card(card: dict[str, Any]) -> bool:
     if isinstance(typed, dict):
         fields.extend(
             (typed, key)
-            for key in ("decision", "rationale", "rule", "preference", "scope", "task", "next_action")
+            for key in ("decision", "rationale", "rule", "preference", "scope", "task", "next_action",
+                        "status_value", "status", "observed_at")
         )
     candidates = [
         (container, key, str(container.get(key) or ""))
@@ -684,6 +755,35 @@ def _shrink_card(card: dict[str, Any]) -> bool:
     else:
         container[key] = value[: max(1, len(value) // 2 - 1)] + "…"
     return True
+
+
+def _shrink_context_page(page: list[dict[str, Any]]) -> bool:
+    """Compress across card types before sacrificing any selected context item."""
+    ranked: list[tuple[int, int, dict[str, Any]]] = []
+    for index, card in enumerate(page):
+        raw_payload = card.get("typed_payload")
+        payload = raw_payload if isinstance(raw_payload, dict) else {}
+        lengths = [len(str(card.get(field) or "")) for field in ("title", "summary")]
+        lengths.extend(len(value) for value in payload.values() if isinstance(value, str))
+        ranked.append((max(lengths, default=0), index, card))
+    for _size, _index, card in sorted(ranked, reverse=True, key=lambda item: (item[0], -item[1])):
+        if _shrink_card(card):
+            return True
+    return False
+
+
+def _drop_optional_context_card(page: list[dict[str, Any]]) -> bool:
+    """If compression is insufficient, preserve one card per selected type."""
+    counts: dict[str, int] = {}
+    for card in page:
+        kind = str(card.get("card_type") or "")
+        counts[kind] = counts.get(kind, 0) + 1
+    for index in range(len(page) - 1, -1, -1):
+        kind = str(page[index].get("card_type") or "")
+        if counts.get(kind, 0) > 1:
+            page.pop(index)
+            return True
+    return False
 
 
 def _lag(value: Any) -> int | None:

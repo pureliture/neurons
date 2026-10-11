@@ -278,6 +278,40 @@ def test_supersede_propose_does_not_replace_target(isolated_pg_store, tmp_path):
     assert proposal["memory_id"] not in accepted_ids
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("project", "different-project"),
+        ("brain_id", "/workspace/another-brain"),
+        ("scope", "organization"),
+    ],
+)
+def test_supersede_proposal_rejects_cross_scope_target(tmp_path, field, value):
+    target = {
+        "memory_id": "mem_target",
+        "project": PROJECT,
+        "brain_id": f"/project/{PROJECT}",
+        "scope": "project",
+        "lifecycle_state": "human_accepted",
+        "approval_state": "approved",
+        "currentness": "current",
+    }
+
+    class Store:
+        def get_steward_card(self, _memory_id):
+            return dict(target)
+
+        def put_steward_proposal(self, card):
+            return dict(card)
+
+    span = _span(content_hash="sha256:cross-scope")
+    span[field] = value
+    steward = BrainStewardService(_ledger(tmp_path), pgvector_store=Store())
+
+    with pytest.raises(ValueError, match="project, brain_id, and scope"):
+        steward.supersede_propose(old_memory_id="mem_target", source_span=span)
+
+
 # ------------------------------------------------------------------- read safety
 
 
