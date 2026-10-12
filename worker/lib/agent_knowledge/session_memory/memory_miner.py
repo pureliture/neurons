@@ -248,6 +248,8 @@ def build_memory_card_candidate_from_source_span(
         "judgment_basis_bundle": basis,
         "mining_reason": mining_reason,
     }
+    if "observed_at" in normalized:
+        card["observed_at"] = normalized["observed_at"]
     validate_memory_card_envelope(card)
     return card
 
@@ -353,7 +355,7 @@ def _normalize_candidate_source_span(source_span: Mapping[str, Any]) -> dict:
     if not summary:
         raise ValueError("source span requires redacted_summary")
     confidence = source_span.get("confidence", 0.5)
-    return {
+    normalized = {
         "source_ref": source_ref,
         "span_ref": span_ref,
         "content_hash": content_hash,
@@ -373,6 +375,9 @@ def _normalize_candidate_source_span(source_span: Mapping[str, Any]) -> dict:
         "evaluator_version": str(source_span.get("evaluator_version") or "eval.v0"),
         "model_reason": str(source_span.get("model_reason") or ""),
     }
+    if "observed_at" in source_span:
+        normalized["observed_at"] = source_span["observed_at"]
+    return normalized
 
 
 def _normalize_locator(value: Any, field_name: str) -> dict:

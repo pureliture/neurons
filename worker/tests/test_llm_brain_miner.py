@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from agent_knowledge.session_memory.llm_brain_miner import LlmBrainEnvelopeMiner
 
 
@@ -79,3 +81,9 @@ def test_envelope_miner_skips_invalid_items_without_crashing():
     candidates = miner.mine_chunk(_chunk(), refresh_watermark="wm")
 
     assert [c["card_type"] for c in candidates] == ["task"]
+
+
+@pytest.mark.parametrize("raw", ["[]", "", "invalid-json", "{}", None])
+def test_legacy_single_chunk_empty_response_contract_is_preserved(raw):
+    miner = LlmBrainEnvelopeMiner(completion_fn=lambda messages: raw)
+    assert miner.mine_chunk(_chunk(), refresh_watermark="wm") == []
