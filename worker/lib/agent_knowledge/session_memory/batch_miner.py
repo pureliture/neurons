@@ -299,6 +299,7 @@ class BatchedEnvelopeMiner:
         self._max_candidates = int(max_candidates)
         self._batch_size = int(batch_size)
         self._max_call_chars = int(max_call_chars)
+        self._model_call_attempts = 0
 
     def mine_batches(
         self, chunks: Sequence[Mapping[str, Any]], *, refresh_watermark: str
@@ -326,6 +327,7 @@ class BatchedEnvelopeMiner:
         )
         candidates: list[dict] = []
         call_sizes: list[int] = []
+        self._model_call_attempts = 0
         for batch in batches:
             items = self._call_model_with_retry(batch)
             call_sizes.append(sum(_chunk_text_length(chunk) for chunk in batch))
@@ -339,7 +341,7 @@ class BatchedEnvelopeMiner:
         report = BatchMiningReport(
             chunk_count=len(bounded),
             batch_count=len(batches),
-            model_calls=len(batches),
+            model_calls=self._model_call_attempts,
             call_char_sizes=tuple(call_sizes),
             candidate_count=len(candidates),
             lower_bound_calls=len(bounded),
@@ -356,7 +358,10 @@ class BatchedEnvelopeMiner:
     def _call_model_with_retry(
         self, batch: Sequence[Mapping[str, Any]]
     ) -> list[Mapping[str, Any] | None]:
+        # Successful bounded response retries are real provider calls; report the
+        # attempts actually made rather than the number of planned batches.
         for attempt in range(self._BATCH_ATTEMPTS):
+            self._model_call_attempts += 1
             try:
                 return self._call_model(batch)
             except BatchExtractionError:
