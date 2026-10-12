@@ -112,6 +112,34 @@ def test_projector_refuses_corrupt_existing_row(lane, field, value):
     assert getattr(lane["sql"].get_chunk(row.chunk_id), field) == value
 
 
+def test_secret_egress_rejection_blocks_queue_until_source_changes(lane):
+    def _append_source_content(suffix):
+        docs = lane["couch"].find_by_session(session_id_hash=lane["sid"])
+        chunk = next(doc for doc in docs if doc["doc_type"] == dm.SourceDocType.CONVERSATION_CHUNK)
+        chunk["body"] += suffix
+        chunk["content_hash"] = dm.sha256_hash(chunk["body"])
+        lane["couch"].put(chunk)
+
+    _append_source_content(" deploy note sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789")
+    rc, report = lane["run"]()
+    assert report["projected"] == 0 and report["failed"] == 1
+    receipt = _receipt(lane)
+    assert receipt["projection_status"] == "failed"
+    assert receipt["failure_reason"] == "secret_egress_policy"
+    state = lane["couch"].get(dm.projection_state_doc_id(lane["sid"]))
+    blocked_hash = str(state.get("failure_source_hash") or "")
+    assert blocked_hash
+
+    rc, report = lane["run"]()
+    assert report["selected"] == 0
+
+    _append_source_content(" postscript")
+    rc, report = lane["run"]()
+    assert report["failed"] == 1
+    refreshed = lane["couch"].get(dm.projection_state_doc_id(lane["sid"]))
+    assert str(refreshed.get("failure_source_hash") or "") not in ("", blocked_hash)
+
+
 @pytest.mark.parametrize("field,value", [("embedding_state", "failed"), ("embedding_model", "wrong"), ("content_markdown", "tampered"), ("provider", "wrong"), ("project", "wrong")])
 def test_recall_rejects_nonready_or_mislabeled_sql_rows(lane, field, value):
     assert lane["run"]()[0] == 0

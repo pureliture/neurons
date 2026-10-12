@@ -471,6 +471,7 @@ def _projection_state_for_materialization(
     existing: dict,
     projection_status: str,
     failure_reason: str = "",
+    failure_source_hash: str = "",
     ref: str = "",
     backend: str = "retired_index_bridge",
 ) -> dict:
@@ -493,6 +494,10 @@ def _projection_state_for_materialization(
             "failure_reason": failure_reason,
         }
         doc["backend_receipts"] = receipts
+        if projection_status == ProjectionStatus.PROJECTED:
+            doc.pop("failure_source_hash", None)
+        elif failure_source_hash:
+            doc["failure_source_hash"] = failure_source_hash
         return doc
     hash_field = "projected_source_hash"
 
@@ -539,6 +544,7 @@ def _commit_projection_state_if_source_current(
     store: CouchDBSourceStore,
     projection_status: str,
     failure_reason: str = "",
+    failure_source_hash: str = "",
     ref: str = "",
     backend: str = "retired_index_bridge",
     representation_receipt: dict | None = None,
@@ -601,6 +607,7 @@ def _commit_projection_state_if_source_current(
             existing=existing,
             projection_status=projection_status,
             failure_reason=failure_reason,
+            failure_source_hash=failure_source_hash,
             ref=ref,
             backend=backend,
         )
@@ -733,16 +740,29 @@ def project_session_memory(
     except OwnershipViolation:
         raise
     except Exception as exc:  # backend/projection failure -> keep source, mark failed
+        failure_reason = type(exc).__name__
+        if isinstance(exc, ValueError):
+            from ..rag_ingress.pg_embedding_privacy import (
+                EGRESS_POLICY_ERROR,
+                SECRET_EGRESS_FAILURE_REASON,
+            )
+
+            if str(exc) == EGRESS_POLICY_ERROR:
+                # Egress rejection is a policy outcome, not a transient fault: record a
+                # specific reason and the blocked source revision so the selector leaves
+                # the session out of the queue until its source changes.
+                failure_reason = SECRET_EGRESS_FAILURE_REASON
         commit_status, _state = _commit_projection_state_if_source_current(
             materialized=materialized,
             store=store,
             projection_status=ProjectionStatus.FAILED,
-            failure_reason=type(exc).__name__,
+            failure_reason=failure_reason,
+            failure_source_hash=materialized.source_hash,
             backend=backend,
         )
         result = {
             "status": ProjectionStatus.FAILED,
-            "reason": type(exc).__name__,
+            "reason": failure_reason,
             "ref": "",
         }
         if commit_status == "source_revision_changed":
