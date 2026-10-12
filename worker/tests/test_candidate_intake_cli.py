@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 
 import pytest
 
@@ -24,7 +26,7 @@ PROJECT = "neurons"
 
 def _hash(tag: int) -> str:
     """A valid 71-char sha256 hash for fixture chunk identities."""
-    return "sha256:" + str(tag) * 64
+    return "sha256:" + hashlib.sha256(str(tag).encode()).hexdigest()
 
 
 def default_chunk_hash() -> str:
@@ -46,32 +48,17 @@ def _chunk(content_hash: str = _hash(0)) -> dict:
 
 
 def _completion(messages):
-    return json.dumps(
-        [
-            {
-                "card_type": "decision",
-                "title": "Authority store",
-                "statement": "PostgreSQL is the authority store.",
-                "typed_payload": {
-                    "decision": "Use PostgreSQL",
-                    "rationale": "One authority store",
-                    "alternatives": [],
-                    "consequence": "Graph stays derived",
-                    "authority_ref": "design-note",
-                },
-            }
-        ]
-        )
+    keys = re.findall(r"SOURCE_KEY: ([^\s]+)", messages[-1]["content"])
+    return json.dumps([{"source_key": key, "candidate": _decision()} for key in keys])
 
 
 class CountingCompletion:
-    def __init__(self, items_per_call: int = 1):
+    def __init__(self):
         self.calls = 0
-        self.items_per_call = items_per_call
 
     def __call__(self, messages):
         self.calls += 1
-        return json.dumps([_decision() for _ in range(self.items_per_call)])
+        return _completion(messages)
 
 
 def _decision() -> dict:
@@ -211,12 +198,11 @@ def test_miner_failure_is_skipped_and_never_counted_as_projection_complete():
         steward=steward,
     )
 
-    assert report.status == "completed"
+    assert report.status == "mining_failed"
     assert report.proposed_count == 0
-    assert report.skipped_count == 1
     assert steward.calls == []
-    # A failed chunk must not advance repeat state.
-    assert already_processed(state, project=PROJECT, source_hash=checkpoint_source_hash(PROJECT)) is False
+    # Assert the actual failed source, not a different project-hash key.
+    assert already_processed(state, project=PROJECT, source_hash=default_chunk_hash()) is False
 
 
 # ------------------------------------------------------------- checkpoint repeat state
@@ -267,10 +253,11 @@ def test_missing_checkpoint_file_is_an_empty_checkpoint(tmp_path):
     assert load_checkpoint(str(tmp_path / "absent.json")) == {"version": 1, "projects": {}}
 
 
-def test_corrupt_checkpoint_file_does_not_crash_the_run(tmp_path):
+def test_corrupt_checkpoint_fails_closed_without_losing_history(tmp_path):
     path = tmp_path / "checkpoint.json"
     path.write_text("{not json", encoding="utf-8")
-    assert load_checkpoint(str(path)) == {"version": 1, "projects": {}}
+    with pytest.raises(CandidateIntakeConfigError, match="checkpoint"):
+        load_checkpoint(str(path))
 
 
 def test_second_run_after_a_completed_revision_skips_duplicates():
@@ -350,7 +337,7 @@ def test_cli_once_without_enable_writes_no_proposals(tmp_path, capsys):
 
 
 def test_enabled_run_batches_chunks_into_fewer_model_calls():
-    completion = CountingCompletion(items_per_call=1)
+    completion = CountingCompletion()
     steward = RecordingSteward()
     report, _state = run_candidate_intake(
         settings=_settings(enable_proposals=True, batch_candidates=5),
@@ -365,7 +352,7 @@ def test_enabled_run_batches_chunks_into_fewer_model_calls():
 
 
 def test_twenty_chunks_cost_four_model_calls():
-    completion = CountingCompletion(items_per_call=1)
+    completion = CountingCompletion()
     steward = RecordingSteward()
     report, _state = run_candidate_intake(
         settings=_settings(enable_proposals=True, batch_candidates=5),
@@ -384,7 +371,7 @@ def test_every_distinct_chunk_is_processed_not_dropped_by_a_project_key():
     report, _state = run_candidate_intake(
         settings=_settings(enable_proposals=True, batch_candidates=5),
         chunks=[_chunk(_hash(i)) for i in range(3)],
-        completion_fn=CountingCompletion(items_per_call=3),
+        completion_fn=CountingCompletion(),
         steward=steward,
     )
 
@@ -401,7 +388,7 @@ def test_revision_within_the_same_project_is_processed_once():
     first, state = run_candidate_intake(
         settings=settings,
         chunks=[_chunk(_hash(1))],
-        completion_fn=CountingCompletion(items_per_call=1),
+        completion_fn=CountingCompletion(),
         steward=steward,
         checkpoint={"version": 1, "projects": {}},
     )
@@ -411,7 +398,7 @@ def test_revision_within_the_same_project_is_processed_once():
     second, _state = run_candidate_intake(
         settings=settings,
         chunks=[_chunk(_hash(1)), _chunk(_hash(2))],
-        completion_fn=CountingCompletion(items_per_call=2),
+        completion_fn=CountingCompletion(),
         steward=again,
         checkpoint=state,
     )

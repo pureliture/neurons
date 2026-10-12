@@ -20,6 +20,7 @@ validation 규칙을 만들지 않는다.
 from __future__ import annotations
 
 import hashlib
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
@@ -27,9 +28,14 @@ from .llm_brain_service import LLMBrainMemoryService
 from .memory_card import (
     _ensure_no_forbidden_content,  # 기존 validator 와 동일한 forbidden-content 규칙 재사용
     REVIEW_LIFECYCLE_STATES,  # review queue 조회와 적격성이 공유하는 단일 정의
+    validate_judgment_basis_bundle,
     validate_memory_card_envelope,
+    validate_source_locator,
 )
-from .memory_miner import build_memory_card_candidate_from_source_span
+from .memory_miner import (
+    _assert_no_raw_transcript_input,
+    build_memory_card_candidate_from_source_span,
+)
 from .memory_promotion import (
     build_feedback_record,
     build_stale_proposal_card,
@@ -171,6 +177,17 @@ def assert_public_safe(payload: Any, field_name: str = "steward_response") -> An
     return payload
 
 
+def _assert_no_extra_source_content(value: Any) -> None:
+    if isinstance(value, Mapping):
+        if any(str(key).lower() in {"content", "body", "text", "excerpt", "redacted_text", "metadata"} for key in value):
+            raise ValueError("candidate envelope contains unapproved source fields")
+        for child in value.values():
+            _assert_no_extra_source_content(child)
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            _assert_no_extra_source_content(child)
+
+
 class BrainStewardService:
     """proposal-only Brain Steward 서비스.
 
@@ -285,7 +302,7 @@ class BrainStewardService:
     ) -> dict:
         """새 MemoryCard 후보를 만든다. accepted 가 아니라 candidate / needs_review 로만 남는다."""
 
-        card = build_memory_card_candidate_from_source_span(
+        card = self._build_candidate(
             source_span,
             refresh_watermark=refresh_watermark,
             mining_reason="steward_candidate",
@@ -350,7 +367,7 @@ class BrainStewardService:
         old = self._get_card(old_memory_id)
         if old is None:
             raise ValueError("unknown target memory card")
-        card = build_memory_card_candidate_from_source_span(
+        card = self._build_candidate(
             source_span,
             refresh_watermark=refresh_watermark,
             mining_reason="steward_supersede",
@@ -573,6 +590,46 @@ class BrainStewardService:
 
     # -------------------------------------------------------------- internals
 
+    def _build_candidate(
+        self, source_span: Mapping[str, Any], *, refresh_watermark: str, mining_reason: str
+    ) -> dict:
+        # Intake passes a completed miner envelope with plural locators. Feeding
+        # it back into the singular source-span builder replaces provenance and
+        # candidate identity with defaults. Validate, then preserve that envelope.
+        if isinstance(source_span, Mapping) and (
+            "source_refs" in source_span or "span_refs" in source_span
+        ):
+            _assert_no_raw_transcript_input(source_span)
+            _assert_no_extra_source_content(source_span)
+            # Preserved optional fields must pass the same privacy boundary as
+            # required fields; public response filtering is not storage safety.
+            try:
+                _ensure_no_forbidden_content(source_span, "candidate_envelope")
+            except ValueError:
+                raise ValueError("candidate envelope contains forbidden private/source content") from None
+            card = validate_memory_card_envelope(source_span)
+            if (
+                card["lifecycle_state"] not in REVIEW_LIFECYCLE_STATES
+                or card["approval_state"] not in ("suggested", "needs_review")
+                or card.get("authorization_status", "disabled") != "disabled"
+            ):
+                raise ValueError("candidate envelope must be pending and disabled")
+            for field in ("candidate_id", "idempotency_key"):
+                if not isinstance(card.get(field), str) or not card[field].strip():
+                    raise ValueError(f"candidate envelope requires {field}")
+                _ensure_no_forbidden_content(card[field], field)
+            spans = card.get("span_refs")
+            if not isinstance(spans, list) or not spans:
+                raise ValueError("candidate envelope requires span_refs")
+            for span in spans:
+                validate_source_locator(span, field_name="span_refs[]")
+            if "judgment_basis_bundle" in card:
+                validate_judgment_basis_bundle(card["judgment_basis_bundle"])
+            return deepcopy(card)
+        return build_memory_card_candidate_from_source_span(
+            source_span, refresh_watermark=refresh_watermark, mining_reason=mining_reason
+        )
+
     def _safe_restricted_result(self, result: Mapping[str, Any]) -> dict:
         """restricted write 응답을 public-safe 로 projection 한다.
 
@@ -654,7 +711,9 @@ class BrainStewardService:
         card["memory_id"] = STEWARD_PROPOSAL_PREFIX + _sha16(
             idempotency_key, kind, target_memory_id
         )
-        card["lifecycle_state"] = "candidate"
+        # Keep a review-gated candidate in needs_review instead of erasing the
+        # lifecycle set by mark_candidate_needs_review. PG still requires a
+        # pending, disabled proposal before any insert.
         card["authorization_status"] = "disabled"
         card["steward_proposal_kind"] = kind
         card["steward_proposed_by"] = canonicalize_provider(proposer) or "unspecified"
@@ -677,16 +736,18 @@ class BrainStewardService:
     def _proposal_result(
         self, *, kind: str, card: Mapping[str, Any], target_memory_id: str = ""
     ) -> dict:
+        existing_decided = str(card.get("lifecycle_state")) not in REVIEW_LIFECYCLE_STATES
         result = {
             "schema_version": "brain_steward_proposal.v1",
             "proposal_kind": kind,
             "accepted": False,
-            "write_performed": True,
-            "proposal_write_performed": True,
+            "write_performed": not existing_decided,
+            "proposal_write_performed": not existing_decided,
+            "existing_candidate": existing_decided,
             "authoritative_memory_changed": False,
             "memory_id": card.get("memory_id"),
-            "lifecycle_state": "candidate",
-            "authorization_status": "disabled",
+            "lifecycle_state": str(card.get("lifecycle_state") or "candidate"),
+            "authorization_status": str(card.get("authorization_status") or "disabled"),
             "approval_state": str(card.get("approval_state") or "suggested"),
             "currentness": str(card.get("currentness") or "current"),
             "proposal": self._review_item(card),

@@ -18,6 +18,18 @@ DEFAULT_PROVIDERS_PATH = "~/.graphify/providers.json"
 DEFAULT_USER_AGENT = "OpenAI/Python 1.109.1"
 
 
+class ExtractionError(RuntimeError):
+    """A completion failure safe to report without provider response details."""
+
+
+class ExtractionTransportError(ExtractionError):
+    """The completion request failed before a response could be validated."""
+
+
+class ExtractionResponseError(ExtractionError):
+    """The provider did not return non-empty assistant text."""
+
+
 def _urllib_post(url: str, *, headers: dict, body: str) -> str:
     request = urllib.request.Request(url, data=body.encode("utf-8"), headers=headers, method="POST")
     with urllib.request.urlopen(request, timeout=120) as response:
@@ -49,12 +61,61 @@ def build_openai_compat_completion_fn(
         body = json.dumps({"model": model, "messages": list(messages), "temperature": temperature})
         try:
             raw = post_fn(url, headers=headers, body=body)
-            data = json.loads(raw)
-            return str(data["choices"][0]["message"]["content"] or "")
         except Exception:
-            return ""
+            # Provider exceptions may contain URLs, credentials, or response
+            # bodies. Do not expose their messages or exception chains.
+            raise ExtractionTransportError("extraction transport failed") from None
+        try:
+            data = json.loads(raw)
+            content = data["choices"][0]["message"]["content"]
+        except (ValueError, TypeError, KeyError, IndexError):
+            raise ExtractionResponseError("extraction response is invalid") from None
+        if not isinstance(content, str) or not content.strip():
+            raise ExtractionResponseError("extraction response requires non-empty assistant text")
+        return content
 
     return completion_fn
+
+
+class _OllamaCompletion:
+    def __init__(self, base_url: str, model: str, post_fn: Callable[..., str], options: dict[str, Any] | None):
+        self.url = base_url.rstrip("/") + "/api/chat"
+        self.model = model
+        self.post_fn = post_fn
+        self.options = dict(options or {"temperature": 0})
+
+    def __call__(self, messages: list[dict]) -> str:
+        return self._request(messages, None)
+
+    def complete_batch(self, messages: list[dict], schema: dict[str, Any]) -> str:
+        return self._request(messages, schema)
+
+    def _request(self, messages: list[dict], schema: dict[str, Any] | None) -> str:
+        payload = {"model": self.model, "messages": list(messages), "stream": False,
+                   "options": self.options, "keep_alive": "30s"}
+        if schema is not None:
+            payload["format"] = schema
+        try:
+            raw = self.post_fn(self.url, headers={"Content-Type": "application/json"}, body=json.dumps(payload))
+        except Exception:
+            raise ExtractionTransportError("extraction transport failed") from None
+        try:
+            content = json.loads(raw)["message"]["content"]
+        except (ValueError, TypeError, KeyError):
+            raise ExtractionResponseError("extraction response is invalid") from None
+        if not isinstance(content, str) or not content.strip():
+            raise ExtractionResponseError("extraction response requires non-empty assistant text")
+        return content
+
+
+def build_ollama_completion_fn(
+    base_url: str, model: str, *, post_fn: Callable[..., str] = _urllib_post,
+    options: dict[str, Any] | None = None,
+) -> _OllamaCompletion:
+    """Explicit local-provider injection; never selects a model or changes defaults."""
+    if not base_url or not model:
+        raise ValueError("explicit extraction endpoint and model are required")
+    return _OllamaCompletion(base_url, model, post_fn, options)
 
 
 def build_openai_compat_embedding_fn(

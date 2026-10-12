@@ -11,25 +11,83 @@ from __future__ import annotations
 
 from typing import Any, Callable, Mapping
 
-from .memory_card import MEMORY_CARD_TYPES
+from .memory_card import (MEMORY_CARD_TYPES, validate_content_hash, validate_observed_at,
+                          validate_source_locator, _ensure_no_forbidden_content)
 from .memory_miner import _parse_candidate_items, build_memory_card_candidate_from_source_span
 
 
-_ENVELOPE_EXTRACTION_PROMPT = (
-    "You extract durable project memory from a redacted work session. "
-    "Output ONLY a JSON array; each element is an object with keys: "
-    '"card_type" (one of: decision, task, drift, preference, status, evidence), '
-    '"title" (short), "statement" (one redacted sentence), and '
-    '"typed_payload" (an object whose fields match the card_type schema: '
+_TYPED_PAYLOAD_SCHEMAS = (
     "decision={decision,rationale,alternatives,consequence,authority_ref}; "
     "task={task_state,next_action,blocker,owner_hint,status}; "
     "preference={preference,explicitness,repeated_count,confirmation_status,applies_to}; "
     "status={status_value,observed_at,expires_at,current_authority}; "
     "evidence={evidence_kind,result_status,hash_refs,count_refs}; "
     "drift={subject,expected_state,observed_state,drift_kind,severity,authority_lane,"
-    "source_precedence_rank,resolution_action,suggested_action,basis_refs}). "
+    "source_precedence_rank,resolution_action,suggested_action,basis_refs}"
+)
+
+_ENVELOPE_EXTRACTION_PROMPT = (
+    "You extract durable project memory from a redacted work session. "
+    "Output ONLY a JSON array; each candidate is an object with keys: "
+    '"card_type" (one of: decision, task, drift, preference, status, evidence), '
+    '"title" (short), "statement" (one redacted sentence), and '
+    '"typed_payload" (an object whose fields match the card_type schema: '
+    + _TYPED_PAYLOAD_SCHEMAS + "). "
     "Emit nothing but durable, decision-grade memory. Begin your reply with '[' and output no other text."
 )
+
+
+def _chunk_source_provenance(
+    chunk: Mapping[str, Any], *, scope: str, span_index: int = 0
+) -> dict[str, Any]:
+    """Preserve canonical locators; fallback spans are local to this chunk."""
+    metadata_value = chunk.get("metadata")
+    metadata: Mapping[str, Any] = metadata_value if isinstance(metadata_value, Mapping) else {}
+
+    def field(key: str, default: Any = None) -> Any:
+        value = chunk.get(key)
+        if value is None:
+            value = metadata.get(key)
+        return default if value is None else value
+
+    project = field("project", "")
+    knowledge_id = field("knowledge_id") or field("chunk_id") or field("content_hash", "")
+    provenance = {
+        "source_ref": field("source_ref", {"source_id": knowledge_id}),
+        "span_ref": field("span_ref", {"span_id": f"{knowledge_id}#{span_index}"}),
+        "content_hash": field("content_hash", ""),
+        "brain_id": field("brain_id", f"/project/{project}"),
+        "scope": field("scope", scope),
+        "project": project,
+        "provider": field("provider", ""),
+    }
+    observed_at = field("observed_at")
+    if observed_at is not None:
+        provenance["observed_at"] = observed_at
+    return provenance
+
+
+def _validate_chunk_source(chunk: Mapping[str, Any], *, scope: str) -> dict[str, Any]:
+    """One source-admission rule shared by intake and batched mining."""
+    if not isinstance(chunk, Mapping):
+        raise ValueError("source chunk must be an object")
+    provenance = _chunk_source_provenance(chunk, scope=scope)
+    body = chunk.get("redacted_text")
+    if body is None:
+        body = chunk.get("content")
+    if not isinstance(body, str) or not body.strip():
+        raise ValueError("source chunk requires redacted content")
+    for field in ("project", "brain_id", "scope"):
+        value = provenance[field]
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("source chunk requires nonempty scope fields")
+        _ensure_no_forbidden_content(value, "source_scope")
+    validate_content_hash(provenance["content_hash"])
+    validate_source_locator(provenance["source_ref"], field_name="source_ref")
+    validate_source_locator(provenance["span_ref"], field_name="span_ref")
+    if "observed_at" in provenance:
+        validate_observed_at(provenance["observed_at"])
+    return provenance
 
 
 class LlmBrainEnvelopeMiner:
@@ -41,17 +99,9 @@ class LlmBrainEnvelopeMiner:
     def mine_chunk(self, chunk: Mapping[str, Any], *, refresh_watermark: str) -> list[dict]:
         # Normalize both the flat fixture shape and the real list_transcript_memory_chunks
         # shape {content, content_hash, metadata{knowledge_id, project, provider, ...}}.
-        metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), Mapping) else {}
-
-        def _field(key: str) -> str:
-            return str(chunk.get(key) or metadata.get(key) or "")
-
+        provenance = _chunk_source_provenance(chunk, scope=self.scope)
         body = str(chunk.get("redacted_text") or chunk.get("content") or "")
-        project = _field("project")
-        provider = _field("provider")
-        knowledge_id = _field("knowledge_id") or _field("chunk_id") or _field("content_hash")
-        content_hash = _field("content_hash")
-        if not (body and project and content_hash):
+        if not (body and provenance["project"] and provenance["content_hash"]):
             return []
 
         messages = [
@@ -72,14 +122,8 @@ class LlmBrainEnvelopeMiner:
             if card_type not in MEMORY_CARD_TYPES or not statement or not isinstance(typed_payload, Mapping):
                 continue
             source_span = {
-                "source_ref": {"source_id": knowledge_id},
-                "span_ref": {"span_id": f"{knowledge_id}#{index}"},
-                "content_hash": content_hash,
-                "brain_id": f"/project/{project}",
+                **_chunk_source_provenance(chunk, scope=self.scope, span_index=index),
                 "card_type": card_type,
-                "scope": self.scope,
-                "project": project,
-                "provider": provider,
                 "title": str(item.get("title") or card_type),
                 "redacted_summary": statement,
                 "typed_payload": dict(typed_payload),
