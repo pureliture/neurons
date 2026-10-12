@@ -790,6 +790,9 @@ class TestSelectSessionsNeedingProjection:
         )
         assert [row["session_id_hash"] for row in first] == [sid]
         assert cp_file.exists()
+        # A selected session stays durable pending work until its projection is
+        # verified; acknowledging it without projecting would lose it.
+        _mark_projected(store, sid, "claude", "neurons")
 
         second = _select_sessions_for_cycle(
             store, limit=10, project="", provider="", backend="postgres_pgvector", mode="auto"

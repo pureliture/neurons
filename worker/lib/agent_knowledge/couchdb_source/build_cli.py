@@ -235,17 +235,36 @@ def _read_selection_checkpoint(path: str) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
-def _write_selection_checkpoint(path: str, last_seq: str) -> None:
+def _write_selection_checkpoint(
+    path: str,
+    last_seq: str,
+    *,
+    pending_session_ids: list[str] | tuple[str, ...] = (),
+    full_walk_in_progress: bool = False,
+) -> None:
     import datetime
 
     directory = os.path.dirname(path)
     if directory:
         os.makedirs(directory, exist_ok=True)
-    payload = {
+    payload: dict = {
         "schema_version": _SELECTION_CHECKPOINT_SCHEMA,
         "last_seq": str(last_seq or ""),
         "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
+    # Chosen-but-not-yet-projected sessions are durable pending work. The change
+    # feed only re-emits a document when it changes again, so a selected session
+    # must stay listed here until its projection is verified; otherwise a failure
+    # or restart between selection and completion silently loses that session.
+    pending = [value for value in dict.fromkeys(str(v) for v in pending_session_ids) if value]
+    if pending:
+        payload["pending_session_ids"] = pending
+    # A full walk that stopped at its cap has not examined the remaining tail.
+    # Record that instead of claiming the database-wide sequence as seen, so the
+    # next cycle repeats the full walk rather than switching to an incremental
+    # change feed that will never emit the untouched tail.
+    if full_walk_in_progress:
+        payload["full_walk_in_progress"] = True
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, sort_keys=True)
 
@@ -412,6 +431,61 @@ def _select_sessions_incremental(
     return selected, {"last_seq": current_watermark}, len(rows)
 
 
+def _pending_session_ids(checkpoint: dict) -> list[str]:
+    values = checkpoint.get("pending_session_ids")
+    if not isinstance(values, list):
+        return []
+    return [
+        value
+        for value in dict.fromkeys(str(item) for item in values if isinstance(item, str))
+        if value.startswith("sha256:")
+    ]
+
+
+def _session_identity(session: dict) -> str:
+    return str(session.get("session_id_hash") or "")
+
+
+def _dedupe_sessions(sessions: list[dict]) -> list[dict]:
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for session in sessions:
+        identity = _session_identity(session)
+        if identity and identity in seen:
+            continue
+        if identity:
+            seen.add(identity)
+        deduped.append(session)
+    return deduped
+
+
+def _resolve_pending_sessions(
+    store, pending_ids: list[str], *, project: str, provider: str
+) -> list[dict]:
+    """Re-select previously chosen sessions whose projection is still unfinished.
+
+    Selection and completion are separate steps, so a pending id can describe a
+    session that a later run already projected, one that is now policy-blocked,
+    or one that genuinely still needs work. Re-evaluating each id keeps completed
+    work out of the queue while preserving failed/interrupted work for retry. A
+    transient evaluation error keeps the id pending instead of dropping it.
+    """
+    if not pending_ids:
+        return []
+    still_pending: list[dict] = []
+    for session_id_hash in pending_ids:
+        try:
+            needs_projection, session = _evaluate_session_change(
+                store, session_id_hash, project=project, provider=provider
+            )
+        except Exception:  # noqa: BLE001 - a read failure must not discard pending work
+            still_pending.append({"session_id_hash": session_id_hash})
+            continue
+        if needs_projection and session is not None:
+            still_pending.append(session)
+    return still_pending
+
+
 def _select_sessions_for_cycle(
     store,
     *,
@@ -422,52 +496,112 @@ def _select_sessions_for_cycle(
     mode: str,
     persist: bool = True,
 ) -> list[dict]:
-    """Checkpoint-aware selection: incremental when possible, full walk otherwise."""
+    """Checkpoint-aware selection: incremental when possible, full walk otherwise.
+
+    Two acknowledgement rules keep unprocessed work durable:
+
+    * ``pending_session_ids`` carries every chosen-but-not-yet-verified session
+      forward, because advancing the change-feed watermark past a selection is
+      otherwise an acknowledgement of work that has not happened yet.
+    * a full walk stopped by ``limit`` sets ``full_walk_in_progress`` instead of
+      storing the database-wide sequence, so untouched sessions are re-scanned
+      on the next cycle instead of being hidden behind an incremental feed.
+    """
 
     normalized = (mode or "auto").strip().lower()
     if normalized not in {"auto", "incremental", "full"}:
         normalized = "auto"
     path = _selection_checkpoint_path()
     checkpoint = _read_selection_checkpoint(path)
-    if normalized != "full" and checkpoint and str(checkpoint.get("last_seq") or ""):
+    last_seq = str(checkpoint.get("last_seq") or "")
+    full_walk_pending = bool(checkpoint.get("full_walk_in_progress"))
+    pending_sessions = _resolve_pending_sessions(
+        store, _pending_session_ids(checkpoint), project=project, provider=provider
+    )
+    if limit <= 0:
+        processed_pending = pending_sessions
+        fresh_limit: int | None = None  # unlimited
+    else:
+        processed_pending = pending_sessions[:limit]
+        fresh_limit = max(0, limit - len(processed_pending))
+    remaining_pending = pending_sessions[len(processed_pending):]
+
+    sessions: list[dict] | None = None
+    next_seq = last_seq
+    next_full_walk_pending = full_walk_pending
+
+    if normalized != "full" and last_seq and not full_walk_pending and fresh_limit != 0:
         try:
-            sessions, new_checkpoint, changed_count = _select_sessions_incremental(
+            fresh, new_checkpoint, changed_count = _select_sessions_incremental(
                 store,
                 checkpoint=checkpoint,
-                limit=limit,
+                limit=fresh_limit or 0,
                 project=project,
                 provider=provider,
                 backend=backend,
             )
-            if persist:
-                _write_selection_checkpoint(
-                    path, str(new_checkpoint.get("last_seq") or "")
-                )
-            print(
-                f"[selection] mode=incremental changed={changed_count} selected={len(sessions)}",
-                file=sys.stderr,
-            )
-            return sessions
         except Exception as exc:  # noqa: BLE001 - fail-safe fallback to the full walk
             print(
                 f"[selection] incremental fallback ({type(exc).__name__})",
                 file=sys.stderr,
             )
-    sequence_before = ""
-    try:
-        sequence_before = str(store.read_change_sequence())
-    except Exception:  # noqa: BLE001 - checkpoint is best-effort observability
+        else:
+            sessions = _dedupe_sessions(processed_pending + fresh)
+            next_seq = str(new_checkpoint.get("last_seq") or last_seq)
+            next_full_walk_pending = False
+            print(
+                f"[selection] mode=incremental changed={changed_count} "
+                f"selected={len(fresh)} pending_recovered={len(processed_pending)}",
+                file=sys.stderr,
+            )
+
+    if sessions is None and fresh_limit == 0:
+        # Pending work already fills this run's cap: leave the change-feed
+        # watermark and any in-progress full walk exactly where they were.
+        sessions = processed_pending
+        print(
+            f"[selection] mode=pending-preserved selected={len(sessions)} "
+            f"pending_recovered={len(processed_pending)}",
+            file=sys.stderr,
+        )
+    elif sessions is None:
         sequence_before = ""
-    sessions = _select_sessions_needing_projection(
-        store, limit=limit, project=project, provider=provider, backend=backend
-    )
-    if persist and sequence_before:
         try:
-            _write_selection_checkpoint(path, sequence_before)
+            sequence_before = str(store.read_change_sequence())
+        except Exception:  # noqa: BLE001 - checkpoint is best-effort observability
+            sequence_before = ""
+        walk_limit = 0 if fresh_limit is None else fresh_limit
+        fresh = _select_sessions_needing_projection(
+            store, limit=walk_limit, project=project, provider=provider, backend=backend
+        )
+        sessions = _dedupe_sessions(processed_pending + fresh)
+        capped = fresh_limit is not None and fresh_limit > 0 and len(fresh) >= fresh_limit
+        next_full_walk_pending = capped
+        next_seq = "" if capped else sequence_before
+        print(
+            f"[selection] mode=full selected={len(fresh)} "
+            f"pending_recovered={len(processed_pending)} capped={str(capped).lower()}",
+            file=sys.stderr,
+        )
+
+    # Pending debt can be larger than this run's cap: keep every still-unfinished
+    # id, including ids that were not reached because pending work filled the cap.
+    durable_pending = _session_identity_many(remaining_pending) + _session_identity_many(sessions)
+    if persist:
+        try:
+            _write_selection_checkpoint(
+                path,
+                next_seq,
+                pending_session_ids=durable_pending,
+                full_walk_in_progress=next_full_walk_pending,
+            )
         except OSError:
             pass
-    print(f"[selection] mode=full selected={len(sessions)}", file=sys.stderr)
     return sessions
+
+
+def _session_identity_many(sessions: list[dict]) -> list[str]:
+    return [identity for identity in (_session_identity(s) for s in sessions) if identity]
 
 
 def _scope_selector(*, project: str, provider: str) -> dict[str, str]:
