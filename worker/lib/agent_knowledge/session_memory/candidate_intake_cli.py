@@ -363,6 +363,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="JSON array of redacted session chunks; required for once/continuous",
     )
     parser.add_argument(
+        "--source-mode",
+        choices=("json", "pg"),
+        default="json",
+        help="json reads --source-json; pg reads the project's newest PostgreSQL session chunks",
+    )
+    parser.add_argument(
+        "--source-limit",
+        type=int,
+        default=20,
+        help="pg source: newest chunks to load per run (1..200)",
+    )
+    parser.add_argument(
         "--batch-candidates",
         type=int,
         default=DEFAULT_BATCH_CANDIDATES,
@@ -394,6 +406,38 @@ def _load_chunks(path: str) -> list[Mapping[str, Any]]:
     if not isinstance(raw, list):
         raise CandidateIntakeConfigError("--source-json must contain a JSON array")
     return [item for item in raw if isinstance(item, Mapping)]
+
+
+def load_chunks_from_pg(dsn: str, *, project: str, limit: int) -> list[Mapping[str, Any]]:
+    """Load the newest redacted session chunks for one project from PostgreSQL."""
+    import psycopg
+
+    bounded = max(1, min(int(limit), 200))
+    with psycopg.connect(dsn, autocommit=True, connect_timeout=8) as conn:
+        rows = conn.execute(
+            "SELECT chunk_id, content_markdown, content_hash, provider "
+            "FROM session_memory_chunks WHERE project = %s "
+            "ORDER BY updated_at DESC LIMIT %s",
+            (project, bounded),
+        ).fetchall()
+    chunks: list[Mapping[str, Any]] = []
+    for chunk_id, content, content_hash, provider in rows:
+        body = str(content or "").strip()
+        revision = str(content_hash or "").strip()
+        if not body or not revision:
+            continue
+        chunks.append(
+            {
+                "content": body,
+                "content_hash": revision,
+                "metadata": {
+                    "knowledge_id": str(chunk_id or ""),
+                    "project": project,
+                    "provider": str(provider or ""),
+                },
+            }
+        )
+    return chunks
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -428,7 +472,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     try:
-        chunks = [] if dry_run else _load_chunks(args.source_json)
+        if dry_run:
+            chunks = []
+        elif args.source_mode == "pg":
+            dsn = (
+                os.environ.get("NEURON_LBRAIN_PGVECTOR_DSN")
+                or os.environ.get("LLM_BRAIN_PGVECTOR_DSN")
+                or ""
+            ).strip()
+            if not dsn:
+                raise CandidateIntakeConfigError(
+                    "NEURON_LBRAIN_PGVECTOR_DSN is required for --source-mode pg"
+                )
+            chunks = load_chunks_from_pg(dsn, project=settings.project, limit=args.source_limit)
+        else:
+            chunks = _load_chunks(args.source_json)
     except (CandidateIntakeConfigError, OSError, ValueError) as exc:
         print(
             json.dumps(
@@ -450,7 +508,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Writing requires an injected steward and model function. They are built by
     # the registered entry point, never guessed here, and never defaulted to a
     # live model without explicit cost approval.
-    from .extraction_llm import build_vertex_wrapper_completion_fn
+    from .extraction_llm import build_intake_completion_from_env
 
     if not settings.enable_proposals:
         report = CandidateIntakeReport(
@@ -464,7 +522,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     try:
-        completion_fn = build_vertex_wrapper_completion_fn()
+        completion_fn = build_intake_completion_from_env()
     except Exception as exc:
         print(
             json.dumps(

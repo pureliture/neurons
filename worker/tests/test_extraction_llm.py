@@ -60,3 +60,54 @@ def test_openai_compat_no_auth_header_without_key():
 
     build_openai_compat_completion_fn("http://x/v1", "m", post_fn=fake_post)([{"role": "user", "content": "hi"}])
     assert "Authorization" not in captured["headers"]
+
+
+def test_openai_compat_extra_headers_are_merged():
+    captured = {}
+
+    def fake_post(url, *, headers, body):
+        captured["headers"] = headers
+        return json.dumps({"choices": [{"message": {"content": "ok"}}]})
+
+    fn = build_openai_compat_completion_fn(
+        "http://x/v1", "m", api_key="k", post_fn=fake_post,
+        extra_headers={"x-opencode-session": "s1"},
+    )
+    assert fn([{"role": "user", "content": "hi"}]) == "ok"
+    assert captured["headers"]["Authorization"] == "Bearer k"
+    assert captured["headers"]["x-opencode-session"] == "s1"
+
+
+def test_intake_completion_env_builds_opencode_target_with_session_header():
+    from agent_knowledge.session_memory.extraction_llm import build_intake_completion_from_env
+
+    captured = {}
+
+    def fake_post(url, *, headers, body):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["body"] = json.loads(body)
+        return json.dumps({"choices": [{"message": {"content": "ok"}}]})
+
+    env = {
+        "LLM_BRAIN_EXTRACTION_BASE_URL": "https://opencode.ai/zen/go/v1",
+        "LLM_BRAIN_EXTRACTION_MODEL": "mimo-v2.6-flash",
+        "LLM_BRAIN_EXTRACTION_API_KEY": "zk",
+    }
+    fn = build_intake_completion_from_env(env, post_fn=fake_post)
+    assert fn([{"role": "user", "content": "hi"}]) == "ok"
+    assert captured["url"] == "https://opencode.ai/zen/go/v1/chat/completions"
+    assert captured["body"]["model"] == "mimo-v2.6-flash"
+    assert captured["headers"]["Authorization"] == "Bearer zk"
+    assert captured["headers"]["x-opencode-session"] == "neurons-memory-intake"
+
+
+def test_intake_completion_env_falls_back_to_vertex_wrapper(monkeypatch):
+    import agent_knowledge.session_memory.extraction_llm as module
+
+    def sentinel(_messages):
+        return "sentinel"
+
+    monkeypatch.setattr(module, "build_vertex_wrapper_completion_fn", lambda **kwargs: sentinel)
+    fn = module.build_intake_completion_from_env({})
+    assert fn([{"role": "user", "content": "hi"}]) == "sentinel"

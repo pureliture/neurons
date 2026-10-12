@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import urllib.request
+from collections.abc import Mapping
 from typing import Any, Callable
 
 DEFAULT_PROVIDERS_PATH = "~/.graphify/providers.json"
@@ -29,6 +30,7 @@ def build_openai_compat_completion_fn(
     api_key: str = "",
     temperature: float = 0.0,
     post_fn: Callable[..., str] = _urllib_post,
+    extra_headers: Mapping[str, str] | None = None,
 ) -> Callable[[list[dict]], str]:
     """An OpenAI-compatible /chat/completions completion_fn: messages -> assistant content."""
 
@@ -38,6 +40,8 @@ def build_openai_compat_completion_fn(
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
+        if extra_headers:
+            headers.update({str(key): str(value) for key, value in extra_headers.items()})
         body = json.dumps({"model": model, "messages": list(messages), "temperature": temperature})
         try:
             raw = post_fn(url, headers=headers, body=body)
@@ -120,3 +124,38 @@ def build_vertex_wrapper_completion_fn(
         temperature=float(vw.get("temperature") or 0.0),
         post_fn=post_fn,
     )
+
+
+def build_intake_completion_from_env(
+    environ: Mapping[str, str] | None = None,
+    *,
+    post_fn: Callable[..., str] | None = None,
+) -> Callable[[list[dict]], str]:
+    """Production intake completion source.
+
+    An explicit OpenAI-compatible endpoint (for example the OpenCode Zen
+    ``mimo-v2.6-flash`` model) takes precedence via ``LLM_BRAIN_EXTRACTION_*``
+    variables; without one, keep the local keyless vertex-wrapper default.
+    """
+    env = os.environ if environ is None else environ
+    base_url = str(env.get("LLM_BRAIN_EXTRACTION_BASE_URL") or "").strip()
+    if not base_url:
+        if post_fn is not None:
+            return build_vertex_wrapper_completion_fn(post_fn=post_fn)
+        return build_vertex_wrapper_completion_fn()
+    model = str(env.get("LLM_BRAIN_EXTRACTION_MODEL") or "").strip()
+    if not model:
+        raise ValueError("LLM_BRAIN_EXTRACTION_MODEL is required when LLM_BRAIN_EXTRACTION_BASE_URL is set")
+    extra_headers: dict[str, str] = {}
+    if "opencode.ai" in base_url:
+        # OpenCode Go rejects requests without a session id (HTTP 400 MissingSessionID).
+        extra_headers["x-opencode-session"] = (
+            str(env.get("LLM_BRAIN_EXTRACTION_SESSION") or "").strip() or "neurons-memory-intake"
+        )
+    kwargs: dict[str, Any] = {
+        "api_key": str(env.get("LLM_BRAIN_EXTRACTION_API_KEY") or ""),
+        "extra_headers": extra_headers,
+    }
+    if post_fn is not None:
+        kwargs["post_fn"] = post_fn
+    return build_openai_compat_completion_fn(base_url, model, **kwargs)
