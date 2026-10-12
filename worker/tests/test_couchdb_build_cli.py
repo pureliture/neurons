@@ -22,6 +22,8 @@ from agent_knowledge.couchdb_source import document_model as dm
 from agent_knowledge.couchdb_source.build_cli import (
     BUILD_CLI_SCHEMA_VERSION,
     _close_if_supported,
+    _select_sessions_for_cycle,
+    _select_sessions_incremental,
     _select_sessions_needing_projection,
     main,
 )
@@ -698,6 +700,107 @@ class TestSelectSessionsNeedingProjection:
             store, limit=0, backend="postgres_pgvector"
         )
         assert [row["session_id_hash"] for row in selected] == [sid]
+
+    def test_incremental_selection_only_visits_changed_sessions(self) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sid_a = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="inc-a")
+        sid_b = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="inc-b")
+        baseline_seq = store.read_change_sequence()
+        _mark_projected(store, sid_a, "claude", "neurons")
+        pending = dm.build_projection_state_document(
+            session_id_hash=sid_b,
+            provider="claude",
+            project="neurons",
+            projection_status=dm.ProjectionStatus.PENDING,
+        )
+        store.put(pending)
+        chunk = TranscriptChunk.from_text(
+            chunk_id="chunk_01",
+            session_id_hash=sid_b,
+            provider="claude",
+            project="neurons",
+            turn_start_index=1,
+            turn_end_index=1,
+            text="a distinct follow-up was observed",
+        )
+        store.put(dm.build_conversation_chunk_document(chunk=chunk))
+
+        selected, checkpoint, changed = _select_sessions_incremental(
+            store,
+            checkpoint={"last_seq": baseline_seq},
+            limit=10,
+            backend="postgres_pgvector",
+        )
+        assert [row["session_id_hash"] for row in selected] == [sid_b]
+        assert changed >= 2
+
+        selected2, checkpoint2, changed2 = _select_sessions_incremental(
+            store,
+            checkpoint=checkpoint,
+            limit=10,
+            backend="postgres_pgvector",
+        )
+        assert selected2 == [] and changed2 == 0
+
+    def test_incremental_selection_resumes_after_limit_cut(self) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sids = [
+            _build_synthetic_session(store, provider="claude", project="neurons", raw_id=name)
+            for name in ("cut-a", "cut-b", "cut-c")
+        ]
+        baseline_seq = store.read_change_sequence()
+        for index, sid in enumerate(sids):
+            chunk = TranscriptChunk.from_text(
+                chunk_id=f"chunk_{index:02d}",
+                session_id_hash=sid,
+                provider="claude",
+                project="neurons",
+                turn_start_index=1,
+                turn_end_index=1,
+                text=f"follow-up {index}",
+            )
+            store.put(dm.build_conversation_chunk_document(chunk=chunk))
+
+        first, cp1, _ = _select_sessions_incremental(
+            store, checkpoint={"last_seq": baseline_seq}, limit=1, backend="postgres_pgvector"
+        )
+        second, cp2, _ = _select_sessions_incremental(
+            store, checkpoint=cp1, limit=1, backend="postgres_pgvector"
+        )
+        third, cp3, _ = _select_sessions_incremental(
+            store, checkpoint=cp2, limit=1, backend="postgres_pgvector"
+        )
+        assert len(first) == 1 and len(second) == 1 and len(third) == 1
+        got = {row["session_id_hash"] for row in first + second + third}
+        assert got == set(sids)
+        fourth, _, _ = _select_sessions_incremental(
+            store, checkpoint=cp3, limit=1, backend="postgres_pgvector"
+        )
+        assert fourth == []
+
+    def test_selection_cycle_checkpoint_file_roundtrip(self, tmp_path, monkeypatch) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sid = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="cyc-1")
+        cp_file = tmp_path / "selection-checkpoint.json"
+        monkeypatch.setenv("SESSION_MEMORY_SELECTION_CHECKPOINT", str(cp_file))
+        monkeypatch.setenv("SESSION_MEMORY_SELECTION_MODE", "auto")
+
+        first = _select_sessions_for_cycle(
+            store, limit=10, project="", provider="", backend="postgres_pgvector", mode="auto"
+        )
+        assert [row["session_id_hash"] for row in first] == [sid]
+        assert cp_file.exists()
+
+        second = _select_sessions_for_cycle(
+            store, limit=10, project="", provider="", backend="postgres_pgvector", mode="auto"
+        )
+        assert second == []
+
+        sid2 = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="cyc-2")
+        third = _select_sessions_for_cycle(
+            store, limit=10, project="", provider="", backend="postgres_pgvector", mode="auto"
+        )
+        assert [row["session_id_hash"] for row in third] == [sid2]
 
     def test_reselects_projected_session_when_source_changes_but_state_is_untouched(self) -> None:
         store = InMemoryCouchDBSourceStore()
