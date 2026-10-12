@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
@@ -553,7 +554,14 @@ class OntologyEpisode:
         return data
 
     def search_text(self) -> str:
-        return " ".join([self.entity_type, self.natural_id, stable_json(self.payload)]).lower()
+        # Lexical matching must see raw characters. The shared stable_json keeps
+        # ensure_ascii=True for hash stability, which hid every 한글 character
+        # behind \uXXXX and made Korean query terms unmatchable in the graph
+        # episode filter. Hashing elsewhere keeps using stable_json untouched.
+        payload_text = json.dumps(
+            self.payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        return " ".join([self.entity_type, self.natural_id, payload_text]).lower()
 
 
 @dataclass(frozen=True)

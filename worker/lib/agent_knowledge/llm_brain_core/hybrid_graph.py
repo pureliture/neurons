@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -529,7 +530,9 @@ def _terms(value: Any) -> list[str]:
 def _match_score(value: Any, terms: list[str]) -> int:
     if not terms:
         return 1
-    text = stable_json(value).lower()
+    # Unicode-raw text for the same reason as OntologyEpisode.search_text:
+    # ensure_ascii escaping would make Korean terms unmatchable.
+    text = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).lower()
     return sum(1 for term in terms if term in text)
 
 
