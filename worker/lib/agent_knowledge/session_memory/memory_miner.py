@@ -54,12 +54,16 @@ def _strip_code_fence(text: str) -> str:
     stripped = text.strip()
     if not stripped.startswith("```"):
         return stripped
-    lines = stripped.splitlines()
-    if lines and lines[0].startswith("```"):
-        lines = lines[1:]
-    if lines and lines[-1].strip() == "```":
-        lines = lines[:-1]
-    return "\n".join(lines).strip()
+    body = stripped[3:]
+    # Optional language tag on the opening fence ("json", "JSON", …).
+    if body[:4].lower() == "json":
+        body = body[4:]
+    elif body[:1] not in {"", "\n", " "} and "\n" in body:
+        # Unknown single-token language tag: drop up to the first newline.
+        body = body.split("\n", 1)[1]
+    if body.endswith("```"):
+        body = body[:-3]
+    return body.strip()
 
 
 def _parse_candidate_items(raw) -> list[dict]:

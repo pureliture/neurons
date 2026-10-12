@@ -123,6 +123,15 @@ def test_llm_memory_miner_strips_code_fence_wrapping():
     assert [c["candidate_type"] for c in candidates] == ["semantic_fact"]
 
 
+def test_llm_memory_miner_strips_inline_code_fence():
+    def fake_completion(messages):
+        return '```json [{"type": "semantic_fact", "statement": "Embedding runs on Mac mini."}] ```'
+
+    candidates = LlmMemoryMiner(completion_fn=fake_completion).mine_chunk(_chunk("text"))
+
+    assert [c["candidate_type"] for c in candidates] == ["semantic_fact"]
+
+
 def test_llm_memory_miner_returns_empty_on_invalid_json_without_raising():
     candidates = LlmMemoryMiner(completion_fn=lambda messages: "sorry, no JSON here").mine_chunk(_chunk("text"))
 
