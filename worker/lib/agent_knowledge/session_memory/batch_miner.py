@@ -87,25 +87,100 @@ def _batch_response_schema(source_keys: Sequence[str]) -> dict[str, Any]:
                 "required": ["source_key", "candidate"], "additionalProperties": False}}
 
 
-def _parse_batch_items(raw: Any, source_keys: Sequence[str]) -> list[Mapping[str, Any] | None]:
-    """Validate every identity-bearing slot before any candidate assembly."""
-    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        value: dict[str, Any] = {}
-        for key, child in pairs:
-            if key in value:
-                raise BatchExtractionError("batch response contains duplicate JSON fields")
-            value[key] = child
-        return value
+def _typed_payload_value_guide() -> str:
+    """Concrete allowed values so the model cannot invent enum tokens."""
+    from . import memory_card as contract
 
-    def reject_constant(_value: str) -> Any:
-        raise BatchExtractionError("batch response contains a non-JSON numeric constant")
+    return (
+        "Allowed typed_payload values: "
+        "evidence_kind in {" + ",".join(contract._EVIDENCE_KINDS) + "}; "
+        "result_status in {" + ",".join(contract._EVIDENCE_RESULT_STATUSES) + "}; "
+        "severity in {" + ",".join(contract._DRIFT_SEVERITIES) + "}; "
+        "authority_lane in {" + ",".join(contract._DRIFT_AUTHORITY_LANES) + "}; "
+        "resolution_action in {" + ",".join(contract._DRIFT_RESOLUTION_ACTIONS) + "}; "
+        "explicitness in {" + ",".join(contract._PREFERENCE_EXPLICITNESS) + "}; "
+        "confirmation_status in {" + ",".join(contract._PREFERENCE_CONFIRMATION) + "}; "
+        "hash_refs must be an array of hash strings; count_refs must be an array "
+        "of objects; alternatives and basis_refs must be arrays of strings."
+    )
 
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, child in pairs:
+        if key in value:
+            raise BatchExtractionError("batch response contains duplicate JSON fields")
+        value[key] = child
+    return value
+
+
+def _reject_non_json_constant(_value: str) -> Any:
+    raise BatchExtractionError("batch response contains a non-JSON numeric constant")
+
+
+# The extraction model occasionally returns a slightly malformed JSON tail: a
+# missing final closing brace, a stray trailing closer, or a code-fence
+# wrapper. Only these bounded wrapper/tail-level slips are repaired here; the
+# slot identity, order and payload validation below stays strict, so a
+# repaired parse can never invent, drop or reorder a slot.
+_BATCH_TAIL_REPAIR_LIMIT = 2
+
+
+def _decode_batch_text(text: str) -> Any:
+    return json.loads(
+        text, object_pairs_hook=_unique_json_object, parse_constant=_reject_non_json_constant
+    )
+
+
+def _load_batch_slots(raw: Any) -> Any:
+    """Parse the batch response JSON with bounded tail repair, or fail closed."""
     if not isinstance(raw, str) or not raw.strip():
         raise BatchExtractionError("batch response must contain JSON source slots")
-    try:
-        slots = json.loads(raw, object_pairs_hook=unique_object, parse_constant=reject_constant)
-    except (ValueError, TypeError):
-        raise BatchExtractionError("batch response is invalid JSON") from None
+    from .memory_miner import _strip_code_fence
+
+    text = raw.strip()
+    stripped = _strip_code_fence(text)
+    candidates: list[str] = [text]
+    if stripped != text:
+        candidates.append(stripped)
+    for base in (text, stripped):
+        body = base.strip()
+        if not body:
+            continue
+        if body.endswith("]") or body.endswith("}"):
+            closer = body[-1]
+            for extra in range(1, _BATCH_TAIL_REPAIR_LIMIT + 1):
+                candidates.append(body[:-1] + "}" * extra + closer)
+        for extra in range(1, _BATCH_TAIL_REPAIR_LIMIT + 1):
+            candidates.append(body + "}" * extra)
+        candidates.append(body + "}]")
+        candidates.append(body + "}}]")
+    for candidate in candidates:
+        try:
+            return _decode_batch_text(candidate)
+        except (ValueError, TypeError):
+            continue
+    # A complete first value with only trailing closers is accepted; the
+    # parsed slots must still pass the full identity/payload validation.
+    for base in (text, stripped):
+        try:
+            decoder = json.JSONDecoder(
+                object_pairs_hook=_unique_json_object,
+                parse_constant=_reject_non_json_constant,
+            )
+            value, end = decoder.raw_decode(base.strip())
+        except (ValueError, TypeError):
+            continue
+        remainder = base.strip()[end:].strip()
+        if remainder and (len(remainder) > 4 or set(remainder) - set("]}")):
+            continue
+        return value
+    raise BatchExtractionError("batch response is invalid JSON") from None
+
+
+def _parse_batch_items(raw: Any, source_keys: Sequence[str]) -> list[Mapping[str, Any] | None]:
+    """Validate every identity-bearing slot before any candidate assembly."""
+    slots = _load_batch_slots(raw)
     if not isinstance(slots, list) or len(slots) != len(source_keys):
         raise BatchExtractionError("batch response source slot count mismatch")
     items: list[Mapping[str, Any] | None] = []
@@ -252,7 +327,7 @@ class BatchedEnvelopeMiner:
         candidates: list[dict] = []
         call_sizes: list[int] = []
         for batch in batches:
-            items = self._call_model(batch)
+            items = self._call_model_with_retry(batch)
             call_sizes.append(sum(_chunk_text_length(chunk) for chunk in batch))
             for chunk, item in zip(batch, items, strict=True):
                 mined = self._candidate_for(
@@ -272,6 +347,22 @@ class BatchedEnvelopeMiner:
         return candidates, report
 
     # ------------------------------------------------------------------ internals
+
+    # Response slips are stochastic: one bounded retry per batch usually
+    # parses. Transport failures are deterministic for the moment and are
+    # not retried here.
+    _BATCH_ATTEMPTS = 2
+
+    def _call_model_with_retry(
+        self, batch: Sequence[Mapping[str, Any]]
+    ) -> list[Mapping[str, Any] | None]:
+        for attempt in range(self._BATCH_ATTEMPTS):
+            try:
+                return self._call_model(batch)
+            except BatchExtractionError:
+                if attempt == self._BATCH_ATTEMPTS - 1:
+                    raise
+        raise AssertionError("unreachable")
 
     def _call_model(self, batch: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any] | None]:
         from .llm_brain_miner import _TYPED_PAYLOAD_SCHEMAS
@@ -309,7 +400,7 @@ class BatchedEnvelopeMiner:
             "candidate is null only when that session contains no durable memory; otherwise it "
             "is an object with card_type (decision, task, drift, preference, status, evidence), "
             "title, statement, and typed_payload. Preserve the meaning of that session only. "
-            "typed_payload fields: " + _TYPED_PAYLOAD_SCHEMAS + ". "
+            "typed_payload fields: " + _TYPED_PAYLOAD_SCHEMAS + ". " + _typed_payload_value_guide() + " "
             "Do not return raw source locators or source content hashes. "
             "EXAMPLE:\n" + json.dumps(example, separators=(",", ":"))
         )
