@@ -454,9 +454,13 @@ class GraphFirstResolver:
         while tool_result_bytes(payload) > _MAX_BYTES and _drop_last_evidence_edge(evidence, page):
             payload = self._final_payload(request, page, metadata, offset, len(deduped), fingerprint, error_code, keyset, evidence)
         if request.mode == "context":
-            while tool_result_bytes(payload) > _MAX_BYTES and _shrink_context_page(page):
+            # Fit inside the wire budget without destroying the meaning of the
+            # context: bound readable text first, then drop the lowest-priority
+            # cards. Emptying section text leaves an agent with ids and hashes but
+            # no work subject, decision, status or next action.
+            while tool_result_bytes(payload) > _MAX_BYTES and _trim_context_text(page):
                 payload = self._final_payload(request, page, metadata, offset, len(deduped), fingerprint, error_code, keyset, evidence)
-            while tool_result_bytes(payload) > _MAX_BYTES and _drop_optional_context_card(page):
+            while tool_result_bytes(payload) > _MAX_BYTES and _drop_context_card(page):
                 payload = self._final_payload(request, page, metadata, offset, len(deduped), fingerprint, error_code, keyset, evidence)
             # Last resort: keep the page bounded and let the cursor carry the
             # remainder instead of failing the entire default context call.
@@ -518,17 +522,39 @@ class GraphFirstResolver:
             card_type = str(card.get("card_type") or "")
             section_identity = {"id": item["id"]} if context_mode else item
             if card_type == "decision":
-                decisions.append({**section_identity, "decision": _safe(typed.get("decision") or card.get("summary"), 144), "rationale": _safe(typed.get("rationale"), 96)})
+                decision_entry = {**section_identity, "decision": _safe(typed.get("decision") or card.get("summary") or card.get("title"), 144)}
+                rationale = _safe(typed.get("rationale"), 96)
+                if rationale:
+                    decision_entry["rationale"] = rationale
+                decisions.append(decision_entry)
             elif card_type == "preference":
-                preferences.append({**section_identity, "rule": _safe(typed.get("rule") or typed.get("preference") or card.get("summary"), 144), "scope": _safe(typed.get("scope") or "general", 64)})
+                preferences.append({**section_identity, "rule": _safe(typed.get("rule") or typed.get("preference") or card.get("summary") or card.get("title"), 144), "scope": _safe(typed.get("scope") or "general", 64)})
             elif card_type in {"task", "work", "work_unit"}:
-                tasks.append({**section_identity, "task": _safe(typed.get("task") or typed.get("task_state") or typed.get("next_action") or card.get("summary"), 144)})
+                # Subject, state and next step are three different facts. Reading only
+                # `task_state` hides what the work is and what to do next whenever the
+                # state is a status token such as "in_progress".
+                subject = _safe(_task_subject(card, typed), 144)
+                task_entry = {**section_identity, "task": subject}
+                state = _safe(typed.get("task_state") or typed.get("status"), 40)
+                # Repeating the subject as its own state only costs wire budget.
+                if state and state != subject:
+                    task_entry["task_state"] = state
+                next_action = _safe(typed.get("next_action"), 144)
+                if next_action:
+                    task_entry["next_action"] = next_action
+                blocker = _safe(typed.get("blocker"), 96)
+                if blocker:
+                    task_entry["blocker"] = blocker
+                tasks.append(task_entry)
             elif card_type == "status":
-                statuses.append({
+                status_entry = {
                     **section_identity,
-                    "status": _safe(typed.get("status_value") or typed.get("status") or card.get("summary"), 144),
-                    "observed_at": _safe(typed.get("observed_at"), 64),
-                })
+                    "status": _safe(typed.get("status_value") or typed.get("status") or card.get("summary") or card.get("title"), 144),
+                }
+                observed_at = _safe(typed.get("observed_at"), 64)
+                if observed_at:
+                    status_entry["observed_at"] = observed_at
+                statuses.append(status_entry)
             content_hash = str(card.get("content_hash") or "")
             if content_hash:
                 evidence_hashes.append(content_hash)
@@ -638,11 +664,14 @@ def _context_item(card: Mapping[str, Any]) -> dict[str, Any]:
     card_type = str(card.get("card_type") or "")
     if card_type not in {"decision", "preference", "task", "work", "work_unit", "status"}:
         return _item(card)
+    # A startup pack trades the per-card content hash for readable section text:
+    # the hash costs ~87 bytes per card while a 3 KB tool result that carries the
+    # payload twice leaves only ~200 bytes of text budget per card. Full-hash
+    # provenance stays available through mode=list and response_mode=with_evidence.
     return {
         "id": _safe(card.get("memory_id") or card.get("id"), 180),
         "card_type": _safe(card_type, 64),
         "currentness": _safe(card.get("currentness") or "current", 32),
-        "content_hash": _safe(card.get("content_hash"), 80),
     }
 
 
@@ -762,33 +791,115 @@ def _shrink_card(card: dict[str, Any]) -> bool:
     return True
 
 
-def _shrink_context_page(page: list[dict[str, Any]]) -> bool:
-    """Compress across card types before sacrificing any selected context item."""
-    ranked: list[tuple[int, int, dict[str, Any]]] = []
-    for index, card in enumerate(page):
-        raw_payload = card.get("typed_payload")
-        payload = raw_payload if isinstance(raw_payload, dict) else {}
-        lengths = [len(str(card.get(field) or "")) for field in ("title", "summary")]
-        lengths.extend(len(value) for value in payload.values() if isinstance(value, str))
-        ranked.append((max(lengths, default=0), index, card))
-    for _size, _index, card in sorted(ranked, reverse=True, key=lambda item: (item[0], -item[1])):
-        if _shrink_card(card):
-            return True
-    return False
+# Semantic text is bounded (not emptied) before a context card is sacrificed, so
+# a startup context still names the work, the decision, the status and the next
+# step instead of returning only ids and hashes.
+_CONTEXT_TEXT_FLOOR = 48
+_CONTEXT_SECTION_TYPES = frozenset(
+    {"decision", "preference", "task", "work", "work_unit", "status"}
+)
+# `task_state` sometimes carries a status token rather than the work subject.
+_TASK_STATE_TOKENS = frozenset(
+    {
+        "active", "blocked", "cancelled", "canceled", "complete", "completed", "done",
+        "failed", "in-progress", "in_progress", "not-started", "not_started", "open",
+        "paused", "pending", "running", "stopped", "todo",
+    }
+)
 
 
-def _drop_optional_context_card(page: list[dict[str, Any]]) -> bool:
-    """If compression is insufficient, preserve one card per selected type."""
-    counts: dict[str, int] = {}
+def _task_subject(card: Mapping[str, Any], typed: Mapping[str, Any]) -> str:
+    """Name the work itself; a status token is not a task name."""
+    explicit = typed.get("task")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit
+    state = str(typed.get("task_state") or "")
+    if state.strip().lower() in _TASK_STATE_TOKENS:
+        return str(card.get("title") or card.get("summary") or state)
+    if state.strip():
+        return state
+    return str(card.get("title") or card.get("summary") or "")
+
+
+def _context_text_slots(card: Mapping[str, Any]) -> list[tuple[Any, str]]:
+    """Rendered text sources for this card in context mode.
+
+    Card types with a dedicated section keep their identity in `items`, so only
+    the section source is bounded. Types without a section carry their text in
+    `items`, so title/summary are the sources to bound there.
+    """
+    raw_payload = card.get("typed_payload")
+    # Return the card's own mutable payload: trimming a per-call copy would look
+    # like progress while the rebuilt payload never changes.
+    typed: Any = raw_payload if isinstance(raw_payload, dict) else {}
+    card_type = str(card.get("card_type") or "")
+    if card_type not in _CONTEXT_SECTION_TYPES:
+        return [(typed, key) for key in ("decision", "rationale") if key in typed] or [
+            (card, key) for key in ("title", "summary") if card.get(key)
+        ]
+    if card_type == "decision":
+        return [(typed, key) for key in ("decision", "rationale") if typed.get(key)]
+    if card_type == "preference":
+        return [(typed, key) for key in ("rule", "preference") if typed.get(key)]
+    if card_type == "status":
+        return [(typed, key) for key in ("status_value", "status") if typed.get(key)]
+    slots = [
+        (typed, key)
+        for key in ("task", "task_state", "next_action", "blocker")
+        if typed.get(key)
+    ]
+    # The subject falls back to title/summary, so those participate in the bound.
+    if not typed.get("task") or str(typed.get("task_state") or "").strip().lower() in _TASK_STATE_TOKENS:
+        slots.extend((card, key) for key in ("title", "summary") if card.get(key))
+    return slots
+
+
+def _trim_context_text(page: list[dict[str, Any]]) -> bool:
+    """Truncate the longest rendered text down to a readable floor.
+
+    Never reduces a value to an empty string: an agent that receives an empty
+    decision or an empty next action cannot resume the work at all.
+    """
+    target_container: Any = None
+    target_key = ""
+    target_len = _CONTEXT_TEXT_FLOOR
     for card in page:
-        kind = str(card.get("card_type") or "")
-        counts[kind] = counts.get(kind, 0) + 1
-    for index in range(len(page) - 1, -1, -1):
-        kind = str(page[index].get("card_type") or "")
-        if counts.get(kind, 0) > 1:
-            page.pop(index)
-            return True
-    return False
+        for container, key in _context_text_slots(card):
+            value = str(container.get(key) or "")
+            if len(value) > target_len:
+                target_container, target_key, target_len = container, key, len(value)
+    if target_container is None:
+        return False
+    value = str(target_container.get(target_key) or "")
+    # Keep the result at or under the floor so this call always terminates.
+    target_container[target_key] = value[: max(1, _CONTEXT_TEXT_FLOOR - 1)].rstrip() + "…"
+    return True
+
+
+def _context_drop_rank(card: Mapping[str, Any]) -> int:
+    """Lower ranks are sacrificed first; task and decision are kept longest."""
+    card_type = str(card.get("card_type") or "")
+    if card_type in {"task", "work", "work_unit"}:
+        return 5
+    if card_type == "decision":
+        return 4
+    if card_type == "status":
+        return 3
+    if card_type == "preference":
+        return 2
+    return 1
+
+
+def _drop_context_card(page: list[dict[str, Any]]) -> bool:
+    """Drop the lowest-priority context card, keeping one card at minimum."""
+    if len(page) <= 1:
+        return False
+    index = min(
+        range(len(page)),
+        key=lambda position: (_context_drop_rank(page[position]), -position),
+    )
+    page.pop(index)
+    return True
 
 
 def _lag(value: Any) -> int | None:
