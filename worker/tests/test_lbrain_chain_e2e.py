@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 import uuid
 
@@ -62,23 +63,28 @@ def _chunk(project: str, marker: str = "1") -> dict:
 
 
 def _completion(messages) -> str:
+    # Batch responses carry one identity-bearing slot per session, echoing the
+    # exact SOURCE_KEY of each input block in order (strict slot contract).
     content = str((messages or [{}])[-1].get("content") or "")
-    count = max(1, content.count("### SESSION "))
+    keys = re.findall(r"SOURCE_KEY: (\S+)", content)
     return json.dumps(
         [
             {
-                "card_type": "decision",
-                "title": f"Authority store {index + 1}",
-                "statement": f"PostgreSQL is the authority store for LBrain work memory (item {index + 1}).",
-                "typed_payload": {
-                    "decision": f"Use PostgreSQL as the authority store (item {index + 1})",
-                    "rationale": "One authority store keeps recall deterministic",
-                    "alternatives": [],
-                    "consequence": "The graph stays a derived index",
-                    "authority_ref": "chain-e2e-design-note",
+                "source_key": key,
+                "candidate": {
+                    "card_type": "decision",
+                    "title": f"Authority store {index + 1}",
+                    "statement": f"PostgreSQL is the authority store for LBrain work memory (item {index + 1}).",
+                    "typed_payload": {
+                        "decision": f"Use PostgreSQL as the authority store (item {index + 1})",
+                        "rationale": "One authority store keeps recall deterministic",
+                        "alternatives": [],
+                        "consequence": "The graph stays a derived index",
+                        "authority_ref": "chain-e2e-design-note",
+                    },
                 },
             }
-            for index in range(count)
+            for index, key in enumerate(keys)
         ]
     )
 

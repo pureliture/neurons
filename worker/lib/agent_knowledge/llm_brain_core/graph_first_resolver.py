@@ -458,6 +458,11 @@ class GraphFirstResolver:
                 payload = self._final_payload(request, page, metadata, offset, len(deduped), fingerprint, error_code, keyset, evidence)
             while tool_result_bytes(payload) > _MAX_BYTES and _drop_optional_context_card(page):
                 payload = self._final_payload(request, page, metadata, offset, len(deduped), fingerprint, error_code, keyset, evidence)
+            # Last resort: keep the page bounded and let the cursor carry the
+            # remainder instead of failing the entire default context call.
+            while tool_result_bytes(payload) > _MAX_BYTES and len(page) > 1:
+                page.pop()
+                payload = self._final_payload(request, page, metadata, offset, len(deduped), fingerprint, error_code, keyset, evidence)
         else:
             while tool_result_bytes(payload) > _MAX_BYTES and len(page) > 1:
                 page.pop()

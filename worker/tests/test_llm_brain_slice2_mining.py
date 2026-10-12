@@ -132,6 +132,19 @@ def test_candidate_contains_refs_hashes_and_redacted_summary_not_source_body():
     assert "raw_transcript" not in serialized
 
 
+def test_candidate_envelope_preserves_observed_at_without_changing_identity():
+    first = build_memory_card_candidate_from_source_span(
+        _source_span(observed_at="2026-10-11T12:34:56Z"), refresh_watermark="wm1"
+    )
+    second = build_memory_card_candidate_from_source_span(
+        _source_span(observed_at="2026-10-11T13:34:56Z"), refresh_watermark="wm2"
+    )
+    assert first.get("observed_at") == "2026-10-11T12:34:56Z"
+    assert second.get("observed_at") == "2026-10-11T13:34:56Z"
+    assert first["idempotency_key"] == second["idempotency_key"]
+    assert first["memory_id"] == second["memory_id"]
+
+
 def test_immediate_candidate_enqueue_accepts_high_signal_event_without_write():
     event = _source_span(
         event_kind="commit",

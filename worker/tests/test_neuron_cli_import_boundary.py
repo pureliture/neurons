@@ -16,6 +16,7 @@ def test_importing_neuron_cli_does_not_load_llm_brain_runtime():
         "'agent_knowledge.couchdb_source.migration_flow_cli', "
         "'agent_knowledge.rag_ingress.projection_invalidation_canary', "
         "'agent_knowledge.rag_ingress.temporal_revision_rebuild', "
+        "'agent_knowledge.session_memory.candidate_intake_cli', "
         "'graphiti_core', 'neo4j'"
         "))); "
         "assert not loaded, loaded"
@@ -29,6 +30,7 @@ def test_importing_neuron_cli_does_not_load_llm_brain_runtime():
 def test_lazy_command_handlers_import_their_targets_only_when_dispatched(monkeypatch):
     expected_targets = {
         "brain-context-resolve": (".llm_brain_core.cli", "main"),
+        "pg-memory-propose": (".session_memory.candidate_intake_cli", "main"),
         "object-query": (".llm_brain_core.objects.object_cli", "object_query_main"),
         "agent-context-startup": (".llm_brain_core.objects.object_cli", "agent_context_startup_main"),
         "artifact-preference-evaluate": (".llm_brain_core.objects.object_cli", "artifact_preference_evaluate_main"),
