@@ -646,6 +646,59 @@ class TestSelectSessionsNeedingProjection:
         assert sid1 not in sids
         assert sid2 in sids
 
+    def test_skips_egress_blocked_session_until_source_changes(self) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sid = _build_synthetic_session(
+            store, provider="claude", project="neurons", raw_id="egress-blocked"
+        )
+        source_hash = session_source_revision_from_couchdb_source(
+            session_id_hash=sid, source_store=store
+        )
+        state = dm.build_projection_state_document(
+            session_id_hash=sid,
+            provider="claude",
+            project="neurons",
+            projection_status="failed",
+            failure_reason="secret_egress_policy",
+        )
+        state["failure_source_hash"] = source_hash
+        state["backend_receipts"] = {
+            "postgres_pgvector": {
+                "projection_status": "failed",
+                "projected_source_hash": "",
+                "active_content_hash": "",
+                "session_memory_knowledge_id": "",
+                "provider": "claude",
+                "project": "neurons",
+                "materialized_at": "2026-10-12T00:00:00+00:00",
+                "failure_reason": "secret_egress_policy",
+            }
+        }
+        store.put(state)
+
+        assert (
+            _select_sessions_needing_projection(
+                store, limit=0, backend="postgres_pgvector"
+            )
+            == []
+        )
+
+        distinct_chunk = TranscriptChunk.from_text(
+            chunk_id="chunk_01",
+            session_id_hash=sid,
+            provider="claude",
+            project="neurons",
+            turn_start_index=1,
+            turn_end_index=1,
+            text="a distinct follow-up was observed",
+        )
+        store.put(dm.build_conversation_chunk_document(chunk=distinct_chunk))
+
+        selected = _select_sessions_needing_projection(
+            store, limit=0, backend="postgres_pgvector"
+        )
+        assert [row["session_id_hash"] for row in selected] == [sid]
+
     def test_reselects_projected_session_when_source_changes_but_state_is_untouched(self) -> None:
         store = InMemoryCouchDBSourceStore()
         sid = _build_synthetic_session(
