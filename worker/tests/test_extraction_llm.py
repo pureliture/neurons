@@ -78,6 +78,17 @@ def test_openai_compat_extra_headers_are_merged():
     assert captured["headers"]["x-opencode-session"] == "s1"
 
 
+def test_openai_compat_sets_sdk_style_user_agent():
+    captured = {}
+
+    def fake_post(url, *, headers, body):
+        captured["headers"] = headers
+        return json.dumps({"choices": [{"message": {"content": "ok"}}]})
+
+    build_openai_compat_completion_fn("http://x/v1", "m", post_fn=fake_post)([{"role": "user", "content": "hi"}])
+    assert captured["headers"]["User-Agent"].startswith("OpenAI/Python")
+
+
 def test_intake_completion_env_builds_opencode_target_with_session_header():
     from agent_knowledge.session_memory.extraction_llm import build_intake_completion_from_env
 

@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from typing import Any, Callable
 
 DEFAULT_PROVIDERS_PATH = "~/.graphify/providers.json"
+DEFAULT_USER_AGENT = "OpenAI/Python 1.109.1"
 
 
 def _urllib_post(url: str, *, headers: dict, body: str) -> str:
@@ -42,6 +43,9 @@ def build_openai_compat_completion_fn(
             headers["Authorization"] = f"Bearer {api_key}"
         if extra_headers:
             headers.update({str(key): str(value) for key, value in extra_headers.items()})
+        # urllib's default "Python-urllib/x.y" User-Agent is rejected by the
+        # provider edge (Cloudflare 1010); use an SDK-style agent.
+        headers.setdefault("User-Agent", DEFAULT_USER_AGENT)
         body = json.dumps({"model": model, "messages": list(messages), "temperature": temperature})
         try:
             raw = post_fn(url, headers=headers, body=body)
