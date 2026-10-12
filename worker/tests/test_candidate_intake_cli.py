@@ -440,3 +440,50 @@ def test_model_failure_is_reported_not_counted_as_completed():
     assert already_processed(
         state, project=PROJECT, source_hash=_hash(1)
     ) is False
+
+
+def test_load_chunks_from_pg_maps_rows(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    captured = {}
+
+    class _FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    class _FakeConn:
+        def __init__(self):
+            self.rows = [
+                ("chunk-1", "body one", _hash(1), "codex"),
+                ("chunk-2", "   ", _hash(2), "codex"),
+            ]
+
+        def execute(self, sql, params):
+            captured["sql"] = " ".join(str(sql).split())
+            captured["params"] = params
+            return _FakeResult(self.rows)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    fake = SimpleNamespace(connect=lambda dsn, **kwargs: _FakeConn())
+    monkeypatch.setitem(sys.modules, "psycopg", fake)
+
+    from agent_knowledge.session_memory.candidate_intake_cli import load_chunks_from_pg
+
+    chunks = load_chunks_from_pg("postgresql://x/db", project=PROJECT, limit=5)
+
+    assert len(chunks) == 1
+    assert chunks[0]["content"] == "body one"
+    assert chunks[0]["content_hash"] == _hash(1)
+    assert chunks[0]["metadata"]["knowledge_id"] == "chunk-1"
+    assert chunks[0]["metadata"]["project"] == PROJECT
+    assert "session_memory_chunks" in captured["sql"]
+    assert captured["params"] == (PROJECT, 5)
