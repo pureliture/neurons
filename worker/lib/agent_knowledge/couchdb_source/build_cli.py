@@ -200,6 +200,276 @@ def _select_sessions_needing_projection(
     return selected
 
 
+# --- Incremental selection (change feed) -------------------------------------
+
+_AFFECTED_CHANGE_PREFIXES = frozenset(
+    {
+        "transcript_session",
+        "conversation_chunk",
+        "tool_evidence_bundle",
+        "coverage_manifest",
+        "active_source_revision",
+        "source_revision_member",
+        "source_revision_manifest",
+    }
+)
+_IGNORED_CHANGE_PREFIXES = frozenset(
+    {"projection_state", "repo_usage_pattern", "retention_manifest"}
+)
+_SELECTION_CHECKPOINT_SCHEMA = "session_memory_selection_checkpoint.v1"
+_DEFAULT_SELECTION_CHECKPOINT = "/app/state/session-memory-selection-checkpoint.json"
+
+
+def _selection_checkpoint_path() -> str:
+    return os.environ.get(
+        "SESSION_MEMORY_SELECTION_CHECKPOINT", _DEFAULT_SELECTION_CHECKPOINT
+    )
+
+
+def _read_selection_checkpoint(path: str) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _write_selection_checkpoint(path: str, last_seq: str) -> None:
+    import datetime
+
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    payload = {
+        "schema_version": _SELECTION_CHECKPOINT_SCHEMA,
+        "last_seq": str(last_seq or ""),
+        "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, sort_keys=True)
+
+
+def _evaluate_session_change(
+    store, session_id_hash: str, *, project: str, provider: str
+) -> tuple[bool, dict | None]:
+    """Single-session mirror of ``_select_sessions_needing_projection`` (pg backend).
+
+    Keep the branch conditions in sync with the full walk: canonical sessions use
+    the resolver/active-session checks, current-only snapshots use the stricter
+    successor checks, and blocked (secret-egress) revisions stay out of the queue.
+    Returns ``(needs_projection, session_document_to_select)``.
+    """
+    from ..rag_ingress.pg_embedding_privacy import SECRET_EGRESS_FAILURE_REASON
+    from .document_model import (
+        ProjectionStatus,
+        assert_hash_like,
+        projection_state_doc_id,
+        session_doc_id,
+    )
+    from .source_revision import resolve_active_source_revision_from_snapshot
+
+    documents = store.find_by_session(session_id_hash=session_id_hash)
+    resolved = resolve_active_source_revision_from_snapshot(
+        session_id_hash=session_id_hash, documents=documents
+    )
+    state_id = projection_state_doc_id(session_id_hash)
+    state = store.get(state_id)
+    merged: dict = {}
+    if isinstance(state, dict) and str(state.get("_id") or "") == state_id:
+        merged = {
+            **state,
+            **((state.get("backend_receipts") or {}).get("postgres_pgvector") or {}),
+        }
+    projected_source_hash = ""
+    if str(merged.get("projection_status") or "") == ProjectionStatus.PROJECTED:
+        projected_source_hash = str(merged.get("projected_source_hash") or "")
+    blocked_source_hash = ""
+    if (
+        str(merged.get("projection_status") or "") == ProjectionStatus.FAILED
+        and str(merged.get("failure_reason") or "") == SECRET_EGRESS_FAILURE_REASON
+    ):
+        blocked_source_hash = str(merged.get("failure_source_hash") or "")
+
+    canonical = next(
+        (
+            doc
+            for doc in documents
+            if str(doc.get("_id") or "") == session_doc_id(session_id_hash)
+        ),
+        None,
+    )
+    if canonical is not None:
+        if not resolved.is_legacy_unpinned:
+            if len(resolved.sessions) != 1:
+                return False, None
+            active_session = resolved.sessions[0]
+            if (
+                (project and str(active_session.get("project") or "") != project)
+                or (provider and str(active_session.get("provider") or "") != provider)
+            ):
+                return False, None
+        current_source_hash = resolved.source_hash
+    else:
+        if resolved.is_legacy_unpinned or len(resolved.sessions) != 1:
+            return False, None
+        active_session = resolved.sessions[0]
+        if str(active_session.get("_id") or "") == session_doc_id(session_id_hash):
+            return False, None
+        if not str(active_session.get("source_snapshot_schema_version") or ""):
+            try:
+                assert_hash_like(
+                    "current_source_scope",
+                    str(active_session.get("current_source_scope") or ""),
+                )
+                assert_hash_like(
+                    "supersedes_source_document_hash",
+                    str(active_session.get("supersedes_source_document_hash") or ""),
+                )
+            except ValueError:
+                return False, None
+        if (
+            (project and str(active_session.get("project") or "") != project)
+            or (provider and str(active_session.get("provider") or "") != provider)
+        ):
+            return False, None
+        current_source_hash = resolved.source_hash
+
+    if (
+        not projected_source_hash
+        or not current_source_hash
+        or projected_source_hash != current_source_hash
+    ):
+        if blocked_source_hash and blocked_source_hash == current_source_hash:
+            return False, None
+        return True, canonical if canonical is not None else resolved.sessions[0]
+    return False, None
+
+
+def _select_sessions_incremental(
+    store,
+    *,
+    checkpoint: dict,
+    limit: int,
+    project: str = "",
+    provider: str = "",
+    backend: str = "retired_index_bridge",
+) -> tuple[list[dict], dict, int]:
+    """Change-feed driven selection.
+
+    Raises ``ValueError`` for any ambiguous window (unknown/deleted documents,
+    mismatched ids, non-pg backends) so the caller can fall back to the full walk.
+    The checkpoint only advances past rows that were fully examined; a limit cut
+    leaves the unchecked tail for the next cycle.
+    """
+    if backend != "postgres_pgvector":
+        raise ValueError("incremental selection supports postgres_pgvector only")
+    since = str(checkpoint.get("last_seq") or "")
+    if not since:
+        raise ValueError("selection checkpoint missing last_seq")
+    rows = store.changes_since(since=since, limit=10000)
+    if not rows:
+        return [], {"last_seq": since}, 0
+
+    examined: set[str] = set()
+    selected: list[dict] = []
+    current_watermark = since
+    for row in rows:
+        seq = str(row.get("seq") or current_watermark)
+        doc_id = str(row.get("id") or "")
+        parts = doc_id.split(":")
+        prefix = parts[0]
+        candidate = parts[1] if len(parts) > 1 else ""
+        if prefix in _IGNORED_CHANGE_PREFIXES:
+            current_watermark = seq
+            continue
+        if (
+            prefix not in _AFFECTED_CHANGE_PREFIXES
+            or len(candidate) != 64
+            or any(ch not in "0123456789abcdef" for ch in candidate)
+        ):
+            raise ValueError("unmappable change document")
+        session_id_hash = f"sha256:{candidate}"
+        if row.get("deleted"):
+            raise ValueError("deleted source document requires full walk")
+        if session_id_hash in examined:
+            current_watermark = seq
+            continue
+        if limit > 0 and len(selected) >= limit:
+            break
+        document = store.get(doc_id)
+        if not isinstance(document, dict):
+            raise ValueError("changed document unavailable")
+        if str(document.get("session_id_hash") or "") != session_id_hash:
+            raise ValueError("change document session mismatch")
+        examined.add(session_id_hash)
+        needs, session = _evaluate_session_change(
+            store, session_id_hash, project=project, provider=provider
+        )
+        if needs and session is not None:
+            selected.append(session)
+        current_watermark = seq
+    return selected, {"last_seq": current_watermark}, len(rows)
+
+
+def _select_sessions_for_cycle(
+    store,
+    *,
+    limit: int,
+    project: str,
+    provider: str,
+    backend: str,
+    mode: str,
+    persist: bool = True,
+) -> list[dict]:
+    """Checkpoint-aware selection: incremental when possible, full walk otherwise."""
+
+    normalized = (mode or "auto").strip().lower()
+    if normalized not in {"auto", "incremental", "full"}:
+        normalized = "auto"
+    path = _selection_checkpoint_path()
+    checkpoint = _read_selection_checkpoint(path)
+    if normalized != "full" and checkpoint and str(checkpoint.get("last_seq") or ""):
+        try:
+            sessions, new_checkpoint, changed_count = _select_sessions_incremental(
+                store,
+                checkpoint=checkpoint,
+                limit=limit,
+                project=project,
+                provider=provider,
+                backend=backend,
+            )
+            if persist:
+                _write_selection_checkpoint(
+                    path, str(new_checkpoint.get("last_seq") or "")
+                )
+            print(
+                f"[selection] mode=incremental changed={changed_count} selected={len(sessions)}",
+                file=sys.stderr,
+            )
+            return sessions
+        except Exception as exc:  # noqa: BLE001 - fail-safe fallback to the full walk
+            print(
+                f"[selection] incremental fallback ({type(exc).__name__})",
+                file=sys.stderr,
+            )
+    sequence_before = ""
+    try:
+        sequence_before = str(store.read_change_sequence())
+    except Exception:  # noqa: BLE001 - checkpoint is best-effort observability
+        sequence_before = ""
+    sessions = _select_sessions_needing_projection(
+        store, limit=limit, project=project, provider=provider, backend=backend
+    )
+    if persist and sequence_before:
+        try:
+            _write_selection_checkpoint(path, sequence_before)
+        except OSError:
+            pass
+    print(f"[selection] mode=full selected={len(sessions)}", file=sys.stderr)
+    return sessions
+
+
 def _scope_selector(*, project: str, provider: str) -> dict[str, str]:
     selector = {}
     if project:
@@ -317,8 +587,14 @@ def main(argv: list[str] | None = None) -> int:
     backend = os.environ.get("SESSION_MEMORY_PROJECTION_BACKEND", "retired_index_bridge").strip().lower()
 
     # --- Session selection --------------------------------------------------
-    sessions = _select_sessions_needing_projection(
-        store, limit=args.limit, project=str(args.project or ""), provider=str(args.provider or ""), backend=backend
+    sessions = _select_sessions_for_cycle(
+        store,
+        limit=args.limit,
+        project=str(args.project or ""),
+        provider=str(args.provider or ""),
+        backend=backend,
+        mode=os.environ.get("SESSION_MEMORY_SELECTION_MODE", "auto"),
+        persist=not args.dry_run,
     )
     selected_count = len(sessions)
 

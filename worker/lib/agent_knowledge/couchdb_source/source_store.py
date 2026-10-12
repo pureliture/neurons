@@ -151,6 +151,10 @@ class CouchDBSourceStore(Protocol):
 
     def delete(self, doc_id: str) -> bool: ...
 
+    def read_change_sequence(self) -> str: ...
+
+    def changes_since(self, *, since: str, limit: int = 2000) -> list[dict[str, object]]: ...
+
 
 def _require_active_source_revision_allows_write(
     *,
@@ -478,6 +482,27 @@ class InMemoryCouchDBSourceStore:
 
     def __init__(self) -> None:
         self._docs: dict[str, dict] = {}
+        self._change_seq = 0
+        self._changes_log: list[tuple[int, str, bool]] = []
+
+    def _note_change(self, doc_id: str, *, deleted: bool = False) -> None:
+        self._change_seq += 1
+        self._changes_log.append((self._change_seq, str(doc_id), bool(deleted)))
+
+    def read_change_sequence(self) -> str:
+        return str(self._change_seq)
+
+    def changes_since(self, *, since: str, limit: int = 2000) -> list[dict[str, object]]:
+        try:
+            start = int(str(since or "0"))
+        except ValueError:
+            start = 0
+        rows = [
+            {"seq": str(seq), "id": doc_id, "deleted": deleted}
+            for seq, doc_id, deleted in self._changes_log
+            if seq > start
+        ]
+        return rows[: max(0, int(limit))]
 
     def _require_source_document_unpinned(
         self,
@@ -535,6 +560,7 @@ class InMemoryCouchDBSourceStore:
         stored["idempotency_key"] = doc_id
         stored["payload_hash"] = incoming_hash
         self._docs[doc_id] = stored
+        self._note_change(doc_id)
         return StoredRevision(doc_id=doc_id, rev=rev, outcome=outcome)
 
     def put_if_absent(self, document: dict) -> StoredRevision:
@@ -577,6 +603,7 @@ class InMemoryCouchDBSourceStore:
         stored["idempotency_key"] = doc_id
         stored["payload_hash"] = incoming_hash
         self._docs[doc_id] = stored
+        self._note_change(doc_id)
         return StoredRevision(doc_id=doc_id, rev=rev, outcome="accepted")
 
     def get(self, doc_id: str) -> dict | None:
@@ -626,6 +653,7 @@ class InMemoryCouchDBSourceStore:
         stored["idempotency_key"] = doc_id
         stored["payload_hash"] = incoming_hash
         self._docs[doc_id] = stored
+        self._note_change(doc_id)
         return StoredRevision(
             doc_id=doc_id,
             rev=rev,
@@ -717,6 +745,7 @@ class InMemoryCouchDBSourceStore:
         updated["idempotency_key"] = doc_id
         updated["payload_hash"] = incoming_hash
         self._docs[doc_id] = updated
+        self._note_change(doc_id)
         return StoredRevision(doc_id=doc_id, rev=rev, outcome="conflict_resolved")
 
     def find_by_session(self, *, session_id_hash: str, doc_type: str = "") -> list[dict]:
@@ -735,6 +764,7 @@ class InMemoryCouchDBSourceStore:
             return False
         _require_active_source_revision_allows_delete(store=self, document=existing)
         self._docs.pop(doc_id)
+        self._note_change(doc_id, deleted=True)
         return True
 
     def all_docs(self) -> list[dict]:

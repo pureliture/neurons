@@ -575,6 +575,45 @@ class CouchDBHttpSourceStore:
             raise CouchDBError("database update sequence read failed")
         return str(payload["update_seq"])
 
+    def changes_since(self, *, since: str, limit: int = 2000) -> list[dict[str, object]]:
+        """Return bounded changed-document rows (seq, id, deleted) since a watermark."""
+
+        from urllib.parse import quote
+
+        target = max(0, int(limit))
+        if target == 0:
+            return []
+        rows: list[dict[str, object]] = []
+        watermark = str(since or "0")
+        while len(rows) < target:
+            status, payload = self._request(
+                "GET",
+                f"/{self.db}/_changes?since={quote(watermark, safe='')}"
+                f"&limit={min(target - len(rows), 1000)}&style=main_only",
+            )
+            if status != 200:
+                raise CouchDBError(f"_changes failed: HTTP {status}")
+            page = payload.get("results") if isinstance(payload, dict) else None
+            if not page:
+                break
+            for row in page:
+                if not isinstance(row, dict):
+                    continue
+                rows.append(
+                    {
+                        "seq": str(row.get("seq") or ""),
+                        "id": str(row.get("id") or ""),
+                        "deleted": bool(row.get("deleted")),
+                    }
+                )
+            if len(rows) >= target:
+                break
+            next_watermark = str(page[-1].get("seq") or "")
+            if not next_watermark or next_watermark == watermark:
+                break
+            watermark = next_watermark
+        return rows[:target]
+
     def find_by_type_with_execution_stats(
         self,
         doc_type: str,
