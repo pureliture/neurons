@@ -67,6 +67,7 @@ def _select_sessions_needing_projection(
             "session_id_hash",
             "projection_status",
             "source_hash",
+            "failure_source_hash",
             hash_field,
         ],
         selector=scope_selector if backend == "postgres_pgvector" else {"projection_status": ProjectionStatus.PROJECTED, **scope_selector},
@@ -83,6 +84,22 @@ def _select_sessions_needing_projection(
         and str(state.get("_id") or "") == projection_state_doc_id(session_id_hash)
         and str(state.get("projection_status") or "") == ProjectionStatus.PROJECTED
     }
+    blocked_source_hashes: dict[str, str] = {}
+    if backend == "postgres_pgvector":
+        from ..rag_ingress.pg_embedding_privacy import SECRET_EGRESS_FAILURE_REASON
+
+        # Secret-egress rejections are policy outcomes, not transient faults. Leave the
+        # session out of the queue while its source revision equals the blocked one; a
+        # source change (or operator action) naturally re-queues it.
+        blocked_source_hashes = {
+            session_id_hash: str(state.get("failure_source_hash") or "")
+            for state in states
+            if (session_id_hash := str(state.get("session_id_hash") or ""))
+            and str(state.get("_id") or "") == projection_state_doc_id(session_id_hash)
+            and str(state.get("projection_status") or "") == ProjectionStatus.FAILED
+            and str(state.get("failure_reason") or "") == SECRET_EGRESS_FAILURE_REASON
+            and str(state.get("failure_source_hash") or "")
+        }
     selected: list[dict] = []
     canonical_session_ids: set[str] = set()
     current_only_session_ids: list[str] = []
@@ -130,6 +147,8 @@ def _select_sessions_needing_projection(
             or not current_source_hash
             or projected_source_hash != current_source_hash
         ):
+            if blocked_source_hashes.get(session_id_hash) == current_source_hash:
+                continue
             selected.append(session)
 
     # A corrective current-source import can legitimately have no canonical
@@ -175,6 +194,8 @@ def _select_sessions_needing_projection(
             or not resolved.source_hash
             or projected_source_hash != resolved.source_hash
         ):
+            if blocked_source_hashes.get(session_id_hash) == resolved.source_hash:
+                continue
             selected.append(session)
     return selected
 

@@ -14,6 +14,9 @@ import re
 
 
 _ERROR = "PG embedding input rejected by secret egress policy"
+# Public aliases: callers record/observe this policy outcome without importing privates.
+EGRESS_POLICY_ERROR = _ERROR
+SECRET_EGRESS_FAILURE_REASON = "secret_egress_policy"
 # Allow only whole, explicit redaction markers (not prefixes with secret tails).
 _REDACTED = re.compile(
     r"(?:<redacted(?:[:_-]secret)?>|\[redacted(?:[:_-]secret)?\]|\*{3,})",
