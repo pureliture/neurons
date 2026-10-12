@@ -276,6 +276,8 @@ def validate_memory_card_envelope(card: Mapping[str, Any]) -> dict:
         # the strict validator at its boundary; the model validator keeps the
         # legacy read/write lane compatible.
         validate_content_hash(str(normalized["content_hash"]), "content_hash", strict=False)
+    if "observed_at" in normalized:
+        validate_observed_at(normalized["observed_at"])
     _require_number(normalized.get("confidence"), "confidence")
     _ensure_no_forbidden_content(normalized.get("summary"), "summary")
     _ensure_no_forbidden_content(normalized.get("render_text"), "render_text")
@@ -300,6 +302,20 @@ def validate_memory_card_envelope(card: Mapping[str, Any]) -> dict:
     if reason_required:
         validate_reason_capsule(normalized.get("reason_capsule"))
     return normalized
+
+
+def validate_observed_at(value: Any) -> str:
+    """Require an explicit timezone while preserving the original timestamp."""
+    if not isinstance(value, str):
+        raise ValueError("observed_at must be a timezone-aware ISO-8601 string")
+    _ensure_no_forbidden_content(value, "observed_at")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if "T" not in value or parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("missing timestamp timezone")
+    except ValueError:
+        raise ValueError("observed_at must be a timezone-aware ISO-8601 string") from None
+    return value
 
 
 def validate_content_hash(
@@ -433,7 +449,23 @@ def validate_source_locator(ref: Any, *, field_name: str = "source_ref") -> Any:
             raise ValueError(f"{field_name}.{key_text} is not an opaque locator field")
         _ensure_no_forbidden_content(key_text, f"{field_name}.{key_text}")
         _ensure_no_forbidden_content(value, f"{field_name}.{key_text}")
+        # A locator stays opaque at every depth. A nested body/content/url-like
+        # key would smuggle source text past the flat top-level check.
+        _reject_forbidden_ref_keys(value, f"{field_name}.{key_text}")
     return dict(ref)
+
+
+def _reject_forbidden_ref_keys(value: Any, path: str) -> None:
+    """Reject forbidden locator keys inside nested mappings and lists."""
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            key_text = str(key)
+            if key_text in _FORBIDDEN_REF_KEYS:
+                raise ValueError(f"{path}.{key_text} is not an opaque locator field")
+            _reject_forbidden_ref_keys(child, f"{path}.{key_text}")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            _reject_forbidden_ref_keys(child, f"{path}[{index}]")
 
 
 def _safe_evidence_refs(evidence_refs: list[dict]) -> list[dict]:

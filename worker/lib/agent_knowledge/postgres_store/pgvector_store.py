@@ -340,15 +340,28 @@ class PgVectorStore:
                 row = cur.fetchone()
                 if row is not None:
                     if (_row_value(row, "steward_envelope", 0) is None or
-                        _row_value(row, "content_hash", 1) != pg_card.content_hash or
-                        _row_value(row, "lifecycle_state", 2) in ('accepted', 'human_accepted', 'auto_accepted', 'human_rejected', 'rejected')):
-                        raise ValueError("proposal identity collision or already committed")
+                        _row_value(row, "content_hash", 1) != pg_card.content_hash):
+                        raise ValueError("proposal identity collision")
                     stored = _json_value(_row_value(row, "steward_envelope", 0))
                     if any(stored.get(field) != envelope.get(field) for field in ("project", "brain_id", "scope")):
                         raise ValueError("steward proposal scope collision")
+                    kind = str(envelope.get("steward_proposal_kind") or "")
+                    committed = _row_value(row, "lifecycle_state", 2) not in ("candidate", "needs_review", "suggested_accept")
+                    if committed and kind not in ("candidate", "needs_review"):
+                        raise ValueError("proposal identity collision or already committed")
+                    identity_fields = ("card_type", "source_refs", "span_refs", "provider", "observed_at")
+                    if kind != "stale":
+                        # Stale claims use (target, reason) identity and stamp a
+                        # fresh observation time on each retry. Candidate identity
+                        # instead binds the immutable extraction payload.
+                        identity_fields += ("typed_payload", "candidate_id", "idempotency_key")
+                    if any(stored.get(field) != envelope.get(field) for field in identity_fields):
+                        raise ValueError("steward candidate identity collision")
                     if (stored.get('steward_proposal_kind') != envelope.get('steward_proposal_kind') or
                         stored.get('steward_target_memory_id') != envelope.get('steward_target_memory_id')):
                         raise ValueError('conflicting steward proposal')
+                    # Safe replay is an exact immutable candidate match, not a
+                    # proposal update. A concurrent human decision remains intact.
                     return stored
             # A proposal is not approved. Do not enqueue embedding/graph work
             # before the restricted decision commits the accepted authority.
@@ -469,10 +482,16 @@ class PgVectorStore:
                     card_id = str(changed['memory_id'])
                     if changed['content_hash'] != _row_value(rows[card_id], 'content_hash', 2):
                         raise ValueError("steward content hash cannot change during transition")
+                    # Reuse the existing SQL authorization rule for the envelope
+                    # and immutable audit snapshot as well. This changes only
+                    # their representation, not authority/recall eligibility.
+                    changed['authorization_status'] = (
+                        'active' if changed.get('approval_state') in ('approved', 'auto_accepted') else 'disabled'
+                    )
                     cur.execute("""UPDATE memory_cards SET steward_envelope = %s::jsonb, lifecycle_state = %s,
                         authorization_status = %s, currentness = %s, valid_from = COALESCE(%s::timestamptz, valid_from), valid_to = %s, updated_at = NOW()
                         WHERE memory_id = %s""", (_json_text(changed), changed['lifecycle_state'],
-                        'active' if changed.get('approval_state') in ('approved', 'auto_accepted') else 'disabled',
+                        changed['authorization_status'],
                         changed.get('currentness') or 'unknown', changed.get('valid_from'), changed.get('valid_to'), card_id))
                     if (changed.get('approval_state') in ('approved', 'auto_accepted')
                             and changed.get('currentness') == 'current'
