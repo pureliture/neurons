@@ -302,43 +302,36 @@ class BrainStewardService:
         normalized = re.sub(r"[^0-9a-z가-힣]+", " ", str(title or "").lower()).strip()
         return f"{card_type}|{normalized}"
 
+    @classmethod
+    def _review_subject_key(cls, card: Mapping[str, Any]) -> tuple[str, str, str, str]:
+        return (_text(card, "project"), _text(card, "brain_id"), _text(card, "scope"),
+                cls._subject_key(_text(card, "card_type"), _text(card, "title")))
+
     def _classify_review_items(self, items: list[dict], *, scope_project: str = "") -> tuple[list[dict], dict]:
-        """Review 응답을 맥락 영향 기준으로 분류한다.
-
-        - authority_change: stale/supersede 제안. 승인하면 기존 current 카드가 강등/교체된다.
-        - competes_with_current: 같은 제목·유형의 current 카드가 이미 있다. 승인하면 한 주제에
-          current가 두 개가 되어 새 에이전트가 상반된 맥락을 받는다.
-        - additive: current 대응이 없다. 승인하면 새 기록이 하나 추가될 뿐이다.
-
-        실패 방향은 보수적으로: current 색인을 못 읽으면 additive로 부르지 않고 전부
-        needs_eyes로 남긴다.
-        """
+        """완전한 current 대조와 후보 사이의 중복 검사. 분류는 승인 권한이 아니다."""
         by_class = {"authority_change": 0, "competes_with_current": 0, "additive": 0}
         classified: list[dict] = []
-        current_index: dict[str, str] | None
+        current_index: dict[tuple, str] | None
         try:
             current_index = {}
-            for card in self._pg().list_steward_cards(project=scope_project or "",
-                                                       accepted_only=True,
-                                                       current_only=True, limit=100):
-                key = self._subject_key(str(card.get("card_type") or ""),
-                                        str(card.get("title") or ""))
-                current_index.setdefault(key, str(card.get("memory_id") or ""))
-        except Exception:  # noqa: BLE001 - never report unknown state as safe
+            for card in self._pg().list_steward_current_context(project=scope_project or ""):
+                current_index.setdefault(self._review_subject_key(card), str(card.get("memory_id") or ""))
+        except Exception:  # noqa: BLE001 - incomplete knowledge is never a safe result
             current_index = None
-
+        queue_subjects: dict[tuple, set[str]] = {}
         for item in items:
-            proposal_kind = str(item.get("proposal_kind") or "")
-            memory_id = str(item.get("memory_id") or "")
-            supersedes = item.get("supersedes") or []
+            queue_subjects.setdefault(self._review_subject_key(item), set()).add(_text(item, "memory_id"))
+        for original in items:
+            item = dict(original)
+            proposal_kind = _text(item, "proposal_kind")
+            memory_id = _text(item, "memory_id")
             flags: list[str] = []
             review_class = "additive"
-            if proposal_kind in {"stale", "supersede"} or supersedes:
+            if proposal_kind in {"stale", "supersede"} or item.get("supersedes"):
                 review_class = "authority_change"
                 flags.append("demotes_or_replaces_current")
             else:
-                key = self._subject_key(str(item.get("card_type") or ""),
-                                        str(item.get("title") or ""))
+                key = self._review_subject_key(item)
                 if current_index is None:
                     review_class = "competes_with_current"
                     flags.append("current_index_unavailable")
@@ -348,21 +341,36 @@ class BrainStewardService:
                         review_class = "competes_with_current"
                         flags.append("same_subject_already_current")
                         item["conflicts_with_memory_id"] = conflict
+                if len(queue_subjects[key]) > 1:
+                    review_class = "competes_with_current"
+                    flags.append("same_subject_in_review_bundle")
             by_class[review_class] += 1
             item["review_class"] = review_class
             item["review_flags"] = flags
             classified.append(item)
-
         summary = {
-            "total": len(classified),
-            "by_class": dict(by_class),
+            "total": len(classified), "by_class": by_class,
             "bulk_safe_count": by_class["additive"],
             "needs_eyes_count": len(classified) - by_class["additive"],
             "criterion": "context_integrity_not_sentence_accuracy",
+            "classification_is_advisory": True,
+            "current_index_available": current_index is not None,
         }
-        if current_index is None:
-            summary["current_index_available"] = False
         return classified, summary
+
+    def review_bundle_read(self, *, project: str, brain_id: str, scope: str, member_ids: list[str]) -> dict:
+        """정확히 지정한 후보를 맥락 묶음으로 읽는다. 쓰기·승인·모델 호출 없음."""
+        from .review_bundle import read_bundle
+        return read_bundle(self, project=project, brain_id=brain_id, scope=scope, member_ids=member_ids)
+
+    def review_bundle_commit(self, *, project: str, brain_id: str, scope: str, member_ids: list[str],
+                             snapshot_token: str, action: str, actor: str, decision_id: str, reason: str = "") -> dict:
+        """사람이 확인한 정확한 묶음만 결정한다. 기본 거부·자동 수락은 열지 않는다."""
+        self._guard_restricted("memory_review_bundle_commit")
+        self._guard_writable()
+        from .review_bundle import commit_bundle
+        return commit_bundle(self, project=project, brain_id=brain_id, scope=scope, member_ids=member_ids,
+                             snapshot_token=snapshot_token, action=action, actor=actor, decision_id=decision_id, reason=reason)
 
     # -------------------------------------------------------------- proposal
 
@@ -837,6 +845,7 @@ class BrainStewardService:
 
         return {
             "memory_id": _text(card, "memory_id"),
+            "brain_id": _text(card, "brain_id"),
             "card_type": _text(card, "card_type"),
             "scope": _text(card, "scope"),
             "project": _text(card, "project"),

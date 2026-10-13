@@ -9,6 +9,7 @@ from agent_knowledge import mcp_jsonrpc
 from agent_knowledge.mcp_tools import (
     MEMORY_AUTHORITY_PACK_READ_TOOL_NAME,
     MEMORY_CANDIDATE_CREATE_TOOL_NAME,
+    MEMORY_REVIEW_BUNDLE_READ_TOOL_NAME,
     MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME,
     MEMORY_STALE_MARK_TOOL_NAME,
     MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME,
@@ -18,6 +19,7 @@ from agent_knowledge.mcp_tools import (
 _READ_PROPOSAL_STEWARD_TOOL_NAMES = (
     MEMORY_AUTHORITY_PACK_READ_TOOL_NAME,
     MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME,
+    MEMORY_REVIEW_BUNDLE_READ_TOOL_NAME,
     MEMORY_CANDIDATE_CREATE_TOOL_NAME,
     MEMORY_STALE_MARK_TOOL_NAME,
     MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME,
@@ -37,6 +39,12 @@ _READ_PROPOSAL_TOOL_ARGS = {
     MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME: {
         "project": "project-alpha",
         "limit": 10,
+    },
+    MEMORY_REVIEW_BUNDLE_READ_TOOL_NAME: {
+        "project": "project-alpha",
+        "brain_id": "/project/project-alpha",
+        "scope": "project",
+        "member_ids": ["member-two", "member-one"],
     },
     MEMORY_CANDIDATE_CREATE_TOOL_NAME: {
         "review_reason": "unit-test reason",
@@ -68,6 +76,10 @@ class _FakeSteward:
     def review_queue_list(self, **kwargs: str | int) -> dict:
         self.calls.append((MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME, dict(kwargs)))
         return {"tool": MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME}
+
+    def review_bundle_read(self, **kwargs: object) -> dict:
+        self.calls.append((MEMORY_REVIEW_BUNDLE_READ_TOOL_NAME, dict(kwargs)))
+        return {"tool": MEMORY_REVIEW_BUNDLE_READ_TOOL_NAME}
 
     def candidate_create(self, **kwargs: object) -> dict:
         self.calls.append((MEMORY_CANDIDATE_CREATE_TOOL_NAME, dict(kwargs)))
