@@ -656,14 +656,22 @@ class GraphFirstResolver:
         return decoded
 
 
-def _item(card: Mapping[str, Any]) -> dict[str, Any]:
-    return {"id": _safe(card.get("memory_id") or card.get("id"), 180), "card_type": _safe(card.get("card_type"), 64), "title": _safe(card.get("title"), 96), "summary": _safe(card.get("summary"), 144), "currentness": _safe(card.get("currentness") or "current", 32), "content_hash": _safe(card.get("content_hash"), 80)}
+def _item(card: Mapping[str, Any], *, include_created_at: bool = True) -> dict[str, Any]:
+    item = {"id": _safe(card.get("memory_id") or card.get("id"), 180), "card_type": _safe(card.get("card_type"), 64), "title": _safe(card.get("title"), 96), "summary": _safe(card.get("summary"), 144), "currentness": _safe(card.get("currentness") or "current", 32), "content_hash": _safe(card.get("content_hash"), 80)}
+    created_at = card.get("created_at") or card.get("observed_at")
+    if include_created_at and created_at:
+        # A card can stay current long after its observation. Expose when the
+        # record was created so a reader can separate historical facts from
+        # current state instead of having to stale-mark every old card.
+        item["created_at"] = _safe(created_at, 40)
+    return item
 
 
 def _context_item(card: Mapping[str, Any]) -> dict[str, Any]:
     card_type = str(card.get("card_type") or "")
     if card_type not in {"decision", "preference", "task", "work", "work_unit", "status"}:
-        return _item(card)
+        # Context stays a compact startup pack: identity only, no created_at.
+        return _item(card, include_created_at=False)
     # A startup pack trades the per-card content hash for readable section text:
     # the hash costs ~87 bytes per card while a 3 KB tool result that carries the
     # payload twice leaves only ~200 bytes of text budget per card. Full-hash

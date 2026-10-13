@@ -20,6 +20,7 @@ validation 규칙을 만들지 않는다.
 from __future__ import annotations
 
 import hashlib
+import re
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Mapping
@@ -275,18 +276,93 @@ class BrainStewardService:
         return assert_public_safe(response, "authority_pack")
 
     def review_queue_list(self, *, project: str = "", limit: int = 20) -> dict:
-        """사람이 검토해야 할 candidate / stale / supersede proposal 목록(redacted)."""
+        """사람이 검토해야 할 candidate / stale / supersede proposal 목록(redacted).
+
+        읽기 단계에서 승인 부담을 줄이기 위해 문장 단위가 아니라 "맥락이 뒤집히는가"로
+        분류한다. 승인·거부·범위는 그대로 인간 게이트에 남는다.
+        """
 
         cards = self._pg().list_steward_cards(project=project, review_only=True,
                                               limit=min(max(int(limit), 1), 100))
         items = [self._review_item(card) for card in cards]
+        classified, summary = self._classify_review_items(items, scope_project=project)
         response = {
             "schema_version": "brain_steward_review_queue.v1",
             "project": project or "",
-            "count": len(items),
-            "items": items,
+            "count": len(classified),
+            "review_summary": summary,
+            "bulk_safe_ids": [i["memory_id"] for i in classified if i.get("review_class") == "additive"],
+            "needs_eyes_ids": [i["memory_id"] for i in classified if i.get("review_class") != "additive"],
+            "items": classified,
         }
         return assert_public_safe(response, "review_queue")
+
+    @staticmethod
+    def _subject_key(card_type: str, title: str) -> str:
+        normalized = re.sub(r"[^0-9a-z가-힣]+", " ", str(title or "").lower()).strip()
+        return f"{card_type}|{normalized}"
+
+    def _classify_review_items(self, items: list[dict], *, scope_project: str = "") -> tuple[list[dict], dict]:
+        """Review 응답을 맥락 영향 기준으로 분류한다.
+
+        - authority_change: stale/supersede 제안. 승인하면 기존 current 카드가 강등/교체된다.
+        - competes_with_current: 같은 제목·유형의 current 카드가 이미 있다. 승인하면 한 주제에
+          current가 두 개가 되어 새 에이전트가 상반된 맥락을 받는다.
+        - additive: current 대응이 없다. 승인하면 새 기록이 하나 추가될 뿐이다.
+
+        실패 방향은 보수적으로: current 색인을 못 읽으면 additive로 부르지 않고 전부
+        needs_eyes로 남긴다.
+        """
+        by_class = {"authority_change": 0, "competes_with_current": 0, "additive": 0}
+        classified: list[dict] = []
+        current_index: dict[str, str] | None
+        try:
+            current_index = {}
+            for card in self._pg().list_steward_cards(project=scope_project or "",
+                                                       accepted_only=True,
+                                                       current_only=True, limit=100):
+                key = self._subject_key(str(card.get("card_type") or ""),
+                                        str(card.get("title") or ""))
+                current_index.setdefault(key, str(card.get("memory_id") or ""))
+        except Exception:  # noqa: BLE001 - never report unknown state as safe
+            current_index = None
+
+        for item in items:
+            proposal_kind = str(item.get("proposal_kind") or "")
+            memory_id = str(item.get("memory_id") or "")
+            supersedes = item.get("supersedes") or []
+            flags: list[str] = []
+            review_class = "additive"
+            if proposal_kind in {"stale", "supersede"} or supersedes:
+                review_class = "authority_change"
+                flags.append("demotes_or_replaces_current")
+            else:
+                key = self._subject_key(str(item.get("card_type") or ""),
+                                        str(item.get("title") or ""))
+                if current_index is None:
+                    review_class = "competes_with_current"
+                    flags.append("current_index_unavailable")
+                else:
+                    conflict = current_index.get(key)
+                    if conflict and conflict != memory_id:
+                        review_class = "competes_with_current"
+                        flags.append("same_subject_already_current")
+                        item["conflicts_with_memory_id"] = conflict
+            by_class[review_class] += 1
+            item["review_class"] = review_class
+            item["review_flags"] = flags
+            classified.append(item)
+
+        summary = {
+            "total": len(classified),
+            "by_class": dict(by_class),
+            "bulk_safe_count": by_class["additive"],
+            "needs_eyes_count": len(classified) - by_class["additive"],
+            "criterion": "context_integrity_not_sentence_accuracy",
+        }
+        if current_index is None:
+            summary["current_index_available"] = False
+        return classified, summary
 
     # -------------------------------------------------------------- proposal
 

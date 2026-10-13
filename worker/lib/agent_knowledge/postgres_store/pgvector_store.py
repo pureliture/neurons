@@ -1213,7 +1213,7 @@ class PgVectorStore:
                 cur.execute(
                     f"""SELECT memory_id, project, card_type, title, summary,
                                typed_payload, currentness, content_hash, source_ref,
-                               lifecycle_state, authorization_status
+                               lifecycle_state, authorization_status, created_at
                           FROM memory_cards WHERE {' AND '.join(clauses)}
                          ORDER BY memory_id LIMIT %s""",
                     [*params, limit],
