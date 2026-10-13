@@ -323,6 +323,30 @@ class PgVectorStore:
             )
         return card.memory_id
 
+    @staticmethod
+    def _lock_steward_authority_on(db: Any) -> None:
+        """Fence short authority writes before any decision/card lock or read.
+
+        All steward entry points use table -> global advisory -> narrow locks.
+        SHARE ROW EXCLUSIVE also fences generic/direct SQL card writers, whose
+        automatic ROW EXCLUSIVE lock conflicts with it. Ordinary readers are
+        not blocked. Keep callbacks bounded: this serializes authority writers
+        globally for the duration of the transaction, not just one scope.
+        Local timeouts cap waits/statements at 1s/5s without lengthening a
+        caller's shorter existing limits (zero means unlimited in PostgreSQL).
+        """
+        with db.cursor() as cur:
+            cur.execute("""SELECT set_config('lock_timeout',
+                (SELECT (CASE WHEN setting::bigint = 0 THEN %s ELSE LEAST(setting::bigint, %s) END)::text || 'ms'
+                   FROM pg_settings WHERE name = 'lock_timeout'), true),
+                set_config('statement_timeout',
+                (SELECT (CASE WHEN setting::bigint = 0 THEN %s ELSE LEAST(setting::bigint, %s) END)::text || 'ms'
+                   FROM pg_settings WHERE name = 'statement_timeout'), true)""",
+                (1000, 1000, 5000, 5000))
+            cur.execute("LOCK TABLE memory_cards IN SHARE ROW EXCLUSIVE MODE")
+            cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                        ('lbrain-steward-authority-write-v1',))
+
     def put_steward_proposal(self, card: Mapping[str, Any]) -> dict[str, Any]:
         """Persist a non-authoritative steward envelope; never overwrite a committed card."""
         from ..session_memory.llm_brain_service import _build_pg_card
@@ -334,6 +358,7 @@ class PgVectorStore:
             raise ValueError('steward proposal must be pending and disabled')
         pg_card = _build_pg_card(envelope, active=False)
         with self.transaction() as db:
+            self._lock_steward_authority_on(db)
             with db.cursor() as cur:
                 cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (pg_card.memory_id,))
                 cur.execute("SELECT steward_envelope, content_hash, lifecycle_state FROM memory_cards WHERE memory_id = %s FOR UPDATE", (pg_card.memory_id,))
@@ -400,6 +425,75 @@ class PgVectorStore:
                 cur.execute(f"SELECT steward_envelope FROM memory_cards WHERE {' AND '.join(clauses)} ORDER BY created_at DESC, memory_id LIMIT %s", (*params, int(limit)))
                 return [_json_value(_row_value(row, "steward_envelope", 0)) for row in cur.fetchall()]
 
+    def list_steward_current_context(self, project: str = "") -> list[dict[str, Any]]:
+        """Read the complete live steward context in one statement, without a cap."""
+        clauses = [
+            "steward_envelope IS NOT NULL",
+            "lifecycle_state IN ('accepted', 'human_accepted', 'auto_accepted')",
+            "steward_envelope->>'approval_state' IN ('approved', 'auto_accepted')",
+            "authorization_status = 'active'",
+            "currentness = 'current'",
+            "valid_from <= statement_timestamp()",
+            "(valid_to IS NULL OR valid_to > statement_timestamp())",
+            "coalesce(steward_envelope->>'steward_proposal_kind', '') <> 'stale'",
+            _STATUS_EXPIRY_FILTER.replace("%s", "statement_timestamp()"),
+        ]
+        params: list[Any] = []
+        if project:
+            clauses.append("project = %s")
+            params.append(project)
+        with self._scope() as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    f"SELECT steward_envelope FROM memory_cards WHERE {' AND '.join(clauses)} ORDER BY memory_id",
+                    params,
+                )
+                return [_json_value(_row_value(row, "steward_envelope", 0)) for row in cur.fetchall()]
+
+    def read_steward_bundle_state(
+        self, *, project: str, brain_id: str, scope: str,
+        member_ids: list[str] | tuple[str, ...], conn: Any | None = None,
+    ) -> dict[str, Any]:
+        """Read members and the complete scoped current set in one SQL snapshot.
+
+        Accepted/current rows deliberately include disabled and out-of-window
+        rows. Their later reactivation must invalidate a signed state digest.
+        These internal records are not a public authority/recall response.
+        """
+        ids = _validate_steward_bundle_scope(project, brain_id, scope, member_ids)
+        with self._scope(conn=conn) as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    f"""SELECT steward_envelope, {', '.join(_STEWARD_BUNDLE_SQL_FIELDS)}
+                        FROM memory_cards
+                        WHERE memory_id = ANY(%s)
+                           OR (project = %s AND steward_envelope IS NOT NULL
+                               AND steward_envelope->>'brain_id' = %s
+                               AND steward_envelope->>'scope' = %s
+                               AND lifecycle_state IN ('accepted', 'human_accepted', 'auto_accepted')
+                               AND currentness = 'current')
+                        ORDER BY memory_id""",
+                    (ids, project, brain_id, scope),
+                )
+                records = [_steward_bundle_record(row) for row in cur.fetchall()]
+        for record in records:
+            card, sql = record['card'], record['sql']
+            if not isinstance(card, dict) or card.get('memory_id') != sql['memory_id']:
+                raise ValueError('unknown steward member or envelope identity mismatch')
+            if (sql['project'] != project or card.get('project') != project
+                    or card.get('brain_id') != brain_id or card.get('scope') != scope):
+                raise ValueError('steward bundle member scope mismatch')
+        requested_ids = set(ids)
+        if requested_ids - {record['sql']['memory_id'] for record in records}:
+            raise ValueError('unknown steward bundle member')
+        records.sort(key=lambda record: record['sql']['memory_id'])
+        return {
+            'members': [record for record in records if record['sql']['memory_id'] in requested_ids],
+            'current': [record for record in records
+                        if record['sql']['lifecycle_state'] in ('accepted', 'human_accepted', 'auto_accepted')
+                        and record['sql']['currentness'] == 'current'],
+        }
+
     def list_steward_project_counts(self) -> list[tuple[str, int]]:
         with self._scope() as db:
             with db.cursor() as cur:
@@ -420,12 +514,79 @@ class PgVectorStore:
                 return {name: _row_value(row, name, index) for index, name in enumerate(
                     ('decision_id', 'memory_id', 'content_hash', 'action', 'actor', 'target_memory_id', 'result_card', 'result_target'))}
 
+    def steward_bundle_decision(
+        self, *, decision_id: str, request_fingerprint: str, project: str,
+        brain_id: str, scope: str, member_ids: list[str] | tuple[str, ...], decide: Any,
+    ) -> dict[str, Any]:
+        """Persist bounded child authority decisions and their full safe response atomically.
+
+        The trusted callback re-reads and validates the signed state and all
+        transitions using the scoped store. No model/network work belongs in
+        this short globally serialized transaction.
+
+        A caller-owned connection is refused at this outer entry point: its
+        transaction() cannot guarantee rollback if the caller catches errors.
+        Only the callback's child store uses an injected connection.
+        """
+        if self.connection is not None:
+            raise ValueError('steward bundle decision requires a store-owned outer transaction')
+        if (any(not isinstance(value, str) or not value for value in (decision_id, request_fingerprint))
+                or not callable(decide)):
+            raise ValueError('steward bundle decision identity and callback required')
+        ids = sorted(_validate_steward_bundle_scope(project, brain_id, scope, member_ids))
+        if not ids:
+            raise ValueError('steward bundle decision members required')
+        with self.transaction() as db:
+            # An owned connection may inherit REPEATABLE READ from its DSN.
+            # Set this before any SELECT so reads after a waited-for lock see
+            # all writes committed by the preceding authority writer.
+            with db.cursor() as cur:
+                cur.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+            self._lock_steward_authority_on(db)
+            with db.cursor() as cur:
+                cur.execute("""SELECT request_fingerprint, project, brain_id, scope, member_ids, result
+                    FROM steward_bundle_decisions WHERE decision_id = %s""", (decision_id,))
+                previous = cur.fetchone()
+                if previous is not None:
+                    expected = (request_fingerprint, project, brain_id, scope)
+                    stored = tuple(_row_value(previous, name, index) for index, name in enumerate(
+                        ('request_fingerprint', 'project', 'brain_id', 'scope')))
+                    if stored != expected or _json_value(_row_value(previous, 'member_ids', 4)) != ids:
+                        raise ValueError('conflicting steward bundle decision id')
+                    # Retry returns the decision-time response before touching
+                    # members, expiry, fingerprints of current rows, or callback.
+                    raw_result = _row_value(previous, 'result', 5)
+                    stored_result = _json_value(raw_result)
+                    if raw_result is None or not isinstance(stored_result, dict):
+                        raise ValueError('steward bundle decision result unavailable for safe retry')
+                    return stored_result
+            scoped_store = PgVectorStore(connection=db, pgvector_version=self.pgvector_version)
+            result = decide(scoped_store)
+            if not isinstance(result, dict):
+                raise ValueError('steward bundle decision result must be a JSON object')
+            try:
+                result_json = json.dumps(result, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
+            except (TypeError, ValueError) as exc:
+                raise ValueError('steward bundle decision result must be serializable JSON') from exc
+            with db.cursor() as cur:
+                cur.execute("""INSERT INTO steward_bundle_decisions
+                    (decision_id, request_fingerprint, project, brain_id, scope, member_ids, result)
+                    VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+                    RETURNING result""",
+                    (decision_id, request_fingerprint, project, brain_id, scope,
+                     _json_text(ids), result_json))
+                row = cur.fetchone()
+                if row is None:
+                    raise RuntimeError('steward bundle audit insert returned no result')
+                return _json_value(_row_value(row, 'result', 0))
+
     def steward_decision(self, *, decision_id: str, memory_id: str, action: str, actor: str,
                          content_hash: str, target_memory_id: str = "", transform: Any) -> dict[str, Any]:
         """Lock, validate and change steward rows, audit and outboxes in one PG transaction."""
         if not decision_id or not actor or action not in {'approve', 'auto_accept', 'reject', 'supersede', 'stale'}:
             raise ValueError("steward decision identity required")
         with self.transaction() as db:
+            self._lock_steward_authority_on(db)
             with db.cursor() as cur:
                 # Serialize same-decision retries before checking the audit row.
                 cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (decision_id,))
@@ -1904,6 +2065,38 @@ class PgVectorStore:
                 **{**chunk.__dict__, "content_hash": content_hash}
             )
         return chunk
+
+
+_STEWARD_BUNDLE_SQL_FIELDS = (
+    'memory_id', 'project', 'card_type', 'title', 'summary', 'typed_payload',
+    'lifecycle_state', 'authorization_status', 'currentness', 'confidence',
+    'valid_from', 'valid_to', 'content_hash', 'source_ref',
+)
+
+
+def _validate_steward_bundle_scope(
+    project: str, brain_id: str, scope: str, member_ids: Any,
+) -> list[str]:
+    if any(not isinstance(value, str) or not value for value in (project, brain_id, scope)):
+        raise ValueError('steward bundle project, brain_id and scope required')
+    if len(project) > 64 or not isinstance(member_ids, (list, tuple)):
+        raise ValueError('invalid steward bundle scope or member identities')
+    if (any(not isinstance(value, str) or not 1 <= len(value) <= 64 for value in member_ids)
+            or len(set(member_ids)) != len(member_ids)):
+        raise ValueError('unique steward bundle member identities required')
+    return list(member_ids)
+
+
+def _steward_bundle_record(row: Any) -> dict[str, Any]:
+    values = {name: _row_value(row, name, index)
+              for index, name in enumerate(_STEWARD_BUNDLE_SQL_FIELDS, 1)}
+    values['confidence'] = float(values['confidence'])
+    for name in ('valid_from', 'valid_to'):
+        values[name] = (None if values[name] is None else
+                        _as_aware_datetime(values[name]).astimezone(timezone.utc).isoformat())
+    for name in ('typed_payload', 'source_ref'):
+        values[name] = _json_value(values[name])
+    return {'card': _json_value(_row_value(row, 'steward_envelope', 0)), 'sql': values}
 
 
 _CARD_COLUMNS = (

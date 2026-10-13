@@ -148,6 +148,12 @@ class _RecordingCursor:
                 return
         if query.startswith(("SAVEPOINT ", "RELEASE SAVEPOINT ")):
             return
+        # Steward authority lock helper: bounded local timeouts and the table
+        # fence run before narrow locks; this double journals no new state.
+        if query.startswith("SELECT set_config('lock_timeout'"):
+            return
+        if query == "LOCK TABLE memory_cards IN SHARE ROW EXCLUSIVE MODE":
+            return
         if query.startswith("SELECT steward_envelope"):
             row = self.connection.rows.get(params[0])
             if row is not None:

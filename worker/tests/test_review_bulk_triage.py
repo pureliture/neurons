@@ -13,6 +13,10 @@ class FakeStore:
         self.current = list(current)
         self.current_reads = 0
 
+    def list_steward_current_context(self, *, project=""):
+        self.current_reads += 1
+        return [c for c in self.current if not project or c.get("project") == project]
+
     def list_steward_cards(self, *, project="", review_only=False, accepted_only=False,
                            current_only=False, limit=20):
         if accepted_only or current_only:
@@ -82,6 +86,9 @@ def test_authority_change_proposals_always_need_eyes():
 
 def test_unreadable_current_index_fails_closed_to_individual_review():
     class BrokenStore(FakeStore):
+        def list_steward_current_context(self, **kwargs):
+            raise RuntimeError("read failure")
+
         def list_steward_cards(self, **kwargs):
             if kwargs.get("accepted_only") or kwargs.get("current_only"):
                 raise RuntimeError("read failure")
@@ -103,3 +110,31 @@ def test_scope_only_compares_within_the_requested_project():
 
     assert queue["items"][0]["review_class"] == "additive"
     assert queue["bulk_safe_ids"] == ["mem_a"]
+
+
+def test_conflict_after_one_hundred_current_cards_is_not_bulk_safe():
+    existing = [_current(f"old-{i}", title=f"Other {i}") for i in range(100)]
+    existing.append(_current("old-conflict", title="Exact conflicting subject"))
+    queue = _steward(FakeStore([_review("new-conflict", title="Exact conflicting subject")], existing)).review_queue_list(project="neurons")
+    assert queue["bulk_safe_ids"] == []
+    assert queue["needs_eyes_ids"] == ["new-conflict"]
+
+
+def test_unscoped_queue_does_not_compare_different_projects():
+    queue = _steward(FakeStore([_review("new", project="neurons", title="Same")],
+                              [_current("other", project="stocks", title="Same")])).review_queue_list()
+    assert queue["bulk_safe_ids"] == ["new"]
+
+
+def test_same_project_different_brain_or_scope_does_not_compete():
+    pending = dict(_review("new", title="Same"), brain_id="/project/neurons", scope="project")
+    old = dict(_current("old", title="Same"), brain_id="/other/neurons", scope="global")
+    queue = _steward(FakeStore([pending], [old])).review_queue_list(project="neurons")
+    assert queue["bulk_safe_ids"] == ["new"]
+
+
+def test_duplicate_subjects_inside_one_review_queue_need_eyes():
+    queue = _steward(FakeStore([_review("new-a", title="Same"), _review("new-b", title="Same")])).review_queue_list(project="neurons")
+    assert queue["bulk_safe_ids"] == []
+    assert queue["needs_eyes_ids"] == ["new-a", "new-b"]
+    assert all("same_subject_in_review_bundle" in i["review_flags"] for i in queue["items"])
