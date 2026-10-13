@@ -549,6 +549,46 @@ def test_pg_status_expires_inside_still_valid_snapshot_without_authority_write(i
     assert "member_expired" in next(item for item in bundle["items"] if item["memory_id"] == status_id)["blockers"]
 
 
+def test_pg_expired_current_same_subject_is_not_a_live_conflict(isolated_pg_store, monkeypatch):
+    """만료된 current 행은 권위가 아니므로 같은 주제 갱신 승인을 막지 않는다."""
+    store = isolated_pg_store
+    service = _service(store)
+    issued = datetime.now(timezone.utc)
+    monkeypatch.setattr(review_bundle, "_now", lambda: issued)
+
+    def _status_span(marker, expires_at, value):
+        span = _span(marker)
+        span.update(card_type="status", title="Bundle repeated status observation",
+                    observed_at=issued.isoformat(),
+                    typed_payload={"status_value": value, "observed_at": issued.isoformat(),
+                                   "expires_at": expires_at.isoformat(),
+                                   "current_authority": "synthetic-test-observation"})
+        return span
+
+    old_id = service.candidate_create(
+        source_span=_status_span("expiry-old", issued + timedelta(minutes=1), "이전 관측"))["memory_id"]
+    service.candidate_approve(candidate_memory_id=old_id, approved_by=TEST_ACTOR,
+                              decision_id="expiry-old-approve")
+    new_id = service.candidate_create(
+        source_span=_status_span("expiry-new", issued + timedelta(minutes=30), "갱신 관측"))["memory_id"]
+    # 이전 status가 만료된 시점에 갱신 후보를 검토한다.
+    monkeypatch.setattr(review_bundle, "_now", lambda: issued + timedelta(minutes=2))
+    bundle = service.review_bundle_read(**_read_arguments([new_id]))
+    assert "same_subject_already_current" not in bundle["items"][0]["blockers"]
+    assert bundle["items"][0]["current_matches"] == []
+    result = service.review_bundle_commit(**_request(service, [new_id], decision_id="expiry-renewal"))
+    assert result["action"] == "approve" and result["count"] == 1
+    fresh = PgVectorStore(dsn=store.dsn)
+    assert fresh.get_card(new_id).lifecycle_state == "human_accepted"
+    # 만료 행은 자동 정리되지 않는다: 승인과 무관하게 그대로 남는다.
+    old = fresh.get_card(old_id)
+    assert (old.lifecycle_state, old.authorization_status, old.currentness) == \
+        ("human_accepted", "active", "current")
+    state = _db_snapshot(store)
+    assert len(state["steward_bundle_decisions"]) == 1
+    assert state["steward_bundle_decisions"][0]["member_ids"] == [new_id]
+
+
 def _race_public_calls(first_call, second_call):
     """두 public 호출 진입 직전에만 barrier를 둔다. PG lock 안에서는 기다리지 않는다."""
     barrier = threading.Barrier(3)

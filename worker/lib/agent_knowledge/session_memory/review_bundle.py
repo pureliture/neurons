@@ -126,6 +126,16 @@ def _issues(row: dict, *, now: datetime, pending: bool) -> list[str]:
     return list(dict.fromkeys(issues))
 
 
+def _live_current(records: list[dict], *, now: datetime) -> list[dict]:
+    """Only rows that still carry live authority define subject conflicts.
+
+    The full current set stays in the signed digest (any change forces a new
+    review); disabled or out-of-window rows are excluded here so the check
+    matches ``list_steward_current_context``'s live windows.
+    """
+    return [record for record in records if not _issues(record, now=now, pending=False)]
+
+
 def _item(service, record: dict, *, now: datetime) -> dict:
     card = record["card"]
     from .brain_steward import assert_public_safe
@@ -152,7 +162,7 @@ def read_bundle(service, *, project, brain_id, scope, member_ids) -> dict:
     state = _state(service, project=project, brain_id=brain_id, scope=scope, member_ids=ids)
     now = _now()
     items = [_item(service, r, now=now) for r in state["members"]]
-    current_subjects = {_subject(r["card"]): r for r in state["current"]}
+    current_subjects = {_subject(r["card"]): r for r in _live_current(state["current"], now=now)}
     subjects = [_subject(r["card"]) for r in state["members"]]
     for item, subject in zip(items, subjects):
         if not subject[-1]:
@@ -240,7 +250,7 @@ def commit_bundle(service, *, project, brain_id, scope, member_ids, snapshot_tok
         state = _state(service, project=project, brain_id=brain_id, scope=scope, member_ids=ids, store=store)
         if not hmac.compare_digest(_digest(state), str(claims["state_fingerprint"])):
             raise ValueError("review bundle changed; review again")
-        current_subjects = {_subject(r["card"]) for r in state["current"]}
+        current_subjects = {_subject(r["card"]) for r in _live_current(state["current"], now=now)}
         member_subjects = [_subject(r["card"]) for r in state["members"]]
         if action == "approve" and len(set(member_subjects)) != len(member_subjects):
             raise ValueError("review bundle contains competing members")

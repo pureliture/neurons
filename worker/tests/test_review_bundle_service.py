@@ -232,3 +232,45 @@ def test_new_current_memory_invalidates_previously_reviewed_context():
     with pytest.raises(ValueError, match="changed"):
         service.review_bundle_commit(**request)
     assert store.writes == 0
+
+
+def _current_record(mid, title, *, valid_to=None, authorization="active"):
+    record = _full_record(mid, title)
+    record["card"].update(lifecycle_state="human_accepted", approval_state="approved",
+                          authorization_status=authorization, currentness="current")
+    record["sql"].update(lifecycle_state="human_accepted", authorization_status=authorization,
+                         currentness="current")
+    if valid_to:
+        record["card"]["valid_to"] = valid_to
+        record["sql"]["valid_to"] = valid_to
+    return record
+
+
+def test_expired_current_same_subject_is_not_a_live_conflict():
+    # 만료된 current 행은 권위가 아니므로 주제 충돌로 보고하지 않고 승인도 막지 않는다.
+    # 서명 지문에는 그대로 포함되어 변경 시 재검토를 강제한다.
+    store = TransitionStore([_full_record("m-new", "같은 주제")],
+                            current=[_current_record("m-old", "같은 주제",
+                                                     valid_to="2020-01-01T00:00:00+00:00")])
+    service = _service(store, allowed=True)
+    bundle = service.review_bundle_read(project="neurons", brain_id="/project/neurons", scope="project",
+                                        member_ids=["m-new"])
+    assert "same_subject_already_current" not in bundle["items"][0]["blockers"]
+    assert bundle["items"][0]["current_matches"] == []
+    result = service.review_bundle_commit(**_bundle_request(service, ("m-new",)))
+    assert result["count"] == 1
+    assert result["items"][0]["lifecycle_state"] == "human_accepted"
+
+
+def test_inactive_current_row_is_not_claimed_as_subject_but_still_blocks_commit():
+    # 비활성(권위 아님) current 행은 주제 소유권 주장에서 빠지지만, 권위 불일치로
+    # 묶음 커밋 자체는 fail-closed로 막는다.
+    store = TransitionStore([_full_record("m-new", "같은 주제")],
+                            current=[_current_record("m-old", "같은 주제", authorization="disabled")])
+    service = _service(store, allowed=True)
+    bundle = service.review_bundle_read(project="neurons", brain_id="/project/neurons", scope="project",
+                                        member_ids=["m-new"])
+    assert "same_subject_already_current" not in bundle["items"][0]["blockers"]
+    with pytest.raises(ValueError, match="inconsistent"):
+        service.review_bundle_commit(**_bundle_request(service, ("m-new",)))
+    assert store.writes == 0
