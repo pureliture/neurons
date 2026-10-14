@@ -370,7 +370,7 @@ def test_put_steward_proposal_rejects_same_idempotency_identity_with_scope_colli
         def __exit__(self, *_args):
             return False
 
-        def execute(self, query, _params):
+        def execute(self, query, _params=None):
             self.query = query
 
         def fetchone(self):
@@ -421,7 +421,7 @@ def test_supersede_decision_rejects_cross_scope_before_transform_or_write(field,
         def __exit__(self, *_args):
             return False
 
-        def execute(self, query, params):
+        def execute(self, query, params=None):
             self.query = query
             executed.append((query, params))
 
@@ -458,7 +458,13 @@ def test_supersede_decision_rejects_cross_scope_before_transform_or_write(field,
             target_memory_id=target["memory_id"], transform=forbidden_transform,
         )
     assert executed
-    assert all(query.lstrip().startswith("SELECT") for query, _params in executed)
+    # Cross-scope rejection may run the shared authority lock helper (bounded
+    # timeouts + one table fence), but it must never issue a data write.
+    assert all(
+        query.lstrip().startswith("SELECT")
+        or query == "LOCK TABLE memory_cards IN SHARE ROW EXCLUSIVE MODE"
+        for query, _params in executed
+    )
     assert card[field] != target[field]
 
 
