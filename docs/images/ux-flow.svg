@@ -106,66 +106,64 @@
   <path d="M 708 227 L 734 227" class="edge-solid" marker-end="url(#arrow-blue)"/>
   <path d="M 934 227 L 960 227" class="edge-async" marker-end="url(#arrow-amber)"/>
 
-  <!-- BOTTOM HALF: READ / MCP CONTEXT INJECTION PIPELINE -->
+  <!-- BOTTOM HALF: READ / CURRENT RUNTIME READ PIPELINE -->
   <rect x="30" y="360" width="1140" height="245" class="lane-box"/>
-  <rect x="46" y="374" width="250" height="20" rx="4" fill="#c084fc"/>
-  <text x="54" y="388" class="badge-text">READ PATH · MCP HYBRID RETRIEVAL</text>
-  <text x="310" y="389" class="node-title">런타임 읽기 흐름: 에이전트 MCP 도구 호출부터 하이브리드 컨텍스트 주입까지</text>
+  <rect x="46" y="374" width="280" height="20" rx="4" fill="#c084fc"/>
+  <text x="54" y="388" class="badge-text">READ PATH · ACTUAL RUNTIME SEQUENCE</text>
+  <text x="340" y="389" class="node-title">현재 실제 읽기 흐름: 직렬 순차 파이프라인 (R1 → R2 → R3 → R4 → R5)</text>
 
   <!-- Step R1 -->
   <rect x="46" y="410" width="200" height="175" class="card-mcp"/>
-  <text x="60" y="434" class="node-title">R1. 에이전트 MCP 호출</text>
-  <text x="60" y="452" class="node-code">mcp_tools.py</text>
-  <text x="60" y="474" class="node-desc">새로운 코딩 세션에서 에이전트가</text>
-  <text x="60" y="490" class="node-desc">brain_context_resolve,</text>
-  <text x="60" y="506" class="node-desc">brain_drift_explain,</text>
-  <text x="60" y="522" class="node-desc">brain_persona_check 호출</text>
+  <text x="60" y="434" class="node-title">R1. MCP 요청 수신</text>
+  <text x="60" y="452" class="node-code">knowledge_search_service.py</text>
+  <text x="60" y="474" class="node-desc">• brain_memory_resolve() 호출</text>
+  <text x="60" y="490" class="node-desc">• GraphFirstResolver.resolve() 진입</text>
+  <text x="60" y="506" class="node-desc">• mode='query' 분기 진입</text>
+  <text x="60" y="522" class="node-desc">  (graph_first_resolver.py:175)</text>
 
   <!-- Step R2 -->
   <rect x="272" y="410" width="200" height="175" class="card-neo"/>
-  <text x="286" y="434" class="node-title">R2. Graph-First 탐색</text>
-  <text x="286" y="452" class="node-code">graph_first_resolver.py</text>
-  <text x="286" y="474" class="node-desc">• 질의 내 핵심 엔티티 식별</text>
-  <text x="286" y="492" class="node-desc">• Neo4j Graphiti에서 N-hop</text>
-  <text x="286" y="508" class="node-desc">  연관 관계 및 시간순 유효성</text>
-  <text x="286" y="524" class="node-desc">  (현재 유효 vs 폐기된 결정) 탐색</text>
+  <text x="286" y="434" class="node-title">R2. Neo4j 순차 후보 조회</text>
+  <text x="286" y="452" class="node-code">graphiti_adapter.py:502-519</text>
+  <text x="286" y="474" class="node-desc">• 1) _graphiti.search(query)</text>
+  <text x="286" y="490" class="node-desc">  관계 검색 (엔티티 꺼져있어 0건)</text>
+  <text x="286" y="506" class="node-desc">• 2) retrieve_episodes(last_n=8)</text>
+  <text x="286" y="522" class="node-desc">  질문 무관 최근 등록 8개 노드 조회</text>
 
   <!-- Step R3 -->
-  <rect x="498" y="410" width="210" height="175" class="card-pg"/>
-  <text x="512" y="434" class="node-title">R3. pgvector 시맨틱 검색</text>
-  <text x="512" y="452" class="node-code">pgvector_store.py</text>
-  <text x="512" y="474" class="node-desc">• 질의 임베딩으로 HNSW 인덱스</text>
-  <text x="512" y="490" class="node-desc">  코사인 유사도 Top-K 조회</text>
-  <text x="512" y="508" class="node-desc">• 그래프 노드에 연결된 정본</text>
-  <text x="512" y="524" class="node-desc">  MemoryCard 및 원본 청크 인출</text>
+  <rect x="498" y="410" width="210" height="175" class="card-warn"/>
+  <text x="512" y="434" class="node-title">R3. 메모리 필터 &amp; 정렬</text>
+  <text x="512" y="452" class="node-code">terms.py:17 &amp; adapter:667</text>
+  <text x="512" y="474" class="node-desc">• terms(query): 3자미만 토큰 삭제</text>
+  <text x="512" y="490" class="node-desc">  '뭐 입지', '너는' → 빈 리스트 []</text>
+  <text x="512" y="506" class="node-desc">• 빈 토큰으로 키워드 필터 통과</text>
+  <text x="512" y="522" class="node-desc">• sort(observed_at) 시간역순 정렬</text>
 
   <!-- Step R4 -->
-  <rect x="734" y="410" width="200" height="175" class="card-py"/>
-  <text x="748" y="434" class="node-title">R4. 하이브리드 퓨전 &amp; 검증</text>
-  <text x="748" y="452" class="node-code">llm_brain_service.py</text>
-  <text x="748" y="474" class="node-desc">• 그래프 경로 점수와 벡터</text>
-  <text x="748" y="490" class="node-desc">  유사도 점수를 결합/재정렬</text>
-  <text x="748" y="508" class="node-desc">• Evidence Provenance(출처</text>
-  <text x="748" y="524" class="node-desc">  세션·청크 ID) 및 권한 검증</text>
+  <rect x="734" y="410" width="200" height="175" class="card-pg"/>
+  <text x="748" y="434" class="node-title">R4. PG 정본 권한 검증</text>
+  <text x="748" y="452" class="node-code">graph_first_resolver.py:287</text>
+  <text x="748" y="474" class="node-desc">• list_authorized_cards() 단 1회</text>
+  <text x="748" y="490" class="node-desc">  8개 카드의 실제 존재 및</text>
+  <text x="748" y="506" class="node-desc">  content_hash 일치 검증</text>
+  <text x="748" y="522" class="node-desc">  (pgvector 검색 아님! 단순 검증)</text>
 
   <!-- Step R5 -->
   <rect x="960" y="410" width="194" height="175" class="card-mcp"/>
-  <text x="974" y="434" class="node-title">R5. 프롬프트 컨텍스트 주입</text>
-  <text x="974" y="452" class="node-code">JSON-RPC MCP Response</text>
-  <text x="974" y="474" class="node-desc">• 현재 유효한 설계 규칙,</text>
-  <text x="974" y="490" class="node-desc">  과거 인시던트 해결책, 사용자</text>
-  <text x="974" y="506" class="node-desc">  페르소나를 에이전트에 주입해</text>
-  <text x="974" y="522" class="node-desc">  일관된 코딩 수행</text>
+  <text x="974" y="434" class="node-title">R5. 3KB 예산 &amp; 응답 반환</text>
+  <text x="974" y="452" class="node-code">graph_first_resolver.py:382</text>
+  <text x="974" y="474" class="node-desc">• _MAX_BYTES(3072) 예산 검사</text>
+  <text x="974" y="490" class="node-desc">• 초과 시 evidence/카드 축소</text>
+  <text x="974" y="506" class="node-desc">• 최종 8개 카드 JSON 직렬화</text>
+  <text x="974" y="522" class="node-desc">  (동일한 A 목록 반환)</text>
 
   <path d="M 246 497 L 272 497" class="edge-mcp" marker-end="url(#arrow-purple)"/>
   <path d="M 472 497 L 498 497" class="edge-neo" marker-end="url(#arrow-green)"/>
   <path d="M 708 497 L 734 497" class="edge-solid" marker-end="url(#arrow-blue)"/>
   <path d="M 934 497 L 960 497" class="edge-mcp" marker-end="url(#arrow-purple)"/>
 
-  
-        <rect x="30" y="625" width="1140" height="95" class="card-pg"/>
-        <text x="50" y="650" class="node-title" fill="#7dd3fc">런타임 성능 &amp; 정확도 최적화 요약 (To-Be Runtime Sequence)</text>
-        <text x="50" y="672" class="node-desc">• Write Path (비동기 논블로킹): 세션 저장 및 Steward 카드 커밋은 PostgreSQL에서 즉시 완료되고, 무거운 그래프 인덱싱은 Outbox 워커가 백그라운드에서 처리합니다.</text>
-        <text x="50" y="692" class="node-desc">• Read Path (지연 시간 최소화): MCP 호출 시 Graph-First Resolver가 Neo4j 서브그래프와 pgvector HNSW 결과를 병렬 조회 후 Evidence 출처와 함께 반환합니다.</text>
-        
+  <rect x="30" y="625" width="1140" height="95" class="card-pg"/>
+  <text x="50" y="650" class="node-title" fill="#7dd3fc">현재 코드 런타임 워크플로우 실상 (As-Is Reality Sequence)</text>
+  <text x="50" y="672" class="node-desc">• 동시 조회가 아닌 단일 직렬 파이프라인: R1(요청) → R2(Neo4j 순차 조회) → R3(메모리 필터/정렬) → R4(Postgres 정본 확인) → R5(응답)</text>
+  <text x="50" y="692" class="node-desc">• pgvector 검색은 Fallback 전용: 정상 상태에서는 pgvector HNSW 검색이 실행되지 않으며, 오직 Neo4j 장애 시에만 비상 대체 경로로 발동합니다.</text>
 </svg>
