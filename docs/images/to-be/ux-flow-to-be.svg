@@ -1,0 +1,171 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 750" width="100%" height="100%">
+  
+  <defs>
+    <style>
+      .bg { fill: #0b1120; }
+      .grid-line { stroke: #1e293b; stroke-width: 1; stroke-dasharray: 4 4; }
+      .title { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 22px; font-weight: 700; fill: #f8fafc; }
+      .subtitle { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 13px; font-weight: 500; fill: #94a3b8; }
+      .lane-box { fill: #0f172a; stroke: #334155; stroke-width: 1.5; rx: 12; }
+      .lane-title { font-family: 'Inter', sans-serif; font-size: 12px; font-weight: 700; fill: #38bdf8; letter-spacing: 0.08em; }
+      .card-pg { fill: #0f2942; stroke: #38bdf8; stroke-width: 1.8; rx: 10; }
+      .card-neo { fill: #0c2e27; stroke: #34d399; stroke-width: 1.8; rx: 10; }
+      .card-py { fill: #1e1b4b; stroke: #818cf8; stroke-width: 1.8; rx: 10; }
+      .card-mcp { fill: #2e1065; stroke: #c084fc; stroke-width: 1.8; rx: 10; }
+      .card-warn { fill: #3b1c0c; stroke: #fb923c; stroke-width: 1.8; stroke-dasharray: 5 3; rx: 10; }
+      .card-legacy { fill: #27171c; stroke: #f87171; stroke-width: 1.5; stroke-dasharray: 6 4; rx: 10; }
+      .card-neutral { fill: #1e293b; stroke: #64748b; stroke-width: 1.5; rx: 10; }
+      .node-title { font-family: 'Inter', sans-serif; font-size: 14px; font-weight: 700; fill: #f8fafc; }
+      .node-code { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 11px; font-weight: 500; fill: #93c5fd; }
+      .node-desc { font-family: 'Inter', sans-serif; font-size: 11.5px; font-weight: 400; fill: #cbd5e1; }
+      .badge-text { font-family: 'Inter', sans-serif; font-size: 10px; font-weight: 700; fill: #0f172a; }
+      .edge-solid { stroke: #38bdf8; stroke-width: 2; fill: none; }
+      .edge-neo { stroke: #34d399; stroke-width: 2; fill: none; }
+      .edge-mcp { stroke: #c084fc; stroke-width: 2; fill: none; }
+      .edge-async { stroke: #fbbf24; stroke-width: 2; stroke-dasharray: 6 4; fill: none; }
+      .edge-legacy { stroke: #f87171; stroke-width: 1.6; stroke-dasharray: 4 4; fill: none; }
+      .edge-label { font-family: 'Inter', sans-serif; font-size: 10.5px; font-weight: 600; fill: #e2e8f0; }
+      .edge-label-bg { fill: #0f172a; stroke: #334155; stroke-width: 1; rx: 4; }
+    </style>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#38bdf8"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#34d399"/>
+    </marker>
+    <marker id="arrow-purple" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#c084fc"/>
+    </marker>
+    <marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#fbbf24"/>
+    </marker>
+    <marker id="arrow-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#f87171"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="750" class="bg"/>
+
+  <!-- Header -->
+  <text x="30" y="42" class="title">Runtime Write &amp; Read UX Flow — TO-BE (AI 세션 수집 → 지식 승격 → MCP 컨텍스트 주입 루프)</text>
+  <text x="30" y="66" class="subtitle">pureliture/neurons · Runtime Write (Ingestion &amp; Steward Promotion) and Read (Hybrid MCP Retrieval) Sequence</text>
+
+  <!-- TOP HALF: WRITE / INGESTION &amp; PROMOTION PIPELINE -->
+  <rect x="30" y="90" width="1140" height="250" class="lane-box"/>
+  <rect x="46" y="104" width="250" height="20" rx="4" fill="#38bdf8"/>
+  <text x="54" y="118" class="badge-text">WRITE PATH · SESSION INGEST &amp; PROMOTION</text>
+  <text x="310" y="119" class="node-title">런타임 쓰기 흐름: AI 코딩 세션 발생부터 지식 그래프 투영까지</text>
+
+  <!-- Step W1 -->
+  <rect x="46" y="140" width="200" height="175" class="card-neutral"/>
+  <text x="60" y="164" class="node-title">W1. 세션 발생 &amp; 수집</text>
+  <text x="60" y="182" class="node-code">Claude / Codex / Dendrite</text>
+  <text x="60" y="204" class="node-desc">개발자가 AI 도구와 대화하며</text>
+  <text x="60" y="220" class="node-desc">버그 수정, 아키텍처 결정,</text>
+  <text x="60" y="236" class="node-desc">코드 리팩토링 수행 후</text>
+  <text x="60" y="252" class="node-desc">세션 로그를 큐로 전송</text>
+
+  <!-- Step W2 -->
+  <rect x="272" y="140" width="200" height="175" class="card-py"/>
+  <text x="286" y="164" class="node-title">W2. 마스킹 &amp; 청킹</text>
+  <text x="286" y="182" class="node-code">transcript_ingest.py</text>
+  <text x="286" y="204" class="node-desc">• RedactionGuard로 민감정보</text>
+  <text x="286" y="220" class="node-desc">  및 시크릿 토큰 제거</text>
+  <text x="286" y="238" class="node-desc">• 대화 턴/오버랩 기준 청킹</text>
+  <text x="286" y="254" class="node-desc">• 불변 원본으로 PG 적재 준비</text>
+
+  <!-- Step W3 -->
+  <rect x="498" y="140" width="210" height="175" class="card-py"/>
+  <text x="512" y="164" class="node-title">W3. Steward 카드 마이닝</text>
+  <text x="512" y="182" class="node-code">brain_steward.py · memory_miner</text>
+  <text x="512" y="204" class="node-desc">• LLM이 세션 내 핵심 결정,</text>
+  <text x="512" y="220" class="node-desc">  인시던트, 페르소나 규칙 추출</text>
+  <text x="512" y="238" class="node-desc">• 텍스트 임베딩 벡터 생성</text>
+  <text x="512" y="254" class="node-desc">• Steward Card 권위 부여</text>
+
+  <!-- Step W4 -->
+  <rect x="734" y="140" width="200" height="175" class="card-pg"/>
+  <text x="748" y="164" class="node-title">W4. PG 원장 &amp; Outbox 커밋</text>
+  <text x="748" y="182" class="node-code">pgvector_store.py (UoW)</text>
+  <text x="748" y="204" class="node-desc">• PostgreSQL에 원본 청크,</text>
+  <text x="748" y="220" class="node-desc">  MemoryCard, HNSW 벡터 저장</text>
+  <text x="748" y="238" class="node-desc">• 동일 트랜잭션에 Outbox</text>
+  <text x="748" y="254" class="node-desc">  이벤트 기록 (즉시 커밋 완료)</text>
+
+  <!-- Step W5 -->
+  <rect x="960" y="140" width="194" height="175" class="card-neo"/>
+  <text x="974" y="164" class="node-title">W5. Graphiti 시간축 투영</text>
+  <text x="974" y="182" class="node-code">outbox_worker → graphiti</text>
+  <text x="974" y="204" class="node-desc">• 비동기 워커가 Neo4j에</text>
+  <text x="974" y="220" class="node-desc">  에피소드/엔티티 노드 생성</text>
+  <text x="974" y="238" class="node-desc">• 상충하는 과거 결정 엣지에</text>
+  <text x="974" y="254" class="node-desc">  invalid_at 타임스탬프 마킹</text>
+
+  <path d="M 246 227 L 272 227" class="edge-solid" marker-end="url(#arrow-blue)"/>
+  <path d="M 472 227 L 498 227" class="edge-solid" marker-end="url(#arrow-blue)"/>
+  <path d="M 708 227 L 734 227" class="edge-solid" marker-end="url(#arrow-blue)"/>
+  <path d="M 934 227 L 960 227" class="edge-async" marker-end="url(#arrow-amber)"/>
+
+  <!-- BOTTOM HALF: READ / MCP CONTEXT INJECTION PIPELINE -->
+  <rect x="30" y="360" width="1140" height="245" class="lane-box"/>
+  <rect x="46" y="374" width="250" height="20" rx="4" fill="#c084fc"/>
+  <text x="54" y="388" class="badge-text">READ PATH · MCP HYBRID RETRIEVAL</text>
+  <text x="310" y="389" class="node-title">런타임 읽기 흐름: 에이전트 MCP 도구 호출부터 하이브리드 컨텍스트 주입까지</text>
+
+  <!-- Step R1 -->
+  <rect x="46" y="410" width="200" height="175" class="card-mcp"/>
+  <text x="60" y="434" class="node-title">R1. 에이전트 MCP 호출</text>
+  <text x="60" y="452" class="node-code">mcp_tools.py</text>
+  <text x="60" y="474" class="node-desc">새로운 코딩 세션에서 에이전트가</text>
+  <text x="60" y="490" class="node-desc">brain_context_resolve,</text>
+  <text x="60" y="506" class="node-desc">brain_drift_explain,</text>
+  <text x="60" y="522" class="node-desc">brain_persona_check 호출</text>
+
+  <!-- Step R2 -->
+  <rect x="272" y="410" width="200" height="175" class="card-neo"/>
+  <text x="286" y="434" class="node-title">R2. Graph-First 탐색</text>
+  <text x="286" y="452" class="node-code">graph_first_resolver.py</text>
+  <text x="286" y="474" class="node-desc">• 질의 내 핵심 엔티티 식별</text>
+  <text x="286" y="492" class="node-desc">• Neo4j Graphiti에서 N-hop</text>
+  <text x="286" y="508" class="node-desc">  연관 관계 및 시간순 유효성</text>
+  <text x="286" y="524" class="node-desc">  (현재 유효 vs 폐기된 결정) 탐색</text>
+
+  <!-- Step R3 -->
+  <rect x="498" y="410" width="210" height="175" class="card-pg"/>
+  <text x="512" y="434" class="node-title">R3. pgvector 시맨틱 검색</text>
+  <text x="512" y="452" class="node-code">pgvector_store.py</text>
+  <text x="512" y="474" class="node-desc">• 질의 임베딩으로 HNSW 인덱스</text>
+  <text x="512" y="490" class="node-desc">  코사인 유사도 Top-K 조회</text>
+  <text x="512" y="508" class="node-desc">• 그래프 노드에 연결된 정본</text>
+  <text x="512" y="524" class="node-desc">  MemoryCard 및 원본 청크 인출</text>
+
+  <!-- Step R4 -->
+  <rect x="734" y="410" width="200" height="175" class="card-py"/>
+  <text x="748" y="434" class="node-title">R4. 하이브리드 퓨전 &amp; 검증</text>
+  <text x="748" y="452" class="node-code">llm_brain_service.py</text>
+  <text x="748" y="474" class="node-desc">• 그래프 경로 점수와 벡터</text>
+  <text x="748" y="490" class="node-desc">  유사도 점수를 결합/재정렬</text>
+  <text x="748" y="508" class="node-desc">• Evidence Provenance(출처</text>
+  <text x="748" y="524" class="node-desc">  세션·청크 ID) 및 권한 검증</text>
+
+  <!-- Step R5 -->
+  <rect x="960" y="410" width="194" height="175" class="card-mcp"/>
+  <text x="974" y="434" class="node-title">R5. 프롬프트 컨텍스트 주입</text>
+  <text x="974" y="452" class="node-code">JSON-RPC MCP Response</text>
+  <text x="974" y="474" class="node-desc">• 현재 유효한 설계 규칙,</text>
+  <text x="974" y="490" class="node-desc">  과거 인시던트 해결책, 사용자</text>
+  <text x="974" y="506" class="node-desc">  페르소나를 에이전트에 주입해</text>
+  <text x="974" y="522" class="node-desc">  일관된 코딩 수행</text>
+
+  <path d="M 246 497 L 272 497" class="edge-mcp" marker-end="url(#arrow-purple)"/>
+  <path d="M 472 497 L 498 497" class="edge-neo" marker-end="url(#arrow-green)"/>
+  <path d="M 708 497 L 734 497" class="edge-solid" marker-end="url(#arrow-blue)"/>
+  <path d="M 934 497 L 960 497" class="edge-mcp" marker-end="url(#arrow-purple)"/>
+
+  
+        <rect x="30" y="625" width="1140" height="95" class="card-pg"/>
+        <text x="50" y="650" class="node-title" fill="#7dd3fc">런타임 성능 &amp; 정확도 최적화 요약 (To-Be Runtime Sequence)</text>
+        <text x="50" y="672" class="node-desc">• Write Path (비동기 논블로킹): 세션 저장 및 Steward 카드 커밋은 PostgreSQL에서 즉시 완료되고, 무거운 그래프 인덱싱은 Outbox 워커가 백그라운드에서 처리합니다.</text>
+        <text x="50" y="692" class="node-desc">• Read Path (지연 시간 최소화): MCP 호출 시 Graph-First Resolver가 Neo4j 서브그래프와 pgvector HNSW 결과를 병렬 조회 후 Evidence 출처와 함께 반환합니다.</text>
+        
+</svg>

@@ -1,0 +1,164 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 750" width="100%" height="100%">
+  
+  <defs>
+    <style>
+      .bg { fill: #0b1120; }
+      .grid-line { stroke: #1e293b; stroke-width: 1; stroke-dasharray: 4 4; }
+      .title { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 22px; font-weight: 700; fill: #f8fafc; }
+      .subtitle { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 13px; font-weight: 500; fill: #94a3b8; }
+      .lane-box { fill: #0f172a; stroke: #334155; stroke-width: 1.5; rx: 12; }
+      .lane-title { font-family: 'Inter', sans-serif; font-size: 12px; font-weight: 700; fill: #38bdf8; letter-spacing: 0.08em; }
+      .card-pg { fill: #0f2942; stroke: #38bdf8; stroke-width: 1.8; rx: 10; }
+      .card-neo { fill: #0c2e27; stroke: #34d399; stroke-width: 1.8; rx: 10; }
+      .card-py { fill: #1e1b4b; stroke: #818cf8; stroke-width: 1.8; rx: 10; }
+      .card-mcp { fill: #2e1065; stroke: #c084fc; stroke-width: 1.8; rx: 10; }
+      .card-warn { fill: #3b1c0c; stroke: #fb923c; stroke-width: 1.8; stroke-dasharray: 5 3; rx: 10; }
+      .card-legacy { fill: #27171c; stroke: #f87171; stroke-width: 1.5; stroke-dasharray: 6 4; rx: 10; }
+      .card-neutral { fill: #1e293b; stroke: #64748b; stroke-width: 1.5; rx: 10; }
+      .node-title { font-family: 'Inter', sans-serif; font-size: 14px; font-weight: 700; fill: #f8fafc; }
+      .node-code { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 11px; font-weight: 500; fill: #93c5fd; }
+      .node-desc { font-family: 'Inter', sans-serif; font-size: 11.5px; font-weight: 400; fill: #cbd5e1; }
+      .badge-text { font-family: 'Inter', sans-serif; font-size: 10px; font-weight: 700; fill: #0f172a; }
+      .edge-solid { stroke: #38bdf8; stroke-width: 2; fill: none; }
+      .edge-neo { stroke: #34d399; stroke-width: 2; fill: none; }
+      .edge-mcp { stroke: #c084fc; stroke-width: 2; fill: none; }
+      .edge-async { stroke: #fbbf24; stroke-width: 2; stroke-dasharray: 6 4; fill: none; }
+      .edge-legacy { stroke: #f87171; stroke-width: 1.6; stroke-dasharray: 4 4; fill: none; }
+      .edge-label { font-family: 'Inter', sans-serif; font-size: 10.5px; font-weight: 600; fill: #e2e8f0; }
+      .edge-label-bg { fill: #0f172a; stroke: #334155; stroke-width: 1; rx: 4; }
+    </style>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#38bdf8"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#34d399"/>
+    </marker>
+    <marker id="arrow-purple" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#c084fc"/>
+    </marker>
+    <marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#fbbf24"/>
+    </marker>
+    <marker id="arrow-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#f87171"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="750" class="bg"/>
+
+  <!-- Header -->
+  <text x="30" y="42" class="title">Server-Brain Storage &amp; Plane Topology — AS-IS (5-Plane 토폴로지 &amp; 중복/전이 경로 표시)</text>
+  <text x="30" y="66" class="subtitle">pureliture/neurons · 5-Plane Server-Brain Topology: Storage Roles, Tables, Graph Nodes &amp; Docker Network</text>
+
+  <!-- PLANE 1 &amp; 2: INGRESS &amp; MINING (LEFT COLUMN) -->
+  <rect x="30" y="95" width="415" height="620" class="lane-box"/>
+  <text x="46" y="120" class="lane-title">PLANE 01 &amp; 02 · INGRESS LANE &amp; SESSION MINER</text>
+
+  <rect x="46" y="140" width="383" height="115" class="card-neutral"/>
+  <text x="62" y="164" class="node-title">Plane 01: Dendrite &amp; Ingress Queue Lane</text>
+  <text x="62" y="182" class="node-code">compose.yaml · nats:2-alpine (4222) · ingress-worker-py</text>
+  <text x="62" y="204" class="node-desc">• AI 도구 세션 로그(Claude, Codex, Cursor) 수집 및 Redaction</text>
+  <text x="62" y="222" class="node-desc">• NATS JetStream(RAG_INGRESS_QUEUE)으로 스파이크 트래픽 완충</text>
+  <text x="62" y="240" class="node-desc">• transcript_chunking.py가 대화를 의미/턴 단위로 분할</text>
+
+  <rect x="46" y="280" width="383" height="185" class="card-py"/>
+  <text x="62" y="304" class="node-title">Plane 03: Transcript Miner &amp; Brain Steward</text>
+  <text x="62" y="322" class="node-code">brain_steward.py · memory_miner.py · extraction_llm.py</text>
+  <text x="62" y="346" class="node-desc">• 대화 청크로부터 4대 핵심 지식 객체(Brain Objects) 마이닝:</text>
+  <text x="74" y="366" class="node-code">1) MemoryCard (아키텍처 결정, 도메인 규칙, 작업 요약)</text>
+  <text x="74" y="384" class="node-code">2) IncidentRecord (장애 원인, 해결책, 재발 방지책)</text>
+  <text x="74" y="402" class="node-code">3) PersonaRule (사용자 코딩 스타일, 금지 패턴, 선호도)</text>
+  <text x="74" y="420" class="node-code">4) DriftEvent (기존 설계/결정이 변경·대체된 이력)</text>
+  <text x="62" y="444" class="node-desc">• 추출된 객체의 정본 권한(Steward Authority)을 보유</text>
+
+  <rect x="46" y="490" width="383" height="205" class="card-mcp"/>
+  <text x="62" y="514" class="node-title">Plane 05: MCP Steward Interface (13 Tools)</text>
+  <text x="62" y="532" class="node-code">mcp_server.py · mcp_tools.py · brain-steward-mcp.md</text>
+  <text x="62" y="556" class="node-desc">• 컨텍스트/통합 질의: brain_context_resolve, brain.query, brain.resolve</text>
+  <text x="62" y="574" class="node-desc">• 기억/증거 검색: brain_memory_search, brain_evidence_get, knowledge.search</text>
+  <text x="62" y="592" class="node-desc">• 인시던트/변화 추적: brain_incident_search, brain_drift_explain</text>
+  <text x="62" y="610" class="node-desc">• 페르소나/거버넌스: brain_persona_get, brain_persona_check</text>
+  <text x="62" y="628" class="node-desc">• 코퍼스/오브젝트 관리: brain_objects_query, brain_corpus_status,</text>
+  <text x="74" y="646" class="node-desc">brain_corpus_ingest_plan</text>
+
+  <!-- PLANE 2: POSTGRESQL + PGVECTOR (TOP RIGHT) -->
+  <rect x="470" y="95" width="700" height="235" class="card-pg"/>
+  <rect x="488" y="110" width="235" height="20" rx="4" fill="#38bdf8"/>
+  <text x="496" y="124" class="badge-text">PLANE 02 · STATE AUTHORITY (POSTGRESQL 16)</text>
+  <text x="735" y="125" class="node-code">postgres_store/pgvector_schema.sql · pgvector_store.py</text>
+
+  <rect x="488" y="142" width="210" height="170" class="lane-box" stroke="#38bdf8"/>
+  <text x="502" y="164" class="node-title">원본 &amp; 정본 원장 테이블</text>
+  <text x="502" y="184" class="node-code">session_transcripts</text>
+  <text x="502" y="200" class="node-desc">불변 세션 원본 &amp; 메타데이터</text>
+  <text x="502" y="222" class="node-code">document_envelopes</text>
+  <text x="502" y="238" class="node-desc">청크 텍스트 &amp; 출처 Provenance</text>
+  <text x="502" y="260" class="node-code">steward_memory_cards</text>
+  <text x="502" y="276" class="node-desc">정제된 지식 카드 정본(SoT)</text>
+
+  <rect x="714" y="142" width="215" height="170" class="lane-box" stroke="#38bdf8"/>
+  <text x="728" y="164" class="node-title">pgvector 시맨틱 인덱스</text>
+  <text x="728" y="184" class="node-code">embedding vector(D)</text>
+  <text x="728" y="202" class="node-desc">• HNSW 인덱스 (vector_cosine_ops)</text>
+  <text x="728" y="220" class="node-desc">• &lt;=&gt; 코사인 거리 기반 Top-K 검색</text>
+  <text x="728" y="238" class="node-desc">• JSONB 메타데이터 필터링과</text>
+  <text x="728" y="254" class="node-desc">  벡터 검색을 단일 SQL로 처리</text>
+  <text x="728" y="276" class="node-code">Qdrant 완전 대체 완료</text>
+
+  <rect x="945" y="142" width="207" height="170" class="lane-box" stroke="#fbbf24"/>
+  <text x="959" y="164" class="node-title" fill="#fde68a">Transactional Outbox</text>
+  <text x="959" y="184" class="node-code">outbox_events table</text>
+  <text x="959" y="202" class="node-desc">• outbox_worker.py가 폴링</text>
+  <text x="959" y="220" class="node-desc">• 신규/갱신 카드를 Graphiti</text>
+  <text x="959" y="236" class="node-desc">  에피소드로 비동기 발행</text>
+  <text x="959" y="256" class="node-code">graph_replay.py</text>
+  <text x="959" y="272" class="node-desc">• Neo4j 초기화 후 전체 재구축</text>
+
+  <!-- PLANE 4: GRAPHITI + NEO4J (MIDDLE RIGHT) -->
+  <rect x="470" y="355" width="700" height="235" class="card-neo"/>
+  <rect x="488" y="370" width="245" height="20" rx="4" fill="#34d399"/>
+  <text x="496" y="384" class="badge-text">PLANE 04 · TEMPORAL GRAPH (GRAPHITI + NEO4J)</text>
+  <text x="745" y="385" class="node-code">llm_brain_core/graphiti_backend.py · hybrid_graph.py</text>
+
+  <rect x="488" y="402" width="210" height="170" class="lane-box" stroke="#34d399"/>
+  <text x="502" y="424" class="node-title">Episodic Nodes (에피소드)</text>
+  <text x="502" y="444" class="node-code">(:EpisodicNode)</text>
+  <text x="502" y="462" class="node-desc">• 특정 시점의 세션 이벤트 기록</text>
+  <text x="502" y="480" class="node-desc">• Postgres MemoryCard ID 및</text>
+  <text x="502" y="496" class="node-desc">  원본 세션 ID 참조 보유</text>
+  <text x="502" y="518" class="node-desc">• 언제(valid_at) 무슨 맥락에서</text>
+  <text x="502" y="534" class="node-desc">  발생했는지 시간축 앵커 역할</text>
+
+  <rect x="714" y="402" width="215" height="170" class="lane-box" stroke="#34d399"/>
+  <text x="728" y="424" class="node-title">Entity Nodes (개념/컴포넌트)</text>
+  <text x="728" y="444" class="node-code">(:EntityNode)</text>
+  <text x="728" y="462" class="node-desc">• 프로젝트, 모듈, API, 에러 코드,</text>
+  <text x="728" y="478" class="node-desc">  설계 결정(ADR), 페르소나 규칙</text>
+  <text x="728" y="498" class="node-desc">• 여러 세션에 걸쳐 등장하는</text>
+  <text x="728" y="514" class="node-desc">  동일 개체를 단일 노드로 병합</text>
+  <text x="728" y="532" class="node-desc">  (Entity Resolution)</text>
+
+  <rect x="945" y="402" width="207" height="170" class="lane-box" stroke="#34d399"/>
+  <text x="959" y="424" class="node-title">Bi-Temporal Edges (관계)</text>
+  <text x="959" y="444" class="node-code">-[:RELATES_TO]-&gt;</text>
+  <text x="959" y="462" class="node-desc">• fact, valid_at, invalid_at,</text>
+  <text x="959" y="478" class="node-desc">  created_at, expired_at 보유</text>
+  <text x="959" y="498" class="node-desc">• 설계가 바뀌면 과거 엣지를 삭제</text>
+  <text x="959" y="514" class="node-desc">  하지 않고 invalid_at을 기록해</text>
+  <text x="959" y="530" class="node-desc">  brain_drift_explain 지원</text>
+
+  <!-- Connections between Planes -->
+  <path d="M 237 255 L 237 280" class="edge-solid" marker-end="url(#arrow-blue)"/>
+  <path d="M 429 340 L 488 220" class="edge-solid" marker-end="url(#arrow-blue)"/>
+  <path d="M 1048 312 L 1048 402" class="edge-async" marker-end="url(#arrow-amber)"/>
+  <path d="M 429 560 L 488 265" class="edge-mcp" marker-start="url(#arrow-purple)" marker-end="url(#arrow-purple)"/>
+  <path d="M 429 595 L 488 485" class="edge-neo" marker-start="url(#arrow-green)" marker-end="url(#arrow-green)"/>
+
+  
+        <rect x="470" y="610" width="700" height="105" class="card-warn"/>
+        <text x="488" y="633" class="node-title" fill="#fdba74">AS-IS 토폴로지 진단: 왜 각 도구의 역할이 헷갈렸는가?</text>
+        <text x="488" y="654" class="node-desc">1. PostgreSQL(memory_cards)과 Neo4j(Graphiti Entity/EpisodicNode) 양쪽에 유사한 추출 데이터가 중복 저장됨</text>
+        <text x="488" y="672" class="node-desc">2. extraction_llm.py에서 한 번, Graphiti 내부에서 또 한 번 LLM/Embedding을 호출하는 이중 파이프라인 구조</text>
+        <text x="488" y="690" class="node-desc">3. qdrant-client, couchdb_source, Java rag-ingress-queue가 레포에 함께 남아 토폴로지 경계를 흐림</text>
+        
+</svg>

@@ -1,203 +1,184 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 792" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 750" width="100%" height="100%">
+  
   <defs>
-    <linearGradient id="bsky" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#0c142b"/>
-      <stop offset="1" stop-color="#070b18"/>
-    </linearGradient>
-    <pattern id="bgrid" width="34" height="34" patternUnits="userSpaceOnUse">
-      <path d="M34 0H0V34" fill="none" stroke="#14203d" stroke-width="1"/>
-    </pattern>
-    <marker id="dep" viewBox="0 0 12 12" refX="9" refY="6" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
-      <path d="M0 0 L12 6 L0 12 L3.5 6 Z" fill="#22d3ee"/>
+    <style>
+      .bg { fill: #0b1120; }
+      .grid-line { stroke: #1e293b; stroke-width: 1; stroke-dasharray: 4 4; }
+      .title { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 22px; font-weight: 700; fill: #f8fafc; }
+      .subtitle { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; font-size: 13px; font-weight: 500; fill: #94a3b8; }
+      .lane-box { fill: #0f172a; stroke: #334155; stroke-width: 1.5; rx: 12; }
+      .lane-title { font-family: 'Inter', sans-serif; font-size: 12px; font-weight: 700; fill: #38bdf8; letter-spacing: 0.08em; }
+      .card-pg { fill: #0f2942; stroke: #38bdf8; stroke-width: 1.8; rx: 10; }
+      .card-neo { fill: #0c2e27; stroke: #34d399; stroke-width: 1.8; rx: 10; }
+      .card-py { fill: #1e1b4b; stroke: #818cf8; stroke-width: 1.8; rx: 10; }
+      .card-mcp { fill: #2e1065; stroke: #c084fc; stroke-width: 1.8; rx: 10; }
+      .card-warn { fill: #3b1c0c; stroke: #fb923c; stroke-width: 1.8; stroke-dasharray: 5 3; rx: 10; }
+      .card-legacy { fill: #27171c; stroke: #f87171; stroke-width: 1.5; stroke-dasharray: 6 4; rx: 10; }
+      .card-neutral { fill: #1e293b; stroke: #64748b; stroke-width: 1.5; rx: 10; }
+      .node-title { font-family: 'Inter', sans-serif; font-size: 14px; font-weight: 700; fill: #f8fafc; }
+      .node-code { font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 11px; font-weight: 500; fill: #93c5fd; }
+      .node-desc { font-family: 'Inter', sans-serif; font-size: 11.5px; font-weight: 400; fill: #cbd5e1; }
+      .badge-text { font-family: 'Inter', sans-serif; font-size: 10px; font-weight: 700; fill: #0f172a; }
+      .edge-solid { stroke: #38bdf8; stroke-width: 2; fill: none; }
+      .edge-neo { stroke: #34d399; stroke-width: 2; fill: none; }
+      .edge-mcp { stroke: #c084fc; stroke-width: 2; fill: none; }
+      .edge-async { stroke: #fbbf24; stroke-width: 2; stroke-dasharray: 6 4; fill: none; }
+      .edge-legacy { stroke: #f87171; stroke-width: 1.6; stroke-dasharray: 4 4; fill: none; }
+      .edge-label { font-family: 'Inter', sans-serif; font-size: 10.5px; font-weight: 600; fill: #e2e8f0; }
+      .edge-label-bg { fill: #0f172a; stroke: #334155; stroke-width: 1; rx: 4; }
+    </style>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#38bdf8"/>
     </marker>
-    <marker id="impl" viewBox="0 0 12 12" refX="9" refY="6" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
-      <path d="M0 0 L12 6 L0 12 L3.5 6 Z" fill="#f97316"/>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#34d399"/>
+    </marker>
+    <marker id="arrow-purple" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#c084fc"/>
+    </marker>
+    <marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#fbbf24"/>
+    </marker>
+    <marker id="arrow-red" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#f87171"/>
     </marker>
   </defs>
 
-  <rect width="1280" height="792" fill="url(#bsky)"/>
-  <rect width="1280" height="792" fill="url(#bgrid)"/>
-  <rect x="0" y="0" width="1280" height="4" fill="#22d3ee"/>
+  <rect width="1200" height="750" class="bg"/>
 
-  <text x="56" y="58" fill="#f1f5f9" font-size="32" font-weight="700">백엔드 아키텍처</text>
-  <text x="58" y="84" fill="#5b6b8c" font-size="13.5">component-driven layered architecture · ADR-0002 — 기능 단위 패키징 + Port/Adapter 격리</text>
+  <!-- Header -->
+  <text x="30" y="42" class="title">Neurons Backend Layered Architecture — TO-BE (Python agent_knowledge 클린 레이어드 아키텍처)</text>
+  <text x="30" y="66" class="subtitle">pureliture/neurons · worker/lib/agent_knowledge/ Module Dependency &amp; Port/Adapter Boundaries (ADR-0002 &amp; ADR-0005)</text>
 
-  <!-- dependency rule banner -->
-  <g>
-    <rect x="56" y="104" width="1168" height="48" rx="10" fill="#101a33" stroke="#1f2d4a"/>
-    <text x="78" y="133" fill="#5b6b8c" font-size="11" font-weight="700">의존 규칙</text>
-    <g font-size="12.5" font-weight="600">
-      <rect x="168" y="116" width="86" height="24" rx="6" fill="#1a2347"/><text x="211" y="132" fill="#a5b4fc" text-anchor="middle">api</text>
-      <rect x="300" y="116" width="100" height="24" rx="6" fill="#1a2347"/><text x="350" y="132" fill="#a5b4fc" text-anchor="middle">service</text>
-      <rect x="446" y="116" width="100" height="24" rx="6" fill="#1a2347"/><text x="496" y="132" fill="#a5b4fc" text-anchor="middle">domain</text>
-      <rect x="592" y="116" width="86" height="24" rx="6" fill="#0e2f3a"/><text x="635" y="132" fill="#67e8f9" text-anchor="middle">port</text>
-      <rect x="724" y="116" width="100" height="24" rx="6" fill="#2a1a0e"/><text x="774" y="132" fill="#fdba74" text-anchor="middle">adapter</text>
-    </g>
-    <g fill="none" stroke="#22d3ee" stroke-width="1.6" marker-end="url(#dep)">
-      <path d="M256 128 H298"/>
-      <path d="M402 128 H444"/>
-      <path d="M548 128 H590"/>
-    </g>
-    <path d="M722 128 H682" fill="none" stroke="#f97316" stroke-width="1.6" marker-end="url(#impl)"/>
-    <text x="900" y="125" fill="#67e8f9" font-size="10.5">→ depends-on</text>
-    <text x="900" y="140" fill="#fdba74" font-size="10.5">→ implements (adapter→port)</text>
-    <text x="1040" y="133" fill="#475569" font-size="10.5">core는 port만 의존</text>
-  </g>
+  <!-- LAYER 1: INTERFACE / TRANSPORT LAYER -->
+  <rect x="30" y="95" width="815" height="130" class="lane-box"/>
+  <text x="46" y="118" class="lane-title">LAYER 1 · INTERFACE &amp; INGRESS TRANSPORT (worker/lib/agent_knowledge/)</text>
 
-  <!-- ===== ROW 1 : FEATURE COMPONENTS ===== -->
-  <text x="56" y="186" fill="#5b6b8c" font-size="11" font-weight="700" letter-spacing="1.5">기능 컴포넌트  ·  presentation › application › domain</text>
+  <rect x="46" y="132" width="250" height="80" class="card-mcp"/>
+  <text x="60" y="154" class="node-title">MCP Protocol Server</text>
+  <text x="60" y="172" class="node-code">mcp_server.py · mcp_http_server.py</text>
+  <text x="60" y="192" class="node-desc">JSON-RPC stdio &amp; HTTP/SSE 엔트리포인트</text>
 
-  <!-- ingest -->
-  <g>
-    <rect x="56" y="198" width="330" height="232" rx="13" fill="#10183180" stroke="#818cf8" stroke-width="1.3"/>
-    <rect x="56" y="198" width="330" height="32" rx="13" fill="#1a2347"/>
-    <rect x="56" y="214" width="330" height="16" fill="#1a2347"/>
-    <text x="74" y="219" fill="#c7d2fe" font-size="13" font-weight="700">ingest/</text>
-    <text x="370" y="219" fill="#6366f1" font-size="10.5" text-anchor="end">enqueue</text>
-    <g>
-      <rect x="72" y="244" width="298" height="40" rx="7" fill="#161f3d"/>
-      <text x="84" y="262" fill="#94a3b8" font-size="9.5">api/</text>
-      <text x="84" y="277" fill="#dbe4f3" font-size="10.5">IngressController · dto/*</text>
-    </g>
-    <g>
-      <rect x="72" y="292" width="298" height="40" rx="7" fill="#161f3d"/>
-      <text x="84" y="310" fill="#94a3b8" font-size="9.5">service/</text>
-      <text x="84" y="325" fill="#dbe4f3" font-size="10.5">IdempotencyStore</text>
-    </g>
-    <g>
-      <rect x="72" y="340" width="298" height="40" rx="7" fill="#161f3d"/>
-      <text x="84" y="358" fill="#94a3b8" font-size="9.5">domain/</text>
-      <text x="84" y="373" fill="#dbe4f3" font-size="10.5">IngestJob · DocumentPayload · TargetProfile</text>
-    </g>
-    <g>
-      <rect x="72" y="388" width="298" height="40" rx="7" fill="#161f3d"/>
-      <text x="84" y="406" fill="#94a3b8" font-size="9.5">domain/validation/</text>
-      <text x="84" y="421" fill="#dbe4f3" font-size="10.5">IngestJobValidator · RedactionGuard</text>
-    </g>
-  </g>
+  <rect x="312" y="132" width="255" height="80" class="card-mcp"/>
+  <text x="326" y="154" class="node-title">MCP Tool Handlers (13+ Tools)</text>
+  <text x="326" y="172" class="node-code">mcp_tools.py</text>
+  <text x="326" y="192" class="node-desc">brain.query, brain_context_resolve 등</text>
 
-  <!-- delivery -->
-  <g>
-    <rect x="409" y="198" width="330" height="232" rx="13" fill="#10183180" stroke="#34d399" stroke-width="1.3"/>
-    <rect x="409" y="198" width="330" height="32" rx="13" fill="#123a31"/>
-    <rect x="409" y="214" width="330" height="16" fill="#123a31"/>
-    <text x="427" y="219" fill="#a7f3d0" font-size="13" font-weight="700">delivery/</text>
-    <text x="723" y="219" fill="#10b981" font-size="10.5" text-anchor="end">worker + target delivery</text>
-    <g>
-      <rect x="425" y="244" width="298" height="52" rx="7" fill="#161f3d"/>
-      <text x="437" y="262" fill="#94a3b8" font-size="9.5">worker/</text>
-      <text x="437" y="277" fill="#dbe4f3" font-size="10.5">IngestWorker</text>
-      <text x="437" y="291" fill="#7c8cae" font-size="9.5">WorkerLoopRunner · pressure gate</text>
-    </g>
-    <g>
-      <rect x="425" y="304" width="298" height="52" rx="7" fill="#161f3d"/>
-      <text x="437" y="322" fill="#94a3b8" font-size="9.5">domain/</text>
-      <text x="437" y="337" fill="#dbe4f3" font-size="10.5">DeliveryDecision · DeliveryResult</text>
-      <text x="437" y="351" fill="#7c8cae" font-size="9.5">TargetPressure</text>
-    </g>
-    <g>
-      <rect x="425" y="364" width="298" height="50" rx="7" fill="#0f1c20" stroke="#1f4a3a" stroke-dasharray="4 3"/>
-      <text x="437" y="383" fill="#34d399" font-size="9.5">fail-closed 정책</text>
-      <text x="437" y="400" fill="#7c8cae" font-size="10">pressure == OPEN 일 때만 신규 delivery</text>
-    </g>
-  </g>
+  <rect x="583" y="132" width="246" height="80" class="card-neutral"/>
+  <text x="597" y="154" class="node-title">Ingress Queue Consumer</text>
+  <text x="597" y="172" class="node-code">rag_ingress/ · transcript_ingest.py</text>
+  <text x="597" y="192" class="node-desc">NATS / CLI 세션 트랜스크립트 수신</text>
 
-  <!-- status -->
-  <g>
-    <rect x="762" y="198" width="330" height="232" rx="13" fill="#10183180" stroke="#fbbf24" stroke-width="1.3"/>
-    <rect x="762" y="198" width="330" height="32" rx="13" fill="#3a2e0f"/>
-    <rect x="762" y="214" width="330" height="16" fill="#3a2e0f"/>
-    <text x="780" y="219" fill="#fde68a" font-size="13" font-weight="700">status/</text>
-    <text x="1076" y="219" fill="#d97706" font-size="10.5" text-anchor="end">operator observability</text>
-    <g>
-      <rect x="778" y="244" width="298" height="52" rx="7" fill="#161f3d"/>
-      <text x="790" y="262" fill="#94a3b8" font-size="9.5">service/</text>
-      <text x="790" y="277" fill="#dbe4f3" font-size="10.5">StatusService</text>
-      <text x="790" y="291" fill="#7c8cae" font-size="9.5">queue counts + target pressure</text>
-    </g>
-    <g>
-      <rect x="778" y="304" width="298" height="110" rx="7" fill="#0f1726"/>
-      <text x="790" y="324" fill="#94a3b8" font-size="9.5">redacted /status 출력</text>
-      <g font-size="10" fill="#9fb3d1">
-        <text x="790" y="345">queue.pending · inFlight · redelivered</text>
-        <text x="790" y="363">queue.deadLetter</text>
-        <text x="790" y="381">target.pressure  ◦ OPEN/THROTTLED/CLOSED</text>
-        <text x="790" y="399">indexed ≠ authorized — 상태 분리 유지</text>
-      </g>
-    </g>
-  </g>
+  <!-- LAYER 2: APPLICATION &amp; ORCHESTRATION SERVICES -->
+  <rect x="30" y="245" width="815" height="150" class="lane-box"/>
+  <text x="46" y="268" class="lane-title">LAYER 2 · APPLICATION &amp; ORCHESTRATION SERVICES (session_memory/)</text>
 
-  <!-- depends-on arrows row1 -> ports -->
-  <g fill="none" stroke="#22d3ee" stroke-width="1.8" marker-end="url(#dep)" opacity="0.9">
-    <path d="M221 430 V486"/>
-    <path d="M574 430 V486"/>
-    <path d="M900 430 C900 458 845 458 845 486"/>
-  </g>
+  <rect x="46" y="282" width="250" height="98" class="card-py"/>
+  <text x="60" y="304" class="node-title">Brain Steward Authority</text>
+  <text x="60" y="322" class="node-code">session_memory/brain_steward.py</text>
+  <text x="60" y="342" class="node-desc">메모리 카드 생명주기, 승격(Promotion),</text>
+  <text x="60" y="358" class="node-desc">페르소나 체크, 코퍼스 상태 통합 관장</text>
 
-  <!-- ===== ROW 2 : PORTS ===== -->
-  <text x="56" y="468" fill="#5b6b8c" font-size="11" font-weight="700" letter-spacing="1.5">포트  ·  기술 중립 계약 (인터페이스 + 계약 타입)</text>
-  <g>
-    <rect x="56" y="478" width="513" height="118" rx="13" fill="#0c2330" stroke="#22d3ee" stroke-width="1.3"/>
-    <text x="74" y="503" fill="#67e8f9" font-size="12.5" font-weight="700">queue/port/</text>
-    <g font-size="10" fill="#bfe9f2">
-      <text x="74" y="527">IngestPublisher · IngestConsumer</text>
-      <text x="74" y="546">IngestMessage · PublishResult · AcknowledgementHandle</text>
-      <text x="74" y="565">QueueStatusProvider · QueueStatusSnapshot</text>
-    </g>
-    <text x="74" y="585" fill="#3e7a8a" font-size="9.5">큐 엔진을 모른다 — NATS 타입 의존 없음</text>
-  </g>
-  <g>
-    <rect x="585" y="478" width="507" height="118" rx="13" fill="#0c2330" stroke="#22d3ee" stroke-width="1.3"/>
-    <text x="603" y="503" fill="#67e8f9" font-size="12.5" font-weight="700">target/port/</text>
-    <g font-size="10" fill="#bfe9f2">
-      <text x="603" y="527">RagTargetAdapter</text>
-      <text x="603" y="546">TargetStatusSnapshot · TargetPressureSnapshot</text>
-    </g>
-    <text x="603" y="572" fill="#3e7a8a" font-size="9.5">RAG target을 모른다 — RetiredIndexBridge 타입 의존 없음</text>
-    <text x="603" y="586" fill="#3e7a8a" font-size="9.5">core가 보는 유일한 delivery 경계</text>
-  </g>
+  <rect x="312" y="282" width="255" height="98" class="card-py"/>
+  <text x="326" y="304" class="node-title">LLM Brain Read Service</text>
+  <text x="326" y="322" class="node-code">session_memory/llm_brain_service.py</text>
+  <text x="326" y="342" class="node-desc">질의 의도 분류, 드리프트 설명,</text>
+  <text x="326" y="358" class="node-desc">인시던트·증거 조합 파이프라인 조율</text>
 
-  <!-- implements arrows adapters -> ports -->
-  <g fill="none" stroke="#f97316" stroke-width="1.8" marker-end="url(#impl)" opacity="0.9">
-    <path d="M300 700 V600"/>
-    <path d="M840 700 V600"/>
-  </g>
+  <rect x="583" y="282" width="246" height="98" class="card-py"/>
+  <text x="597" y="304" class="node-title">Session Mining Pipeline</text>
+  <text x="597" y="322" class="node-code">memory_miner.py · llm_brain_miner.py</text>
+  <text x="597" y="342" class="node-desc">transcript_chunking.py + extraction_llm.py</text>
+  <text x="597" y="358" class="node-desc">대화에서 구조화된 MemoryCard 추출</text>
 
-  <!-- ===== ROW 3 : ADAPTERS ===== -->
-  <text x="56" y="678" fill="#5b6b8c" font-size="11" font-weight="700" letter-spacing="1.5">어댑터  ·  포트 구현체</text>
-  <g>
-    <rect x="56" y="688" width="513" height="86" rx="13" fill="#0e1a2e" stroke="#38bdf8" stroke-width="1.3"/>
-    <text x="74" y="713" fill="#7dd3fc" font-size="12.5" font-weight="700">adapter/infra/nats/</text>
-    <text x="555" y="713" fill="#0ea5e9" font-size="9.5" text-anchor="end">기술 인프라</text>
-    <g font-size="9.7" fill="#aed6ee">
-      <text x="74" y="735">NatsIngestPublisher · NatsIngestConsumer · NatsQueueStatusProvider</text>
-      <text x="74" y="753">JetStream*Gateway · NatsJetStreamProvisioner · SubjectRouter · Codec</text>
-    </g>
-  </g>
-  <g>
-    <rect x="585" y="688" width="507" height="86" rx="13" fill="#1c1626" stroke="#f97316" stroke-width="1.3"/>
-    <text x="603" y="713" fill="#fdba74" font-size="12.5" font-weight="700">adapter/ext/retired_index_bridge/</text>
-    <text x="1076" y="713" fill="#ea580c" font-size="9.5" text-anchor="end">외부 서비스</text>
-    <g font-size="9.7" fill="#e7cdb3">
-      <text x="603" y="735">RetiredIndexBridgeTargetAdapter · HttpRetiredIndexBridgeGateway · RetiredIndexBridgeGateway</text>
-      <text x="603" y="753">RetiredIndexBridgePressurePolicy · RetiredIndexBridgeDocumentRef · RetiredIndexBridgePressureSnapshot</text>
-    </g>
-  </g>
+  <!-- LAYER 3: DOMAIN &amp; RESOLUTION ENGINE -->
+  <rect x="30" y="415" width="815" height="140" class="lane-box"/>
+  <text x="46" y="438" class="lane-title">LAYER 3 · DOMAIN MODELS &amp; HYBRID GRAPH ENGINE (llm_brain_core/)</text>
 
-  <!-- common sidebar -->
-  <g>
-    <rect x="1108" y="198" width="116" height="576" rx="13" fill="#0e1730" stroke="#475569" stroke-width="1.2" stroke-dasharray="6 5"/>
-    <text x="1166" y="222" fill="#cbd5e1" font-size="12" font-weight="700" text-anchor="middle">common/</text>
-    <line x1="1124" y1="234" x2="1208" y2="234" stroke="#1f2d4a"/>
-    <g font-size="9.6" fill="#94a3b8">
-      <text x="1166" y="276" text-anchor="middle">config/</text>
-      <text x="1166" y="293" text-anchor="middle" fill="#64748b">Worker·</text>
-      <text x="1166" y="306" text-anchor="middle" fill="#64748b">NatsJetStream</text>
-      <text x="1166" y="319" text-anchor="middle" fill="#64748b">Configuration</text>
-      <text x="1166" y="378" text-anchor="middle">logging/</text>
-      <text x="1166" y="395" text-anchor="middle" fill="#64748b">SafeJobSummary</text>
-    </g>
-    <text x="1166" y="700" fill="#475569" font-size="9" text-anchor="middle">공통 인프라</text>
-    <text x="1166" y="714" fill="#475569" font-size="9" text-anchor="middle">조립 루트</text>
-  </g>
+  <rect x="46" y="452" width="250" height="90" class="card-py"/>
+  <text x="60" y="474" class="node-title">Domain Entities &amp; Cards</text>
+  <text x="60" y="492" class="node-code">memory_card.py · models</text>
+  <text x="60" y="512" class="node-desc">MemoryCard, Episode, Incident, Drift,</text>
+  <text x="60" y="528" class="node-desc">PersonaRule, EvidenceEnvelope 도메인 모델</text>
+
+  <rect x="312" y="452" width="255" height="90" class="card-py"/>
+  <text x="326" y="474" class="node-title">Graph-First Resolver</text>
+  <text x="326" y="492" class="node-code">llm_brain_core/graph_first_resolver.py</text>
+  <text x="326" y="512" class="node-desc">엔티티 시드 기반 멀티홉 탐색 후</text>
+  <text x="326" y="528" class="node-desc">pgvector 유사도 결과와 하이브리드 결합</text>
+
+  <rect x="583" y="452" width="246" height="90" class="card-py"/>
+  <text x="597" y="474" class="node-title">Hybrid Graph &amp; Adapter</text>
+  <text x="597" y="492" class="node-code">hybrid_graph.py · graphiti_adapter.py</text>
+  <text x="597" y="512" class="node-desc">도메인 객체 ↔ Graphiti 노드/엣지 변환</text>
+  <text x="597" y="528" class="node-desc">및 서브그래프 컨텍스트 빌딩</text>
+
+  <!-- LAYER 4: STORAGE ADAPTERS &amp; INFRASTRUCTURE -->
+  <rect x="30" y="575" width="815" height="145" class="lane-box"/>
+  <text x="46" y="598" class="lane-title">LAYER 4 · STORAGE ADAPTERS &amp; INFRASTRUCTURE (postgres_store/ &amp; llm_brain_core/)</text>
+
+  <rect x="46" y="612" width="250" height="92" class="card-pg"/>
+  <text x="60" y="634" class="node-title">PostgreSQL + pgvector Store</text>
+  <text x="60" y="652" class="node-code">postgres_store/pgvector_store.py</text>
+  <text x="60" y="672" class="node-desc">psycopg3 풀, HNSW 벡터 검색(&lt;=&gt;),</text>
+  <text x="60" y="688" class="node-desc">Steward 카드 및 원본 트랜스크립트 CRUD</text>
+
+  <rect x="312" y="612" width="255" height="92" class="card-pg"/>
+  <text x="326" y="634" class="node-title">Outbox &amp; Graph Replay Worker</text>
+  <text x="326" y="652" class="node-code">outbox_worker.py · graph_replay.py</text>
+  <text x="326" y="672" class="node-desc">트랜잭셔널 아웃박스 폴링 및</text>
+  <text x="326" y="688" class="node-desc">Neo4j 지식 그래프 재구축/동기화</text>
+
+  <rect x="583" y="612" width="246" height="92" class="card-neo"/>
+  <text x="597" y="634" class="node-title">Graphiti Neo4j Backend</text>
+  <text x="597" y="652" class="node-code">llm_brain_core/graphiti_backend.py</text>
+  <text x="597" y="672" class="node-desc">from graphiti_core import Graphiti</text>
+  <text x="597" y="688" class="node-desc">Neo4j Bolt 드라이버 연결 및 Cypher 질의</text>
+
+  <!-- Vertical Dependency Arrows -->
+  <path d="M 171 212 L 171 282" class="edge-mcp" marker-end="url(#arrow-purple)"/>
+  <path d="M 439 212 L 439 282" class="edge-mcp" marker-end="url(#arrow-purple)"/>
+  <path d="M 706 212 L 706 282" class="edge-solid" marker-end="url(#arrow-blue)"/>
+
+  <path d="M 171 380 L 171 452" class="edge-solid" marker-end="url(#arrow-blue)"/>
+  <path d="M 439 380 L 439 452" class="edge-solid" marker-end="url(#arrow-blue)"/>
+  <path d="M 706 380 L 706 452" class="edge-solid" marker-end="url(#arrow-blue)"/>
+
+  <path d="M 171 542 L 171 612" class="edge-solid" marker-end="url(#arrow-blue)"/>
+  <path d="M 439 542 L 195 612" class="edge-solid" marker-end="url(#arrow-blue)"/>
+  <path d="M 439 542 L 680 612" class="edge-neo" marker-end="url(#arrow-green)"/>
+  <path d="M 567 658 L 583 658" class="edge-async" marker-end="url(#arrow-amber)"/>
+
+  
+        <rect x="865" y="95" width="305" height="625" class="lane-box" stroke="#34d399"/>
+        <rect x="881" y="110" width="185" height="20" rx="4" fill="#34d399"/>
+        <text x="889" y="124" class="badge-text">PORT / ADAPTER CONTRACTS</text>
+        <text x="881" y="150" class="node-title">핵심 데이터 계약 및 경계 규칙</text>
+
+        <rect x="881" y="175" width="273" height="150" class="card-pg"/>
+        <text x="895" y="198" class="node-title">Unit of Work &amp; Outbox 계약</text>
+        <text x="895" y="216" class="node-code">docs/adr-0005 · adr-0006</text>
+        <text x="895" y="238" class="node-desc">• 원본 트랜스크립트는 불변(Immutable)</text>
+        <text x="895" y="256" class="node-desc">• MemoryCard 생성과 Outbox 이벤트</text>
+        <text x="895" y="272" class="node-desc">  적재는 단일 PG 트랜잭션으로 처리</text>
+        <text x="895" y="290" class="node-desc">• 외부 그래프 장애가 수집/원장 커밋을</text>
+        <text x="895" y="306" class="node-desc">  절대 블로킹하지 않음</text>
+
+        <rect x="881" y="345" width="273" height="165" class="card-neo"/>
+        <text x="895" y="368" class="node-title">Graphiti 투영 &amp; 리플레이 계약</text>
+        <text x="895" y="386" class="node-code">graph_replay.py · graphiti_adapter.py</text>
+        <text x="895" y="408" class="node-desc">• Steward가 정제한 카드/메타데이터를</text>
+        <text x="895" y="424" class="node-desc">  Graphiti 에피소드/엔티티로 어댑팅</text>
+        <text x="895" y="442" class="node-desc">• 시간축 충돌(과거 결정 폐기 등)만</text>
+        <text x="895" y="458" class="node-desc">  Graphiti 엣지(valid_at/invalid_at)로</text>
+        <text x="895" y="474" class="node-desc">  버전 관리</text>
+
+        <rect x="881" y="530" width="273" height="170" class="card-mcp"/>
+        <text x="895" y="553" class="node-title">Brain Steward MCP 계약</text>
+        <text x="895" y="571" class="node-code">docs/contracts/brain-steward-mcp.md</text>
+        <text x="895" y="593" class="node-desc">• 모든 MCP 응답은 근거 청크 ID</text>
+        <text x="895" y="609" class="node-desc">  (Evidence Provenance)를 포함</text>
+        <text x="895" y="627" class="node-desc">• Public/Private 도메인 격리 마커</text>
+        <text x="895" y="643" class="node-desc">  검증 후 에이전트에 컨텍스트 반환</text>
+        
 </svg>
