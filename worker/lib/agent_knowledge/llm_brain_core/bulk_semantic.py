@@ -3,6 +3,8 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -159,6 +161,9 @@ class OpenAICompatibleBulkSemanticExtractor:
         return parse_bulk_semantic_result(parsed)
 
 
+DEFAULT_BULK_SEMANTIC_EMBEDDING_BATCH_SIZE = 2
+
+
 class OpenAICompatibleEmbeddingBatcher:
     """Small OpenAI-compatible batch embedding client for deterministic graph writes."""
 
@@ -169,6 +174,7 @@ class OpenAICompatibleEmbeddingBatcher:
         model: str,
         api_key: str = "",
         timeout_seconds: int = DEFAULT_BULK_SEMANTIC_TIMEOUT_SECONDS,
+        max_batch_size: int = DEFAULT_BULK_SEMANTIC_EMBEDDING_BATCH_SIZE,
         post_fn: Callable[..., str] | None = None,
     ) -> None:
         if not base_url:
@@ -179,6 +185,7 @@ class OpenAICompatibleEmbeddingBatcher:
         self._model = model
         self._api_key = api_key
         self._timeout_seconds = max(1, int(timeout_seconds))
+        self._max_batch_size = max(1, int(max_batch_size))
         self._post_fn = post_fn or _urllib_post
 
     @classmethod
@@ -198,6 +205,10 @@ class OpenAICompatibleEmbeddingBatcher:
                 env.get("LLM_BRAIN_BULK_SEMANTIC_TIMEOUT_SECONDS", ""),
                 DEFAULT_BULK_SEMANTIC_TIMEOUT_SECONDS,
             ),
+            max_batch_size=_positive_int_env(
+                env.get("LLM_BRAIN_EMBEDDING_BATCH_SIZE", ""),
+                DEFAULT_BULK_SEMANTIC_EMBEDDING_BATCH_SIZE,
+            ),
         )
 
     def embed_many(self, texts: list[str]) -> list[list[float] | None]:
@@ -209,27 +220,42 @@ class OpenAICompatibleEmbeddingBatcher:
         }
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
-        raw = self._post_fn(
-            self._base_url + "/embeddings",
-            headers=headers,
-            body=json.dumps({"model": self._model, "input": list(texts)}, ensure_ascii=True),
-            timeout=self._timeout_seconds,
-        )
-        data = json.loads(raw)
-        rows = data.get("data") if isinstance(data, dict) else None
-        if not isinstance(rows, list):
-            raise ValueError("embedding response missing data")
-        by_index: dict[int, list[float]] = {}
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
+        results: list[list[float] | None] = []
+        for start in range(0, len(texts), self._max_batch_size):
+            chunk = list(texts[start : start + self._max_batch_size])
+            raw = self._post_embeddings_chunk(headers=headers, chunk=chunk)
+            data = json.loads(raw)
+            rows = data.get("data") if isinstance(data, dict) else None
+            if not isinstance(rows, list):
+                raise ValueError("embedding response missing data")
+            by_index: dict[int, list[float]] = {}
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    index = int(row.get("index"))
+                    embedding = [float(item) for item in row.get("embedding") or []]
+                except (TypeError, ValueError):
+                    continue
+                by_index[index] = embedding
+            results.extend(by_index.get(index) for index in range(len(chunk)))
+        return results
+
+    def _post_embeddings_chunk(self, *, headers: dict[str, str], chunk: list[str]) -> str:
+        body = json.dumps({"model": self._model, "input": chunk}, ensure_ascii=True)
+        for attempt in range(3):
             try:
-                index = int(row.get("index"))
-                embedding = [float(item) for item in row.get("embedding") or []]
-            except (TypeError, ValueError):
-                continue
-            by_index[index] = embedding
-        return [by_index.get(index) for index in range(len(texts))]
+                return self._post_fn(
+                    self._base_url + "/embeddings",
+                    headers=headers,
+                    body=body,
+                    timeout=self._timeout_seconds,
+                )
+            except urllib.error.HTTPError as exc:
+                if exc.code not in {429, 503} or attempt >= 2:
+                    raise
+                time.sleep(0.25 * (attempt + 1))
+        raise RuntimeError("unreachable")
 
 
 class DeterministicGraphitiSemanticWriter:

@@ -30,7 +30,7 @@ from .objects.object_packs import (
 )
 from .objects.reference_corpus import default_corpus_policy_status
 from .source_ref import SourceRefResolver
-from .terms import terms as _terms_impl
+from .terms import query_terms as _query_terms_impl, terms as _terms_impl
 from .temporal import (
     TemporalSelector,
     TemporalSelectorError,
@@ -182,11 +182,13 @@ class BrainReadService:
     ) -> dict[str, Any]:
         bounded = max(1, min(int(limit), 100))
         wanted = set(card_types or [])
-        terms = _terms(query)
+        has_query = bool(str(query or "").strip())
+        terms = _query_terms(query) if has_query else []
         cards = [
             _card_view(card)
             for card in _project_cards(self.memory_cards, project)
-            if (not wanted or str(card.get("card_type")) in wanted) and _matches_terms(card, terms)
+            if (not wanted or str(card.get("card_type")) in wanted)
+            and (not has_query or (bool(terms) and _matches_terms(card, terms)))
         ][:bounded]
         graph = _recall_safe_graph_result(
             self.graph_adapter.search_context(
@@ -1782,6 +1784,10 @@ def _persona_conflicts(card: Mapping[str, Any], plan: str) -> bool:
 
 def _terms(value: Any) -> list[str]:
     return _terms_impl(value)
+
+
+def _query_terms(value: Any) -> list[str]:
+    return _query_terms_impl(value)
 
 
 def _parse_window_bound(value: str) -> datetime | None:

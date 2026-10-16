@@ -28,6 +28,7 @@ from .graph_scope import (
 )
 from .models import GraphMemoryResult, OntologyEpisode
 from .terms import matches as _terms_impl_matches
+from .terms import query_terms as _query_terms_impl
 from .terms import terms as _terms_impl
 from ..model_connectors.structured_response import (
     existing_fact_idx_values_from_messages as _existing_fact_idx_values_from_messages,
@@ -482,13 +483,18 @@ class GraphitiNeo4jGraphMemoryAdapter:
                 if len(as_of) != 10:
                     raise ValueError("as_of must include a timezone")
                 reference_time = reference_time.replace(tzinfo=timezone.utc)
-        # Fix 5 (보수적 정책, 사용자 승인): valid_at/invalid_at이 null인 사실은
-        # 현재 시점 조회에서 완전히 제외한다. is_null 허용은 valid_to 미설정
-        # stale 사실이 current로 계속 노출되는 원인이었다.
+        # valid_at이 null인 미검증 사실은 제외하되, 현재 유효한(아직 폐기되지 않은)
+        # RELATES_TO 엣지는 invalid_at이 null이므로 greater_than OR is_null을 허용한다.
         search_filter = SearchFilters(
             valid_at=[[DateFilter(date=reference_time, comparison_operator=ComparisonOperator.less_than_equal)]],
-            invalid_at=[[DateFilter(date=reference_time, comparison_operator=ComparisonOperator.greater_than)]],
+            invalid_at=[
+                [DateFilter(date=reference_time, comparison_operator=ComparisonOperator.greater_than)],
+                [DateFilter(comparison_operator=ComparisonOperator.is_null)],
+            ],
         )
+        wanted = set(entity_types or [])
+        has_query = bool(str(query or "").strip())
+        terms = _query_terms(query)
 
         async def _call() -> tuple[list[Any], list[Any], list[Any], list[str], bool]:
             loop = asyncio.get_running_loop()
@@ -509,14 +515,38 @@ class GraphitiNeo4jGraphMemoryAdapter:
                 edges = []
                 edge_degraded = True
                 details.append(f"edge_search:{type(exc).__name__}")
+            fanout = _episode_fanout(bounded)
             episodes = list(
                 await self._graphiti.retrieve_episodes(
                     reference_time=reference_time,
-                    last_n=_episode_fanout(bounded),
+                    last_n=fanout,
                     group_ids=group_ids,
                 )
                 or []
             )
+            if len(episodes) >= fanout and (has_query or wanted):
+                initial_matches = sum(
+                    1
+                    for episode_node in episodes
+                    if (episode := _episode_node_to_ontology(episode_node)) is not None
+                    and episode_matches_graph_group(
+                        episode,
+                        expected_group_id=group_id,
+                        default_scope=self._default_group_id,
+                    )
+                    and (not wanted or episode.entity_type in wanted)
+                    and (not has_query or (bool(terms) and _matches(episode.search_text(), terms)))
+                )
+                expanded_fanout = max(fanout * 5, 100)
+                if initial_matches < bounded and expanded_fanout > fanout:
+                    episodes = list(
+                        await self._graphiti.retrieve_episodes(
+                            reference_time=reference_time,
+                            last_n=expanded_fanout,
+                            group_ids=group_ids,
+                        )
+                        or episodes
+                    )
             hydrated_source_nodes: list[Any] = []
             edge_source_ids = _edge_source_episode_ids(list(edges or []))
             if len(edge_source_ids) <= _MAX_EDGE_PROVENANCE_IDS:
@@ -630,13 +660,11 @@ class GraphitiNeo4jGraphMemoryAdapter:
                 continue
             source_episodes_by_id[episode.episode_id] = episode
 
-        wanted = set(entity_types or [])
-        terms = _terms(query)
         converted: list[OntologyEpisode] = []
         for episode in canonical_episodes:
             if wanted and episode.entity_type not in wanted:
                 continue
-            if terms and not _matches(episode.search_text(), terms):
+            if has_query and (not terms or not _matches(episode.search_text(), terms)):
                 continue
             converted.append(episode)
         edge_provenance_degraded = False
@@ -659,12 +687,19 @@ class GraphitiNeo4jGraphMemoryAdapter:
             episode = _edge_to_ontology(edge, source_episodes=source_episodes)
             if wanted and episode.entity_type not in wanted:
                 continue
-            if terms and not _matches(episode.search_text(), terms):
+            if has_query and (not terms or not _edge_matches_terms(episode, source_episodes, terms)):
                 edge_relevance_filtered += 1
                 continue
             converted.append(episode)
 
-        converted.sort(key=lambda item: (item.observed_at, item.episode_id), reverse=True)
+        converted.sort(
+            key=lambda item: (
+                bool(item.payload.get("authority_memory_id") or item.payload.get("authority_sources")),
+                item.observed_at,
+                item.episode_id,
+            ),
+            reverse=True,
+        )
         # Edge (relationship) search failure with surviving episode reads is a
         # partial result, not a healthy 'available' one. Separate it so downstream
         # gates cannot read a false-healthy graph_status.
@@ -1051,12 +1086,21 @@ def _build_graphiti(config: GraphitiNeo4jConfig):
 _OPENAI_CHAT_ROLES = frozenset({"system", "user", "assistant", "tool", "developer", "function"})
 
 
+_GRAPHITI_DEFAULT_HEADERS = {
+    "User-Agent": "neurons-graphiti/1.0",
+    "x-opencode-session": "neurons-graphiti",
+}
+
+
 class _ReasoningOpenAIGenericClient(OpenAIGenericClient):
     """OpenAI-compatible Graphiti client with optional per-request reasoning."""
 
     def __init__(self, *args: Any, reasoning_effort: str = "", **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._reasoning_effort = reasoning_effort
+        with_options = getattr(self.client, "with_options", None)
+        if callable(with_options):
+            self.client = with_options(default_headers=dict(_GRAPHITI_DEFAULT_HEADERS))
 
     async def _generate_response(self, messages, response_model=None, max_tokens=None, model_size=None):
         import json as _json
@@ -1259,6 +1303,13 @@ def _edge_to_ontology(
     valid_at = _datetime_to_iso(getattr(edge, "valid_at", None) or getattr(edge, "reference_time", None))
     invalid_at = _datetime_to_iso(getattr(edge, "invalid_at", None) or getattr(edge, "expired_at", None))
     source_providers = sorted({_episode_provider(episode) for episode in source_episodes})
+    source_entity_types = sorted(
+        {
+            str(episode.entity_type or "")
+            for episode in source_episodes
+            if str(episode.entity_type or "")
+        }
+    )
     payload = {
         "graphiti_edge_uuid": edge_uuid,
         "fact": fact,
@@ -1266,6 +1317,7 @@ def _edge_to_ontology(
         "target_node_uuid": public_safe_text(str(getattr(edge, "target_node_uuid", "") or ""), max_chars=200),
         "provider": source_providers[0] if len(source_providers) == 1 else "",
         "source_providers": source_providers,
+        "source_entity_types": source_entity_types,
         # GraphFact 자체의 hash는 추론 fact의 hash다. 검증된 원본 episode의
         # 카드 키를 별도로 보존해야 PG 권위 join에서 둘을 혼동하지 않는다.
         "authority_sources": [
@@ -1304,6 +1356,9 @@ def _edge_source_episode_ids(edges: list[Any]) -> list[str]:
     return source_ids
 
 
+_AUTHORITY_MEMORY_CARD_PROVIDER = "authority_memory_card"
+
+
 def _resolved_edge_source_episodes(
     edge: Any,
     *,
@@ -1337,13 +1392,26 @@ def _resolved_edge_source_episodes(
         for episode in resolved
     ):
         return None
-    if len(providers) != 1 or not next(iter(providers), ""):
+    if not providers or "" in providers:
+        return None
+    non_card_providers = providers - {_AUTHORITY_MEMORY_CARD_PROVIDER}
+    if len(non_card_providers) > 1:
         return None
     return resolved
 
 
 def _episode_provider(episode: OntologyEpisode) -> str:
-    return str(episode.payload.get("provider") or "").strip().casefold()
+    explicit = str(episode.payload.get("provider") or "").strip().casefold()
+    if explicit:
+        return explicit
+    if (
+        isinstance(episode.payload.get("authority_memory_id"), str)
+        and episode.payload.get("authority_memory_id")
+        and isinstance(episode.payload.get("content_hash"), str)
+        and episode.payload.get("content_hash")
+    ):
+        return _AUTHORITY_MEMORY_CARD_PROVIDER
+    return ""
 
 
 def _parse_datetime(value: str) -> datetime:
@@ -1368,6 +1436,25 @@ def _terms(value: Any) -> list[str]:
     return _terms_impl(value)
 
 
+def _query_terms(value: Any) -> list[str]:
+    return _query_terms_impl(value)
+
+
+def _edge_matches_terms(
+    edge_episode: OntologyEpisode,
+    source_episodes: tuple[OntologyEpisode, ...],
+    terms: list[str],
+) -> bool:
+    if _matches(edge_episode.search_text(), terms):
+        return True
+    return any(
+        isinstance(source.payload.get("authority_memory_id"), str)
+        and bool(source.payload.get("authority_memory_id"))
+        and _matches(source.search_text(), terms)
+        for source in source_episodes
+    )
+
+
 _EPISODE_FANOUT_MULTIPLIER = 1.0
 
 
@@ -1377,7 +1464,10 @@ def _episode_fanout(bounded: int) -> int:
     기존 ×5 fan-out은 limit의 5배를 풀로 가져와 무관한 오래된 에피소드까지
     후보에 포함했다. 기본 배율 1.0로 축소하고, 필요 시 환경변수로만 확장한다.
     """
-    multiplier = _int_env("LBRAIN_EPISODE_FANOUT_X", default=int(_EPISODE_FANOUT_MULTIPLIER))
+    multiplier = _int_env(
+        os.environ.get("LBRAIN_EPISODE_FANOUT_X", ""),
+        default=int(_EPISODE_FANOUT_MULTIPLIER),
+    )
     if multiplier < 1:
         multiplier = 1
     return max(bounded * multiplier, bounded)

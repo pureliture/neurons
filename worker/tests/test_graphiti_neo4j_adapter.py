@@ -81,10 +81,11 @@ def test_graphiti_as_of_filters_relationship_candidates_before_top_k(as_of):
             assert filters.valid_at[0][0].date == datetime(2026, 1, 15, tzinfo=timezone.utc)
         assert filters.valid_at[0][0].comparison_operator == ComparisonOperator.less_than_equal
         assert filters.invalid_at[0][0].comparison_operator == ComparisonOperator.greater_than
-        # Fix 5: null 허용(is_null OR)은 제거됐다 — valid_at/invalid_at이 null인
-        # stale 사실은 현재 시점 조회에서 완전히 제외된다(사용자 승인 정책).
+        assert filters.invalid_at[1][0].comparison_operator == ComparisonOperator.is_null
+        # valid_at은 null을 허용하지 않되(valid_at <= instant), 현재 유효한 엣지(invalid_at IS NULL)는
+        # invalid_at > instant OR invalid_at IS NULL 조건으로 조회 후보에 포함한다.
         assert len(filters.valid_at) == 1
-        assert len(filters.invalid_at) == 1
+        assert len(filters.invalid_at) == 2
         assert observed["reference_time"] == filters.valid_at[0][0].date
         assert observed["num_results"] == 5
     finally:
@@ -1892,3 +1893,166 @@ def test_urllib_post_endpoint_allowlist_blocks_ssrf():
             body="{}",
             timeout=1,
         )
+
+
+def test_search_context_accepts_edge_provenance_from_authority_memory_card_and_matches_card_text():
+    from agent_knowledge.llm_brain_core.ontology import episode_from_memory_card
+
+    card_episode = episode_from_memory_card(
+        {
+            "memory_id": "mem_audit_verdict",
+            "card_type": "decision",
+            "project": "neurons",
+            "title": "전수 감사 판정 및 운영 승격 보류",
+            "summary": "전수 감사 판정 결과 운영 승격은 조건부 보류한다.",
+            "currentness": "current",
+            "lifecycle_state": "accepted",
+            "approval_state": "approved",
+            "content_hash": "sha256:" + "a" * 64,
+            "created_at": "2026-08-29T00:00:00+00:00",
+            "updated_at": "2026-08-29T00:00:00+00:00",
+            "typed_payload": {"decision": "운영 승격 보류"},
+        }
+    )
+    graphiti = _FakeGraphiti()
+    graphiti.episodes.append(
+        SimpleNamespace(
+            uuid=card_episode.episode_id,
+            content=json.dumps(card_episode.to_dict(), ensure_ascii=False),
+        )
+    )
+    graphiti.edges.append(
+        SimpleNamespace(
+            uuid="edge-audit-1",
+            name="RELATES_TO",
+            fact="Full audit verdict holds production promotion until verification passes.",
+            valid_at=datetime(2026, 8, 29, tzinfo=timezone.utc),
+            invalid_at=None,
+            source_node_uuid="node-audit",
+            target_node_uuid="node-promotion",
+            episodes=[card_episode.episode_id],
+        )
+    )
+    adapter = GraphitiNeo4jGraphMemoryAdapter(graphiti, default_group_id="/project/neurons")
+
+    result = adapter.search_context(
+        brain_id="/project/neurons",
+        query="감사 판정 알려줘",
+        entity_types=None,
+        limit=5,
+    )
+
+    assert result.status == "available"
+    fact_episodes = [ep for ep in result.episodes if ep.entity_type == "GraphFact"]
+    assert len(fact_episodes) == 1
+    assert fact_episodes[0].payload["authority_sources"] == [
+        {"authority_memory_id": "mem_audit_verdict", "content_hash": "sha256:" + "a" * 64}
+    ]
+    assert fact_episodes[0].payload["source_entity_types"] == ["Decision"]
+
+
+def test_search_context_rejects_short_korean_irrelevant_query():
+    episode = _episode(
+        "Decision",
+        "decision:ragflow",
+        {
+            "brain_id": "/project/neurons",
+            "authority_memory_id": "mem_ragflow",
+            "content_hash": "sha256:" + "b" * 64,
+            "title": "RAGFlow API 연동 정책",
+            "summary": "RAGFLOW_API_KEY 단일 키를 사용한다.",
+        },
+    )
+    graphiti = _FakeGraphiti()
+    graphiti.episodes.append(
+        SimpleNamespace(
+            uuid=episode.episode_id,
+            content=json.dumps(episode.to_dict(), ensure_ascii=False),
+        )
+    )
+    adapter = GraphitiNeo4jGraphMemoryAdapter(graphiti, default_group_id="/project/neurons")
+
+    for irrelevant_query in ("뭐 입지", "너는", "날씨"):
+        result = adapter.search_context(
+            brain_id="/project/neurons",
+            query=irrelevant_query,
+            entity_types=None,
+            limit=5,
+        )
+        assert result.status == "available"
+        assert result.episodes == ()
+
+
+def test_episode_fanout_reads_env_and_search_context_expands_pool_once(monkeypatch):
+    from agent_knowledge.llm_brain_core.graphiti_adapter import _episode_fanout
+
+    monkeypatch.setenv("LBRAIN_EPISODE_FANOUT_X", "3")
+    assert _episode_fanout(5) == 15
+    monkeypatch.delenv("LBRAIN_EPISODE_FANOUT_X", raising=False)
+
+    non_matching = [
+        _episode(
+            "Session",
+            f"session:{idx}",
+            {"brain_id": "/project/neurons", "provider": "codex", "summary": f"unrelated session {idx}"},
+        )
+        for idx in range(2)
+    ]
+    matching = _episode(
+        "Decision",
+        "decision:target",
+        {
+            "brain_id": "/project/neurons",
+            "authority_memory_id": "mem_target",
+            "content_hash": "sha256:" + "c" * 64,
+            "summary": "target architecture decision",
+        },
+    )
+    all_nodes = [
+        SimpleNamespace(uuid=ep.episode_id, content=json.dumps(ep.to_dict(), ensure_ascii=False))
+        for ep in [*non_matching, matching]
+    ]
+    retrieve_limits: list[int] = []
+
+    async def search(query, **kwargs):
+        _ = (query, kwargs)
+        return []
+
+    async def retrieve(**kwargs):
+        limit = kwargs["last_n"]
+        retrieve_limits.append(limit)
+        return all_nodes[:limit]
+
+    runner = _AsyncLoopRunner()
+    try:
+        adapter = GraphitiNeo4jGraphMemoryAdapter(
+            SimpleNamespace(search=search, retrieve_episodes=retrieve),
+            default_group_id="/project/neurons",
+            runner=runner,
+        )
+        result = adapter.search_context(
+            brain_id="/project/neurons",
+            query="target architecture",
+            entity_types=None,
+            limit=2,
+        )
+        assert retrieve_limits == [2, 100]
+        assert [ep.payload.get("authority_memory_id") for ep in result.episodes] == ["mem_target"]
+    finally:
+        runner.shutdown()
+
+
+def test_reasoning_openai_generic_client_sets_opencode_session_header():
+    from graphiti_core.llm_client.config import LLMConfig
+
+    client = _ReasoningOpenAIGenericClient(
+        config=LLMConfig(
+            api_key="unit-test",
+            model="mimo-v2.6-flash",
+            base_url="https://opencode.ai/zen/go/v1",
+        )
+    )
+    assert client.client.default_headers.get("x-opencode-session") == "neurons-graphiti"
+    assert client.client.default_headers.get("User-Agent") == "neurons-graphiti/1.0"
+
+

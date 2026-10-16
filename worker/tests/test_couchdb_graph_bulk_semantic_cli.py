@@ -677,7 +677,7 @@ def test_deterministic_writer_omits_vector_procedure_without_embeddings(tmp_path
 
 @pytest.mark.parametrize(
     "status, expected_rc",
-    [("ok", 0), ("already_running", 0), ("partial", 1), ("failed", 1)],
+    [("ok", 0), ("already_running", 0), ("failed", 1), ("partial", 1)],
 )
 def test_main_exit_code_reflects_report_status(monkeypatch, status, expected_rc):
     from agent_knowledge.llm_brain_core import bulk_semantic_cli as cli
@@ -689,3 +689,36 @@ def test_main_exit_code_reflects_report_status(monkeypatch, status, expected_rc)
         lambda **kwargs: {"schema_version": "x", "status": status, "raw_paths_printed": False},
     )
     assert cli.main(["--ledger", "/tmp/placeholder.sqlite", "--runtime-dir", "/tmp/rt"]) == expected_rc
+
+
+def test_embedding_batcher_chunks_inputs_by_max_batch_size():
+    from agent_knowledge.llm_brain_core.bulk_semantic import OpenAICompatibleEmbeddingBatcher
+
+    seen_batches: list[list[str]] = []
+
+    def _post(url: str, *, headers: dict[str, str], body: str, timeout: int) -> str:
+        _ = (url, headers, timeout)
+        parsed = json.loads(body)
+        chunk = list(parsed["input"])
+        seen_batches.append(chunk)
+        return json.dumps(
+            {
+                "data": [
+                    {"index": idx, "embedding": [float(len(seen_batches)), float(idx)]}
+                    for idx in range(len(chunk))
+                ]
+            }
+        )
+
+    batcher = OpenAICompatibleEmbeddingBatcher(
+        base_url="http://127.0.0.1:8930/v1",
+        model="gemini-embedding-2",
+        post_fn=_post,
+    )
+    vectors = batcher.embed_many([f"text-{idx}" for idx in range(5)])
+    assert [len(batch) for batch in seen_batches] == [2, 2, 1]
+    assert len(vectors) == 5
+    assert vectors[0] == [1.0, 0.0]
+    assert vectors[2] == [2.0, 0.0]
+    assert vectors[4] == [3.0, 0.0]
+
