@@ -17,3 +17,11 @@ def test_context_and_graph_adapter_use_shared_tokenizer():
 
 def test_default_min_length_three():
     assert terms_mod.terms("a ab abc") == ["abc"]
+
+
+def test_query_terms_keeps_two_char_korean_nouns_and_filters_conversational_fillers():
+    assert terms_mod.query_terms("감사 판정 알려줘") == ["감사", "판정"]
+    assert terms_mod.query_terms("운영 승격 어떻게 됐어") == ["운영", "승격"]
+    assert terms_mod.query_terms("뭐 입지") == ["입지"]
+    assert terms_mod.query_terms("너는") == ["너는"]
+

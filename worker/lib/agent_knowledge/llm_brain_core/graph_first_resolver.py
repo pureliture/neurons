@@ -25,6 +25,7 @@ _CARD_LIMIT = 100
 _EVIDENCE_ROOT_LIMIT = 20
 _EVIDENCE_MAX_DEPTH = 5
 _EVIDENCE_EDGE_LIMIT = 100
+_NON_CARD_ENTITY_TYPES = frozenset({"Session", "SourceRef", "LocalEvidenceEdge"})
 
 
 class _ResolveRequest(BaseModel):
@@ -292,11 +293,22 @@ class GraphFirstResolver:
         for episode in episodes:
             payload = getattr(episode, "payload", None)
             payload = payload if isinstance(payload, Mapping) else {}
-            if getattr(episode, "entity_type", "") == "GraphFact":
+            entity_type = str(getattr(episode, "entity_type", "") or "")
+            if entity_type == "GraphFact":
                 if not _fact_valid_at(episode, instant):
                     continue
                 sources = payload.get("authority_sources")
-                sources = sources if isinstance(sources, list) and sources else [{}]
+                if not isinstance(sources, list) or not sources:
+                    source_entity_types = payload.get("source_entity_types")
+                    if (
+                        isinstance(source_entity_types, list)
+                        and source_entity_types
+                        and all(str(item) in _NON_CARD_ENTITY_TYPES for item in source_entity_types)
+                    ):
+                        continue
+                    sources = [{}]
+            elif entity_type in _NON_CARD_ENTITY_TYPES:
+                continue
             else:
                 sources = [payload]
             for source in sources[:_CARD_LIMIT]:

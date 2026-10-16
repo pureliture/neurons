@@ -439,3 +439,36 @@ def test_evidence_revision_or_authorization_change_between_reads_fails_closed():
     store.evidence["root_hashes"] = {}
     revoked = GraphFirstResolver(store).resolve(project="neurons", mode="list", response_mode="with_evidence")
     assert revoked["error_code"] == "evidence_unavailable"
+
+
+def test_non_card_session_episodes_and_session_facts_do_not_degrade_authority_join_status():
+    session_episode = SimpleNamespace(
+        entity_type="Session",
+        payload={"brain_id": "/project/neurons", "provider": "codex", "summary": "session trace"},
+    )
+    session_fact = SimpleNamespace(
+        entity_type="GraphFact",
+        valid_from="2026-08-01T00:00:00+00:00",
+        valid_to="",
+        payload={
+            "fact": "session fact without authority card",
+            "authority_sources": [],
+            "source_entity_types": ["Session"],
+        },
+    )
+    only_session_result = GraphFirstResolver(
+        Store(),
+        Graph([session_episode, session_fact]),
+        lambda _: [0.1],
+    ).resolve(project="neurons", query="session trace")
+    assert only_session_result["items"] == []
+    assert only_session_result["metadata"]["authority_join_status"] == "verified"
+
+    mixed_result = GraphFirstResolver(
+        Store(),
+        Graph([session_episode, session_fact, _episode("mem_a", HASH_A)]),
+        lambda _: [0.1],
+    ).resolve(project="neurons", query="session trace")
+    assert [item["id"] for item in mixed_result["items"]] == ["mem_a"]
+    assert mixed_result["metadata"]["authority_join_status"] == "verified"
+
