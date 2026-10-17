@@ -585,3 +585,61 @@ def test_session_chunk_fallback_titles_differ_across_sessions():
     # 라벨은 응답 예산(_MAX_BYTES) 안에 두 카드가 모두 직렬화되는 길이로 유지한다.
     assert titles == ["모의투자 작업 S1 초기화", "모의투자 작업 S2 검증"]
     assert all("session-memory" not in status["status"] for status in result["statuses"])
+
+
+def test_context_status_state_token_keeps_title_and_supplements_topical_chunk_fallback():
+    unrelated_status_card = {
+        "memory_id": "mem_steward_sla",
+        "project": "hermes-stocks-agent",
+        "card_type": "status",
+        "title": "US postmarket SLA evidence prefetch completed for 2026-10-15",
+        "summary": "The US postmarket SLA evidence-prefetch worker completed its run.",
+        "typed_payload": {
+            "status_value": "completed",
+            "observed_at": "2026-10-15T20:11:44Z",
+        },
+        "currentness": "current",
+        "content_hash": HASH_A,
+    }
+
+    class TopicalContextStore(Store):
+        def list_context_cards(self, **kwargs):
+            return [dict(unrelated_status_card)]
+
+        def hybrid_search(self, **kwargs):
+            return []
+
+        def search_session_chunks(self, query_vector, project=None, limit=5, conn=None):
+            return [
+                {
+                    "chunk_id": "chk_paper_trader",
+                    "project": project or "hermes-stocks-agent",
+                    "content_markdown": (
+                        _SESSION_CHUNK_HEADER.format(sid="sid_pt")
+                        + "user: [paper-trader-kr-decision] KR 모의투자 에이전트 개발 진행 상태 S3 검증\n"
+                    ),
+                    "content_hash": HASH_B,
+                    "distance": 0.12,
+                }
+            ]
+
+    resolver = GraphFirstResolver(
+        TopicalContextStore(cards=[unrelated_status_card]),
+        Graph([]),
+        lambda _: [0.1, 0.2],
+    )
+    ctx_res = resolver.resolve(
+        project="hermes-stocks-agent",
+        mode="context",
+        query="모의투자 에이전트 개발 진행 상태",
+        limit=5,
+    )
+    assert ctx_res["metadata"]["retrieval_path"] == "pgvector_fallback"
+    assert ctx_res["metadata"]["fallback_used"] is True
+    assert [item["id"] for item in ctx_res["items"]] == [
+        "chunk:chk_paper_trader",
+        "mem_steward_sla",
+    ]
+    assert "paper-trader-kr-decision" in ctx_res["statuses"][0]["status"]
+    assert "US postmarket SLA evidence prefetch completed" in ctx_res["statuses"][1]["status"]
+    assert ctx_res["statuses"][1]["status_state"] == "completed"
