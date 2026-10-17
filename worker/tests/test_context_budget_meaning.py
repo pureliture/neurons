@@ -7,6 +7,7 @@ instead of returning only ids and hashes.
 """
 from __future__ import annotations
 
+import agent_knowledge.llm_brain_core.graph_first_resolver as resolver_module
 from agent_knowledge.llm_brain_core.graph_first_resolver import (
     GraphFirstResolver,
     _task_subject,
@@ -116,7 +117,9 @@ def _sections(result: dict) -> tuple[bool, list[str]]:
     return not empty, empty
 
 
-def test_measured_production_context_shape_fits_wire_budget_with_readable_text():
+def test_measured_production_context_shape_fits_wire_budget_with_readable_text(monkeypatch):
+    # Tight 3072 wire budget fallback verification:
+    monkeypatch.setattr(resolver_module, "_MAX_BYTES", 3072)
     result = GraphFirstResolver(Store(_measured_production_shape())).resolve(
         project="neurons", mode="context", limit=5
     )
@@ -140,7 +143,30 @@ def test_measured_production_context_shape_fits_wire_budget_with_readable_text()
     assert len(result["items"]) >= 3, result["items"]
 
 
-def test_context_keeps_task_and_decision_when_even_trimmed_text_exceeds_budget():
+def test_unconstrained_budget_preserves_full_context_without_truncation():
+    # Default unconstrained wire budget (10MB) preserves all cards and text without truncation:
+    result = GraphFirstResolver(Store(_measured_production_shape())).resolve(
+        project="neurons", mode="context", limit=5
+    )
+
+    assert result.get("error_code") is None, result
+    # All 5 cards are preserved in full:
+    assert len(result["items"]) == 5, result["items"]
+    assert len(result["tasks"]) == 1
+    assert result["tasks"][0]["task"] == _fill(32)
+    assert result["tasks"][0]["next_action"] == _fill(68)
+    assert result["tasks"][0]["blocker"] == _fill(28)
+    assert len(result["decisions"]) == 1
+    assert result["decisions"][0]["decision"] == _fill(170)
+    assert result["decisions"][0]["rationale"] == _fill(212)
+    assert len(result["statuses"]) == 1
+    assert result["statuses"][0]["status"] == _fill(9, "k")
+    assert len(result["preferences"]) == 1
+    assert result["preferences"][0]["rule"] == _fill(160)
+
+
+def test_context_keeps_task_and_decision_when_even_trimmed_text_exceeds_budget(monkeypatch):
+    monkeypatch.setattr(resolver_module, "_MAX_BYTES", 3072)
     oversized = [
         _card(
             "mem_task", "task",
