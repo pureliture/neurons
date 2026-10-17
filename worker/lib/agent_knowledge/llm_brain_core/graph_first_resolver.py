@@ -194,11 +194,15 @@ class GraphFirstResolver:
             return self._error_payload(request, error_code="authority_store_unavailable")
         retrieval_path = "none"
         fallback_used = False
-        if not cards and request.query.strip():
+        topical_tokens = _query_tokens(request.query) - _CONTEXT_TYPE_QUERY_ALIASES
+        needs_semantic_fallback = bool(request.query.strip()) and (
+            not cards or (bool(topical_tokens) and not _cards_cover_query_tokens(cards, topical_tokens))
+        )
+        if needs_semantic_fallback:
             if self._embed_query is not None and callable(getattr(self._store, "hybrid_search", None)):
                 fallback_cards, _, _, _ = self._fallback_cards(request)
                 if fallback_cards:
-                    cards = fallback_cards
+                    cards = _dedupe_cards([*fallback_cards, *cards])
                     retrieval_path = "pgvector_fallback"
                     fallback_used = True
             if not cards and not request.as_of:
@@ -677,10 +681,14 @@ class GraphFirstResolver:
                     task_entry["blocker"] = blocker
                 tasks.append(task_entry)
             elif card_type == "status":
+                subject = _safe(_status_subject(card, typed), 144)
                 status_entry = {
                     **section_identity,
-                    "status": _safe(typed.get("status_value") or typed.get("status") or card.get("summary") or card.get("title"), 144),
+                    "status": subject,
                 }
+                state = _safe(typed.get("status_value") or typed.get("status"), 40)
+                if state and state != subject and state.strip().lower() in _STATUS_STATE_TOKENS:
+                    status_entry["status_state"] = state
                 observed_at = _safe(typed.get("observed_at"), 64)
                 if observed_at:
                     status_entry["observed_at"] = observed_at
@@ -994,6 +1002,22 @@ _TASK_STATE_TOKENS = frozenset(
 )
 
 
+_STATUS_STATE_TOKENS = _TASK_STATE_TOKENS | frozenset(
+    {
+        "completed_submitted", "degraded", "healthy", "ok", "pass", "passed",
+        "ready", "submitted", "succeeded", "success", "unavailable", "unknown",
+    }
+)
+_CONTEXT_TYPE_QUERY_ALIASES = frozenset(
+    {
+        "task", "tasks", "work", "work_unit", "작업",
+        "decision", "decisions", "결정",
+        "status", "statuses", "상태", "진행",
+        "preference", "preferences", "guardrail", "guardrails", "선호", "제약",
+    }
+)
+
+
 def _task_subject(card: Mapping[str, Any], typed: Mapping[str, Any]) -> str:
     """Name the work itself; a status token is not a task name."""
     explicit = typed.get("task")
@@ -1005,6 +1029,26 @@ def _task_subject(card: Mapping[str, Any], typed: Mapping[str, Any]) -> str:
     if state.strip():
         return state
     return str(card.get("title") or card.get("summary") or "")
+
+
+def _status_subject(card: Mapping[str, Any], typed: Mapping[str, Any]) -> str:
+    """Name what the status describes when status_value is only a state token."""
+    raw = str(typed.get("status_value") or typed.get("status") or "").strip()
+    if raw.lower() in _STATUS_STATE_TOKENS:
+        title = str(card.get("title") or "").strip()
+        summary = str(card.get("summary") or "").strip()
+        if title and summary and summary != title:
+            return f"{title} — {summary}"
+        return title or summary or raw
+    if raw:
+        return raw
+    return str(card.get("summary") or card.get("title") or "")
+
+
+def _cards_cover_query_tokens(cards: Sequence[Mapping[str, Any]], tokens: set[str]) -> bool:
+    if not tokens:
+        return bool(cards)
+    return any(tokens & _query_tokens(_card_search_text(card)) for card in cards)
 
 
 def _context_text_slots(card: Mapping[str, Any]) -> list[tuple[Any, str]]:
@@ -1028,7 +1072,13 @@ def _context_text_slots(card: Mapping[str, Any]) -> list[tuple[Any, str]]:
     if card_type == "preference":
         return [(typed, key) for key in ("rule", "preference") if typed.get(key)]
     if card_type == "status":
-        return [(typed, key) for key in ("status_value", "status") if typed.get(key)]
+        slots = [(typed, key) for key in ("status_value", "status") if typed.get(key)]
+        if (
+            not slots
+            or str(typed.get("status_value") or typed.get("status") or "").strip().lower() in _STATUS_STATE_TOKENS
+        ):
+            slots.extend((card, key) for key in ("title", "summary") if card.get(key))
+        return slots
     slots = [
         (typed, key)
         for key in ("task", "task_state", "next_action", "blocker")
