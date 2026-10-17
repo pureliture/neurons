@@ -14,6 +14,7 @@ from agent_knowledge.ledger import Ledger
 from agent_knowledge.llm_brain_core.models import GraphMemoryResult, OntologyEpisode
 from agent_knowledge.llm_brain_core.graphiti_adapter import GraphitiNeo4jGraphMemoryAdapter, _AsyncLoopRunner
 from agent_knowledge.mcp_jsonrpc import handle_jsonrpc_message
+import agent_knowledge.llm_brain_core.graph_first_resolver as resolver_module
 from agent_knowledge.postgres_store.pgvector_store import MemoryCard, PgVectorStore, make_dummy_vector
 
 PG_DSN = os.environ.get("LBRAIN_TEST_PG_DSN", "")
@@ -146,7 +147,8 @@ def test_public_query_authority_outage_is_tool_error_without_legacy_fallback(tmp
     assert "127.0.0.1" not in json.dumps(response)
 
 
-def test_public_list_keyset_crosses_100_rows_with_actual_mcp_wire_budget(tmp_path):
+def test_public_list_keyset_crosses_100_rows_with_actual_mcp_wire_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr(resolver_module, "_MAX_BYTES", 3072)
     store = PgVectorStore(dsn=PG_DSN)
     store.execute_ddl()
     project = "m3-pages-" + uuid.uuid4().hex[:8]
