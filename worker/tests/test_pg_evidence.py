@@ -11,6 +11,7 @@ import pytest
 from agent_knowledge.postgres_store.pgvector_store import MemoryCard, MemoryEdge, PgVectorStore, make_dummy_vector
 from agent_knowledge.knowledge_search_service import KnowledgeSearchService, DisabledRetiredIndexBridgeClient
 from agent_knowledge.ledger import Ledger
+import agent_knowledge.llm_brain_core.graph_first_resolver as resolver_module
 from agent_knowledge.mcp_jsonrpc import handle_jsonrpc_message
 
 
@@ -103,7 +104,8 @@ def test_sql_evidence_batch_roots_row_limit_and_caller_guc_preserved(graph):
         assert conn.execute("SHOW statement_timeout").fetchone()["statement_timeout"] == "2s"
 
 
-def test_public_with_evidence_contains_real_sql_edge_within_wire_budget(graph, tmp_path):
+def test_public_with_evidence_contains_real_sql_edge_within_wire_budget(graph, tmp_path, monkeypatch):
+    monkeypatch.setattr(resolver_module, "_MAX_BYTES", 3072)
     from agent_knowledge.session_memory.brain_steward import BrainStewardService
 
     store, project, ids, start = graph
