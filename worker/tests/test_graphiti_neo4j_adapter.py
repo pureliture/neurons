@@ -2056,3 +2056,91 @@ def test_reasoning_openai_generic_client_sets_opencode_session_header():
     assert client.client.default_headers.get("User-Agent") == "neurons-graphiti/1.0"
 
 
+def test_episode_node_to_ontology_supports_yaml_frontmatter():
+    yaml_content = """---
+schema_version: agent_knowledge_document.v2
+result_type: conversation_chunk
+knowledge_id: kn_test_frontmatter_42
+provider: antigravity
+project: neurons
+agent_id: antigravity-transcript-capture
+session_id_hash: sha256:ff2562f21aa9106fe4fbaa632d8229b7be19146991f23d865455b7f4d699e482
+---
+# Some markdown content
+Here is user request and response body
+"""
+    node = SimpleNamespace(
+        uuid="episode:yaml_test_node",
+        content=yaml_content,
+        created_at="2026-10-17T09:00:00Z",
+        valid_at="2026-10-17T09:00:00Z",
+    )
+    episode = _episode_node_to_ontology(node)
+    assert episode is not None
+    assert episode.episode_id == "episode:yaml_test_node"
+    assert episode.natural_id == "kn_test_frontmatter_42"
+    assert episode.entity_type == "Session"
+    assert episode.payload.get("provider") == "antigravity"
+    assert episode.payload.get("project") == "neurons"
+    assert episode.content_hash == "sha256:ff2562f21aa9106fe4fbaa632d8229b7be19146991f23d865455b7f4d699e482"
+
+
+def test_episode_provider_recognizes_legacy_memory_card():
+    from agent_knowledge.llm_brain_core.graphiti_adapter import (
+        _AUTHORITY_MEMORY_CARD_PROVIDER,
+        _episode_provider,
+    )
+
+    legacy_card_ep = OntologyEpisode.from_payload(
+        event_id="evt:legacy_card_1",
+        entity_type="Decision",
+        natural_id="decision:mem_steward_cb05d2d9180830be",
+        payload={
+            "brain_id": "/project/neurons",
+            "memory_id": "mem_steward_cb05d2d9180830be",
+            "project": "neurons",
+            "summary": "Legacy card test",
+        },
+        observed_at="2026-06-19T00:00:00+00:00",
+        reference_time="2026-06-19T00:00:00+00:00",
+        extractor_version="memory-card-runtime.1",
+    )
+    assert _episode_provider(legacy_card_ep) == _AUTHORITY_MEMORY_CARD_PROVIDER
+
+
+def test_edge_to_ontology_maps_legacy_memory_card_authority_sources():
+    from agent_knowledge.llm_brain_core.graphiti_adapter import _edge_to_ontology
+
+    legacy_card_ep = OntologyEpisode.from_payload(
+        event_id="evt:legacy_card_2",
+        entity_type="Decision",
+        natural_id="decision:mem_steward_legacy_123",
+        payload={
+            "brain_id": "/project/neurons",
+            "memory_id": "mem_steward_legacy_123",
+            "project": "neurons",
+        },
+        observed_at="2026-06-19T00:00:00+00:00",
+        reference_time="2026-06-19T00:00:00+00:00",
+        extractor_version="memory-card-runtime.1",
+    )
+    edge = SimpleNamespace(
+        uuid="edge:uuid:123",
+        name="edge:uuid:123",
+        fact="Neurons live mutation requires separate approval gates",
+        source_node_uuid="node_a",
+        target_node_uuid="node_b",
+        valid_at=datetime.now(timezone.utc),
+        invalid_at=None,
+    )
+    fact_ep = _edge_to_ontology(edge, source_episodes=(legacy_card_ep,))
+    assert fact_ep.entity_type == "GraphFact"
+    auth_sources = fact_ep.payload.get("authority_sources")
+    assert auth_sources is not None
+    assert len(auth_sources) == 1
+    assert auth_sources[0]["authority_memory_id"] == "mem_steward_legacy_123"
+    assert auth_sources[0]["content_hash"] == legacy_card_ep.content_hash
+
+
+
+

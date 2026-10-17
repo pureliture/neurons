@@ -1258,6 +1258,43 @@ def _episode_node_to_ontology(node: Any) -> OntologyEpisode | None:
     try:
         parsed = json.loads(content)
     except json.JSONDecodeError:
+        if content.startswith("---"):
+            try:
+                import yaml
+
+                parts = content.split("---", 2)
+                if len(parts) >= 2:
+                    header = yaml.safe_load(parts[1])
+                    if isinstance(header, dict):
+                        node_uuid = str(getattr(node, "uuid", "") or "")
+                        event_id = str(header.get("knowledge_id") or header.get("event_id") or f"evt:{node_uuid}")
+                        content_hash = str(
+                            header.get("source_locator_hash")
+                            or header.get("session_id_hash")
+                            or f"sha256:{short_hash([content])}"
+                        )
+                        return OntologyEpisode(
+                            episode_id=node_uuid or f"episode:{short_hash([event_id])}",
+                            event_id=event_id,
+                            idempotency_key=f"ontology-episode:{short_hash([event_id])}",
+                            entity_type=str(header.get("entity_type") or "Session"),
+                            natural_id=str(header.get("knowledge_id") or node_uuid),
+                            lifecycle_state="human_accepted",
+                            currentness="current",
+                            source_event_ids=(event_id,),
+                            source_ref_ids=(),
+                            valid_from=str(getattr(node, "valid_at", "") or ""),
+                            valid_to="",
+                            observed_at=str(getattr(node, "created_at", "") or ""),
+                            reference_time=str(getattr(node, "valid_at", "") or getattr(node, "created_at", "") or ""),
+                            content_hash=content_hash,
+                            ontology_version=str(header.get("schema_version") or "1.0.0"),
+                            extractor_version=str(header.get("agent_id") or "yaml-chunk.1"),
+                            payload=dict(header),
+                            relations=(),
+                        )
+            except Exception:
+                pass
         return None
     required_fields = (
         "episode_id",
@@ -1321,11 +1358,33 @@ def _edge_to_ontology(
         # GraphFact 자체의 hash는 추론 fact의 hash다. 검증된 원본 episode의
         # 카드 키를 별도로 보존해야 PG 권위 join에서 둘을 혼동하지 않는다.
         "authority_sources": [
-            {"authority_memory_id": episode.payload["authority_memory_id"],
-             "content_hash": episode.payload["content_hash"]}
+            {
+                "authority_memory_id": str(
+                    episode.payload.get("authority_memory_id")
+                    or episode.payload.get("memory_id")
+                    or ""
+                ),
+                "content_hash": str(
+                    episode.payload.get("content_hash")
+                    or episode.content_hash
+                    or ""
+                ),
+            }
             for episode in source_episodes
-            if isinstance(episode.payload.get("authority_memory_id"), str)
-            and isinstance(episode.payload.get("content_hash"), str)
+            if (
+                (
+                    isinstance(episode.payload.get("authority_memory_id"), str)
+                    and episode.payload.get("authority_memory_id")
+                )
+                or (
+                    isinstance(episode.payload.get("memory_id"), str)
+                    and str(episode.payload.get("memory_id")).startswith("mem_")
+                )
+            )
+            and (
+                bool(episode.payload.get("content_hash"))
+                or bool(episode.content_hash)
+            )
         ],
     }
     return OntologyEpisode.from_payload(
@@ -1404,11 +1463,16 @@ def _episode_provider(episode: OntologyEpisode) -> str:
     explicit = str(episode.payload.get("provider") or "").strip().casefold()
     if explicit:
         return explicit
+    memory_id = episode.payload.get("authority_memory_id") or episode.payload.get("memory_id")
+    content_hash = episode.payload.get("content_hash") or episode.content_hash
+    extractor_version = str(episode.extractor_version or "")
     if (
-        isinstance(episode.payload.get("authority_memory_id"), str)
-        and episode.payload.get("authority_memory_id")
-        and isinstance(episode.payload.get("content_hash"), str)
-        and episode.payload.get("content_hash")
+        isinstance(memory_id, str)
+        and memory_id.startswith("mem_")
+        and (
+            (isinstance(content_hash, str) and content_hash)
+            or extractor_version.startswith("memory-card")
+        )
     ):
         return _AUTHORITY_MEMORY_CARD_PROVIDER
     return ""
