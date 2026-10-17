@@ -82,7 +82,7 @@ def require_opaque_id(value: str, field: str) -> str:
     return text
 
 
-def public_safe_text(value: str, *, max_chars: int = 2048) -> str:
+def public_safe_text(value: str, *, max_chars: int = 65536) -> str:
     normalized = " ".join(str(value or "").split())
     return bound_text(redact_public_ingress_text(normalized), max_chars)
 

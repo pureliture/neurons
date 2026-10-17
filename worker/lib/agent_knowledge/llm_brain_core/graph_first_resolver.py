@@ -20,7 +20,7 @@ from agent_knowledge.session_memory.brain_query import (
 )
 
 
-_MAX_BYTES = 3072
+_MAX_BYTES = 10 * 1024 * 1024
 _CARD_LIMIT = 100
 _EVIDENCE_ROOT_LIMIT = 20
 _EVIDENCE_MAX_DEPTH = 5
@@ -530,11 +530,11 @@ class GraphFirstResolver:
             if not content_hash.startswith("sha256:"):
                 content_hash = "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
             body = _session_chunk_body(text)
-            safe_summary = _safe(body, 240)
+            safe_summary = _safe(body, 65536)
             if not safe_summary:
                 continue
             first_line = next((line.strip("#* -") for line in safe_summary.splitlines() if line.strip("#* -")), "")
-            title = _safe(first_line or f"{request.project} session context", 96)
+            title = _safe(first_line or f"{request.project} session context", 1000)
             results.append(
                 {
                     "memory_id": f"chunk:{chunk_id[:56]}",
@@ -656,40 +656,40 @@ class GraphFirstResolver:
             card_type = str(card.get("card_type") or "")
             section_identity = {"id": item["id"]} if context_mode else item
             if card_type == "decision":
-                decision_entry = {**section_identity, "decision": _safe(typed.get("decision") or card.get("summary") or card.get("title"), 144)}
-                rationale = _safe(typed.get("rationale"), 96)
+                decision_entry = {**section_identity, "decision": _safe(typed.get("decision") or card.get("summary") or card.get("title"), 65536)}
+                rationale = _safe(typed.get("rationale"), 65536)
                 if rationale:
                     decision_entry["rationale"] = rationale
                 decisions.append(decision_entry)
             elif card_type == "preference":
-                preferences.append({**section_identity, "rule": _safe(typed.get("rule") or typed.get("preference") or card.get("summary") or card.get("title"), 144), "scope": _safe(typed.get("scope") or "general", 64)})
+                preferences.append({**section_identity, "rule": _safe(typed.get("rule") or typed.get("preference") or card.get("summary") or card.get("title"), 65536), "scope": _safe(typed.get("scope") or "general", 256)})
             elif card_type in {"task", "work", "work_unit"}:
                 # Subject, state and next step are three different facts. Reading only
                 # `task_state` hides what the work is and what to do next whenever the
                 # state is a status token such as "in_progress".
-                subject = _safe(_task_subject(card, typed), 144)
+                subject = _safe(_task_subject(card, typed), 65536)
                 task_entry = {**section_identity, "task": subject}
-                state = _safe(typed.get("task_state") or typed.get("status"), 40)
+                state = _safe(typed.get("task_state") or typed.get("status"), 256)
                 # Repeating the subject as its own state only costs wire budget.
                 if state and state != subject:
                     task_entry["task_state"] = state
-                next_action = _safe(typed.get("next_action"), 144)
+                next_action = _safe(typed.get("next_action"), 65536)
                 if next_action:
                     task_entry["next_action"] = next_action
-                blocker = _safe(typed.get("blocker"), 96)
+                blocker = _safe(typed.get("blocker"), 65536)
                 if blocker:
                     task_entry["blocker"] = blocker
                 tasks.append(task_entry)
             elif card_type == "status":
-                subject = _safe(_status_subject(card, typed), 144)
+                subject = _safe(_status_subject(card, typed), 65536)
                 status_entry = {
                     **section_identity,
                     "status": subject,
                 }
-                state = _safe(typed.get("status_value") or typed.get("status"), 40)
+                state = _safe(typed.get("status_value") or typed.get("status"), 256)
                 if state and state != subject and state.strip().lower() in _STATUS_STATE_TOKENS:
                     status_entry["status_state"] = state
-                observed_at = _safe(typed.get("observed_at"), 64)
+                observed_at = _safe(typed.get("observed_at"), 256)
                 if observed_at:
                     status_entry["observed_at"] = observed_at
                 statuses.append(status_entry)
@@ -795,7 +795,7 @@ class GraphFirstResolver:
 
 
 def _item(card: Mapping[str, Any], *, include_created_at: bool = True) -> dict[str, Any]:
-    item = {"id": _safe(card.get("memory_id") or card.get("id"), 180), "card_type": _safe(card.get("card_type"), 64), "title": _safe(card.get("title"), 96), "summary": _safe(card.get("summary"), 144), "currentness": _safe(card.get("currentness") or "current", 32), "content_hash": _safe(card.get("content_hash"), 80)}
+    item = {"id": _safe(card.get("memory_id") or card.get("id"), 180), "card_type": _safe(card.get("card_type"), 64), "title": _safe(card.get("title"), 1000), "summary": _safe(card.get("summary"), 65536), "currentness": _safe(card.get("currentness") or "current", 32), "content_hash": _safe(card.get("content_hash"), 80)}
     created_at = card.get("created_at") or card.get("observed_at")
     if include_created_at and created_at:
         # A card can stay current long after its observation. Expose when the
@@ -880,7 +880,7 @@ def _drop_last_evidence_edge(evidence: dict[str, Any] | None, page: list[dict[st
     return True
 
 
-def _safe(value: Any, max_chars: int) -> str:
+def _safe(value: Any, max_chars: int = 65536) -> str:
     return public_safe_text(str(value or ""), max_chars=max_chars)
 
 

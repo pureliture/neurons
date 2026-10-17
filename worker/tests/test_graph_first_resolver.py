@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 from agent_knowledge.mcp_payload import tool_result_bytes
 
+import agent_knowledge.llm_brain_core.graph_first_resolver as resolver_module
 from agent_knowledge.llm_brain_core.graph_first_resolver import (
     GraphFirstResolver,
     _ResolveRequest,
@@ -221,7 +222,8 @@ def test_query_mode_rejects_missing_or_whitespace_query():
         resolver.resolve(project="neurons", query=" \t ")
 
 
-def test_single_unicode_item_fits_final_default_json_with_cursor_and_keeps_identity():
+def test_single_unicode_item_fits_final_default_json_with_cursor_and_keeps_identity(monkeypatch):
+    monkeypatch.setattr(resolver_module, "_MAX_BYTES", 3072)
     cards = [_card("mem_a", HASH_A), _card("mem_b", HASH_B)]
     cards[0]["title"] = "한글😀" * 2000
     cards[0]["summary"] = "근거😀" * 2000
@@ -316,7 +318,8 @@ def test_fallback_keeps_lexically_relevant_card_even_with_negative_semantic_scor
     assert [item["id"] for item in result["items"]] == ["mem_a"]
 
 
-def test_partial_graph_error_code_is_capped_and_shrinking_always_progresses():
+def test_partial_graph_error_code_is_capped_and_shrinking_always_progresses(monkeypatch):
+    monkeypatch.setattr(resolver_module, "_MAX_BYTES", 3072)
     card = _card()
     card["title"] = "😀" * 2000
     card["summary"] = "한글" * 2000
@@ -334,7 +337,8 @@ def test_partial_graph_error_code_is_capped_and_shrinking_always_progresses():
     assert len(__import__("json").dumps(result, ensure_ascii=False).encode("utf-8")) <= 3072
 
 
-def test_unicode_budget_and_cursor_are_stable_and_bound_to_candidates():
+def test_unicode_budget_and_cursor_are_stable_and_bound_to_candidates(monkeypatch):
+    monkeypatch.setattr(resolver_module, "_MAX_BYTES", 3072)
     cards = [_card(f"mem_{i}", "sha256:" + f"{i:064x}") for i in range(4)]
     for card in cards:
         card["title"] = "한글😀" * 100
@@ -393,7 +397,8 @@ def test_with_evidence_uses_one_bounded_batch_and_emits_only_explicit_hash_proje
     assert result["metadata"]["evidence_truncated"] is False
 
 
-def test_with_evidence_never_returns_edges_for_cards_dropped_by_byte_pagination():
+def test_with_evidence_never_returns_edges_for_cards_dropped_by_byte_pagination(monkeypatch):
+    monkeypatch.setattr(resolver_module, "_MAX_BYTES", 3072)
     cards = [_card("mem_a", HASH_A), _card("mem_b", HASH_B)]
     for card in cards:
         card["title"] = "한글😀" * 2000
@@ -413,7 +418,8 @@ def test_with_evidence_never_returns_edges_for_cards_dropped_by_byte_pagination(
     assert tool_result_bytes(result) <= 3072
 
 
-def test_with_evidence_marks_overflow_and_db_failure_as_explicit_tool_errors():
+def test_with_evidence_marks_overflow_and_db_failure_as_explicit_tool_errors(monkeypatch):
+    monkeypatch.setattr(resolver_module, "_MAX_BYTES", 3072)
     edges = [_edge(dst_id=f"child_{index:03d}") for index in range(100)]
     large = GraphFirstResolver(Store(evidence={"edges": edges, "truncated": False})).resolve(
         project="neurons", mode="list", response_mode="with_evidence"
