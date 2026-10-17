@@ -519,3 +519,69 @@ def test_session_chunk_semantic_fallback_returns_work_in_progress_status_when_ca
     assert ctx_res["metadata"]["fallback_used"] is True
 
 
+_SESSION_CHUNK_HEADER = (
+    "# session-memory hermes hermes-stocks-agent\n"
+    "session_id_hash: sha256:{sid}\n\n"
+    "## conversation\n\n"
+    "---\n"
+    "schema_version: agent_knowledge_document.v2\n"
+    "provider: hermes\n"
+    "project: hermes-stocks-agent\n"
+    "---\n"
+    "# Conversation Chunk\n\n"
+    "## Context\n\n"
+    "- provider: hermes\n\n"
+    "## Transcript\n\n"
+)
+
+
+def test_session_chunk_cards_use_transcript_body_not_shared_header():
+    from agent_knowledge.llm_brain_core.graph_first_resolver import _session_chunk_body
+
+    body = _session_chunk_body(
+        _SESSION_CHUNK_HEADER.format(sid="a1")
+        + "user: LANGUAGE CONTRACT: 모든 자연어 응답은 한국어로 작성한다.\n\n"
+        "[paper-trader-kr-decision] KR sleeve 모의투자 판단 실행\n"
+    )
+    assert body.startswith("[paper-trader-kr-decision]")
+    assert "session_id_hash" not in body
+    assert "LANGUAGE CONTRACT" not in body
+
+    # marker가 없는 청크도 front matter와 session-memory 헤더는 건너뛴다.
+    no_marker = _session_chunk_body(
+        "# session-memory hermes x\nsession_id_hash: sha256:b2\n\n## conversation\n\n"
+        "---\nprovider: hermes\n---\nS3 체결 원장 검증 진행 중\n"
+    )
+    assert no_marker == "S3 체결 원장 검증 진행 중"
+
+    # 본문이 전혀 없으면 원문을 그대로 돌려줘 카드가 사라지지 않는다.
+    assert _session_chunk_body("plain text only") == "plain text only"
+
+
+def test_session_chunk_fallback_titles_differ_across_sessions():
+    class DistinctChunkStore(Store):
+        def list_context_cards(self, **kwargs):
+            return []
+
+        def hybrid_search(self, **kwargs):
+            return []
+
+        def search_session_chunks(self, query_vector, project=None, limit=5, conn=None):
+            return [
+                {
+                    "chunk_id": f"chk_{idx}",
+                    "project": project or "hermes-stocks-agent",
+                    "content_markdown": _SESSION_CHUNK_HEADER.format(sid=f"sid{idx}") + f"user: 모의투자 작업 {label}\n",
+                    "content_hash": (HASH_A, HASH_B)[idx],
+                    "distance": 0.1 + idx * 0.01,
+                }
+                for idx, label in enumerate(["S1 초기화", "S2 검증"])
+            ]
+
+    result = GraphFirstResolver(DistinctChunkStore(cards=[]), Graph([]), lambda _: [0.1, 0.2]).resolve(
+        project="hermes-stocks-agent", mode="query", query="모의투자 작업", limit=5
+    )
+    titles = [item["title"] for item in result["items"]]
+    # 라벨은 응답 예산(_MAX_BYTES) 안에 두 카드가 모두 직렬화되는 길이로 유지한다.
+    assert titles == ["모의투자 작업 S1 초기화", "모의투자 작업 S2 검증"]
+    assert all("session-memory" not in status["status"] for status in result["statuses"])

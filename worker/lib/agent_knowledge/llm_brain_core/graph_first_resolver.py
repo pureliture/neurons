@@ -525,7 +525,8 @@ class GraphFirstResolver:
             content_hash = str(row.get("content_hash") or "")
             if not content_hash.startswith("sha256:"):
                 content_hash = "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
-            safe_summary = _safe(text, 240)
+            body = _session_chunk_body(text)
+            safe_summary = _safe(body, 240)
             if not safe_summary:
                 continue
             first_line = next((line.strip("#* -") for line in safe_summary.splitlines() if line.strip("#* -")), "")
@@ -873,6 +874,54 @@ def _drop_last_evidence_edge(evidence: dict[str, Any] | None, page: list[dict[st
 
 def _safe(value: Any, max_chars: int) -> str:
     return public_safe_text(str(value or ""), max_chars=max_chars)
+
+
+_CHUNK_TRANSCRIPT_MARKER = "## Transcript"
+_CHUNK_ROLE_PREFIXES = ("user:", "assistant:", "system:", "tool:")
+# 모든 Hermes cron prompt가 공통으로 앞에 붙이는 문구라 요약 정보량이 없다.
+_CHUNK_BOILERPLATE_PREFIXES = ("language contract:",)
+
+
+def _session_chunk_body(text: str) -> str:
+    """세션 청크에서 공통 메타데이터 헤더를 제거하고 실제 대화 본문만 돌려준다.
+
+    청크 상단에는 `# session-memory ...`, `session_id_hash`, YAML front matter 등
+    모든 청크가 공유하는 추적 헤더가 있어 앞부분을 그대로 자르면 title/summary가
+    전부 동일해진다. `## Transcript` 이후를 본문으로 보고, marker가 없으면 front
+    matter와 헤더 라인만 건너뛴다. 본문이 비면 원문을 그대로 반환한다.
+    """
+    marker = text.find(_CHUNK_TRANSCRIPT_MARKER)
+    if marker >= 0:
+        body = text[marker + len(_CHUNK_TRANSCRIPT_MARKER):]
+    else:
+        lines = text.splitlines()
+        index = 0
+        if lines and lines[0].lstrip().startswith("# session-memory"):
+            index = 1
+            while index < len(lines) and (
+                not lines[index].strip()
+                or lines[index].startswith(("session_id_hash:", "## conversation"))
+            ):
+                index += 1
+        if index < len(lines) and lines[index].strip() == "---":
+            end = next((i for i in range(index + 1, len(lines)) if lines[i].strip() == "---"), None)
+            index = end + 1 if end is not None else index
+        body = "\n".join(lines[index:])
+    cleaned: list[str] = []
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        lowered = line.lower()
+        for prefix in _CHUNK_ROLE_PREFIXES:
+            if lowered.startswith(prefix):
+                line = line[len(prefix):].strip()
+                lowered = line.lower()
+                break
+        if not line or lowered.startswith(_CHUNK_BOILERPLATE_PREFIXES):
+            continue
+        cleaned.append(line)
+    return "\n".join(cleaned) or text.strip()
 
 
 def _fact_valid_at(episode: Any, instant: datetime) -> bool:
