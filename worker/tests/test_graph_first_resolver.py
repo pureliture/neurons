@@ -472,3 +472,50 @@ def test_non_card_session_episodes_and_session_facts_do_not_degrade_authority_jo
     assert [item["id"] for item in mixed_result["items"]] == ["mem_a"]
     assert mixed_result["metadata"]["authority_join_status"] == "verified"
 
+
+def test_session_chunk_semantic_fallback_returns_work_in_progress_status_when_cards_empty():
+    class ChunkFallbackStore(Store):
+        def list_context_cards(self, **kwargs):
+            self.calls.append(("context", kwargs))
+            return []
+
+        def hybrid_search(self, **kwargs):
+            self.calls.append("hybrid")
+            return []
+
+        def search_session_chunks(self, query_vector, project=None, limit=5, conn=None):
+            self.calls.append(("chunks", project))
+            return [
+                {
+                    "chunk_id": "chk_hermes_s3",
+                    "project": project or "hermes-stocks-agent",
+                    "provider": "hermes",
+                    "content_markdown": "# Hermes Stocks S3 진행 상태\nS1, S2 완료 후 S3 모의투자 기간별 성과 API 및 체결 원장 검증 진행 중",
+                    "content_hash": HASH_A,
+                    "distance": 0.18,
+                }
+            ]
+
+    store = ChunkFallbackStore(cards=[])
+    resolver = GraphFirstResolver(store, Graph([]), lambda _: [0.1, 0.2])
+
+    query_res = resolver.resolve(
+        project="hermes-stocks-agent",
+        mode="query",
+        query="모의투자 에이전트 개발 어디까지 진행했지?",
+    )
+    assert [item["id"] for item in query_res["items"]] == ["chunk:chk_hermes_s3"]
+    assert "S3" in query_res["statuses"][0]["status"]
+    assert query_res["metadata"]["retrieval_path"] == "pgvector_fallback"
+    assert query_res["metadata"]["fallback_used"] is True
+
+    ctx_res = resolver.resolve(
+        project="hermes-stocks-agent",
+        mode="context",
+        query="모의투자 에이전트 개발 진행",
+    )
+    assert [item["id"] for item in ctx_res["items"]] == ["chunk:chk_hermes_s3"]
+    assert "S3" in ctx_res["statuses"][0]["status"]
+    assert ctx_res["metadata"]["fallback_used"] is True
+
+

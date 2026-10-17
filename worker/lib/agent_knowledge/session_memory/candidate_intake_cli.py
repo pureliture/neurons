@@ -60,6 +60,7 @@ class CandidateIntakeSettings:
     enable_proposals: bool = False
     checkpoint_path: str = ""
     refresh_watermark: str = ""
+    auto_accept_work_items: bool = False
 
     def __post_init__(self) -> None:
         if not str(self.project or "").strip():
@@ -88,9 +89,10 @@ class CandidateIntakeReport:
     skipped_count: int = 0
     error_code: str = ""
     remaining_chunks: int = 0
+    auto_accepted_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "schema_version": "llm_brain_candidate_intake.v1",
             "project": self.project,
             "status": self.status,
@@ -102,10 +104,13 @@ class CandidateIntakeReport:
             "skipped_count": self.skipped_count,
             "error_code": self.error_code,
             "remaining_chunks": self.remaining_chunks,
-            "proposal_only": True,
-            "authoritative_memory_changed": False,
+            "proposal_only": self.auto_accepted_count == 0,
+            "authoritative_memory_changed": self.auto_accepted_count > 0,
             "note": _PROPOSAL_ONLY_NOTE,
         }
+        if self.auto_accepted_count > 0:
+            payload["auto_accepted_count"] = self.auto_accepted_count
+        return payload
 
 
 def _hash_text(value: str) -> str:
@@ -406,6 +411,7 @@ def _run_candidate_intake(
 
     proposed = 0
     duplicates = 0
+    auto_accepted = 0
     seen_ids: set[str] = set()
     processed_sources: set[str] = set()
 
@@ -429,11 +435,35 @@ def _run_candidate_intake(
                 project=settings.project, status="proposal_failed", dry_run=False,
                 enabled=True, examined_chunks=len(bounded), proposed_count=proposed,
                 error_code="proposal_write_failed",
+                auto_accepted_count=auto_accepted,
             ), state
         if isinstance(outcome, Mapping) and outcome.get("proposal_write_performed") is False:
             duplicates += 1
         else:
             proposed += 1
+        if (
+            settings.auto_accept_work_items
+            and getattr(steward, "allow_auto_accept", False)
+            and callable(getattr(steward, "candidate_autopilot_accept", None))
+        ):
+            proposal_memory_id = str(
+                (outcome.get("memory_id") if isinstance(outcome, Mapping) else "")
+                or ((outcome.get("proposal") or {}).get("memory_id") if isinstance(outcome, Mapping) else "")
+                or ""
+            )
+            if proposal_memory_id:
+                try:
+                    accept_outcome = steward.candidate_autopilot_accept(
+                        candidate_memory_id=proposal_memory_id,
+                        decision_id=f"autopilot-{proposal_memory_id}",
+                    )
+                    if isinstance(accept_outcome, Mapping) and (
+                        accept_outcome.get("canonical_write_performed") is True
+                        or accept_outcome.get("committed") is True
+                    ):
+                        auto_accepted += 1
+                except Exception:
+                    pass
 
     # Repeat state is keyed on the chunk's own content hash, so one project has
     # many revisions and no chunk is ever skipped by a project-level key.
@@ -460,6 +490,7 @@ def _run_candidate_intake(
         duplicate_count=duplicates,
         skipped_count=skipped,
         remaining_chunks=len(fresh_all) - len(fresh),
+        auto_accepted_count=auto_accepted,
     )
     return report, state
 
@@ -469,7 +500,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="pg-memory-propose",
         description="Proposal-only session-memory candidate intake for LBrain.",
     )
-    parser.add_argument("--project", required=True, help="single project scope")
+    parser.add_argument("--project", required=True, help="single project scope or 'all' for PG active projects")
     parser.add_argument(
         "--mode",
         choices=("dry-run", "once", "continuous"),
@@ -526,6 +557,20 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="mining watermark label recorded on created candidates",
     )
+    parser.add_argument(
+        "--auto-accept-work-items",
+        dest="auto_accept_work_items",
+        action="store_true",
+        default=None,
+        help="automatically promote structurally safe work candidates to auto_accepted",
+    )
+    parser.add_argument(
+        "--no-auto-accept-work-items",
+        dest="auto_accept_work_items",
+        action="store_false",
+        default=None,
+        help="disable automatic promotion of structurally safe work candidates",
+    )
     return parser
 
 
@@ -538,6 +583,22 @@ def _load_chunks(path: str) -> list[Mapping[str, Any]]:
     if any(not isinstance(item, Mapping) for item in raw):
         raise CandidateIntakeConfigError("--source-json entries must be objects")
     return raw
+
+
+def list_active_projects_from_pg(dsn: str, *, limit: int = 20) -> list[str]:
+    """List projects with session chunks in PostgreSQL, ordered by freshest activity."""
+    import psycopg
+
+    bounded = max(1, min(int(limit), 100))
+    with psycopg.connect(dsn, autocommit=True, connect_timeout=8) as conn:
+        rows = conn.execute(
+            "SELECT project FROM session_memory_chunks "
+            "WHERE project IS NOT NULL AND project <> '' "
+            "AND coalesce(provider, '') <> 'lbrain-temporal-canary' "
+            "GROUP BY project ORDER BY MAX(updated_at) DESC LIMIT %s",
+            (bounded,),
+        ).fetchall()
+    return [str(row[0]).strip() for row in rows if row and str(row[0] or "").strip()]
 
 
 def load_chunks_from_pg(dsn: str, *, project: str, limit: int) -> list[Mapping[str, Any]]:
@@ -575,6 +636,11 @@ def load_chunks_from_pg(dsn: str, *, project: str, limit: int) -> list[Mapping[s
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    auto_accept_work_items = (
+        bool(args.auto_accept_work_items)
+        if args.auto_accept_work_items is not None
+        else (args.source_mode == "pg")
+    )
     try:
         settings = CandidateIntakeSettings(
             project=args.project,
@@ -584,6 +650,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             enable_proposals=bool(args.enable),
             checkpoint_path=args.checkpoint,
             refresh_watermark=args.refresh_watermark,
+            auto_accept_work_items=auto_accept_work_items,
         )
     except CandidateIntakeConfigError as exc:
         print(json.dumps({"error_code": "invalid_settings", "message": str(exc)}, sort_keys=True))
@@ -604,6 +671,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 2
 
+    dsn = ""
+    project_chunks: list[tuple[str, list[Mapping[str, Any]]]] = []
     try:
         if dry_run:
             chunks = []
@@ -617,9 +686,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise CandidateIntakeConfigError(
                     "NEURON_LBRAIN_PGVECTOR_DSN is required for --source-mode pg"
                 )
-            chunks = load_chunks_from_pg(dsn, project=settings.project, limit=args.source_limit)
+            if settings.project in ("all", "*"):
+                target_projects = list_active_projects_from_pg(dsn)
+            elif "," in settings.project:
+                target_projects = [p.strip() for p in settings.project.split(",") if p.strip()]
+            else:
+                target_projects = [settings.project]
+            for proj in target_projects:
+                project_chunks.append((proj, load_chunks_from_pg(dsn, project=proj, limit=args.source_limit)))
+            chunks = project_chunks[0][1] if len(project_chunks) == 1 else [c for _, cs in project_chunks for c in cs]
         else:
             chunks = _load_chunks(args.source_json)
+            project_chunks = [(settings.project, chunks)]
     except (CandidateIntakeConfigError, OSError, ValueError) as exc:
         print(
             json.dumps(
@@ -682,7 +760,53 @@ def main(argv: Sequence[str] | None = None) -> int:
     if pgvector_store is None:
         print(json.dumps({"error_code": "postgresql_required"}, sort_keys=True))
         return 3
-    steward = BrainStewardService(ledger, pgvector_store=pgvector_store)
+    steward = BrainStewardService(
+        ledger,
+        pgvector_store=pgvector_store,
+        allow_restricted=auto_accept_work_items,
+        allow_auto_accept=auto_accept_work_items,
+    )
+
+    if len(project_chunks) > 1 or settings.project in ("all", "*"):
+        reports = []
+        overall_ok = True
+        for proj, proj_chunks in project_chunks:
+            proj_settings = CandidateIntakeSettings(
+                project=proj,
+                batch_candidates=settings.batch_candidates,
+                max_chunks_per_run=settings.max_chunks_per_run,
+                max_candidates_per_chunk=settings.max_candidates_per_chunk,
+                max_call_chars=settings.max_call_chars,
+                enable_proposals=settings.enable_proposals,
+                checkpoint_path=settings.checkpoint_path,
+                refresh_watermark=settings.refresh_watermark or proj,
+                auto_accept_work_items=settings.auto_accept_work_items,
+            )
+            try:
+                rep, _ = run_candidate_intake(
+                    settings=proj_settings,
+                    chunks=proj_chunks,
+                    completion_fn=completion_fn,
+                    steward=steward,
+                    dry_run=False,
+                )
+                reports.append(rep.to_dict())
+                if rep.status not in ("completed", "no_source"):
+                    overall_ok = False
+            except (CandidateIntakeConfigError, OSError):
+                overall_ok = False
+        print(
+            json.dumps(
+                {
+                    "schema_version": "llm_brain_candidate_intake_multi.v1",
+                    "project": settings.project,
+                    "status": "completed" if overall_ok else "partial_failure",
+                    "reports": reports,
+                },
+                sort_keys=True,
+            )
+        )
+        return 0 if overall_ok else 1
 
     try:
         report, state = run_candidate_intake(

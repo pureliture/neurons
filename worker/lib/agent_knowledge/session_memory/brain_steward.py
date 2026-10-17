@@ -558,6 +558,102 @@ class BrainStewardService:
         )
         return self._safe_restricted_result(result)
 
+    def candidate_autopilot_accept(
+        self,
+        *,
+        candidate_memory_id: str,
+        decision_id: str,
+        actor: str = "candidate-intake-autopilot",
+    ) -> dict:
+        """Cold-start structural-safety auto-promotion for safe intake candidates."""
+        self._guard_restricted("memory_candidate_autopilot_accept", capability="auto_accept")
+        self._guard_writable()
+        decided = self._load_decided(decision_id, candidate_memory_id, "auto_accept", actor)
+        if decided is not None:
+            return self._safe_restricted_result(
+                {
+                    "schema_version": "llm_brain_auto_acceptance_commit.v1",
+                    "promotion_path": "auto_policy",
+                    "canonical_write_performed": True,
+                    "accepted_card": decided,
+                }
+            )
+        from .memory_evaluation import classify_candidate_block_reason
+
+        try:
+            candidate = self._load_pending_candidate(candidate_memory_id)
+        except ValueError:
+            decided = self._load_decided(decision_id, candidate_memory_id, "auto_accept", actor)
+            if decided is None:
+                raise
+            return self._safe_restricted_result(
+                {
+                    "schema_version": "llm_brain_auto_acceptance_commit.v1",
+                    "promotion_path": "auto_policy",
+                    "canonical_write_performed": True,
+                    "accepted_card": decided,
+                }
+            )
+        block_reason = classify_candidate_block_reason(candidate)
+        if block_reason:
+            return {
+                "schema_version": "llm_brain_auto_acceptance_commit.v1",
+                "promotion_path": "auto_policy",
+                "canonical_write_performed": False,
+                "blocked_reason": block_reason,
+            }
+
+        def transform(current, _target):
+            if current.get("lifecycle_state") not in REVIEW_LIFECYCLE_STATES:
+                raise ValueError("only pending steward candidate may be auto-accepted")
+            reason = classify_candidate_block_reason(current)
+            if reason:
+                raise ValueError(f"candidate blocked from auto-accept: {reason}")
+            accepted = deepcopy(validate_memory_card_envelope(current))
+            accepted.update(
+                {
+                    "lifecycle_state": "auto_accepted",
+                    "judgment_state": "auto_status",
+                    "approval_state": "auto_accepted",
+                    "status": "accepted",
+                    "freshness": "current",
+                    "currentness": "current",
+                    "auto_policy_ready": True,
+                    "operator_approval_ref": decision_id,
+                    "reason_capsule": {
+                        "rule_hits": ["autopilot_work_memory_passed", "structural_safety_passed"],
+                        "deterministic_signals": [
+                            {"kind": "card_type", "value": str(current.get("card_type") or "")},
+                            {"kind": "confidence", "value": float(current.get("confidence") or 0.0)},
+                        ],
+                        "evidence_gap": [],
+                        "model_reason": "Candidate passed structural safety checks for automatic promotion.",
+                        "policy_version": "policy.v1",
+                        "evaluator_version": "eval.v1",
+                        "review_block_reason": "",
+                    },
+                }
+            )
+            validate_memory_card_envelope(accepted)
+            return accepted, None
+
+        changed = self._pg().steward_decision(
+            decision_id=decision_id,
+            memory_id=candidate_memory_id,
+            content_hash=str(candidate["content_hash"]),
+            action="auto_accept",
+            actor=actor,
+            transform=transform,
+        )
+        return self._safe_restricted_result(
+            {
+                "schema_version": "llm_brain_auto_acceptance_commit.v1",
+                "promotion_path": "auto_policy",
+                "canonical_write_performed": True,
+                "accepted_card": changed["card"],
+            }
+        )
+
     def supersede_commit(
         self, *, proposal_memory_id: str, approved_by: str, decision_id: str
     ) -> dict:
