@@ -192,14 +192,34 @@ class GraphFirstResolver:
             )
         except Exception:
             return self._error_payload(request, error_code="authority_store_unavailable")
+        retrieval_path = "none"
+        fallback_used = False
+        if not cards and request.query.strip():
+            if self._embed_query is not None and callable(getattr(self._store, "hybrid_search", None)):
+                fallback_cards, _, _, _ = self._fallback_cards(request)
+                if fallback_cards:
+                    cards = fallback_cards
+                    retrieval_path = "pgvector_fallback"
+                    fallback_used = True
+            if not cards and not request.as_of:
+                try:
+                    cards = self._store.list_context_cards(
+                        project=request.project,
+                        query="",
+                        as_of=None,
+                        limit=request.limit + 1,
+                        steward_only=True,
+                    )
+                except Exception:
+                    pass
         return self._serialize(
             request,
             list(cards),
             metadata=self._metadata(
-                retrieval_path="none",
+                retrieval_path=retrieval_path,
                 graph_status="unavailable",
                 authority_join_status="verified",
-                fallback_used=False,
+                fallback_used=fallback_used,
                 projection_lag_ms=None,
             ),
         )
@@ -271,6 +291,26 @@ class GraphFirstResolver:
                 graph_status="projection_lag",
                 lag=lag,
             )
+        if (
+            not graph_cards
+            and join_status == "verified"
+            and not request.as_of
+            and self._embed_query is not None
+            and callable(getattr(self._store, "search_session_chunks", None))
+        ):
+            fallback_cards, _, fallback_used, fallback_join = self._fallback_cards(request)
+            if fallback_cards:
+                return self._serialize(
+                    request,
+                    fallback_cards,
+                    metadata=self._metadata(
+                        retrieval_path="pgvector_fallback",
+                        graph_status="available",
+                        authority_join_status=fallback_join,
+                        fallback_used=fallback_used,
+                        projection_lag_ms=lag,
+                    ),
+                )
         return self._serialize(
             request,
             graph_cards,
@@ -430,7 +470,84 @@ class GraphFirstResolver:
             for memory_id, content_hash in rank_keys
             if memory_id in by_id and str(by_id[memory_id].get("content_hash") or "") == content_hash
         ]
-        return cards, None, True, "verified" if len(cards) == len(ranked) else "mismatch"
+        join_status = "verified" if len(cards) == len(ranked) else "mismatch"
+        if not cards and not request.as_of and callable(getattr(self._store, "search_session_chunks", None)):
+            chunk_cards = self._session_chunk_cards(request, vector)
+            if chunk_cards:
+                return chunk_cards, None, True, join_status
+        return cards, None, True, join_status
+
+    def _session_chunk_cards(
+        self, request: _ResolveRequest, vector: list[float] | None = None
+    ) -> list[dict[str, Any]]:
+        if (
+            request.as_of
+            or request.response_mode == "with_evidence"
+            or not callable(getattr(self._store, "search_session_chunks", None))
+        ):
+            return []
+        if vector is None:
+            if self._embed_query is None:
+                return []
+            try:
+                vector = self._embed_query(request.query)
+            except Exception:
+                return []
+        try:
+            chunks = self._store.search_session_chunks(
+                vector,
+                project=request.project,
+                limit=max(request.limit * 2, 10),
+            )
+        except Exception:
+            return []
+        tokens = _query_tokens(request.query)
+        threshold = max(1, (len(tokens) + 1) // 3) if tokens else 1
+        results: list[dict[str, Any]] = []
+        for row in chunks or ():
+            if not isinstance(row, Mapping):
+                continue
+            text = str(row.get("content_markdown") or row.get("content") or "").strip()
+            if not text:
+                continue
+            distance = _finite_score_or_none(row.get("distance"))
+            similarity = (
+                (1.0 - distance)
+                if distance is not None
+                else (_finite_score_or_none(row.get("similarity_score", row.get("score"))) or 0.0)
+            )
+            lexical_hits = len(tokens & _query_tokens(text)) if tokens else 0
+            if similarity < 0.45 and lexical_hits < threshold:
+                continue
+            chunk_id = str(row.get("chunk_id") or "")
+            if not chunk_id:
+                continue
+            content_hash = str(row.get("content_hash") or "")
+            if not content_hash.startswith("sha256:"):
+                content_hash = "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+            safe_summary = _safe(text, 240)
+            if not safe_summary:
+                continue
+            first_line = next((line.strip("#* -") for line in safe_summary.splitlines() if line.strip("#* -")), "")
+            title = _safe(first_line or f"{request.project} session context", 96)
+            results.append(
+                {
+                    "memory_id": f"chunk:{chunk_id[:56]}",
+                    "project": str(row.get("project") or request.project),
+                    "card_type": "status",
+                    "title": title,
+                    "summary": safe_summary,
+                    "typed_payload": {
+                        "status": safe_summary,
+                        "status_value": safe_summary,
+                    },
+                    "currentness": "current",
+                    "content_hash": content_hash,
+                }
+            )
+            if len(results) >= request.limit + 1:
+                break
+        return results
 
     def _serialize(
         self,

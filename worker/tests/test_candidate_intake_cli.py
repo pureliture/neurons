@@ -474,3 +474,60 @@ def test_load_chunks_from_pg_maps_rows(monkeypatch):
     assert chunks[0]["metadata"]["project"] == PROJECT
     assert "session_memory_chunks" in captured["sql"]
     assert captured["params"] == (PROJECT, 5)
+
+
+def test_auto_accept_work_items_promotes_valid_candidates_and_redacts_paths():
+    class AutoAcceptRecordingSteward(RecordingSteward):
+        allow_auto_accept = True
+
+        def __init__(self):
+            super().__init__()
+            self.auto_accepts = []
+
+        def candidate_autopilot_accept(self, **kwargs):
+            self.auto_accepts.append(kwargs)
+            return {
+                "schema_version": "brain_steward_commit.v1",
+                "committed": True,
+                "authoritative_memory_changed": True,
+            }
+
+    def completion_with_path(messages):
+        keys = re.findall(r"SOURCE_KEY: ([^\s]+)", messages[-1]["content"])
+        return json.dumps(
+            [
+                {
+                    "source_key": key,
+                    "candidate": {
+                        "card_type": "task",
+                        "title": "Hermes stocks S3 in progress at /Users/alice/repo/app.py",
+                        "statement": "S1/S2 completed, S3 paper trading API verification in progress.",
+                        "typed_payload": {
+                            "task": "Verify S3 paper trading API",
+                            "task_state": "in_progress",
+                            "next_action": "Run integration tests on /Users/alice/repo/tests",
+                            "blocker": "",
+                            "owner_hint": "hermes",
+                            "status": "in_progress",
+                        },
+                    },
+                }
+                for key in keys
+            ]
+        )
+
+    steward = AutoAcceptRecordingSteward()
+    report, _ = run_candidate_intake(
+        settings=_settings(enable_proposals=True, auto_accept_work_items=True),
+        chunks=[_chunk(_hash(10))],
+        completion_fn=completion_with_path,
+        steward=steward,
+    )
+    assert report.status == "completed"
+    assert report.proposed_count == 1
+    assert report.auto_accepted_count == 1
+    assert len(steward.calls) == 1
+    assert "/Users/alice" not in steward.calls[0]["source_span"]["title"]
+    assert len(steward.auto_accepts) == 1
+    assert steward.auto_accepts[0]["candidate_memory_id"] == "mem_steward_test"
+
