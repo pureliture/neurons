@@ -92,8 +92,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.retry_dead_letters:
         source_ids = [s.strip() for s in args.source_ids.split(",") if s.strip()]
+        if not source_ids:
+            print(
+                "error: --retry-dead-letters requires --source-ids (empty would retry ALL dead letters)",
+                file=sys.stderr,
+            )
+            return 2
         try:
-            reset_count = store.reset_graph_projection_dead_letters(source_ids=source_ids or None)
+            reset_count = store.reset_graph_projection_dead_letters(source_ids=source_ids)
             print(f"reset {reset_count} dead-letter job(s) to failed for retry")
         except Exception as exc:
             print(f"error: failed to reset dead letters: {exc}", file=sys.stderr)
