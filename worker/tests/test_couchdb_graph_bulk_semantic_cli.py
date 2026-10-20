@@ -596,6 +596,27 @@ def test_openai_bulk_extractor_accepts_json_wrapped_in_prose():
     assert properties["sessions"]["items"]["properties"]["entities"]["minItems"] == 1
 
 
+def test_openai_bulk_extractor_keeps_opencode_session_header():
+    captured = {}
+
+    def fake_post(url, *, headers, body, timeout):  # type: ignore[no-untyped-def]
+        _ = (url, body, timeout)
+        captured.update(headers)
+        return json.dumps({"choices": [{"message": {"content": '{"sessions": []}'}}]})
+
+    extractor = OpenAICompatibleBulkSemanticExtractor(
+        base_url="https://opencode.ai/zen/go/v1",
+        model="mimo-v2.6-flash",
+        post_fn=fake_post,
+    )
+    extractor.extract([])
+
+    # Pre-existing behaviour: the bulk semantic lane already carried the
+    # OpenCode session id and an identifying User-Agent. Keep both.
+    assert captured["x-opencode-session"] == "neurons-bulk-semantic"
+    assert captured["User-Agent"] == "neurons-bulk-semantic/1.0"
+
+
 def test_deterministic_writer_uses_graphiti_compatible_nodes_and_edges(tmp_path):
     store = InMemoryCouchDBSourceStore()
     sid = _seed_session(store, raw_id="writer")

@@ -7,6 +7,7 @@ from typing import Any, Protocol
 
 from .env import resolve_reranker_spec
 from .policy import ModelConnectorConfigError, ModelPolicy
+from .session_headers import opencode_session_headers
 from .specs import ModelConnectionConfig, RerankerSpec
 
 # rank_fn(query, [text, ...]) -> [score, ...] aligned with the input order.
@@ -64,12 +65,17 @@ class OpenAICompatibleRerankerClient:
         base_url = spec.base_url or ("http://localhost:11434/v1" if spec.provider == "ollama" else "")
         self._model = spec.model or ("deepseek-r1:7b" if spec.provider == "ollama" else "")
         self._timeout_seconds = timeout_seconds
-        client_kwargs = {
+        client_kwargs: dict[str, Any] = {
             "api_key": api_key or ("ollama" if spec.provider == "ollama" else None),
             "base_url": base_url or None,
         }
         if timeout_seconds is not None:
             client_kwargs["timeout"] = timeout_seconds
+        # The OpenCode zen/go relay rejects requests without x-opencode-session
+        # (HTTP 400 MissingSessionID). Attach it for that family only.
+        session_headers = opencode_session_headers(base_url)
+        if session_headers:
+            client_kwargs["default_headers"] = session_headers
         self._async_client = openai_client
         self._sync_client = sync_openai_client
         if self._async_client is None:
