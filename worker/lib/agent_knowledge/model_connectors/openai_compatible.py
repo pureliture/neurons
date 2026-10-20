@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from typing import Any
+
 from .policy import ModelConnectorConfigError, ModelPolicy
 from .reranker import GraphitiCrossEncoderAdapter, build_reranker_client
+from .session_headers import GRAPH_WORKER_SESSION_ID, opencode_session_headers
 from .specs import ModelConnectionConfig
 from .structured_response import normalize_structured_response
 
@@ -54,7 +57,7 @@ def build_openai_compatible_graphiti_components(
             data = await super()._generate_response(*args, **kwargs)
             return normalize_structured_response(data, response_model)
 
-    llm_client = _NeuronStructuredClient(config=llm_config)
+    llm_client = _NeuronStructuredClient(config=llm_config, client=_build_llm_client(llm_config))
     embedder = OpenAIEmbedder(
         config=OpenAIEmbedderConfig(
             api_key=embedding_api_key_value,
@@ -67,6 +70,29 @@ def build_openai_compatible_graphiti_components(
     )
     reranker = build_reranker_client(config, api_key=api_key, openai_client=llm_client.client, policy=validator)
     return llm_client, embedder, GraphitiCrossEncoderAdapter(reranker)
+
+
+def _build_llm_client(llm_config) -> Any:
+    """Build the async OpenAI client, adding OpenCode session headers if needed.
+
+    The OpenCode zen/go relay rejects requests without ``x-opencode-session``
+    (HTTP 400 ``MissingSessionID``), so the header is attached for that family
+    only. Other providers keep the plain client construction.
+    """
+
+    from openai import AsyncOpenAI
+
+    headers = opencode_session_headers(
+        str(llm_config.base_url or ""),
+        session_id=GRAPH_WORKER_SESSION_ID,
+    )
+    if not headers:
+        return AsyncOpenAI(api_key=llm_config.api_key, base_url=llm_config.base_url)
+    return AsyncOpenAI(
+        api_key=llm_config.api_key,
+        base_url=llm_config.base_url,
+        default_headers=headers,
+    )
 
 
 def _require_configured(value: str, env_name: str) -> None:
