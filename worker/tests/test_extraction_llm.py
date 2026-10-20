@@ -188,6 +188,34 @@ def test_intake_completion_env_builds_opencode_target_with_session_header():
     assert captured["headers"]["x-opencode-session"] == "neurons-memory-intake"
 
 
+def test_openai_compat_completion_fn_adds_session_header_for_opencode_endpoint():
+    captured = {}
+
+    def fake_post(url, *, headers, body):
+        captured["headers"] = headers
+        return json.dumps({"choices": [{"message": {"content": "ok"}}]})
+
+    fn = build_openai_compat_completion_fn(
+        "https://opencode.ai/zen/go/v1", "mimo-v2.6-flash", post_fn=fake_post
+    )
+    assert fn([{"role": "user", "content": "hi"}]) == "ok"
+    assert captured["headers"]["x-opencode-session"]
+
+
+def test_openai_compat_completion_fn_omits_session_header_for_other_providers():
+    captured = {}
+
+    def fake_post(url, *, headers, body):
+        captured["headers"] = headers
+        return json.dumps({"choices": [{"message": {"content": "ok"}}]})
+
+    fn = build_openai_compat_completion_fn(
+        "http://model-gateway-proxy:8930/v1", "m", post_fn=fake_post
+    )
+    assert fn([{"role": "user", "content": "hi"}]) == "ok"
+    assert "x-opencode-session" not in captured["headers"]
+
+
 def test_intake_completion_env_falls_back_to_vertex_wrapper(monkeypatch):
     import agent_knowledge.session_memory.extraction_llm as module
 

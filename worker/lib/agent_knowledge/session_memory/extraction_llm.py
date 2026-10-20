@@ -14,6 +14,8 @@ import urllib.request
 from collections.abc import Mapping
 from typing import Any, Callable
 
+from ..model_connectors.session_headers import opencode_session_headers
+
 DEFAULT_PROVIDERS_PATH = "~/.graphify/providers.json"
 DEFAULT_USER_AGENT = "OpenAI/Python 1.109.1"
 
@@ -48,11 +50,16 @@ def build_openai_compat_completion_fn(
     """An OpenAI-compatible /chat/completions completion_fn: messages -> assistant content."""
 
     url = base_url.rstrip("/") + "/chat/completions"
+    # The OpenCode zen/go relay rejects requests without x-opencode-session
+    # (HTTP 400 MissingSessionID). Attach it for that family only; other
+    # providers (internal gateway, Vertex, Ollama) must not receive it.
+    session_headers = opencode_session_headers(base_url)
 
     def completion_fn(messages: list[dict]) -> str:
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
+        headers.update(session_headers)
         if extra_headers:
             headers.update({str(key): str(value) for key, value in extra_headers.items()})
         # urllib's default "Python-urllib/x.y" User-Agent is rejected by the
