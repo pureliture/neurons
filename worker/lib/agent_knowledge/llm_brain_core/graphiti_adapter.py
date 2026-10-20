@@ -75,6 +75,8 @@ class GraphitiNeo4jConfig:
     # Secrets are repr=False so an accidental repr()/traceback/locals dump of the
     # config never leaks credentials (CLAUDE.md: no token/credential in output).
     password: str = field(default="", repr=False)
+    # When True, connect to Neo4j without authentication (auth disabled on server).
+    auth_disabled: bool = False
     default_group_id: str = ""
     llm_provider: str = "openai"
     llm_model: str = ""
@@ -140,6 +142,10 @@ class GraphitiNeo4jConfig:
             uri=env.get("LLM_BRAIN_NEO4J_URI", env.get("NEO4J_URI", "bolt://localhost:7687")),
             user=env.get("LLM_BRAIN_NEO4J_USER", env.get("NEO4J_USER", "neo4j")),
             password=env.get("LLM_BRAIN_NEO4J_PASSWORD", env.get("NEO4J_PASSWORD", "")),
+        auth_disabled=(
+            str(env.get("LLM_BRAIN_NEO4J_AUTH_DISABLED", "")).lower() in {"1", "true", "yes", "on"}
+            or not bool(env.get("LLM_BRAIN_NEO4J_PASSWORD", env.get("NEO4J_PASSWORD", "")).strip())
+        ),
             default_group_id=env.get("LLM_BRAIN_GRAPH_GROUP_ID", ""),
             llm_provider=provider.lower(),
             llm_model=llm_model,
@@ -1028,6 +1034,63 @@ def _build_graphiti(config: GraphitiNeo4jConfig):
                 base_url=config.embedding_base_url or base_url or None,
             )
         )
+        if config.auth_disabled or not (config.password or "").strip():
+            # Neo4j auth is disabled on the server: connect without credentials
+            # instead of sending empty/invalid credentials that trigger
+            # AuthenticationError.
+            from graphiti_core import Graphiti as _Graphiti
+            from graphiti_core.driver.neo4j_driver import Neo4jDriver as _Neo4jDriver
+            from graphiti_core.driver.driver import GraphDriver as _GraphDriver
+            from neo4j import AsyncGraphDatabase as _AsyncGraphDatabase
+
+            class _NoAuthNeo4jDriver(_Neo4jDriver):
+                def __init__(self, uri, database="neo4j"):
+                    _GraphDriver.__init__(self)
+                    self.client = _AsyncGraphDatabase.driver(uri, auth=None)
+                    self._database = database
+                    from graphiti_core.driver.neo4j_driver import (
+                        Neo4jEntityNodeOperations,
+                        Neo4jEpisodeNodeOperations,
+                        Neo4jCommunityNodeOperations,
+                        Neo4jSagaNodeOperations,
+                        Neo4jEntityEdgeOperations,
+                        Neo4jEpisodicEdgeOperations,
+                        Neo4jCommunityEdgeOperations,
+                        Neo4jHasEpisodeEdgeOperations,
+                        Neo4jNextEpisodeEdgeOperations,
+                        Neo4jSearchOperations,
+                        Neo4jGraphMaintenanceOperations,
+                    )
+                    self._entity_node_ops = Neo4jEntityNodeOperations()
+                    self._episode_node_ops = Neo4jEpisodeNodeOperations()
+                    self._community_node_ops = Neo4jCommunityNodeOperations()
+                    self._saga_node_ops = Neo4jSagaNodeOperations()
+                    self._entity_edge_ops = Neo4jEntityEdgeOperations()
+                    self._episodic_edge_ops = Neo4jEpisodicEdgeOperations()
+                    self._community_edge_ops = Neo4jCommunityEdgeOperations()
+                    self._has_episode_edge_ops = Neo4jHasEpisodeEdgeOperations()
+                    self._next_episode_edge_ops = Neo4jNextEpisodeEdgeOperations()
+                    self._search_ops = Neo4jSearchOperations()
+                    self._graph_ops = Neo4jGraphMaintenanceOperations()
+                    self._init_task = None
+                    self.aoss_client = None
+                    try:
+                        import asyncio
+                        loop = asyncio.get_running_loop()
+                        self._init_task = loop.create_task(self.build_indices_and_constraints())
+                    except RuntimeError:
+                        pass
+
+            _no_auth_driver = _NoAuthNeo4jDriver(config.uri)
+            return _Graphiti(
+                uri=config.uri,
+                graph_driver=_no_auth_driver,
+                llm_client=llm_client,
+                embedder=embedder,
+                cross_encoder=OpenAIRerankerClient(client=llm_client.client, config=llm_config),
+                store_raw_episode_content=config.store_raw_episode_content,
+            )
+
         return Graphiti(
             config.uri,
             config.user,
@@ -1035,6 +1098,57 @@ def _build_graphiti(config: GraphitiNeo4jConfig):
             llm_client=llm_client,
             embedder=embedder,
             cross_encoder=OpenAIRerankerClient(client=llm_client.client, config=llm_config),
+            store_raw_episode_content=config.store_raw_episode_content,
+        )
+
+    if config.auth_disabled or not (config.password or "").strip():
+        from graphiti_core import Graphiti as _Graphiti
+        from graphiti_core.driver.neo4j_driver import Neo4jDriver as _Neo4jDriver
+        from graphiti_core.driver.driver import GraphDriver as _GraphDriver
+        from neo4j import AsyncGraphDatabase as _AsyncGraphDatabase
+
+        class _NoAuthNeo4jDriver(_Neo4jDriver):
+            def __init__(self, uri, database="neo4j"):
+                _GraphDriver.__init__(self)
+                self.client = _AsyncGraphDatabase.driver(uri, auth=None)
+                self._database = database
+                from graphiti_core.driver.neo4j_driver import (
+                    Neo4jEntityNodeOperations,
+                    Neo4jEpisodeNodeOperations,
+                    Neo4jCommunityNodeOperations,
+                    Neo4jSagaNodeOperations,
+                    Neo4jEntityEdgeOperations,
+                    Neo4jEpisodicEdgeOperations,
+                    Neo4jCommunityEdgeOperations,
+                    Neo4jHasEpisodeEdgeOperations,
+                    Neo4jNextEpisodeEdgeOperations,
+                    Neo4jSearchOperations,
+                    Neo4jGraphMaintenanceOperations,
+                )
+                self._entity_node_ops = Neo4jEntityNodeOperations()
+                self._episode_node_ops = Neo4jEpisodeNodeOperations()
+                self._community_node_ops = Neo4jCommunityNodeOperations()
+                self._saga_node_ops = Neo4jSagaNodeOperations()
+                self._entity_edge_ops = Neo4jEntityEdgeOperations()
+                self._episodic_edge_ops = Neo4jEpisodicEdgeOperations()
+                self._community_edge_ops = Neo4jCommunityEdgeOperations()
+                self._has_episode_edge_ops = Neo4jHasEpisodeEdgeOperations()
+                self._next_episode_edge_ops = Neo4jNextEpisodeEdgeOperations()
+                self._search_ops = Neo4jSearchOperations()
+                self._graph_ops = Neo4jGraphMaintenanceOperations()
+                self._init_task = None
+                self.aoss_client = None
+                try:
+                    import asyncio
+                    loop = asyncio.get_running_loop()
+                    self._init_task = loop.create_task(self.build_indices_and_constraints())
+                except RuntimeError:
+                    pass
+
+        _no_auth_driver = _NoAuthNeo4jDriver(config.uri)
+        return _Graphiti(
+            uri=config.uri,
+            graph_driver=_no_auth_driver,
             store_raw_episode_content=config.store_raw_episode_content,
         )
 
