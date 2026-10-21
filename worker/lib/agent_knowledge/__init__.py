@@ -21,3 +21,5 @@ __version__ = "0.1.0"  # 2026-10-14: 자동 배포 체인 드릴 웨이브5 (ses
 # name and derives the lane's own application, so the promotion completes.
 # M7 ninth drill (2026-10-21): the production comparison is bound to the
 # current ops main head, so a sibling's promotion commit no longer blocks it.
+# M7 tenth drill (2026-10-21): the live authority reads each lane's own Argo
+# applications, so the production promotion can authenticate the canary proof.
