@@ -1,3 +1,7 @@
 __all__ = ["__version__"]
 
 __version__ = "0.1.0"  # 2026-10-14: 자동 배포 체인 드릴 웨이브5 (session replica 계약 수정 검증)
+
+# M7 parallel drill (2026-10-21): verifies that all seven delivery lanes
+# start at once through GoCD's native publish trigger after the per-lane Argo
+# application split. Comment only - no behaviour change.
