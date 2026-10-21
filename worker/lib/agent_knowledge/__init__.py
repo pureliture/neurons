@@ -29,3 +29,5 @@ __version__ = "0.1.0"  # 2026-10-14: 자동 배포 체인 드릴 웨이브5 (ses
 # overlay path, so the production promotion can authenticate the canary proof.
 # M7 thirteenth drill (2026-10-21): every lane runs with the reviewed tool,
 # so the seven lanes complete 6/6 in parallel.
+# M7 fourteenth drill (2026-10-21): the scale-to-zero lane applications report
+# Synced, so all seven lanes complete 6/6 in parallel.
