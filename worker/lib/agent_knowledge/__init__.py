@@ -5,3 +5,5 @@ __version__ = "0.1.0"  # 2026-10-14: 자동 배포 체인 드릴 웨이브5 (ses
 # M7 parallel drill (2026-10-21): verifies that all seven delivery lanes
 # start at once through GoCD's native publish trigger after the per-lane Argo
 # application split. Comment only - no behaviour change.
+# M7 second drill (2026-10-21): verifies the corrected lane-application
+# handoff contract - all seven lanes start together and complete 6/6.
