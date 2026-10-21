@@ -7,3 +7,5 @@ __version__ = "0.1.0"  # 2026-10-14: 자동 배포 체인 드릴 웨이브5 (ses
 # application split. Comment only - no behaviour change.
 # M7 second drill (2026-10-21): verifies the corrected lane-application
 # handoff contract - all seven lanes start together and complete 6/6.
+# M7 third drill (2026-10-21): the adapter is pinned by blob, so the lanes
+# run the reviewed handoff contract and can complete in parallel.
