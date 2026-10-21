@@ -17,3 +17,5 @@ __version__ = "0.1.0"  # 2026-10-14: 자동 배포 체인 드릴 웨이브5 (ses
 # seven lanes run the reviewed handoff contract and complete in parallel.
 # M7 seventh drill (2026-10-21): the Argo RBAC covers the per-lane
 # applications, so the canary sync reaches every lane's own application.
+# M7 eighth drill (2026-10-21): the production writer receives the shared
+# name and derives the lane's own application, so the promotion completes.
