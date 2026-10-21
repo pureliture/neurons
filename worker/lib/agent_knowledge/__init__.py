@@ -9,3 +9,5 @@ __version__ = "0.1.0"  # 2026-10-14: 자동 배포 체인 드릴 웨이브5 (ses
 # handoff contract - all seven lanes start together and complete 6/6.
 # M7 third drill (2026-10-21): the adapter is pinned by blob, so the lanes
 # run the reviewed handoff contract and can complete in parallel.
+# M7 fourth drill (2026-10-21): every lane starts together and completes 6/6
+# with the canary sync accepting a sibling's newer ops main.
