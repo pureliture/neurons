@@ -23,3 +23,5 @@ __version__ = "0.1.0"  # 2026-10-14: 자동 배포 체인 드릴 웨이브5 (ses
 # current ops main head, so a sibling's promotion commit no longer blocks it.
 # M7 tenth drill (2026-10-21): the live authority reads each lane's own Argo
 # applications, so the production promotion can authenticate the canary proof.
+# M7 eleventh drill (2026-10-21): the delivery tools are checked against the
+# resolved ops revision, so a tool change no longer invalidates the guard.
