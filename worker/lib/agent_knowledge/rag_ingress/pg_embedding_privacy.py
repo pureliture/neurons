@@ -31,12 +31,11 @@ _NON_SECRET_LITERAL = re.compile(r"^(?:true|false|none|null|yes|no)$", re.IGNORE
 # words is still a secret, but the guard is a heuristic and the policy is
 # reviewed.
 _PLACEHOLDER_WORDS = frozenset({
-    "true", "false", "none", "null", "yes", "no",
+    # Only obvious placeholder markers. Credential words such as
+    # "password", "token" or "admin" are intentionally excluded because
+    # they are also real (weak) secrets.
     "example", "sample", "placeholder", "changeme", "dummy", "test",
-    "xxx", "token", "password", "secret", "key", "admin", "root",
-    "user", "default", "foo", "bar", "baz", "qux", "asdf", "qwerty",
-    "agent", "amb", "ambiguous", "redacted", "todo", "synthetic",
-    "fake", "mock", "stub", "demo", "trial", "temp", "temporary",
+    "xxx", "redacted", "todo",
 })
 _VALUE = r'''(?:"(?P<double>(?:\\.|[^"\\])*)"|'(?P<single>(?:\\.|[^'\\])*)'|(?P<bare>[^\s,;\}"']+))'''
 _ASSIGNMENT = re.compile(

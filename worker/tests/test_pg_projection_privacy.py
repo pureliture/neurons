@@ -99,24 +99,32 @@ NON_SECRET_LITERAL_ASSIGNMENTS = [
     'password: false # comment',
     '{"token": false, "other": 1}',
 ]
-NON_LITERAL_SHORT_ASSIGNMENTS = [
-    'token: falsey',
-    'password: none-of-your-business',
-    'api_key: 0',
-    'password: false my-secret',
-    'token: " false "',
-]
 PLACEHOLDER_ASSIGNMENTS = [
     'token: example',
     'password: changeme',
     'api_key: dummy',
     'secret: test',
     'credential: placeholder',
-    'token: agent',
-    'password: AMB',
     'token: sample',
     'api_key: xxx',
-    'password: token',
+]
+NON_LITERAL_SHORT_ASSIGNMENTS = [
+    'token: falsey',
+    'password: none-of-your-business',
+    'api_key: 0',
+    'password: false my-secret',
+    'token: " false "',
+    'token: example my-secret',
+    'password: " changeme "',
+    'token: agent',
+    'password: AMB',
+    'token: token',
+    'password: admin',
+    'api_key: root',
+    'secret: key',
+    'credential: default',
+    'token: foo',
+    'password: bar',
 ]
 
 
