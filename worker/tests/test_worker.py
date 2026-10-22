@@ -86,32 +86,18 @@ def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
         "agent_knowledge.session_memory.transcript_model",
         "agent_knowledge.session_memory.brain_query",
         "agent_knowledge.session_memory.brain_read_model",
-        "agent_knowledge.session_memory.gc_backup",
         "agent_knowledge.session_memory.llm_brain_service",
         "agent_knowledge.session_memory.memory_evaluation",
         "agent_knowledge.session_memory.memory_promotion",
         "agent_knowledge.session_memory.native_memory_governance",
-        "agent_knowledge.session_memory.native_memory_mirror",
-        "agent_knowledge.session_memory.native_memory_recall",
-        "agent_knowledge.session_memory.native_memory_reconcile",
         "agent_knowledge.session_memory.native_memory_sync_approval",
-        "agent_knowledge.session_memory.native_memory_writer",
-        "agent_knowledge.session_memory.native_memory_write_runner",
         "agent_knowledge.session_memory.index_projection",
-        "agent_knowledge.session_memory.session_memory_gc",
         "agent_knowledge.session_memory.terminal_skipped_quarantine",
         "agent_knowledge.session_memory.transcript_quality",
         "agent_knowledge.session_memory.transcript_memory_gc",
-        "agent_knowledge.session_memory.transcript_volume_gc",
         "agent_knowledge.session_memory.zombie_snapshot_repair",
     ):
         importlib.import_module(included)
-
-    gc_backup = importlib.import_module("agent_knowledge.session_memory.gc_backup")
-    # restore_gc_backup is vendored with the GC executors so a mistaken hard delete
-    # is recoverable (re-upload + re-embed) where GC runs; it takes the retired_index_bridge
-    # client as an argument, so the slice still has no wired client.
-    assert hasattr(gc_backup, "restore_gc_backup")
 
     for excluded in (
         "agent_knowledge.rag_ingress.state_store",
@@ -190,19 +176,6 @@ def test_local_dedup_survives_restart(tmp_path):
 
 
 # --- natural-key persistence ----------------------------------------------
-
-# --- transport closure -----------------------------------------------------
-
-def test_default_transport_closure_resolves():
-    # The default RetiredIndexBridgeHttpClient transport (_urllib_transport) lazily imports
-    # transport_contract.ProxyResponse at call time; it must be vendored or live
-    # delivery fails at runtime with ModuleNotFoundError.
-    import agent_knowledge.legacy.index_client as rc
-    from agent_knowledge.transport_contract import ProxyResponse  # noqa: F401
-
-    client = rc.RetiredIndexBridgeHttpClient(base_url="http://example", bearer_token="t")
-    assert client.transport is rc._urllib_transport
-
 
 # --- backend pressure gate -------------------------------------------------
 

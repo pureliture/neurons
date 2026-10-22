@@ -27,11 +27,10 @@
 - ingress API/queue/runtime/worker and durable state DB
 - `ledger.py`, transcript ingest worker, replay/reconcile/backfill server state
 - session-memory/project-memory build and read surfaces
-- brain.query, MemoryCard, native-memory mirror/sync/reconcile
+- brain.query and MemoryCard
 - Qdrant/graph-backed memory projection and recall surfaces
 - GC safety planners and fail-closed GC command surfaces:
-  `session-memory-gc`, `transcript-memory-gc`, `transcript-session-gc`,
-  `transcript-volume-gc`, `session-memory-quarantine-terminal-skipped`,
+  `transcript-memory-gc`, `session-memory-quarantine-terminal-skipped`,
   `session-memory-repair-zombie-snapshots`
 
 ## Not Owned Here

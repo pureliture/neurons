@@ -28,19 +28,13 @@ from .rag_ingress import state_cli
 from .rag_ingress import temporal_metadata_backfill
 from .session_memory import (
     autopilot_cli,
-    cleanup_readiness,
     eval_cli,
     eval_notify_discord,
     memory_regeneration_cli,
-    native_memory_write_runner,
     neuron_session_memory,
-    session_memory_gc,
     session_memory_private_sync_cli,
     terminal_skipped_quarantine,
-    transcript_backfill,
     transcript_memory_gc,
-    transcript_session_gc,
-    transcript_volume_gc,
     zombie_snapshot_repair,
 )
 
@@ -124,15 +118,9 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "pg-qdrant-import": _lazy_handler(".rag_ingress.pg_qdrant_import_cli"),
     "rag-ingress-state": state_cli.main,
     "memory-regeneration": memory_regeneration_cli.main,
-    "cleanup-readiness": cleanup_readiness.main,
     "session-memory-private-sync": session_memory_private_sync_cli.main,
     "neuron-session-memory-build": neuron_session_memory.main,
-    "native-memory-sync": native_memory_write_runner.main,
-    "session-memory-gc": session_memory_gc.main,
-    "transcript-backfill": transcript_backfill.main,
     "transcript-memory-gc": transcript_memory_gc.main,
-    "transcript-session-gc": transcript_session_gc.main,
-    "transcript-volume-gc": transcript_volume_gc.main,
     "session-memory-quarantine-terminal-skipped": terminal_skipped_quarantine.main,
     "session-memory-repair-zombie-snapshots": zombie_snapshot_repair.main,
     "brain-context-resolve": _lazy_handler(".llm_brain_core.cli"),
@@ -385,7 +373,6 @@ def _build_recall_service(
         retired_index_bridge=retired_index_bridge,
         dataset_ids=list(args.dataset_id or []),
         allow_private_results=bool(args.allow_private_results),
-        native_memory_id=args.native_memory_id,
         graph_adapter=graph_adapter,
         mirror_search=mirror_search,
         semantic_ranker=semantic_ranker,
@@ -407,7 +394,6 @@ def _add_recall_service_arguments(parser) -> None:
     parser.add_argument("--dataset-id", action="append", default=[])
     parser.add_argument("--policy-proxy-url", default="")
     parser.add_argument("--allow-private-results", action="store_true")
-    parser.add_argument("--native-memory-id", default="")
     parser.add_argument("--state-db-recall", default="")
     parser.add_argument("--enable-graph", action="store_true")
     parser.add_argument("--graph-required", action="store_true")
