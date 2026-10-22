@@ -19,7 +19,10 @@ from ..model_connectors import (
 )
 from ..postgres_store.pgvector_store import PgVectorStore, SessionChunk
 from .pg_embedding_privacy import assert_pg_embedding_egress_safe
-from .pg_embedding_chunks import CHUNK_BYTES, CHUNKED_PROFILE, assert_pg_text_safe
+from .pg_embedding_chunks import (
+    CHUNK_BYTES, CHUNKED_PROFILE, INVALID_TEXT_NUL,
+    InvalidProjectionText, assert_pg_text_safe,
+)
 
 
 def _derive_pg_chunk_id_impl(
@@ -112,6 +115,19 @@ def project_pg_representation(*, materialized, source_store, sql_store, embed_pr
         or sha256_hash(materialized.body) != materialized.content_hash
         or not isinstance(body, str) or body != public_safe_mask_body(current.body)):
         raise ValueError("PG representation verification failed")
+    try:
+        assert_pg_text_safe(current.body, body, current.session_id_hash,
+                            current.project, current.provider, current.source_hash)
+    except InvalidProjectionText:
+        if dry_run:
+            raise
+        status, _state = _commit_projection_state_if_source_current(
+            materialized=current, store=source_store, projection_status="failed",
+            failure_reason=INVALID_TEXT_NUL, failure_source_hash=current.source_hash,
+            backend="postgres_pgvector",
+        )
+        return {"status": "failed", "reason": (
+            status if status == "source_revision_changed" else INVALID_TEXT_NUL), "ref": ""}
     b_hash = sha256_hash(body)
     chunk_id = _derive_pg_chunk_id_impl(
         project=current.project, provider=current.provider, session_id_hash=current.session_id_hash,
