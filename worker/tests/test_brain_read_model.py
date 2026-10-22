@@ -4,10 +4,7 @@ from agent_knowledge.session_memory.curation import CurationService
 from agent_knowledge.ledger import Ledger
 from agent_knowledge.session_memory.memory_card import build_memory_candidate
 from agent_knowledge.session_memory.brain_query import BrainReadModel
-from agent_knowledge.session_memory.brain_read_model import (
-    LegacyLedgerBrainReadModel,
-    build_semantic_recall,
-)
+from agent_knowledge.session_memory.brain_read_model import LegacyLedgerBrainReadModel
 
 PROJECT = "workspace-x"
 
@@ -55,20 +52,3 @@ def test_adapter_counts_active_cards_by_project(tmp_path):
         ("workspace-x", 2),
         ("workspace-y", 1),
     ]
-
-
-def test_build_semantic_recall_binds_recall_pipeline(tmp_path, monkeypatch):
-    ledger = Ledger(tmp_path / "ledger.sqlite3")
-    captured = {}
-
-    def fake_recall(*, retired_index_bridge, store, memory_id, query, brain_id=""):
-        captured.update(memory_id=memory_id, query=query, brain_id=brain_id)
-        return [{"session_tag": "mem:x"}]
-
-    import agent_knowledge.session_memory.brain_read_model as mod
-
-    monkeypatch.setattr(mod, "recall_active_native_memory", fake_recall)
-    semantic = build_semantic_recall(ledger=ledger, retired_index_bridge=object(), memory_id="mem_main")
-    hits = semantic("질문", "/project/p")
-    assert hits == [{"session_tag": "mem:x"}]
-    assert captured == {"memory_id": "mem_main", "query": "질문", "brain_id": "/project/p"}

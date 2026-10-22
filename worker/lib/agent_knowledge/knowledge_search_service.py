@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import math
 import os
 import re
 import sqlite3
@@ -54,13 +53,12 @@ from .runtime_build_identity import (
 from .session_memory.memory_card import validate_memory_card_envelope
 from .session_memory.memory_promotion import commit_stale, commit_supersession
 from .session_memory.brain_query import (
-    SEMANTIC_RESULT_MIN_SCORE,
     build_temporal_brain_query_response,
     project_from_brain_id,
     resolve_brain_ids,
     run_brain_query_v2,
 )
-from .session_memory.brain_read_model import LegacyLedgerBrainReadModel, PgStewardBrainReadModel, build_semantic_recall
+from .session_memory.brain_read_model import LegacyLedgerBrainReadModel, PgStewardBrainReadModel
 
 
 _SYNTHETIC_CANARY_PROVIDER = "lbrain-temporal-canary"
@@ -102,32 +100,6 @@ def _parse_utc_runtime_timestamp(value: object, *, field: str) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError(f"{field} is invalid")
     return parsed.astimezone(timezone.utc)
-
-
-def _native_semantic_memory_scores(hits: list[dict]) -> dict[str, float]:
-    """Map only explicit MemoryCard semantic hits into a fail-closed ranker."""
-
-    scores: dict[str, float] = {}
-    for hit in hits:
-        if not isinstance(hit, Mapping):
-            continue
-        score = hit.get("score")
-        if (
-            isinstance(score, bool)
-            or not isinstance(score, (int, float))
-            or not math.isfinite(float(score))
-            or float(score) < SEMANTIC_RESULT_MIN_SCORE
-        ):
-            continue
-        memory_id = str(hit.get("memory_id") or "")
-        if not memory_id:
-            session_tag = str(hit.get("session_tag") or "")
-            if session_tag.startswith("mem:"):
-                memory_id = session_tag.removeprefix("mem:")
-        if not memory_id:
-            continue
-        scores[memory_id] = max(scores.get(memory_id, 0.0), float(score))
-    return scores
 
 
 _APPROVAL_BOARD_PRODUCTION_REQUIRED_TRUE_FIELDS = (
@@ -956,7 +928,6 @@ class KnowledgeSearchService:
         retired_index_bridge,
         dataset_ids: list[str],
         allow_private_results: bool = False,
-        native_memory_id: str = "",
         graph_adapter: GraphMemoryAdapter | None = None,
         authorized_reader: AuthorizedMemoryReader | None = None,
         read_pipeline: AuthorizedMemoryReader | None = None,
@@ -977,7 +948,6 @@ class KnowledgeSearchService:
         self.retired_index_bridge = retired_index_bridge
         self.dataset_ids = dataset_ids
         self.allow_private_results = bool(allow_private_results)
-        self.native_memory_id = native_memory_id
         self.graph_adapter = graph_adapter
         # Brain Steward restricted tools 는 기본적으로 막혀 있다. review_commit(approve/reject/
         # supersede_commit/stale_commit)과 가장 위험한 auto_accept 를 별도 flag 로 분리한다.
@@ -2281,36 +2251,6 @@ class KnowledgeSearchService:
         index_search = self._mirror_search or (
             self._brain_query_index_search if self.dataset_ids else None
         )
-        semantic_hits: list[dict] = []
-        semantic_failure_type = ""
-        effective_semantic_ranker = self._semantic_ranker
-        if self.native_memory_id:
-            semantic = build_semantic_recall(
-                ledger=self.ledger,
-                retired_index_bridge=self.retired_index_bridge,
-                memory_id=self.native_memory_id,
-            )
-            try:
-                semantic_hits = semantic(query, brain_id)
-            except (OSError, RuntimeError, ValueError, KeyError, TypeError, sqlite3.DatabaseError) as exc:
-                semantic_hits = []
-                semantic_failure_type = type(exc).__name__
-            native_scores = _native_semantic_memory_scores(semantic_hits)
-            if native_scores:
-                def _native_semantic_ranker(**kwargs):
-                    ranked = []
-                    for card in kwargs.get("cards") or []:
-                        memory_id = str(card.get("memory_id") or "")
-                        score = native_scores.get(memory_id)
-                        if score is None:
-                            continue
-                        enriched = dict(card)
-                        enriched["_semantic_score"] = score
-                        ranked.append(enriched)
-                    ranked.sort(key=lambda card: (-float(card.get("_semantic_score") or 0.0), str(card.get("memory_id") or "")))
-                    return ranked[: max(0, int(kwargs.get("limit") or 0))]
-
-                effective_semantic_ranker = _native_semantic_ranker
         result = run_brain_query_v2(
             read_model=read_model,
             index_search=index_search,
@@ -2318,15 +2258,8 @@ class KnowledgeSearchService:
             query=query,
             query_intent="session_context",
             limit=limit,
-            semantic_ranker=effective_semantic_ranker,
+            semantic_ranker=self._semantic_ranker,
         )
-        if self.native_memory_id:
-            audit = dict(result.get("audit") or {})
-            audit["native_memory_bound"] = True
-            audit["native_memory_hits"] = len(semantic_hits)
-            if semantic_failure_type:
-                audit["native_memory_error_type"] = semantic_failure_type
-            result["audit"] = audit
         return result
 
     def _brain_query_index_search(self, query: str, brain_id: str) -> list[dict]:

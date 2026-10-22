@@ -17,17 +17,18 @@ def test_seam_invariants_catch_unallowlisted_delete_site(monkeypatch):
 
 
 def test_gc_scripts_do_not_call_delete_documents_directly():
-    # A2 핵심 불변식: GC 스크립트의 비가역 삭제는 seam(hard_delete_documents) 경유만 —
-    # delete_documents 직접 호출이 0이어야 한다(seam 우회 금지).
+    # A2 핵심 불변식: 비가역 삭제는 seam(hard_delete_documents) 경유만 —
+    # delete_documents 직접 호출은 seam 모듈 한 곳에만 존재해야 한다(seam 우회 금지).
     sites = lint._scan_mutation_sites(lint._agent_knowledge_root())
-    for gc in (
-        "session_memory/session_memory_gc.py",
-        "session_memory/transcript_volume_gc.py",
-        "session_memory/transcript_session_gc.py",
-    ):
-        assert "delete_documents" not in sites.get(gc, set()), (
-            f"{gc} still calls delete_documents directly (must route via seam)"
-        )
+    direct = {
+        rel: sorted(methods)
+        for rel, methods in sites.items()
+        if "delete_documents" in methods
+        and rel != "session_memory/gc_safety_auditor.py"
+    }
+    assert direct == {}, (
+        f"delete_documents called outside the GC safety seam: {direct}"
+    )
 
 
 def test_seam_invariants_catch_missing_injection_seam(monkeypatch):
@@ -35,7 +36,7 @@ def test_seam_invariants_catch_missing_injection_seam(monkeypatch):
     monkeypatch.setattr(
         lint,
         "REQUIRED_INJECTION_SEAMS",
-        {"session_memory/session_memory_gc.py": ("NoSuchRunner", "index_client")},
+        {"session_memory/memory_regeneration.py": ("NoSuchRunner", "index_client")},
     )
     violations = lint.check_seam_invariants()
     assert any("missing injection seam" in v for v in violations)

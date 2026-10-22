@@ -5249,76 +5249,6 @@ def test_mcp_brain_query_returns_only_exact_relevance_and_nonsense_is_empty(tmp_
     assert nonsense["results"] == []
     assert nonsense["current"] == []
     assert nonsense["accepted"] == []
-
-
-@pytest.mark.skip(
-    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
-)
-def test_mcp_brain_query_semantic_hits_control_the_public_results_lane(
-    tmp_path: Path,
-    monkeypatch,
-):
-    service = _service(tmp_path)
-    service.ledger.upsert_llm_brain_memory_card(
-        _accepted_task_card(
-            "mem_semantic_unrelated",
-            next_action="Continue unrelated runtime bookkeeping",
-        )
-    )
-    expected = next(
-        card
-        for card in service.ledger.list_llm_brain_memory_cards(
-            project=PROJECT,
-            accepted_only=True,
-            limit=20,
-        )
-        if card["summary"] == "한국어로 응답한다"
-    )
-    service.native_memory_id = "mem_native"
-
-    def semantic_recall_factory(**kwargs):
-        def recall(query: str, brain_id: str) -> list[dict]:
-            return [
-                {
-                    "kind": "native_memory",
-                    "session_tag": f"mem:{expected['memory_id']}",
-                    "brain_id": brain_id,
-                    "message_type": "semantic",
-                    "content": "Korean natural-language response preference",
-                    "score": 0.99,
-                    "tier": "low",
-                }
-            ]
-
-        return recall
-
-    monkeypatch.setattr(
-        "agent_knowledge.knowledge_search_service.build_semantic_recall",
-        semantic_recall_factory,
-    )
-
-    response = handle_jsonrpc_message(
-        {
-            "jsonrpc": "2.0",
-            "id": 203,
-            "method": "tools/call",
-            "params": {
-                "name": BRAIN_QUERY_TOOL_NAME,
-                "arguments": {
-                    "brain_id": f"/project/{PROJECT}",
-                    "query": "language response preference",
-                },
-            },
-        },
-        service,
-    )
-
-    result = response["result"]["structuredContent"]
-    assert result["audit"]["native_memory_hits"] == 1
-    assert [item["memory_id"] for item in result["results"]] == [expected["memory_id"]]
-    assert result["results"][0]["score"] == 0.99
-
-
 @pytest.mark.skip(
     reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
 )
@@ -7453,31 +7383,6 @@ def test_mcp_brain_objects_query_overlays_local_authority_state(
         if lane != new_authority_lane
         for obj in objects
     )
-
-
-def test_brain_query_semantic_recall_type_error_is_audited(tmp_path: Path, monkeypatch):
-    service = _service(tmp_path)
-    service.native_memory_id = "mem_native"
-
-    def broken_semantic_recall(**kwargs):
-        def recall(query: str, brain_id: str):
-            raise TypeError("malformed native-memory hit")
-
-        return recall
-
-    monkeypatch.setattr(
-        "agent_knowledge.knowledge_search_service.build_semantic_recall",
-        broken_semantic_recall,
-    )
-
-    result = service.brain_query(brain_id=f"/project/{PROJECT}", query="한국어로 응답한다")
-
-    assert result["current"][0]["summary"] == "한국어로 응답한다"
-    assert result["audit"]["native_memory_bound"] is True
-    assert result["audit"]["native_memory_hits"] == 0
-    assert result["audit"]["native_memory_error_type"] == "TypeError"
-
-
 def test_mcp_brain_resolve_roundtrip(tmp_path: Path):
     service = _service(tmp_path)
     response = handle_jsonrpc_message(

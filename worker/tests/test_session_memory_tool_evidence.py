@@ -110,7 +110,7 @@ def test_session_memory_evidence_is_redacted_in_body():
 
 def test_session_memory_runner_includes_evidence_for_session():
     source = FixtureTranscriptMemorySource([_chunk()], tool_evidence=_evidence_rows())
-    runner = SessionMemoryRegenerationRunner(source=source, sync=False)
+    runner = SessionMemoryRegenerationRunner(source=source)
     report = runner.run(project=PROJECT, provider="codex", session_id_hash=SESSION_HASH)
     planned = report["would_write_session_memory"]
     assert planned, "expected a planned session_memory document"

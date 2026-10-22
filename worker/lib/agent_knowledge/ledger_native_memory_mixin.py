@@ -745,6 +745,27 @@ class NativeMemoryMixin:
         provider: str | None = None,
         session_id_hash: str | None = None,
     ) -> list[dict]:
+        """List tool-evidence summaries for one session scope.
+
+        This listing deliberately does NOT filter on the row ``status`` column.
+        Two facts make that correct rather than an oversight:
+
+        - Evidence rows are not registered as index items, and
+          ``ToolEvidenceSummaryRecord`` has no ``status`` field, so the column
+          stays at its ``'prepared'`` default and never transitions to
+          ``'indexed'``. Filtering on ``status = 'indexed'`` would therefore
+          drop EVERY row.
+        - Recall scope is already exact. The caller groups the indexed
+          conversation chunks by session and then asks for the evidence of THAT
+          ``session_id_hash`` (see
+          ``SessionMemoryRegenerationRunner._list_tool_evidence_for``), so an
+          evidence row can only reach a recall document through a session that
+          is itself indexed. The two sections of the document therefore share
+          one scope.
+
+        Do not add a ``status`` filter here without first giving evidence its
+        own index-status lifecycle; that would silently empty recall.
+        """
         filters: list[str] = []
         params: list[object] = []
         if project:

@@ -25,7 +25,7 @@ The current CouchDB/session-memory surface is not a single dead-code island. It 
 | `worker/lib/agent_knowledge/couchdb_source/retirement_verifier.py` | human-gated safety verifier | Tested directly; verifies transcript-memory retirement readiness. | Medium; deletion needs retirement proof replacement. |
 | `worker/lib/agent_knowledge/couchdb_source/migration_cli.py` | compatibility / archive CLI | Routed as `neuron-knowledge transcript-migration`; tested directly. | Medium; removal breaks CLI compatibility and tests. |
 | `worker/lib/agent_knowledge/couchdb_source/migration_flow_cli.py` | compatibility / migration orchestration CLI | Routed as `neuron-knowledge couchdb-migration-flow`; tested directly. | Medium; removal breaks CLI compatibility and tests. |
-| `worker/lib/agent_knowledge/session_memory/neuron_session_memory.py` | legacy session-memory builder compatibility | Exposed as `neuron-session-memory-build` script and `neuron-knowledge neuron-session-memory-build`. | Medium; candidate for comparison against CouchDB-native builder before deprecation. |
+| `worker/lib/agent_knowledge/session_memory/neuron_session_memory.py` | legacy session-memory builder compatibility | Exposed as `neuron-session-memory-build` script and `neuron-knowledge neuron-session-memory-build`. The retired external index bridge transport it depended on is deleted, so the lane is now a read-only planner: the live path reports a structured `blocked_live_execution`. | Compared against the CouchDB-native builder: the legacy lane is read-only and the CouchDB-native lane is the live path. |
 
 ## Immediate Deletion Decision
 
