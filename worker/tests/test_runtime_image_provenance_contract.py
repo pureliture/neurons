@@ -157,7 +157,7 @@ def test_ingress_worker_compose_revision_label_matches_build_source_identity() -
     )
 
 
-def test_ingress_worker_compose_defaults_retired_only_when_backend_env_is_unset() -> None:
+def test_ingress_worker_compose_defaults_to_couchdb_backend() -> None:
     services = _compose_services(REPOSITORY_ROOT / "compose.yaml")
     ingress_worker = services.get("ingress-worker-py")
     assert isinstance(ingress_worker, dict)
@@ -165,7 +165,9 @@ def test_ingress_worker_compose_defaults_retired_only_when_backend_env_is_unset(
     assert isinstance(environment, dict)
 
     assert environment.get("INGRESS_DELIVERY_BACKEND") == (
-        "${INGRESS_DELIVERY_BACKEND-retired_index_bridge}"
+        "${INGRESS_DELIVERY_BACKEND-couchdb}"
     )
+    # The retired external index bridge must not reappear as a deploy env.
+    assert not any(name.startswith("RETIRED_INDEX_BRIDGE") for name in environment)
     for name in ("COUCHDB_URL", "COUCHDB_USER", "COUCHDB_PASSWORD", "COUCHDB_DB"):
         assert environment.get(name) == "${" + name + "}"

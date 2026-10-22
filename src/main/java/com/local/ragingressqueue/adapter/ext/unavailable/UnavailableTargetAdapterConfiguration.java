@@ -7,7 +7,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
 
 @Configuration(proxyBeanMethods = false)
-@Profile("api & !worker & !retired-index-bridge")
+@Profile("api & !worker")
 public class UnavailableTargetAdapterConfiguration {
     @Bean
     @ConditionalOnMissingBean(RagTargetAdapter.class)

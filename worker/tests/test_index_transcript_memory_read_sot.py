@@ -1,6 +1,6 @@
 """Read-only RetiredIndexBridge transcript-memory source-of-truth mapping."""
 
-from agent_knowledge.index_client import transcript_memory_records_from_retired_index_bridge
+from agent_knowledge.legacy.index_client import transcript_memory_records_from_retired_index_bridge
 from agent_knowledge.session_memory.memory_regeneration import (
     RetiredIndexBridgeTranscriptMemorySource,
     _chunk_record_from_retired_index_bridge,

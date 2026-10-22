@@ -19,7 +19,6 @@ def load_script(name):
 
 
 runtime_verify = load_script("runtime-verify.py")
-live_verify = load_script("live-index-verify.py")
 
 
 class PostcheckContractTest(unittest.TestCase):
@@ -87,60 +86,6 @@ class RuntimeVerifyContractTest(unittest.TestCase):
         self.assertEqual(evidence["runtime"]["verificationLevel"], "api_queue_smoke")
         self.assertFalse(evidence["runtime"]["fullE2EVerified"])
         self.assertEqual(evidence["postcheck"]["verificationLevel"], "api_shape_only")
-
-
-class LiveRetiredIndexBridgeVerifyContractTest(unittest.TestCase):
-    def test_document_name_candidates_include_queue_content_hash_suffix(self):
-        candidates = live_verify.document_name_candidates(
-            "rag_ingress_live_verify_example.md",
-            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        )
-
-        self.assertEqual(
-            candidates,
-            [
-                "rag_ingress_live_verify_example-0123456789ab.md",
-                "rag_ingress_live_verify_example.md",
-            ],
-        )
-
-    def test_document_search_keyword_uses_original_stem(self):
-        self.assertEqual(
-            live_verify.document_search_keyword(
-                [
-                    "rag_ingress_live_verify_example-0123456789ab.md",
-                    "rag_ingress_live_verify_example.md",
-                ]
-            ),
-            "rag_ingress_live_verify_example",
-        )
-
-    def test_authorized_retrieval_falls_back_to_unfiltered_dataset_query(self):
-        calls = []
-
-        def fake_retrieve(_base_url, _api_key, _dataset_id, _marker, *, project, metadata_filter=True):
-            self.assertEqual(project, "neurons")
-            calls.append(metadata_filter)
-            return [] if metadata_filter else [{"document_id": "doc_1"}]
-
-        def fake_is_authorized(_ledger_path, document_id, *, project):
-            return document_id == "doc_1" and project == "neurons"
-
-        chunks, authorized_chunks, mode = live_verify.retrieve_authorized_chunks(
-            "http://retired_index_bridge",
-            "token",
-            "dataset",
-            "marker",
-            "ledger.sqlite",
-            project="neurons",
-            retrieve_fn=fake_retrieve,
-            is_authorized_fn=fake_is_authorized,
-        )
-
-        self.assertEqual(calls, [True, False])
-        self.assertEqual(chunks, [{"document_id": "doc_1"}])
-        self.assertEqual(authorized_chunks, [{"document_id": "doc_1"}])
-        self.assertEqual(mode, "dataset_unfiltered_fallback")
 
 
 if __name__ == "__main__":

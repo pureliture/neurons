@@ -19,7 +19,6 @@ from agent_knowledge.rag_ingress.delivery_executor import DeliveryExecutor
 from agent_knowledge.rag_ingress.shadow_worker import (
     IngestStateStore,
     build_synthetic_event,
-    env_profile_dataset_resolver,
     process_payload,
 )
 from agent_knowledge.rag_ingress.state_sink import StateDBIngressSink
@@ -28,25 +27,15 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SHADOW_SESSION_ID_HASH = "sha256:" + hashlib.sha256(b"shadow-worker-session").hexdigest()
 
 
-def test_env_profile_dataset_resolver_uses_retired_index_bridge_session_dataset_env_key():
-    env = {"RETIRED_INDEX_BRIDGE_SESSION_MEMORY_DATASET_ID": "ds_session"}
+def test_target_profile_contract_keeps_logical_backend_kind_without_bridge_env():
+    """The logical target-profile contract survives; the retired bridge env does not.
 
-    resolve = env_profile_dataset_resolver(env.get)
-    assert resolve("index-session-memory") == "ds_session"
-
-
-def test_env_profile_dataset_resolver_covers_application_profiles_and_compose_env():
+    The profile ids / dataset roles are a public routing contract, so they stay.
+    The retired external index bridge had no runtime left, so its per-profile
+    dataset env keys must not reappear in compose or .env.example.
+    """
     profiles = _target_profile_contract()
-    expected_keys = {
-        profile: entry["retiredIndexBridgeDatasetEnv"]
-        for profile, entry in profiles.items()
-    }
-    env = {
-        key: f"ds_{profile.removeprefix('index-').replace('-', '_')}"
-        for profile, key in expected_keys.items()
-    }
-
-    resolve = env_profile_dataset_resolver(env.get)
+    application_profiles = _application_target_profiles()
 
     assert list(profiles) == [
         "index-transcript-memory",
@@ -57,18 +46,15 @@ def test_env_profile_dataset_resolver_covers_application_profiles_and_compose_en
         "index-approved-memory-card",
         "index-procedural-memory",
     ]
-    for profile, key in expected_keys.items():
-        assert resolve(profile) == env[key]
-
-    compose = (REPO_ROOT / "compose.yaml").read_text(encoding="utf-8")
-    env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
-    application_profiles = _application_target_profiles()
-    for key in expected_keys.values():
-        assert key in compose
-        assert key in env_example
     for profile, entry in profiles.items():
         assert application_profiles[profile]["dataset-role"] == entry["datasetRole"]
         assert application_profiles[profile]["adapter"] == "retired_index_bridge"
+
+    compose = (REPO_ROOT / "compose.yaml").read_text(encoding="utf-8")
+    env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+    for entry in profiles.values():
+        assert entry["retiredIndexBridgeDatasetEnv"] not in compose
+        assert entry["retiredIndexBridgeDatasetEnv"] not in env_example
 
 
 def _target_profile_contract() -> dict[str, object]:
@@ -842,6 +828,7 @@ def test_main_rejects_unknown_delivery_backend_before_state_or_backend_startup(
     monkeypatch,
     backend_name,
 ):
+    import agent_knowledge.rag_ingress.couchdb_delivery_backend as couchdb_delivery_backend
     import agent_knowledge.rag_ingress.shadow_worker as shadow_worker
 
     state_path = tmp_path / "private" / "ingress.sqlite"
@@ -849,7 +836,9 @@ def test_main_rejects_unknown_delivery_backend_before_state_or_backend_startup(
     def fail_backend_build(**_kwargs):
         raise AssertionError("unknown backend must not construct a delivery adapter")
 
-    monkeypatch.setattr(shadow_worker, "build_backend", fail_backend_build)
+    monkeypatch.setattr(
+        couchdb_delivery_backend, "build_couchdb_delivery_backend", fail_backend_build
+    )
     monkeypatch.setattr(
         sys,
         "argv",

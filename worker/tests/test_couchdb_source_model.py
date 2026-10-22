@@ -164,14 +164,14 @@ def test_projection_state_rejects_transcript_memory_target() -> None:
         session_memory_knowledge_id="sha256:" + "9" * 64,
         active_content_hash="sha256:" + "9" * 64,
     )
-    assert ok["target_profile"] == dm.RETIRED_INDEX_BRIDGE_RECALL_PROFILE
+    assert ok["target_profile"] == dm.INDEX_RECALL_PROFILE
     with pytest.raises(dm.OwnershipViolation):
         dm.build_projection_state_document(
             session_id_hash=sid,
             provider="codex",
             project="neurons",
             projection_status=dm.ProjectionStatus.PROJECTED,
-            target_profile=dm.RETIRED_RETIRED_INDEX_BRIDGE_PROFILE,
+            target_profile=dm.RETIRED_TRANSCRIPT_MEMORY_PROFILE,
         )
 
 

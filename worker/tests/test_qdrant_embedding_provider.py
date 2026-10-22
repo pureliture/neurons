@@ -13,7 +13,7 @@ import types
 
 import pytest
 
-from agent_knowledge.rag_ingress.retired_index_bridge import IndexStatus
+from agent_knowledge.rag_ingress.index_adapter import IndexStatus
 from agent_knowledge.rag_ingress.qdrant_docling_mirror import (
     DEFAULT_COLLECTION_NAME,
     FOUNDATION_DIRECT_WRITE_CONTRACT,

@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from ..index_client import envelope_failed
+from ..legacy.index_client import envelope_failed
 from .native_memory_mirror import NativeMemoryMirrorStore
 
 RECONCILE_NATIVE_MEMORY_SCHEMA_VERSION = "agent_knowledge_native_memory_reconcile.v1"

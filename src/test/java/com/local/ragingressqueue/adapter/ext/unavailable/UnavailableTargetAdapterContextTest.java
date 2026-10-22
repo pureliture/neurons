@@ -1,13 +1,7 @@
 package com.local.ragingressqueue.adapter.ext.unavailable;
 
-import com.local.ragingressqueue.adapter.ext.retired_index_bridge.RetiredIndexBridgeTargetAdapter;
-import com.local.ragingressqueue.adapter.ext.retired_index_bridge.RetiredIndexBridgeDocumentRef;
-import com.local.ragingressqueue.adapter.ext.retired_index_bridge.RetiredIndexBridgeDocumentSummary;
-import com.local.ragingressqueue.adapter.ext.retired_index_bridge.RetiredIndexBridgeGateway;
-import com.local.ragingressqueue.adapter.ext.retired_index_bridge.RetiredIndexBridgePressureSnapshot;
 import com.local.ragingressqueue.delivery.domain.DeliveryResult;
 import com.local.ragingressqueue.delivery.domain.TargetPressure;
-import com.local.ragingressqueue.ingest.domain.DocumentPayload;
 import com.local.ragingressqueue.ingest.domain.IngestJob;
 import com.local.ragingressqueue.queue.port.QueueStatusProvider;
 import com.local.ragingressqueue.queue.port.QueueStatusSnapshot;
@@ -21,9 +15,8 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
 
-import java.util.Collection;
-import java.util.List;
 import java.util.Map;
+
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -83,26 +76,6 @@ class UnavailableTargetAdapterContextTest {
             .run(context -> assertThat(context).doesNotHaveBean(UnavailableTargetAdapter.class));
     }
 
-    @Test
-    void retiredIndexBridgeProfileDoesNotRegisterFallbackTargetAdapter() {
-        new ApplicationContextRunner()
-            .withInitializer(context -> context.getEnvironment().setActiveProfiles("api", "retired-index-bridge"))
-            .withUserConfiguration(FallbackOnlyContext.class)
-            .run(context -> assertThat(context).doesNotHaveBean(UnavailableTargetAdapter.class));
-    }
-
-    @Test
-    void retiredIndexBridgeProfileUsesRealTargetAdapter() {
-        new ApplicationContextRunner()
-            .withInitializer(context -> context.getEnvironment().setActiveProfiles("api", "retired-index-bridge"))
-            .withUserConfiguration(RetiredIndexBridgeContext.class)
-            .run(context -> {
-                assertThat(context).hasSingleBean(RagTargetAdapter.class);
-                assertThat(context).hasSingleBean(RetiredIndexBridgeTargetAdapter.class);
-                assertThat(context).doesNotHaveBean(UnavailableTargetAdapter.class);
-            });
-    }
-
     @Configuration(proxyBeanMethods = false)
     @Import({StatusService.class, UnavailableTargetAdapterConfiguration.class})
     static class ApiStatusContext {
@@ -115,15 +88,6 @@ class UnavailableTargetAdapterContextTest {
     @Configuration(proxyBeanMethods = false)
     @Import(UnavailableTargetAdapterConfiguration.class)
     static class FallbackOnlyContext {
-    }
-
-    @Configuration(proxyBeanMethods = false)
-    @Import({UnavailableTargetAdapterConfiguration.class, RetiredIndexBridgeTargetAdapter.class})
-    static class RetiredIndexBridgeContext {
-        @Bean
-        RetiredIndexBridgeGateway retiredIndexBridgeGateway() {
-            return new FakeRetiredIndexBridgeGateway();
-        }
     }
 
     private static final class FakeRagTargetAdapter implements RagTargetAdapter {
@@ -139,53 +103,6 @@ class UnavailableTargetAdapterContextTest {
 
         @Override
         public TargetStatusSnapshot getStatus(IngestJob job, String targetProfile) {
-            throw new UnsupportedOperationException("not used");
-        }
-    }
-
-    private static final class FakeRetiredIndexBridgeGateway implements RetiredIndexBridgeGateway {
-        @Override
-        public RetiredIndexBridgeDocumentRef uploadDocument(
-            String baseUrl,
-            String apiKey,
-            String datasetId,
-            DocumentPayload payload
-        ) {
-            throw new UnsupportedOperationException("not used");
-        }
-
-        @Override
-        public void updateMetadata(String baseUrl, String apiKey, String datasetId, String documentId, Map<String, String> metadata) {
-            throw new UnsupportedOperationException("not used");
-        }
-
-        @Override
-        public void requestParse(String baseUrl, String apiKey, String datasetId, String documentId) {
-            throw new UnsupportedOperationException("not used");
-        }
-
-        @Override
-        public RetiredIndexBridgePressureSnapshot pressureSnapshot(String baseUrl, String apiKey, String datasetId) {
-            throw new UnsupportedOperationException("not used");
-        }
-
-        @Override
-        public boolean findByContentHash(String baseUrl, String apiKey, String datasetId, String contentHashFragment) {
-            throw new UnsupportedOperationException("not used");
-        }
-
-        @Override
-        public List<RetiredIndexBridgeDocumentSummary> listDocumentsByKeyword(
-            String baseUrl,
-            String apiKey,
-            String datasetId,
-            String keyword
-        ) {
-            throw new UnsupportedOperationException("not used");
-        }
-
-        @Override
-        public void deleteDocuments(String baseUrl, String apiKey, String datasetId, Collection<String> documentIds) {
             throw new UnsupportedOperationException("not used");
         }
     }

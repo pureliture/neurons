@@ -43,7 +43,7 @@ from .rag_ready_document import (
 from .qdrant_docling_mirror import MirrorDeletionResult
 
 from ..couchdb_source.document_model import (
-    RETIRED_INDEX_BRIDGE_RECALL_PROFILE,
+    INDEX_RECALL_PROFILE,
     ProjectionStatus,
     SourceDocType,
 )
@@ -234,7 +234,7 @@ def build_session_memory_mirror_document(
     )
     # Direct frozen-dataclass construction so content_hash is preserved verbatim.
     return RagReadyDocument(
-        target_profile=RETIRED_INDEX_BRIDGE_RECALL_PROFILE,
+        target_profile=INDEX_RECALL_PROFILE,
         document_kind=SESSION_MEMORY_DOCUMENT_KIND,
         artifact_kind=SESSION_MEMORY_ARTIFACT_KIND,
         source_namespace=provider,
@@ -592,7 +592,7 @@ __all__ = [
     "BACKFILL_SCHEMA",
     "SESSION_MEMORY_DOCUMENT_KIND",
     "SESSION_MEMORY_PRIVACY_CLASS",
-    "RETIRED_INDEX_BRIDGE_RECALL_PROFILE",
+    "INDEX_RECALL_PROFILE",
     "BackfillReport",
     "RollbackReport",
     "EmbeddingDimMismatch",

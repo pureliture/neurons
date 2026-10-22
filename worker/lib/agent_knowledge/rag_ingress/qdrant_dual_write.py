@@ -1,4 +1,4 @@
-"""M6 dual-write shadow seam: primary RetiredIndexBridgeAdapter + best-effort mirror.
+"""M6 dual-write shadow seam: primary IndexAdapter + best-effort mirror.
 
 The primary backend (RetiredIndexBridge today, CouchDB alternative) stays the authority of
 record. The Qdrant mirror submit is best-effort: a mirror failure is captured as an
@@ -24,7 +24,7 @@ from agent_knowledge.qdrant_write_gateway_runtime import (
     qdrant_write_gateway_generation_from_environment,
 )
 
-from .retired_index_bridge import (
+from .index_adapter import (
     BackendDocumentHandle,
     BackendStatusDetail,
     BackendSubmitResult,
@@ -51,7 +51,7 @@ class MirrorWriteOutcome:
 
 
 class MirrorDualWriteBackend:
-    """``RetiredIndexBridgeAdapter`` wrapping a primary + an optional best-effort mirror."""
+    """``IndexAdapter`` wrapping a primary + an optional best-effort mirror."""
 
     def __init__(
         self,

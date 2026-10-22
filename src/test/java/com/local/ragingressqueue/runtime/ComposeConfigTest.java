@@ -1,13 +1,10 @@
 package com.local.ragingressqueue.runtime;
 
 import org.junit.jupiter.api.Test;
-import org.yaml.snakeyaml.Yaml;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
-import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -22,8 +19,6 @@ class ComposeConfigTest {
         assertThat(compose).contains("ingress-api:");
         assertThat(compose).contains("ingress-worker:");
         assertThat(compose).contains("RAG_INGRESS_NATS_URL: nats://nats-jetstream:4222");
-        assertThat(compose).contains("RETIRED_INDEX_BRIDGE_PRESSURE_RUNNING_THROTTLE_THRESHOLD");
-        assertThat(compose).contains("RETIRED_INDEX_BRIDGE_PRESSURE_RUNNING_CLOSED_THRESHOLD");
         assertThat(compose).contains("host.docker.internal:host-gateway");
         assertThat(compose).contains("127.0.0.1:4222:4222");
         assertThat(compose).contains("127.0.0.1:18080:8080");
@@ -99,49 +94,18 @@ class ComposeConfigTest {
     }
 
     @Test
-    void retiredIndexBridgeEnvAnchorIsSharedByJavaAndPythonWorkers() throws IOException {
+    void retiredIndexBridgeEnvIsAbsentFromComposeAndEnvExample() throws IOException {
         String compose = Files.readString(Path.of("compose.yaml"));
-        String pythonWorker = serviceBlock(compose, "ingress-worker-py");
+        String envExample = Files.readString(Path.of(".env.example"));
 
-        assertThat(compose).contains("x-retired-index-bridge-env: &retired-index-bridge-env");
-        assertThat(compose).contains("x-ingress-java-env: &ingress-java-env\n  <<: *retired-index-bridge-env");
-        assertThat(pythonWorker).contains("<<: *retired-index-bridge-env");
-        assertThat(serviceBlock(compose, "ingress-api")).contains("<<: *ingress-java-env");
-        assertThat(serviceBlock(compose, "ingress-worker")).contains("<<: *ingress-java-env");
-
-        for (String key : retiredIndexBridgeCommonEnvKeys()) {
-            assertThat(directYamlKeyDeclarationCount(compose, key)).as(key).isEqualTo(1);
-            assertThat(pythonWorker).doesNotContain("\n      " + key + ":");
-        }
-    }
-
-    @Test
-    void retiredIndexBridgeEnvAnchorResolvesThroughYamlMergeForJavaAndPythonServices() throws IOException {
-        Map<String, Object> compose = composeYaml();
-        Map<String, Object> sharedEnv = map(compose.get("x-retired-index-bridge-env"));
-
-        assertThat(sharedEnv.keySet()).containsExactlyElementsOf(retiredIndexBridgeCommonEnvKeys());
-        assertThat(sharedEnv)
-            .doesNotContainKeys(
-                "RAG_INGRESS_NATS_URL",
-                "ALLOW_LIVE_QUEUE",
-                "SHADOW_DELIVER",
-                "RAG_INGRESS_ALLOW_LIVE_QUEUE",
-                "RAG_INGRESS_DELIVER"
-            );
-
-        for (String serviceName : List.of("ingress-api", "ingress-worker", "ingress-worker-py")) {
-            Map<String, Object> env = serviceEnvironment(compose, serviceName);
-            for (String key : retiredIndexBridgeCommonEnvKeys()) {
-                assertThat(env).containsEntry(key, sharedEnv.get(key));
-            }
-        }
-
-        Map<String, Object> pythonEnv = serviceEnvironment(compose, "ingress-worker-py");
-        assertThat(pythonEnv)
-            .containsKeys("ALLOW_LIVE_QUEUE", "SHADOW_DELIVER", "SHADOW_STREAM", "SHADOW_DURABLE");
-        assertThat(serviceEnvironment(compose, "ingress-api"))
-            .doesNotContainKeys("ALLOW_LIVE_QUEUE", "SHADOW_DELIVER");
+        // The retired external index bridge left the active runtime: no credential,
+        // no dataset id and no delivery-enable knob may reappear in the deploy
+        // surface (CLAUDE.md: retired external index bridge credentials are not
+        // part of active runtime configuration).
+        assertThat(compose).doesNotContain("RETIRED_INDEX_BRIDGE");
+        assertThat(compose).doesNotContain("x-retired-index-bridge-env");
+        assertThat(envExample).doesNotContain("RETIRED_INDEX_BRIDGE");
+        assertThat(compose).contains("INGRESS_DELIVERY_BACKEND: ${INGRESS_DELIVERY_BACKEND-couchdb}");
     }
 
     @Test
@@ -214,43 +178,5 @@ class ComposeConfigTest {
             }
         }
         return compose.substring(start, end);
-    }
-
-    @SuppressWarnings("unchecked")
-    private static Map<String, Object> composeYaml() throws IOException {
-        Object loaded = new Yaml().load(Files.readString(Path.of("compose.yaml")));
-        return (Map<String, Object>) loaded;
-    }
-
-    private static Map<String, Object> serviceEnvironment(Map<String, Object> compose, String serviceName) {
-        Map<String, Object> services = map(compose.get("services"));
-        Map<String, Object> service = map(services.get(serviceName));
-        return map(service.get("environment"));
-    }
-
-    @SuppressWarnings("unchecked")
-    private static Map<String, Object> map(Object value) {
-        assertThat(value).isInstanceOf(Map.class);
-        return (Map<String, Object>) value;
-    }
-
-    private static List<String> retiredIndexBridgeCommonEnvKeys() {
-        return List.of(
-            "RETIRED_INDEX_BRIDGE_BASE_URL",
-            "RETIRED_INDEX_BRIDGE_API_KEY",
-            "RETIRED_INDEX_BRIDGE_TRANSCRIPT_MEMORY_DATASET_ID",
-            "RETIRED_INDEX_BRIDGE_SESSION_MEMORY_DATASET_ID",
-            "RETIRED_INDEX_BRIDGE_SESSION_SUMMARY_DATASET_ID",
-            "RETIRED_INDEX_BRIDGE_PROJECT_MEMORY_DATASET_ID",
-            "RETIRED_INDEX_BRIDGE_PROCEDURAL_MEMORY_DATASET_ID",
-            "RETIRED_INDEX_BRIDGE_TASK_SUMMARY_DATASET_ID",
-            "RETIRED_INDEX_BRIDGE_APPROVED_MEMORY_CARD_DATASET_ID"
-        );
-    }
-
-    private static long directYamlKeyDeclarationCount(String yaml, String key) {
-        return yaml.lines()
-            .filter(line -> line.matches("\\s+" + key + ":.*"))
-            .count();
     }
 }

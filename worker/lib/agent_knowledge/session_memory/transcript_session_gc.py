@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .native_memory_sync_approval import ApprovalError, validate_goal3_live_approval
-from ..index_client import RetiredIndexBridgeHttpClient
+from ..legacy.index_client import RetiredIndexBridgeHttpClient
 from .gc_backup import write_gc_backup
 from .gc_safety_auditor import hard_delete_documents
 

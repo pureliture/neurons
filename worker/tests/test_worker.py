@@ -17,10 +17,9 @@ from agent_knowledge.rag_ingress.shadow_worker import (
     build_synthetic_event,
     process_payload,
 )
-from agent_knowledge.rag_ingress.retired_index_bridge import (
+from agent_knowledge.rag_ingress.index_adapter import (
     BackendDocumentHandle,
     BackendSubmitResult,
-    RetiredIndexBridgeRetiredIndexBridgeAdapter,
 )
 from agent_knowledge.rag_ingress.rag_ready_document import build_rag_ready_document
 
@@ -48,22 +47,6 @@ class FakeBackend:
         return self.natural_key_hit
 
 
-class FakeClient:
-    """Captures the metadata dict passed to update_metadata."""
-
-    def __init__(self):
-        self.metadata = None
-
-    def upload_document(self, dataset_id, body, *, filename):
-        return {"document_id": "d1", "run": "UNSTART"}
-
-    def update_metadata(self, dataset_id, document_id, metadata):
-        self.metadata = dict(metadata)
-
-    def request_parse(self, dataset_id, document_ids):
-        return None
-
-
 # --- vendoring boundary ----------------------------------------------------
 
 def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
@@ -79,7 +62,7 @@ def test_server_state_primitives_are_vendored_without_client_or_ledger_wiring():
         "agent_knowledge.rag_ingress.ingress_journal",
         "agent_knowledge.rag_ingress.delivery_executor",
         "agent_knowledge.rag_ingress.delivery_reconcile",
-        "agent_knowledge.rag_ingress.delivery_backend",
+        "agent_knowledge.rag_ingress.delivery_payload_gate",
         "agent_knowledge.rag_ingress.delivery_drain",
         "agent_knowledge.rag_ingress.backfill",
         "agent_knowledge.rag_ingress.backfill_apply",
@@ -208,32 +191,13 @@ def test_local_dedup_survives_restart(tmp_path):
 
 # --- natural-key persistence ----------------------------------------------
 
-def test_submit_document_persists_natural_key_metadata():
-    client = FakeClient()
-    adapter = RetiredIndexBridgeRetiredIndexBridgeAdapter(client=client, resolve_dataset_id=lambda _profile: "ds-1")
-    document = build_rag_ready_document(
-        target_profile="index-transcript-memory",
-        document_kind="conversation_chunk",
-        source_namespace="claude",
-        source_alias="x.md",
-        privacy_class="private",
-        body="# body\n",
-        filename="x.md",
-        metadata={"provider": "claude"},
-    )
-    adapter.submit_document(document)
-    assert client.metadata["content_hash"] == document.content_hash
-    assert client.metadata["idempotency_key"] == document.idempotency_key
-    assert client.metadata["provider"] == "claude"  # producer metadata preserved
-
-
 # --- transport closure -----------------------------------------------------
 
 def test_default_transport_closure_resolves():
     # The default RetiredIndexBridgeHttpClient transport (_urllib_transport) lazily imports
     # transport_contract.ProxyResponse at call time; it must be vendored or live
     # delivery fails at runtime with ModuleNotFoundError.
-    import agent_knowledge.index_client as rc
+    import agent_knowledge.legacy.index_client as rc
     from agent_knowledge.transport_contract import ProxyResponse  # noqa: F401
 
     client = rc.RetiredIndexBridgeHttpClient(base_url="http://example", bearer_token="t")
@@ -245,13 +209,12 @@ def test_default_transport_closure_resolves():
 def test_couchdb_delivery_backend_disables_legacy_index_pressure_gate():
     assert build_delivery_pressure_check("http://ingress/status", delivery_backend="couchdb") is None
     assert build_delivery_pressure_check("", delivery_backend="couchdb") is None
-    assert build_delivery_pressure_check("http://ingress/status", delivery_backend="retired_index_bridge") is not None
 
 
 # --- natural-key match fail-safe -------------------------------------------
 
 def test_natural_key_match_requires_idempotency_key():
-    from agent_knowledge.rag_ingress.retired_index_bridge import _document_matches_natural_key
+    from agent_knowledge.rag_ingress.index_adapter import _document_matches_natural_key
 
     ph = "sha256:abc"
     ik = "claude:conversation_chunk:" + ph
@@ -272,72 +235,3 @@ def test_natural_key_match_requires_idempotency_key():
     assert _document_matches_natural_key(
         {"meta_fields": {"content_hash": "sha256:zzz", "idempotency_key": ik}},
         idempotency_key=ik, payload_hash=ph) is False
-
-
-def test_find_by_natural_key_empty_inputs_fail_closed():
-    from agent_knowledge.rag_ingress.retired_index_bridge import RetiredIndexBridgeRetiredIndexBridgeAdapter
-
-    class BoomClient:
-        def list_documents(self, *a, **k):
-            raise AssertionError("must not scan when the natural key is empty")
-
-    adapter = RetiredIndexBridgeRetiredIndexBridgeAdapter(client=BoomClient(), resolve_dataset_id=lambda _p: "ds")
-    assert adapter.find_by_natural_key(target_profile="p", idempotency_key="", payload_hash="sha256:x") is None
-    assert adapter.find_by_natural_key(target_profile="p", idempotency_key="k", payload_hash="") is None
-
-
-def test_find_by_natural_key_does_not_broad_scan_by_default():
-    from agent_knowledge.rag_ingress.retired_index_bridge import RetiredIndexBridgeRetiredIndexBridgeAdapter
-
-    payload_hash = "sha256:" + "abcdef123456" + ("0" * 52)
-
-    class RecordingClient:
-        def __init__(self):
-            self.calls = []
-
-        def list_documents(self, dataset_id, *, page=1, page_size=100, keywords=""):
-            self.calls.append({"page": page, "page_size": page_size, "keywords": keywords})
-            return []
-
-    client = RecordingClient()
-    adapter = RetiredIndexBridgeRetiredIndexBridgeAdapter(client=client, resolve_dataset_id=lambda _p: "ds")
-
-    assert adapter.find_by_natural_key(
-        target_profile="p", idempotency_key="ik", payload_hash=payload_hash
-    ) is None
-    assert [call["keywords"] for call in client.calls] == [payload_hash, "abcdef123456"]
-
-
-def test_find_by_natural_key_checks_content_hash_fragment_keyword():
-    from agent_knowledge.rag_ingress.retired_index_bridge import RetiredIndexBridgeRetiredIndexBridgeAdapter
-
-    payload_hash = "sha256:" + "abcdef123456" + ("0" * 52)
-    idempotency_key = "ik"
-
-    class FragmentClient:
-        def __init__(self):
-            self.calls = []
-
-        def list_documents(self, dataset_id, *, page=1, page_size=100, keywords=""):
-            self.calls.append(keywords)
-            if keywords == "abcdef123456":
-                return [
-                    {
-                        "id": "doc_fragment_match",
-                        "meta_fields": {
-                            "content_hash": payload_hash,
-                            "idempotency_key": idempotency_key,
-                        },
-                    }
-                ]
-            return []
-
-    client = FragmentClient()
-    adapter = RetiredIndexBridgeRetiredIndexBridgeAdapter(client=client, resolve_dataset_id=lambda _p: "ds")
-
-    handle = adapter.find_by_natural_key(
-        target_profile="p", idempotency_key=idempotency_key, payload_hash=payload_hash
-    )
-
-    assert handle == BackendDocumentHandle(dataset_ref="ds", document_ref="doc_fragment_match")
-    assert client.calls == [payload_hash, "abcdef123456"]

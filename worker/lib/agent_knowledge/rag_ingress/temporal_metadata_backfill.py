@@ -46,7 +46,7 @@ from ..session_memory.native_memory_sync_approval import (
     ApprovalError,
     validate_memory_enqueue_approval,
 )
-from .delivery_backend import PAYLOAD_OK, resolve_delivery_payload
+from .delivery_payload_gate import PAYLOAD_OK, resolve_delivery_payload
 from .server_runtime import apply_server_redaction
 from .state_db import RAGIngressStateDB
 from .state_cli import DEFAULT_TRANSCRIPT_TARGET_PROFILE
