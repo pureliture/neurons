@@ -43,6 +43,8 @@ PG projector는 UTF-8 본문이 8KiB를 넘으면 원문을 보존한 채 청크
 본문과 PG 식별 필드의 NUL은 외부 호출과 PG 쓰기 전에 `invalid_text_nul`로 거절한다.
 원문과 해시는 수정하지 않는다. `failure_source_hash`가 같은 revision은 selector가
 재선택하지 않으며, 새 source revision이 들어오면 다시 평가한다.
+정책 버전이 없는 기존 선택 checkpoint는 pending 목록을 유지한 채 한 번 full walk를
+수행해 과거 DataError도 새 검증으로 평가한다.
 
 ## 무엇을 가져왔고(vendored) 무엇을 뺐나
 
