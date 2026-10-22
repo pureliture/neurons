@@ -54,7 +54,7 @@ def test_contract_registries_partition_cleanly():
     assert len(public_contracts) == 2
     assert set(public_contracts) == PUBLIC_AGENT_TOOL_NAMES
 
-    assert len(admin_contracts) == 32
+    assert len(admin_contracts) == 34
     assert set(admin_contracts) == ADMIN_TOOL_NAMES
 
     # No overlap between public and admin tool sets
@@ -81,7 +81,7 @@ def test_admin_surface_tools_list_requires_auth(tmp_path: Path):
     )
     assert resp_invalid["error"]["code"] == -32000
 
-    # 3. With valid lbrain_admin token -> returns 32 admin tools
+    # 3. With valid lbrain_admin token -> returns 34 admin tools
     resp_auth = handle_admin_jsonrpc_message(
         {"jsonrpc": "2.0", "id": 3, "method": "tools/list"},
         service,
@@ -89,7 +89,7 @@ def test_admin_surface_tools_list_requires_auth(tmp_path: Path):
     )
     assert "error" not in resp_auth
     tools = resp_auth["result"]["tools"]
-    assert len(tools) == 32
+    assert len(tools) == 34
     assert {t["name"] for t in tools} == ADMIN_TOOL_NAMES
 
 
