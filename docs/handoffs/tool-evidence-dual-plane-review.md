@@ -6,12 +6,10 @@ neurons에서 tool 실행 정보가 **두 개의 서로 다른 소비 경로**�
 생겼습니다. 이 구조가 의도된 것인지, 아니면 한쪽이 불필요한 중복인지 판단하고
 결정해 주세요. 판단 근거는 코드 실측으로 이미 정리되어 있습니다.
 
-## 현재 상태 (커밋 `d64aff9` 기준)
+## 현재 상태
 
-브랜치: `claude/antigravity-tool-evidence-compaction` (worktree:
-`/Users/ddalkak/Projects/neurons/.worktrees/antigravity-tool-evidence-20261022`)
-
-아직 **push 되지 않았고 PR도 없습니다.** main 기준으로 3커밋 앞선 상태입니다.
+브랜치: `claude/antigravity-tool-evidence-compaction` (격리 worktree에서 작업).
+이 PR은 `origin/main` 위에 antigravity 커밋 4개만 cherry-pick한 형태다.
 
 ```
 ef926a0 fix(antigravity): tool 결과를 turn 텍스트에서 제거하고 고신호 요약만 남김
@@ -141,9 +139,10 @@ uv run --project worker python -c "..."
 
 ## 제약
 
-- 브랜치는 미푸시 상태. 먼저 `git push -u origin claude/antigravity-tool-evidence-compaction`
-  하고 PR을 열지, 아니면 이 브랜치 위에서 계속 작업할지 결정 필요.
-- main/master checkout에서 파일 변경 금지. 이미 격리 worktree에 있음.
+- 이 PR의 브랜치는 `origin/main` 위에 antigravity 커밋만 cherry-pick한 형태다.
+  이어서 작업할 때는 이 브랜치 위에서 진행하거나, 격리 worktree의
+  `claude/antigravity-tool-evidence-compaction`에서 계속한 뒤 다시 cherry-pick한다.
+- main/master checkout에서 파일 변경 금지. 격리 worktree를 쓸 것.
 - 라이브 서버(SSH alias `llm-brain-server`, k3s) 변경 금지. read-only 확인만.
 - CLAUDE.md 가드레일 준수. 특히 "Retired external index bridge ... live GC,
   Docker/systemd/firewall/package mutation" 계열은 current evidence + explicit

@@ -134,7 +134,7 @@ def test_parser_uses_provider_tool_summary_not_argument_dump(tmp_path):
                         "name": "write_to_file",
                         "args": {
                             "toolSummary": "Append to ORIGINAL_REQUEST.md",
-                            "TargetFile": "/Users/example/project/ORIGINAL_REQUEST.md",
+                            "TargetFile": "example/project/ORIGINAL_REQUEST.md",
                             "CodeContent": "entire file body that must not leak",
                         },
                     }
