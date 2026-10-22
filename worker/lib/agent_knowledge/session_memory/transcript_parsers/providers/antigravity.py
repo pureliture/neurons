@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from ....redaction import redact_text_v2
 from ...transcript_model import TranscriptSession, TranscriptToolEvent, TranscriptTurn, ToolEvidenceSummaryRecord
@@ -202,6 +204,34 @@ def _strip_antigravity_tool_result(text: str) -> str:
     return head
 
 
+def _antigravity_result_body(record: Mapping[str, Any]) -> str:
+    """Return the rendered result body of an Antigravity step record.
+
+    A result step is the ``GENERIC`` record that follows a ``PLANNER_RESPONSE``
+    record: it carries the ``Created At:`` / ``Completed At:`` header, the exit
+    code, and the command output. The planner record itself has an empty
+    ``content`` -- the tool call lives only in its ``tool_calls``.
+
+    The timestamp header is dropped here: the evidence summarizers treat every
+    line as signal, so keeping it would push the actual outcome (the exit code
+    and the output) out of the bounded summary.
+    """
+
+    content = str(record.get("content") or "")
+    if not content:
+        return ""
+    if not content.startswith("Created At:"):
+        return ""
+    lines = content.splitlines()
+    # The header is exactly the leading "Created At:" / "Completed At:" lines.
+    start = 0
+    while start < len(lines) and (
+        lines[start].startswith("Created At:") or lines[start].startswith("Completed At:")
+    ):
+        start += 1
+    return "\n".join(lines[start:]).strip()
+
+
 def extract_antigravity_tool_evidence(
     source_path: Path | str,
     *,
@@ -210,23 +240,27 @@ def extract_antigravity_tool_evidence(
 ) -> list[ToolEvidenceSummaryRecord]:
     """Extract tool evidence from a raw Antigravity transcript.
 
-    Antigravity steps are typed (RUN_COMMAND / CODE_ACTION / VIEW_FILE / ...);
-    the shell command lives in ``tool_calls[].args.CommandLine`` and the result in
-    the step ``content`` / ``error`` with a step ``status``.
+    Antigravity splits a shell step across two records: the ``PLANNER_RESPONSE``
+    record carries the call in ``tool_calls[].args.CommandLine`` (its ``content``
+    is empty), and the following ``GENERIC`` record carries the result -- the
+    exit code and the command output. Reading the result off the planner record
+    therefore always yields an empty output, which loses the outcome. This
+    pairs the two records so the evidence carries "which command ran, and how
+    did it turn out".
     """
     path = Path(source_path)
     records = _load_jsonl_source(path)
     session_id = _antigravity_session_id_from_path(path)
     raw_items: list[dict] = []
 
-    for record in records:
+    for index, record in enumerate(records):
         if not session_id:
             session_id = str(record.get("conversationId") or record.get("conversation_id") or record.get("session_id") or "")
         step_type = str(record.get("type") or "").upper()
         status = str(record.get("status") or "").upper()
         error = record.get("error")
         is_error = status == "ERROR" or bool(error)
-        output = str(record.get("content") or "") or (str(error) if error else "")
+        own_content = str(record.get("content") or "")
         observed_at = str(record.get("created_at") or record.get("timestamp") or "")
         command = ""
         tool_calls = record.get("tool_calls")
@@ -237,9 +271,15 @@ def extract_antigravity_tool_evidence(
                     if command:
                         break
         if step_type == "RUN_COMMAND" or command:
+            # The result of a planner-issued call is the next record.
+            output = ""
+            if index + 1 < len(records):
+                output = _antigravity_result_body(records[index + 1])
+            if not output:
+                output = own_content or (str(error) if error else "")
             raw_items.append({"tool_name": "run_command", "command": command, "output": output, "is_error": is_error, "observed_at": observed_at})
         elif step_type == "CODE_ACTION":
-            raw_items.append({"tool_name": "code_action", "command": "", "output": output, "is_error": is_error, "observed_at": observed_at})
+            raw_items.append({"tool_name": "code_action", "command": "", "output": own_content or (str(error) if error else ""), "is_error": is_error, "observed_at": observed_at})
         # VIEW_FILE / LIST_DIRECTORY / GREP_SEARCH / PLANNER_RESPONSE / etc. -> dropped
 
     if not session_id:

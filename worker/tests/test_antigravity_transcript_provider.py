@@ -210,3 +210,143 @@ def test_tool_evidence_lane_still_reports_the_command_outcome(tmp_path):
     assert records
     assert records[0].tool_name == "run_command"
     assert "pytest" in records[0].command_summary
+
+
+def test_tool_evidence_pairs_the_call_with_the_following_result_record(tmp_path):
+    """Antigravity splits a shell step across two records: call, then result.
+
+    The planner record carries the command in ``tool_calls`` and an EMPTY
+    ``content``; the result (exit code + output) is the next record. Reading
+    the result off the call record therefore always yields an empty output and
+    loses the outcome entirely.
+    """
+    root = _antigravity_dir(tmp_path)
+    path = _write_transcript(
+        root,
+        [
+            {
+                "type": "PLANNER_RESPONSE",
+                "source": "MODEL",
+                "step_index": 1,
+                "content": "",
+                "tool_calls": [
+                    {
+                        "name": "run_command",
+                        "args": {
+                            "CommandLine": "uv run pytest -q",
+                            "toolSummary": "Run the suite",
+                        },
+                    }
+                ],
+            },
+            {
+                "type": "GENERIC",
+                "source": "MODEL",
+                "step_index": 2,
+                "content": (
+                    "Created At: 2026-10-22T13:43:00+09:00\n"
+                    "Completed At: 2026-10-22T13:43:06+09:00\n"
+                    "Command exited with code 0.\n"
+                    "\n"
+                    "Command output:\n"
+                    "198 passed in 6.08s\n"
+                ),
+            },
+        ],
+    )
+    records = extract_tool_evidence(
+        "antigravity",
+        path,
+        project="antigravity",
+        source_locator_hash=_sha256("locator"),
+    )
+    assert records
+    record = records[0]
+    assert record.tool_name == "run_command"
+    assert "pytest" in record.command_summary
+    # The outcome must be present, not empty.
+    assert "198 passed" in record.redacted_summary
+    # The timestamp header is not an outcome signal and must not crowd it out.
+    assert "Created At" not in record.redacted_summary
+
+
+def test_tool_evidence_outcome_reflects_a_failing_command(tmp_path):
+    root = _antigravity_dir(tmp_path)
+    path = _write_transcript(
+        root,
+        [
+            {
+                "type": "PLANNER_RESPONSE",
+                "source": "MODEL",
+                "step_index": 1,
+                "content": "",
+                "tool_calls": [
+                    {
+                        "name": "run_command",
+                        "args": {"CommandLine": "uv run pytest -q"},
+                    }
+                ],
+            },
+            {
+                "type": "GENERIC",
+                "source": "MODEL",
+                "step_index": 2,
+                "content": (
+                    "Created At: 2026-10-22T13:43:00+09:00\n"
+                    "Command exited with code 1.\n"
+                    "\n"
+                    "Command output:\n"
+                    "3 failed, 195 passed in 6.08s\n"
+                ),
+            },
+        ],
+    )
+    records = extract_tool_evidence(
+        "antigravity",
+        path,
+        project="antigravity",
+        source_locator_hash=_sha256("locator"),
+    )
+    assert records
+    assert records[0].outcome == "fail"
+    assert "failed" in records[0].redacted_summary
+
+
+def test_extraction_text_includes_the_tool_evidence_addendum():
+    """The entity pass must see "which command ran, and how it turned out"."""
+    from agent_knowledge.llm_brain_core.runtime import _extraction_text_from_evidence
+
+    bundles = [
+        {
+            "_id": "evidence:part-1",
+            "part_index": 1,
+            "body": (
+                "# Tool Evidence Summary\n"
+                "\n"
+                "## Context\n"
+                "\n"
+                "- provider: antigravity\n"
+                "- evidence_count: 1\n"
+                "\n"
+                "## Evidence\n"
+                "\n"
+                "### 0 test_result/pass\n"
+                "- tool: run_command\n"
+                "- command: uv run pytest -q\n"
+                "- result: 198 passed in 6.08s\n"
+            ),
+        }
+    ]
+    prose = _extraction_text_from_evidence(bundles)
+    assert "uv run pytest -q" in prose
+    assert "198 passed" in prose
+    # The bundle's own context header carries no extraction signal.
+    assert "provider: antigravity" not in prose
+
+
+def test_extraction_text_from_evidence_is_empty_without_bundles():
+    from agent_knowledge.llm_brain_core.runtime import _extraction_text_from_evidence
+
+    assert _extraction_text_from_evidence([]) == ""
+    assert _extraction_text_from_evidence([{"body": "# Tool Evidence Summary\n"}]) == ""
+
