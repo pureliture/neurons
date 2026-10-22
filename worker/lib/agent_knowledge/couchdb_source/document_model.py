@@ -42,7 +42,7 @@ COUCHDB_SOURCE_OWNER = "couchdb-transcript-source"
 # is retired: never a CouchDB-source doc type, never a post-cutover projection
 # target. These two constants encode the migration's final-state invariant.
 INDEX_RECALL_PROFILE = "session-memory"
-RETIRED_RETIRED_INDEX_BRIDGE_PROFILE = "transcript-memory"
+RETIRED_TRANSCRIPT_MEMORY_PROFILE = "transcript-memory"
 
 
 class SourceDocType:
@@ -379,7 +379,7 @@ def assert_index_target_allowed(target_profile: str) -> None:
     can never record the retired profile as its destination.
     """
 
-    if target_profile == RETIRED_RETIRED_INDEX_BRIDGE_PROFILE:
+    if target_profile == RETIRED_TRANSCRIPT_MEMORY_PROFILE:
         raise OwnershipViolation(
             "transcript-memory is retired and is not a valid RetiredIndexBridge projection target"
         )
@@ -800,7 +800,7 @@ __all__ = [
     "COUCHDB_SOURCE_OWNER",
     "COUCHDB_OWNED_DOC_TYPES",
     "INDEX_RECALL_PROFILE",
-    "RETIRED_RETIRED_INDEX_BRIDGE_PROFILE",
+    "RETIRED_TRANSCRIPT_MEMORY_PROFILE",
     "SourceDocType",
     "ProjectionStatus",
     "RetentionTier",

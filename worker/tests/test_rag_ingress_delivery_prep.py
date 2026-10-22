@@ -3,8 +3,8 @@
 Covers:
 - Slice A: delivery_payloads persistence (record/get/conflict/fill-gap) and the
   fail-closed triple-hash recovery gate.
-- Slice B: RetiredIndexBridgeDeliveryBackend submit/uncertain/retryable/payload-unavailable
-  mapping over a fake IndexAdapter (no network anywhere).
+- Slice B: delivery backend submit/uncertain/retryable/payload-unavailable mapping
+  over a fake IndexAdapter (no network anywhere).
 - Slice C: drain_pending_deliveries dry-run-first contract + live counters via a
   fake DeliveryBackend.
 """

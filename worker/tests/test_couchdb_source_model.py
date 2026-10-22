@@ -171,7 +171,7 @@ def test_projection_state_rejects_transcript_memory_target() -> None:
             provider="codex",
             project="neurons",
             projection_status=dm.ProjectionStatus.PROJECTED,
-            target_profile=dm.RETIRED_RETIRED_INDEX_BRIDGE_PROFILE,
+            target_profile=dm.RETIRED_TRANSCRIPT_MEMORY_PROFILE,
         )
 
 

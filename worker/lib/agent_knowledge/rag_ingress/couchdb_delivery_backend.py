@@ -1,7 +1,7 @@
 """CouchDB DeliveryBackend: routes live ingress payloads into the CouchDB source plane.
 
-This module is the live-pipeline counterpart to :mod:`.delivery_backend`
-(``RetiredIndexBridgeDeliveryBackend``) and the migration-built
+This module is the live-pipeline counterpart to the backend-neutral payload gate
+(:mod:`.delivery_payload_gate`) and the migration-built
 :mod:`..couchdb_source.historical_import`.
 
 Architecture note
@@ -30,7 +30,7 @@ Gap handling
 - ``transcript_session`` upsert: the deterministic document id keeps exact
   duplicates idempotent while distinct chunks refresh source currentness.
 
-Fail-closed gate (mirrors RetiredIndexBridgeDeliveryBackend)
+Fail-closed gate (the backend-neutral payload gate in :mod:`.delivery_payload_gate`)
 -------------------------------------------------
 1. resolve_delivery_payload: gate = PAYLOAD_OK or early return evidence.
 2. apply_server_redaction: full public-ingress redaction on the body/meta.

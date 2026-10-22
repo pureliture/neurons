@@ -4,6 +4,15 @@ RAGFlow is retired from the active `neurons` runtime. `RAGFLOW_API_KEY`, `RAGFLO
 
 The active runtime baseline is Qdrant plus graph-backed `neurons` services. Legacy `ragflow_*` state is migrated to backend-neutral index naming with data preservation.
 
+### Documented exception: lowercase `ragflow` in migration and redaction paths
+
+No uppercase `RAGFLOW_` token, `RAGFLOW_API_KEY`, `--ragflow-url` or `--token-env` appears outside this record. The lowercase `ragflow` string does remain in exactly two places, and both are sanctioned by the paragraph above:
+
+- **Legacy column migration** — `agent_knowledge/ledger.py` copies the historical `ragflow_dataset_id` / `ragflow_document_id` / `ragflow_run` / `ragflow_memory_id` / `ragflow_disabled_at` / `ragflow_document_id_hash` columns and the `ragflow_datasets` table into their backend-neutral `index_*` equivalents. Renaming the source column names would break the migration.
+- **Public-safe redaction patterns** — `knowledge_search_service.py` and `llm_brain_core/objects/{artifact_preference_evaluator,post_deploy_mcp_capture,runtime_readiness}.py` match secret-like key names such as `ragflow_dataset:` and `ragflow_document_id`. These are detection patterns for values that must never reach a public surface, not references to the retired product.
+
+Both are lower-case, both are inert with respect to the retired service, and neither can select, configure or reach it.
+
 ## Current state
 
 The retirement is complete on the **runtime, CLI, env and backend-option** surfaces. RAGFlow is no longer selectable, configurable, or reachable from a default-enabled path.
@@ -33,9 +42,18 @@ A third, deliberately unchanged item is the **logical** target-profile contract:
 
 ## Operator follow-up (live deployment)
 
-These changes are code-and-config only; no live mutation was performed. On the live host (`llm-brain-server` / `ragflow-ubuntu`, k3s) the retired bridge was already absent — no service listened on the retired default port and the k3s workload inventory lists the legacy external memory surface as removed from the target runtime. Two follow-ups are still owed by whoever owns the private `neurons-ops` overlay:
+These changes are code-and-config only; no live mutation was performed.
 
-1. **Drop `INGRESS_DELIVERY_BACKEND=retired_index_bridge` from the live env-file** if it is still set. The worker now rejects any value other than `couchdb` and exits with a clear message.
-2. **Drop `RETIRED_INDEX_BRIDGE_*` keys from the live env-file** if they are still set. They are now ignored; leaving them set would make the deployment look bridge-configured when it is not.
+The live runtime was **already bridge-free** before this change, and that was verified read-only against the running k3s cluster:
 
-The `session-memory-worker` deployment also needs its image rebuilt: the container entrypoint no longer schedules the gc/backfill lanes, and its compose file no longer injects a bridge credential.
+- the live ingress worker selects `INGRESS_DELIVERY_BACKEND=couchdb`;
+- no `RETIRED_INDEX_BRIDGE_*` or `RAGFLOW_*` key exists in any live deployment env or secret;
+- the live ingress-api runs with `SPRING_PROFILES_ACTIVE=api`, and the ingress-api **canary** with `api,retired-index-bridge` — but with no bridge credential the bridge adapter reported `isConfigured()==false`, so it already failed every delivery (`failed("retired_index_bridge delivery unavailable")`) and reported `closed("pressure_read_failed")` pressure;
+- the live session-memory build lane runs with `SESSION_MEMORY_PROJECTION_BACKEND=postgres_pgvector` (the code default is now `qdrant`; neither value is the retired bridge).
+
+What is still owed by the owner of the private `neurons-ops` overlay:
+
+1. **Rebuild and redeploy three images.** `neurons-ingress-worker` (the `INGRESS_DELIVERY_BACKEND` default changed to `couchdb`), `neurons-session-memory-worker` (the entrypoint no longer schedules the gc/backfill lanes and no longer injects a bridge credential) and `neurons-ingress-api` (the Java adapter package is gone, so both the `api` profile and the `api,retired-index-bridge` canary now resolve `UnavailableTargetAdapter`).
+2. **Check the private overlay for leftover `RETIRED_INDEX_BRIDGE_*` references.** The public repo is clean and the live secrets carry no such key, but the private overlay is not visible from this repository.
+3. **The ingress-api canary's `/status` strings change** (`pressure_read_failed` → `not_configured`), because its adapter switches from the unconfigured bridge adapter to `UnavailableTargetAdapter`. `not_configured` is the reason the `api` profile is designed to report when no real target adapter is wired (`docs/specs/2026-06-30-ingress-api-profile-startup/`), so this moves the canary *onto* the documented behaviour rather than away from it. Anything asserting on those strings needs to follow.
+

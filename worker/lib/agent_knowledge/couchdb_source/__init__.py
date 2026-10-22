@@ -21,7 +21,7 @@ from .document_model import (  # noqa: F401
     COUCHDB_SOURCE_SCHEMA_VERSION,
     COUCHDB_OWNED_DOC_TYPES,
     INDEX_RECALL_PROFILE,
-    RETIRED_RETIRED_INDEX_BRIDGE_PROFILE,
+    RETIRED_TRANSCRIPT_MEMORY_PROFILE,
     OwnershipViolation,
     ProjectionStatus,
     RetentionTier,
