@@ -67,6 +67,7 @@ DSN은 다음 순서로 환경변수에서 읽는다.
 
 - `status`: `planned`, `ok`, `missing`, `applied`, `verification_failed`,
   `denied`, `configuration_required`, `configuration_rejected`, `failed`
+- `schema_name`: 연결 시 `current_schema()` (DDL과 검증이 향하는 첫 search_path schema)
 - `schema_sha256`: 승인에 사용할 DDL hash
 - `tables`, `indexes`, `extensions`, `columns`: DDL이 선언한 객체
 - `missing`: `denied`에서는 미충족 승인 요건, `missing`/`verification_failed`에서는

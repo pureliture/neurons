@@ -157,18 +157,21 @@ def test_check_then_execute_applies_the_schema_idempotently(empty_pg_schema, cap
     assert main(["--check"], environ=env) == 1
     before = _payload(capsys)
     assert before["status"] == "missing"
+    assert before["schema_name"].startswith("c1_test_")
     assert "table:memory_cards" in before["missing"]
     assert before["mutation_performed"] is False
 
     assert main(["--execute"], environ=env) == 0
     applied = _payload(capsys)
     assert applied["status"] == "applied"
+    assert applied["schema_name"] == before["schema_name"]
     assert applied["mutation_performed"] is True
     assert applied["missing"] == []
 
     assert main(["--check"], environ=env) == 0
     after = _payload(capsys)
     assert after["status"] == "ok"
+    assert after["schema_name"] == before["schema_name"]
     assert after["missing"] == []
     assert after["mutation_performed"] is False
 

@@ -96,23 +96,38 @@ def _valid_ref(value: str) -> bool:
     return bool(text) and len(text) <= 256 and "\n" not in text and "\r" not in text
 
 
-def _present(row: Any) -> bool:
-    if isinstance(row, Mapping):
-        return bool(row.get("present"))
-    return bool(row[0]) if row is not None else False
+def _schema_state(
+    store: PgVectorStore, manifest: Mapping[str, list[str]]
+) -> tuple[str | None, list[str]]:
+    """Verify objects in the first search_path schema, not in a public fallback."""
 
-
-def _missing_objects(store: PgVectorStore, manifest: Mapping[str, list[str]]) -> list[str]:
     missing: list[str] = []
     with store.transaction() as conn:
         with conn.cursor() as cur:
+            cur.execute("SELECT current_schema() AS schema_name")
+            row = cur.fetchone()
+            schema_name = (
+                row.get("schema_name") if isinstance(row, Mapping) else row[0] if row else None
+            )
             for table in manifest["tables"]:
-                cur.execute("SELECT to_regclass(%s) IS NOT NULL AS present", (table,))
-                if not _present(cur.fetchone()):
+                cur.execute(
+                    "SELECT 1 AS present FROM pg_class c "
+                    "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                    "WHERE n.nspname = current_schema() AND c.relname = %s "
+                    "AND c.relkind IN ('r', 'p')",
+                    (table,),
+                )
+                if cur.fetchone() is None:
                     missing.append(f"table:{table}")
             for index in manifest["indexes"]:
-                cur.execute("SELECT to_regclass(%s) IS NOT NULL AS present", (index,))
-                if not _present(cur.fetchone()):
+                cur.execute(
+                    "SELECT 1 AS present FROM pg_class c "
+                    "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                    "WHERE n.nspname = current_schema() AND c.relname = %s "
+                    "AND c.relkind = 'i'",
+                    (index,),
+                )
+                if cur.fetchone() is None:
                     missing.append(f"index:{index}")
             for extension in manifest["extensions"]:
                 cur.execute(
@@ -124,20 +139,20 @@ def _missing_objects(store: PgVectorStore, manifest: Mapping[str, list[str]]) ->
                 if row is None:
                     missing.append(f"extension:{extension}")
                     continue
-                schema_name = row.get("schema_name") if isinstance(row, Mapping) else row[0]
-                if schema_name != "public":
+                extension_schema = row.get("schema_name") if isinstance(row, Mapping) else row[0]
+                if extension_schema != "public":
                     missing.append(f"extension_schema:{extension}")
             for item in manifest["columns"]:
                 table, column = item.split(".", 1)
                 cur.execute(
                     "SELECT 1 AS present FROM information_schema.columns "
-                    "WHERE table_schema = ANY(current_schemas(false)) "
+                    "WHERE table_schema = current_schema() "
                     "AND table_name = %s AND column_name = %s",
                     (table, column),
                 )
                 if cur.fetchone() is None:
                     missing.append(f"column:{item}")
-    return sorted(missing)
+    return schema_name, sorted(missing)
 
 
 def _emit(report: dict[str, Any]) -> None:
@@ -166,6 +181,7 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
         "status": "planned",
         "target": args.target,
         "schema_path": _SCHEMA_PATH,
+        "schema_name": None,
         "schema_sha256": schema_hash,
         "tables": manifest["tables"],
         "indexes": manifest["indexes"],
@@ -231,7 +247,8 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
             report["mutation_performed"] = True
             report["production_mutation_performed"] = args.target == "production"
         report["network_used"] = True
-        missing_objects = _missing_objects(store, manifest)
+        schema_name, missing_objects = _schema_state(store, manifest)
+        report["schema_name"] = schema_name
         report["missing"] = missing_objects
         if args.execute:
             report["status"] = "applied" if not missing_objects else "verification_failed"
