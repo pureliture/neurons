@@ -30,7 +30,11 @@ from agent_knowledge.couchdb_source.build_cli import (
 from agent_knowledge.couchdb_source.session_memory_materializer import (
     RecordingSessionMemoryProjector,
     materialize_and_project,
+    materialize_session_memory,
+    project_session_memory,
 )
+from agent_knowledge.rag_ingress.pg_embedding_chunks import PG_INPUT_POLICY_VERSION
+from agent_knowledge.rag_ingress.pg_embedding_privacy import EGRESS_POLICY_ERROR
 from agent_knowledge.couchdb_source.source_revision import (
     SourceRevisionResolutionError,
     active_source_origin_document_ids,
@@ -1450,6 +1454,259 @@ class TestReportRedaction:
 
         allowed_keys = {"schema_version", "dry_run", "selected", "projected", "failed", "skipped"}
         assert set(report.keys()) <= allowed_keys
+
+class _EgressBlockedProjector:
+    def project(self, *, target_profile: str, document: dict) -> str:
+        raise ValueError(EGRESS_POLICY_ERROR)
+
+
+class TestProjectionAttemptAudit:
+    def test_terminal_failure_on_projected_session_is_audited_and_blocked(self) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sid = _build_synthetic_session(
+            store, provider="claude", project="neurons", raw_id="egress-refresh"
+        )
+        materialized = materialize_session_memory(session_id_hash=sid, store=store)
+        old_source_hash = "sha256:" + "b" * 64
+        state = dm.build_projection_state_document(
+            session_id_hash=sid,
+            provider="claude",
+            project="neurons",
+            projection_status=dm.ProjectionStatus.PENDING,
+        )
+        state["source_hash"] = materialized.source_hash
+        state["backend_receipts"] = {
+            "postgres_pgvector": {
+                "projection_status": dm.ProjectionStatus.PROJECTED,
+                "projected_source_hash": old_source_hash,
+                "active_content_hash": "sha256:" + "a" * 64,
+                "session_memory_knowledge_id": "old-ref",
+                "provider": "claude",
+                "project": "neurons",
+            }
+        }
+        store.put(state)
+
+        result = project_session_memory(
+            materialized=materialized,
+            store=store,
+            projector=_EgressBlockedProjector(),
+            backend="postgres_pgvector",
+        )
+        assert result["status"] == dm.ProjectionStatus.FAILED
+        assert result["reason"] == "secret_egress_policy"
+
+        persisted = store.get(dm.projection_state_doc_id(sid))
+        receipt = persisted["backend_receipts"]["postgres_pgvector"]
+        # The last successful mapping must survive the failed refresh.
+        assert receipt["projection_status"] == dm.ProjectionStatus.PROJECTED
+        assert receipt["projected_source_hash"] == old_source_hash
+        attempt = persisted["projection_attempt"]["postgres_pgvector"]
+        assert attempt["status"] == dm.ProjectionStatus.FAILED
+        assert attempt["reason"] == "secret_egress_policy"
+        assert attempt["source_hash"] == materialized.source_hash
+        assert attempt["policy_version"] == PG_INPUT_POLICY_VERSION
+
+        assert (
+            _select_sessions_needing_projection(
+                store, limit=0, backend="postgres_pgvector"
+            )
+            == []
+        )
+
+        # A new source revision must re-queue the session without an operator action.
+        distinct_chunk = TranscriptChunk.from_text(
+            chunk_id="chunk_01",
+            session_id_hash=sid,
+            provider="claude",
+            project="neurons",
+            turn_start_index=1,
+            turn_end_index=1,
+            text="a distinct follow-up was observed",
+        )
+        store.put(dm.build_conversation_chunk_document(chunk=distinct_chunk))
+        selected = _select_sessions_needing_projection(
+            store, limit=0, backend="postgres_pgvector"
+        )
+        assert [session["session_id_hash"] for session in selected] == [sid]
+
+    def test_legacy_top_level_failure_is_not_hidden_by_projected_receipt(self) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sid = _build_synthetic_session(
+            store, provider="claude", project="neurons", raw_id="legacy-egress"
+        )
+        source_hash = session_source_revision_from_couchdb_source(
+            session_id_hash=sid, source_store=store
+        )
+        state = dm.build_projection_state_document(
+            session_id_hash=sid,
+            provider="claude",
+            project="neurons",
+            projection_status="failed",
+            failure_reason="secret_egress_policy",
+        )
+        state["failure_source_hash"] = source_hash
+        state["backend_receipts"] = {
+            "postgres_pgvector": {
+                "projection_status": "projected",
+                "projected_source_hash": "sha256:" + "d" * 64,
+                "active_content_hash": "sha256:" + "a" * 64,
+                "session_memory_knowledge_id": "old-ref",
+                "provider": "claude",
+                "project": "neurons",
+            }
+        }
+        store.put(state)
+
+        assert (
+            _select_sessions_needing_projection(
+                store, limit=0, backend="postgres_pgvector"
+            )
+            == []
+        )
+
+    def test_policy_version_bump_requeues_stale_terminal_attempt(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sid = _build_synthetic_session(
+            store, provider="claude", project="neurons", raw_id="policy-bump"
+        )
+        source_hash = session_source_revision_from_couchdb_source(
+            session_id_hash=sid, source_store=store
+        )
+        old_version = PG_INPUT_POLICY_VERSION - 1
+        state = dm.build_projection_state_document(
+            session_id_hash=sid,
+            provider="claude",
+            project="neurons",
+            projection_status=dm.ProjectionStatus.PENDING,
+        )
+        state["source_hash"] = source_hash
+        state["backend_receipts"] = {
+            "postgres_pgvector": {
+                "projection_status": dm.ProjectionStatus.PROJECTED,
+                "projected_source_hash": "sha256:" + "e" * 64,
+                "active_content_hash": "sha256:" + "a" * 64,
+                "session_memory_knowledge_id": "old-ref",
+                "provider": "claude",
+                "project": "neurons",
+            }
+        }
+        state["projection_attempt"] = {
+            "postgres_pgvector": {
+                "status": dm.ProjectionStatus.FAILED,
+                "reason": "secret_egress_policy",
+                "source_hash": source_hash,
+                "recorded_at": "2026-10-22T00:00:00+00:00",
+                "policy_version": old_version,
+            }
+        }
+        state["terminal_failure_policy_version"] = old_version
+        state["terminal_failure_source_hash"] = source_hash
+        state["terminal_failure_reason"] = "secret_egress_policy"
+        store.put(state)
+
+        checkpoint_path = tmp_path / "selection-checkpoint.json"
+        monkeypatch.setenv("SESSION_MEMORY_SELECTION_CHECKPOINT", str(checkpoint_path))
+        monkeypatch.setenv("SESSION_MEMORY_SELECTION_MODE", "incremental")
+        sequence = store.read_change_sequence()
+
+        def write_checkpoint(policy_version: int) -> None:
+            checkpoint_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "session_memory_selection_checkpoint.v1",
+                        "pg_input_policy_version": policy_version,
+                        "last_seq": sequence,
+                        "updated_at": "2026-10-22T00:00:00+00:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+        write_checkpoint(PG_INPUT_POLICY_VERSION)
+        assert (
+            _select_sessions_for_cycle(
+                store,
+                limit=10,
+                project="",
+                provider="",
+                backend="postgres_pgvector",
+                mode="incremental",
+            )
+            == []
+        )
+
+        write_checkpoint(old_version)
+        selected = _select_sessions_for_cycle(
+            store,
+            limit=10,
+            project="",
+            provider="",
+            backend="postgres_pgvector",
+            mode="incremental",
+        )
+        assert [session["session_id_hash"] for session in selected] == [sid]
+
+    def test_source_revision_change_is_audited_without_blocking_new_revision(self) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sid = _build_synthetic_session(
+            store, provider="claude", project="neurons", raw_id="egress-race"
+        )
+        materialized = materialize_session_memory(session_id_hash=sid, store=store)
+        old_source_hash = "sha256:" + "c" * 64
+        state = dm.build_projection_state_document(
+            session_id_hash=sid,
+            provider="claude",
+            project="neurons",
+            projection_status=dm.ProjectionStatus.PENDING,
+        )
+        state["source_hash"] = materialized.source_hash
+        state["backend_receipts"] = {
+            "postgres_pgvector": {
+                "projection_status": dm.ProjectionStatus.PROJECTED,
+                "projected_source_hash": old_source_hash,
+                "active_content_hash": "sha256:" + "a" * 64,
+                "session_memory_knowledge_id": "old-ref",
+                "provider": "claude",
+                "project": "neurons",
+            }
+        }
+        store.put(state)
+
+        # The source advances after materialization but before the commit.
+        distinct_chunk = TranscriptChunk.from_text(
+            chunk_id="chunk_01",
+            session_id_hash=sid,
+            provider="claude",
+            project="neurons",
+            turn_start_index=1,
+            turn_end_index=1,
+            text="a distinct follow-up was observed",
+        )
+        store.put(dm.build_conversation_chunk_document(chunk=distinct_chunk))
+
+        result = project_session_memory(
+            materialized=materialized,
+            store=store,
+            projector=_EgressBlockedProjector(),
+            backend="postgres_pgvector",
+        )
+        assert result["status"] == dm.ProjectionStatus.FAILED
+        assert result["state_write_skipped"] == "source_revision_changed"
+
+        persisted = store.get(dm.projection_state_doc_id(sid))
+        attempt = persisted["projection_attempt"]["postgres_pgvector"]
+        assert attempt["source_hash"] == materialized.source_hash
+        assert attempt["reason"] == "secret_egress_policy"
+
+        # The audit is for the stale revision, so the new revision must be selected.
+        selected = _select_sessions_needing_projection(
+            store, limit=0, backend="postgres_pgvector"
+        )
+        assert [session["session_id_hash"] for session in selected] == [sid]
+
 
 def test_pg_missing_reselects_even_if_qdrant_current() -> None:
     store = InMemoryCouchDBSourceStore()
