@@ -515,14 +515,25 @@ def _select_sessions_for_cycle(
     path = _selection_checkpoint_path()
     checkpoint = _read_selection_checkpoint(path)
     last_seq = str(checkpoint.get("last_seq") or "")
-    # Re-evaluate historical DataError rows once when the input policy is
-    # upgraded. Preserve pending IDs and the watermark; no checkpoint reset.
-    full_walk_pending = bool(checkpoint.get("full_walk_in_progress")) or (
-        backend == "postgres_pgvector"
-        and checkpoint.get("pg_input_policy_version") != 1
-    )
+    full_walk_pending = bool(checkpoint.get("full_walk_in_progress"))
+    pending_ids = _pending_session_ids(checkpoint)
+    if backend == "postgres_pgvector" and checkpoint.get("pg_input_policy_version") != 1:
+        from .document_model import SourceDocType, projection_state_doc_id
+        # Re-evaluate only historical PG DataError receipts on policy upgrade.
+        # A full scan would also activate unrelated, never-projected sources.
+        failures = store.find_by_type(
+            SourceDocType.PROJECTION_STATE,
+            fields=["_id", "session_id_hash"],
+            selector={"backend_receipts.postgres_pgvector.failure_reason": "DataError"},
+        )
+        pending_ids = list(dict.fromkeys([
+            *pending_ids,
+            *(str(row["session_id_hash"]) for row in failures
+              if row.get("session_id_hash") and row.get("_id") ==
+              projection_state_doc_id(str(row["session_id_hash"]))),
+        ]))
     pending_sessions = _resolve_pending_sessions(
-        store, _pending_session_ids(checkpoint), project=project, provider=provider
+        store, pending_ids, project=project, provider=provider
     )
     if limit <= 0:
         processed_pending = pending_sessions
