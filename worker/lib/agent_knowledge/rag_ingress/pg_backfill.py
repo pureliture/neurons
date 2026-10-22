@@ -255,7 +255,7 @@ class PgSessionMemoryProjector:
         # len(text) is a cheap lower bound; only small strings need a byte count.
         chunked = len(body) > CHUNK_BYTES or len(body.encode("utf-8")) > CHUNK_BYTES
         embedding_profile = CHUNKED_PROFILE if chunked else self._profile
-        embedding_revision = 2 if chunked else 1
+        embedding_revision = 3 if chunked else 1
 
         chunk_id = _derive_pg_chunk_id_impl(
             project=project,
