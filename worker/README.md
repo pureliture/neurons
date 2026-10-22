@@ -25,6 +25,27 @@ best-effort로 받는다. `QDRANT_URL`이 없거나 mirror 구성·write가 실�
 - 출처(provenance): `agent-knowledge` advisor source revision `d571800`의 벤더링 사본.
 - 외부 의존: `nats-py>=2.6` 하나(런타임). 그 외 표준 라이브러리만 사용.
 
+## PostgreSQL session-memory의 큰 입력과 격리
+
+PG projector는 UTF-8 본문이 8KiB를 넘으면 원문을 보존한 채 청크로 나눠
+임베딩한다. 청크 벡터의 바이트 수 가중 평균을 정규화해 기존 세션당 벡터 1개
+계약을 유지한다. 새 집계 방식은 별도 profile과 `embedding_revision=2`를 사용한다.
+기존에 게시된 벡터를 일괄 재작성하지 않는다.
+
+`PG_EMBEDDING_CHUNK_CACHE`(기본 `/app/state/pg-embedding-chunks.sqlite3`)는 영속 볼륨에
+둔다. 원문 없이 digest, 벡터, 완료 위치와 집계값만 저장한다. 캐시에서 청크가
+퇴출돼도 집계 checkpoint로 재개한다. 청크 영수증과 집계 checkpoint는 각각 최대
+16384개다. 세션별 기본 64개, 사이클별 기본 192개 신규 청크를 호출하며,
+`PG_EMBEDDING_CHUNKS_PER_SESSION`, `PG_EMBEDDING_CHUNKS_PER_CYCLE`로 조절한다.
+예산 소진은 `pending/embedding_chunks_pending`으로 남기고 다음 사이클에 재개한다.
+외부 호출 실패는 실패 청크부터 재시도하며, 모든 청크가 끝나기 전에는 게시하지 않는다.
+
+본문과 PG 식별 필드의 NUL은 외부 호출과 PG 쓰기 전에 `invalid_text_nul`로 거절한다.
+원문과 해시는 수정하지 않는다. `failure_source_hash`가 같은 revision은 selector가
+재선택하지 않으며, 새 source revision이 들어오면 다시 평가한다.
+정책 버전이 없는 기존 선택 checkpoint는 pending 목록과 watermark를 유지한 채
+과거 PG DataError만 한 번 재선택해 새 검증으로 평가한다.
+
 ## 무엇을 가져왔고(vendored) 무엇을 뺐나
 
 라이브 worker가 실제로 실행하는 경로(`shadow_worker.run_consume` →

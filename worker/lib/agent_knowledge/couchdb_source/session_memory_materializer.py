@@ -740,7 +740,23 @@ def project_session_memory(
     except OwnershipViolation:
         raise
     except Exception as exc:  # backend/projection failure -> keep source, mark failed
+        from ..rag_ingress.pg_embedding_chunks import (
+            EmbeddingChunksPending, InvalidProjectionText, INVALID_TEXT_NUL,
+        )
+        if isinstance(exc, EmbeddingChunksPending):
+            commit_status, _state = _commit_projection_state_if_source_current(
+                materialized=materialized, store=store,
+                projection_status=ProjectionStatus.PENDING,
+                failure_reason="embedding_chunks_pending", backend=backend,
+            )
+            result = {"status": ProjectionStatus.PENDING,
+                      "reason": "embedding_chunks_pending", "ref": ""}
+            if commit_status == "source_revision_changed":
+                result["state_write_skipped"] = commit_status
+            return result
         failure_reason = type(exc).__name__
+        if isinstance(exc, InvalidProjectionText):
+            failure_reason = INVALID_TEXT_NUL
         if isinstance(exc, ValueError):
             from ..rag_ingress.pg_embedding_privacy import (
                 EGRESS_POLICY_ERROR,
