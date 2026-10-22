@@ -1,10 +1,10 @@
 """Guard: the retired external index bridge must not re-enter the active runtime.
 
-The bridge was retired from the `neurons` runtime. What survives is (a) a
-backend-neutral adapter boundary and (b) an explicitly-legacy operator tool
-package. This module pins the boundary so a later change cannot quietly put the
-retired wire protocol, its credentials or its backend option back into a
-runtime, deploy or recall path.
+The bridge was retired from the `neurons` runtime and the operator-side
+`legacy/` client package that spoke its wire protocol has been deleted. What
+survives is a backend-neutral adapter boundary. This module pins the boundary
+so a later change cannot quietly put the retired wire protocol, its
+credentials or its backend option back into a runtime, deploy or recall path.
 
 Guardrail source: `CLAUDE.md` — "Retired external index bridge credentials are
 not part of active runtime configuration."
@@ -16,24 +16,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PACKAGE_ROOT = REPO_ROOT / "worker" / "lib" / "agent_knowledge"
-
-# Operator-side tooling that may still drive the retired wire protocol. These
-# modules are CLI/GC/archive tools whose only backend was the retired bridge;
-# none of them is reachable from a default-enabled runtime path.
-LEGACY_CLIENT_ALLOWED_MODULES = frozenset(
-    {
-        "session_memory/cleanup_readiness.py",
-        "session_memory/dirty_session_memory_sync.py",
-        "session_memory/gc_backup.py",
-        "session_memory/native_memory_reconcile.py",
-        "session_memory/native_memory_writer.py",
-        "session_memory/neuron_session_memory.py",
-        "session_memory/session_memory_gc.py",
-        "session_memory/transcript_backfill.py",
-        "session_memory/transcript_session_gc.py",
-        "session_memory/transcript_volume_gc.py",
-    }
-)
 
 # Deploy/runtime surface that must not carry the retired bridge credentials.
 DEPLOY_SURFACE_FILES = (
@@ -47,18 +29,23 @@ def _package_modules() -> list[Path]:
     return sorted(PACKAGE_ROOT.rglob("*.py"))
 
 
-def test_legacy_index_client_is_only_imported_by_operator_tooling() -> None:
+def test_legacy_index_client_package_is_gone() -> None:
+    package = PACKAGE_ROOT / "legacy"
+    assert not package.exists(), (
+        "the retired external index bridge transport package still exists; "
+        "the operator tooling it served has been retired"
+    )
+
+
+def test_no_active_source_imports_the_legacy_transport() -> None:
     offenders: list[str] = []
     for path in _package_modules():
         rel = path.relative_to(PACKAGE_ROOT).as_posix()
-        if rel == "legacy/index_client.py" or rel in LEGACY_CLIENT_ALLOWED_MODULES:
-            continue
         text = path.read_text(encoding="utf-8")
         if "legacy.index_client" in text or "legacy import index_client" in text:
             offenders.append(rel)
     assert offenders == [], (
-        "retired index bridge transport imported outside the legacy operator "
-        f"tooling allowlist: {offenders}"
+        f"retired index bridge transport imported from active source: {offenders}"
     )
 
 
@@ -87,8 +74,6 @@ def test_active_source_carries_no_retired_bridge_wire_protocol() -> None:
     offenders: list[str] = []
     for path in _package_modules():
         rel = path.relative_to(PACKAGE_ROOT).as_posix()
-        if rel.startswith("legacy/"):
-            continue
         text = path.read_text(encoding="utf-8")
         if any(marker in text for marker in retired_protocol_paths):
             offenders.append(rel)

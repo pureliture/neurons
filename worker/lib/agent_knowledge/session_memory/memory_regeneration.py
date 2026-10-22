@@ -11,8 +11,6 @@ from ..ledger import Ledger, SESSION_MEMORY_REGENERATION_EVIDENCE_STATUS
 from ..redaction import redact_public_ingress_text
 from .transcript_model import MAX_PACKED_TRANSCRIPT_BODY_CHARS, REDACTION_VERSION, bound_text
 from .transcript_packer import PackedTranscriptDocument
-from .transcript_ingest import build_transcript_chunks
-from .transcript_parsers import extract_tool_evidence, parse_transcript_source
 from .chunk_overlap import (
     ChunkView,
     canonicalize_chunk_views,
@@ -119,103 +117,6 @@ class FixtureTranscriptMemorySource:
         ]
 
 
-class RetiredIndexBridgeTranscriptMemorySource:
-    """Read redacted transcript-memory records from a read-only RetiredIndexBridge adapter."""
-
-    def __init__(self, retired_index_bridge):
-        self.retired_index_bridge = retired_index_bridge
-
-    def list_conversation_chunks(
-        self,
-        *,
-        project: str | None = None,
-        provider: str | None = None,
-        session_id_hash: str | None = None,
-    ) -> list[TranscriptMemoryChunkRecord]:
-        if not hasattr(self.retired_index_bridge, "list_transcript_memory_chunks"):
-            raise ValueError("retired_index_bridge transcript-memory read adapter is required")
-        records = self.retired_index_bridge.list_transcript_memory_chunks(
-            project=project,
-            provider=provider,
-            session_id_hash=session_id_hash,
-        )
-        return [_chunk_record_from_retired_index_bridge(record) for record in records]
-
-
-class RetiredIndexBridgeRetrievalTranscriptMemorySource:
-    """Read RetiredIndexBridge retrieval hits and resolve every candidate through the local ledger."""
-
-    def __init__(
-        self,
-        *,
-        ledger: Ledger,
-        retired_index_bridge,
-        dataset_ids: list[str],
-        query: str,
-        limit: int = 10,
-    ):
-        self.ledger = ledger
-        self.retired_index_bridge = retired_index_bridge
-        self.dataset_ids = list(dataset_ids)
-        self.query = query
-        self.limit = limit
-        self.last_read_report: dict = {}
-
-    def list_conversation_chunks(
-        self,
-        *,
-        project: str | None = None,
-        provider: str | None = None,
-        session_id_hash: str | None = None,
-    ) -> list[TranscriptMemoryChunkRecord]:
-        filters = {
-            "project": project or "",
-            "provider": provider or "",
-            "domain": "agent_memory",
-            "type": "conversation_chunk",
-        }
-        filters = {key: value for key, value in filters.items() if value}
-        chunks = self.retired_index_bridge.retrieve(self.query, self.dataset_ids, filters=filters, limit=self.limit)
-        records: list[TranscriptMemoryChunkRecord] = []
-        unauthorized_candidate_count = 0
-        dataset_mismatch_count = 0
-        for chunk in chunks or []:
-            document_id = chunk.get("document_id") or chunk.get("doc_id")
-            if not document_id:
-                unauthorized_candidate_count += 1
-                continue
-            item = self.ledger.authorize_document(str(document_id), filters=filters, include_private=True)
-            if item is None or item.get("type") != "conversation_chunk":
-                unauthorized_candidate_count += 1
-                continue
-            candidate_dataset = chunk.get("kb_id") or chunk.get("dataset_id")
-            if candidate_dataset and item.get("index_target_id") and candidate_dataset != item["index_target_id"]:
-                dataset_mismatch_count += 1
-                continue
-            conversation_chunk = self.ledger.get_conversation_chunk_by_document(str(document_id))
-            if conversation_chunk is None:
-                unauthorized_candidate_count += 1
-                continue
-            if session_id_hash and conversation_chunk["session_id_hash"] != session_id_hash:
-                unauthorized_candidate_count += 1
-                continue
-            records.append(_chunk_record_from_ledger(conversation_chunk, str(chunk.get("content") or "")))
-        self.last_read_report = {
-            "source": "index_retrieval",
-            "query_hash": _sha256_content(self.query),
-            "dataset_ids_hash": _sha256_content("|".join(self.dataset_ids)),
-            "candidate_count": len(chunks or []),
-            "authorized_chunk_count": len(records),
-            "unauthorized_candidate_count": unauthorized_candidate_count,
-            "dataset_mismatch_count": dataset_mismatch_count,
-            "network_used": True,
-            "mutation_performed": False,
-            "index_write_performed": False,
-            "raw_query_printed": False,
-            "raw_chunk_content_printed": False,
-            "raw_index_ids_printed": False,
-        }
-        return records
 class LedgerTranscriptMemorySource:
     """Read the local status mirror for already indexed RetiredIndexBridge transcript chunks."""
 
@@ -319,153 +220,6 @@ def _densify_source_windows(records: list[TranscriptMemoryChunkRecord]) -> list[
     return dense_records
 
 
-class SessionFileTranscriptMemorySource:
-    """Read session-memory source directly from private provider transcript files."""
-
-    def __init__(
-        self,
-        *,
-        source_files: Iterable[Path | str] | None = None,
-        source_roots: Iterable[Path | str] | None = None,
-    ):
-        self.source_files = tuple(Path(path) for path in (source_files or ()))
-        self.source_roots = tuple(Path(path) for path in (source_roots or ()))
-        self._loaded = False
-        self._chunks: list[TranscriptMemoryChunkRecord] = []
-        self._tool_evidence: list = []
-        self.last_read_report: dict = {}
-
-    def list_conversation_chunks(
-        self,
-        *,
-        project: str | None = None,
-        provider: str | None = None,
-        session_id_hash: str | None = None,
-    ) -> list[TranscriptMemoryChunkRecord]:
-        self._load(project=project or "", provider=provider or "")
-        return [
-            chunk
-            for chunk in self._chunks
-            if (project is None or chunk.project == project)
-            and (provider is None or chunk.provider == provider)
-            and (session_id_hash is None or chunk.session_id_hash == session_id_hash)
-        ]
-
-    def list_tool_evidence_summaries(
-        self,
-        *,
-        project: str | None = None,
-        provider: str | None = None,
-        session_id_hash: str | None = None,
-    ) -> list:
-        self._load(project=project or "", provider=provider or "")
-        return [
-            item
-            for item in self._tool_evidence
-            if (project is None or _evidence_field(item, "project") == project)
-            and (provider is None or _evidence_field(item, "provider") == provider)
-            and (session_id_hash is None or _evidence_field(item, "session_id_hash") == session_id_hash)
-        ]
-
-    def _load(self, *, project: str, provider: str) -> None:
-        if self._loaded:
-            return
-        if not provider:
-            raise ValueError("actual session file source requires provider")
-        if not project:
-            raise ValueError("actual session file source requires project")
-        candidate_paths = _unique_session_source_paths(self.source_files, self.source_roots)
-        if not candidate_paths:
-            raise ValueError("actual session file source requires at least one readable source file")
-        parsed_session_count = 0
-        skipped_source_count = 0
-        parser_error_count = 0
-        chunks: list[TranscriptMemoryChunkRecord] = []
-        evidence: list = []
-        for path in candidate_paths:
-            try:
-                source_locator_hash = _sha256_content(str(path))
-                parsed = parse_transcript_source(provider, path, project=project, source_locator_hash=source_locator_hash)
-                parsed_session_count += 1
-                chunks.extend(_transcript_memory_records_from_parsed_source(parsed))
-                evidence.extend(extract_tool_evidence(provider, path, project=project, source_locator_hash=source_locator_hash))
-            except ValueError:
-                parser_error_count += 1
-                skipped_source_count += 1
-        self._chunks = chunks
-        self._tool_evidence = evidence
-        self._loaded = True
-        self.last_read_report = {
-            "source": "actual_session_file",
-            "source_file_count": len(candidate_paths),
-            "parsed_session_count": parsed_session_count,
-            "skipped_source_count": skipped_source_count,
-            "parser_error_count": parser_error_count,
-            "conversation_chunk_count": len(chunks),
-            "tool_evidence_count": len(evidence),
-            "network_used": False,
-            "mutation_performed": False,
-            "index_write_performed": False,
-            "raw_source_paths_printed": False,
-            "raw_chunk_content_printed": False,
-        }
-
-
-def _unique_session_source_paths(
-    source_files: Iterable[Path],
-    source_roots: Iterable[Path],
-) -> tuple[Path, ...]:
-    paths: list[Path] = []
-    for source_file in source_files:
-        if source_file.is_file() and not source_file.is_symlink():
-            paths.append(source_file)
-    for source_root in source_roots:
-        if source_root.is_file() and not source_root.is_symlink():
-            paths.append(source_root)
-            continue
-        if not source_root.is_dir() or source_root.is_symlink():
-            continue
-        paths.extend(path for path in source_root.rglob("*.jsonl") if path.is_file() and not path.is_symlink())
-    unique: dict[str, Path] = {}
-    for path in paths:
-        unique[str(path.resolve())] = path
-    return tuple(unique[key] for key in sorted(unique))
-
-
-def _transcript_memory_records_from_parsed_source(parsed) -> list[TranscriptMemoryChunkRecord]:
-    turns_by_index = {turn.turn_index: turn for turn in parsed.turns}
-    records: list[TranscriptMemoryChunkRecord] = []
-    for chunk in build_transcript_chunks(parsed):
-        window_turns = [
-            turns_by_index[index]
-            for index in range(chunk.turn_start_index, chunk.turn_end_index + 1)
-            if index in turns_by_index
-        ]
-        observed = [turn.observed_at for turn in window_turns if turn.observed_at]
-        records.append(
-            TranscriptMemoryChunkRecord(
-                knowledge_id=f"source_session_chunk_{_hash_fragment(chunk.chunk_id, 16)}",
-                chunk_id=chunk.chunk_id,
-                session_id_hash=chunk.session_id_hash,
-                provider=chunk.provider,
-                project=chunk.project,
-                turn_start_index=chunk.turn_start_index,
-                turn_end_index=chunk.turn_end_index,
-                observed_at_start=observed[0] if observed else parsed.session.started_at,
-                observed_at_end=observed[-1] if observed else parsed.session.ended_at or parsed.session.started_at,
-                content_hash=chunk.content_hash,
-                redacted_text=chunk.redacted_text,
-                source_status=chunk.source_status,
-                redaction_version=chunk.redaction_version,
-                part_index=chunk.part_index,
-                part_count=chunk.part_count,
-                char_start=chunk.char_start,
-                char_end=chunk.char_end,
-            )
-        )
-    return records
-
-
 @dataclass(frozen=True)
 class SessionChunkGroup:
     session_id_hash: str
@@ -524,26 +278,10 @@ class SessionMemoryRegenerationRunner:
         source: TranscriptMemorySource,
         target_profile: str = DEFAULT_SESSION_MEMORY_TARGET_PROFILE,
         ledger: Ledger | None = None,
-        sync: bool = False,
-        retired_index_bridge=None,
-        dataset_id: str = "",
-        runtime_dir: str | Path = "",
-        max_poll_attempts: int = 60,
-        poll_interval_seconds: float = 1.0,
-        sleep_func=None,
     ):
-        import time
-
         self.source = source
         self.target_profile = target_profile
         self.ledger = ledger
-        self.sync = sync
-        self.retired_index_bridge = retired_index_bridge
-        self.dataset_id = dataset_id
-        self.runtime_dir = runtime_dir
-        self.max_poll_attempts = max_poll_attempts
-        self.poll_interval_seconds = poll_interval_seconds
-        self.sleep_func = sleep_func or time.sleep
 
     def _list_tool_evidence_for(self, group: SessionChunkGroup) -> list:
         lister = getattr(self.source, "list_tool_evidence_summaries", None)
@@ -575,8 +313,6 @@ class SessionMemoryRegenerationRunner:
         subsumed_overlap_count = 0
         would_write_session_memory = []
         skipped_sessions: list[dict] = []
-        mutated = False
-        sync_executor = None
 
         for group in groups:
             canonical_group, canonicalization = _canonical_session_group_for_memory(group)
@@ -605,20 +341,6 @@ class SessionMemoryRegenerationRunner:
                     }
                 )
                 continue
-            if self.sync and (coverage["gap_count"] or coverage["duplicate_count"]):
-                skipped_sessions.append(
-                    {
-                        "reason": "coverage_incomplete_before_upload",
-                        "session_id_fragment": _hash_fragment(group.session_id_hash, 12),
-                        "source_chunk_count": len(group.chunks),
-                        "canonical_source_chunk_count": len(canonical_group.chunks),
-                        "deduplicated_source_chunk_count": canonicalization["dropped_source_chunk_count"],
-                        "subsumed_overlap_count": canonicalization["subsumed_overlap_count"],
-                        "coverage_gap_count": coverage["gap_count"],
-                        "coverage_duplicate_count": coverage["duplicate_count"],
-                    }
-                )
-                continue
             evidence = self._list_tool_evidence_for(canonical_group)
             packed = pack_session_memory_document(canonical_group, evidence=evidence)
             content_hash = _sha256_content(packed.body)
@@ -631,56 +353,14 @@ class SessionMemoryRegenerationRunner:
                 canonicalization=canonicalization,
             )
 
-            if not self.sync:
-                would_write_session_memory.append(planned)
-                continue
-
-            if sync_executor is None:
-                from .regeneration_index_sync import (
-                    SessionMemoryCoverageRecord,
-                    SessionMemoryIndexSyncExecutor,
-                    SessionMemoryIndexSyncRequest,
-                )
-
-                sync_executor = SessionMemoryIndexSyncExecutor(
-                    ledger=self.ledger,
-                    retired_index_bridge=self.retired_index_bridge,
-                    dataset_id=self.dataset_id,
-                    runtime_dir=self.runtime_dir,
-                    max_poll_attempts=self.max_poll_attempts,
-                    poll_interval_seconds=self.poll_interval_seconds,
-                    sleep_func=self.sleep_func,
-                )
-
-            coverage_records = tuple(
-                SessionMemoryCoverageRecord(
-                    source_content_hash=chunk.content_hash,
-                    source_window_hash=_session_memory_source_window_hash(chunk),
-                    redaction_version=chunk.redaction_version,
-                    turn_start_index=chunk.turn_start_index,
-                    turn_end_index=chunk.turn_end_index,
-                )
-                for chunk in _normalize_session_chunks_for_memory(canonical_group.chunks)
-            )
-            sync_result = sync_executor.execute(
-                SessionMemoryIndexSyncRequest(
-                    packed=packed,
-                    planned=planned,
-                    coverage_records=coverage_records,
-                )
-            )
-            mutated = mutated or sync_result.mutation_performed
-            completed = sync_result.planned
-            if sync_result.document_id:
-                completed = {**completed, "document_id": sync_result.document_id}
-            would_write_session_memory.append(completed)
+            would_write_session_memory.append(planned)
 
         return {
             "schema_version": MEMORY_REGENERATION_REPORT_SCHEMA_VERSION,
-            "mode": "sync" if self.sync else "dry_run",
-            "network_used": bool(source_report.get("network_used")) or self.sync,
-            "mutation_performed": mutated,
-            "index_write_performed": mutated,
+            "mode": "dry_run",
+            "network_used": bool(source_report.get("network_used")),
+            "mutation_performed": False,
+            "index_write_performed": False,
             "datasetRole": SESSION_MEMORY_DATASET_ROLE,
             "targetProfile": self.target_profile,
             "kind": SESSION_MEMORY_KIND,
@@ -943,57 +623,6 @@ class SessionRecapRegenerationRunner:
             "blocked": [],
         }
 
-    @classmethod
-    def mark_index_done_session_recaps(
-        cls,
-        *,
-        ledger: Ledger,
-        retired_index_bridge,
-        dataset_id: str,
-        limit: int = 50,
-        max_pages: int = 20,
-        page_size: int = 200,
-    ) -> dict:
-        queued = _queued_session_recaps(ledger, limit=limit)
-        content_hashes = {row["content_hash"] for row in queued}
-        done_docs_by_hash: dict[str, dict] = {}
-        pages_scanned = 0
-        for page in range(1, max(int(max_pages), 1) + 1):
-            docs = retired_index_bridge.list_documents(dataset_id, page=page, page_size=page_size)
-            pages_scanned += 1
-            if not docs:
-                break
-            for doc in docs:
-                meta = doc.get("meta_fields") or {}
-                content_hash = str(meta.get("content_hash") or "")
-                document_kind = str(meta.get("type") or meta.get("result_type") or "")
-                if (
-                    content_hash in content_hashes
-                    and document_kind == SESSION_RECAP_KIND
-                    and str(doc.get("run") or "") == "DONE"
-                ):
-                    done_docs_by_hash[content_hash] = doc
-            if len(done_docs_by_hash) == len(content_hashes):
-                break
-        indexed_count = 0
-        for row in queued:
-            doc = done_docs_by_hash.get(row["content_hash"])
-            document_id = str((doc or {}).get("id") or "")
-            if not document_id:
-                continue
-            ledger.mark_uploaded(row["knowledge_id"], dataset_id=dataset_id, document_id=document_id, run="DONE")
-            ledger.mark_indexed(row["knowledge_id"], run="DONE")
-            indexed_count += 1
-        return {
-            "schema_version": "agent_knowledge_session_recap_index_done_reconciler.v1",
-            "checked_queued_count": len(queued),
-            "index_indexed_count": indexed_count,
-            "index_missing_count": len(queued) - indexed_count,
-            "index_pages_scanned": pages_scanned,
-            "network_used": True,
-            "mutation_performed": bool(indexed_count),
-            "raw_index_ids_printed": False,
-        }
 
 
 class ProjectMemoryRegenerationRunner:
@@ -1230,52 +859,6 @@ class ProjectMemoryRegenerationRunner:
             "blocked": blocked,
         }
 
-    @classmethod
-    def mark_index_done_project_snapshots(
-        cls,
-        *,
-        ledger: Ledger,
-        retired_index_bridge,
-        dataset_id: str,
-        limit: int = 50,
-        max_pages: int = 20,
-        page_size: int = 200,
-    ) -> dict:
-        queued = _queued_project_memory_snapshots(ledger, limit=limit)
-        content_hashes = {row["content_hash"] for row in queued}
-        done_docs_by_hash: dict[str, dict] = {}
-        pages_scanned = 0
-        for page in range(1, max(int(max_pages), 1) + 1):
-            docs = retired_index_bridge.list_documents(dataset_id, page=page, page_size=page_size)
-            pages_scanned += 1
-            if not docs:
-                break
-            for doc in docs:
-                meta = doc.get("meta_fields") or {}
-                content_hash = str(meta.get("content_hash") or "")
-                if content_hash in content_hashes and str(doc.get("run") or "") == "DONE":
-                    done_docs_by_hash[content_hash] = doc
-            if len(done_docs_by_hash) == len(content_hashes):
-                break
-        indexed_count = 0
-        for row in queued:
-            doc = done_docs_by_hash.get(row["content_hash"])
-            document_id = str((doc or {}).get("id") or "")
-            if not document_id:
-                continue
-            ledger.mark_uploaded(row["knowledge_id"], dataset_id=dataset_id, document_id=document_id, run="DONE")
-            ledger.mark_indexed(row["knowledge_id"], run="DONE")
-            indexed_count += 1
-        return {
-            "schema_version": "agent_knowledge_project_memory_index_done_reconciler.v1",
-            "checked_queued_count": len(queued),
-            "index_indexed_count": indexed_count,
-            "index_missing_count": len(queued) - indexed_count,
-            "index_pages_scanned": pages_scanned,
-            "network_used": True,
-            "mutation_performed": bool(indexed_count),
-            "raw_index_ids_printed": False,
-        }
 def pack_session_memory_document(
     group: SessionChunkGroup,
     *,
@@ -1483,22 +1066,6 @@ def _group_by_project(chunks: list[TranscriptMemoryChunkRecord]) -> list[Project
         )
         groups.append(ProjectChunkGroup(provider=provider, project=project, chunks=ordered))
     return sorted(groups, key=lambda item: (item.project, item.provider))
-def _queued_session_recaps(ledger: Ledger, *, limit: int) -> list[dict]:
-    with ledger._connect() as connection:
-        rows = connection.execute(
-            """
-            SELECT knowledge_id, content_hash
-            FROM knowledge_items
-            WHERE type = 'session_recap'
-              AND status = 'queued'
-              AND ingress_target_profile = ?
-              AND content_hash != ''
-            ORDER BY queued_at ASC, updated_at ASC
-            LIMIT ?
-            """,
-            (DEFAULT_SESSION_MEMORY_TARGET_PROFILE, max(int(limit), 1)),
-        ).fetchall()
-    return [dict(row) for row in rows]
 
 
 def _indexed_session_recaps(ledger: Ledger, *, limit: int) -> list[dict]:
@@ -1519,48 +1086,8 @@ def _indexed_session_recaps(ledger: Ledger, *, limit: int) -> list[dict]:
     return [dict(row) for row in rows]
 
 
-def _queued_project_memory_snapshots(ledger: Ledger, *, limit: int) -> list[dict]:
-    with ledger._connect() as connection:
-        rows = connection.execute(
-            """
-            SELECT knowledge_id, content_hash
-            FROM knowledge_items
-            WHERE type = 'project_context_snapshot'
-              AND status = 'queued'
-              AND ingress_target_profile = ?
-              AND content_hash != ''
-            ORDER BY queued_at ASC, updated_at ASC
-            LIMIT ?
-            """,
-            (DEFAULT_PROJECT_MEMORY_TARGET_PROFILE, max(int(limit), 1)),
-        ).fetchall()
-    return [dict(row) for row in rows]
 
 
-def _chunk_record_from_retired_index_bridge(record: dict) -> TranscriptMemoryChunkRecord:
-    metadata = dict(record.get("metadata") or {})
-    if metadata.get("result_type") != "conversation_chunk" and metadata.get("type") != "conversation_chunk":
-        raise ValueError("retired_index_bridge transcript-memory record must be a conversation_chunk")
-    redacted_text = str(record.get("body") or record.get("content") or "")
-    return TranscriptMemoryChunkRecord(
-        knowledge_id=str(metadata["knowledge_id"]),
-        chunk_id=str(metadata["chunk_id"]),
-        session_id_hash=str(metadata["session_id_hash"]),
-        provider=str(metadata["provider"]),
-        project=str(metadata["project"]),
-        turn_start_index=int(metadata["turn_start_index"]),
-        turn_end_index=int(metadata["turn_end_index"]),
-        observed_at_start=str(metadata.get("observed_at_start") or ""),
-        observed_at_end=str(metadata.get("observed_at_end") or ""),
-        content_hash=str(metadata.get("content_hash") or record.get("content_hash") or ""),
-        redacted_text=redacted_text,
-        source_status=str(metadata.get("source_status") or "indexed_transcript_memory"),
-        redaction_version=str(metadata.get("redaction_version") or REDACTION_VERSION),
-        part_index=int(metadata.get("part_index") or 1),
-        part_count=int(metadata.get("part_count") or 1),
-        char_start=int(metadata.get("char_start") or 0),
-        char_end=int(metadata.get("char_end") or 0),
-    )
 
 
 def _chunk_record_from_ledger(record: dict, retrieval_content: str = "") -> TranscriptMemoryChunkRecord:

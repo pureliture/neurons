@@ -100,21 +100,17 @@ vendored (`lib/agent_knowledge/`):
   no ledger write, queue write, RetiredIndexBridge dataset write, or raw transcript lookup.
 - `session_memory/brain_query.py` / `query_planner.py` /
   `native_memory_governance.py` — pure brain query, resolve, query planning,
-  and mirror-governance logic.
-- `session_memory/brain_read_model.py` / `native_memory_recall.py` /
-  `native_memory_mirror.py` — server-side ledger read-model adapter plus
-  native-memory active-set filtering and local mirror store. RetiredIndexBridge access is
-  injected and recall-only in this slice; writer/reconcile/regeneration upload
-  or disable runners remain out.
-- `session_memory/native_memory_writer.py` / `native_memory_reconcile.py` /
-  `native_memory_write_runner.py` — server-side native-memory mirror write,
-  supersede-sync, and injected RetiredIndexBridge message disable reconciliation logic.
-  These modules are vendored with fake-client unit coverage only. The worker
-  exposes a dry-run/fail-closed `native-memory-sync` console script; live
-  RetiredIndexBridge sync, approval execution, and LaunchAgent wiring remain out.
+  and the shared high-risk card-type governance policy
+  (`HIGH_RISK_CARD_TYPES`, used by `brain_query.py`).
+- `session_memory/brain_read_model.py` — server-side ledger read-model adapter.
+  The native-memory mirror read/write/reconcile path was discontinued
+  (decision C-1: native_memory discontinued) together with the retired external
+  index bridge transport it was built on. The `native_memory_mirror` **ledger
+  table and its rows are kept** — only the Python helper modules are gone.
 - `session_memory/native_memory_sync_approval.py` — read-only approval-file
-  validator for the future `native-memory-sync` live runner. It does not create
-  clients, read secrets, or execute RetiredIndexBridge writes/disables.
+  validator for the live CouchDB-native build/migration lanes
+  (`couchdb_source/*`, `rag_ingress/*`). It does not create clients, read
+  secrets, or execute any index write/disable.
 - `document_envelope.py`, `session_memory/transcript_packer.py`,
   `session_memory/transcript_parsers.py`, and
   `session_memory/tool_evidence_sync.py` — server-side tool-evidence extraction,
@@ -141,21 +137,14 @@ vendored (`lib/agent_knowledge/`):
   `session_memory/zombie_snapshot_repair.py` — local-ledger-only safety repair
   tools. They do not call RetiredIndexBridge, network, delete, disable, or live GC APIs;
   heavier GC/delete/disable modules remain out of this slice.
-- `session_memory/gc_backup.py` — recoverable-delete backup record store only:
-  private-directory JSON write/read/list and raw RetiredIndexBridge document-id hashing.
-  Restore/upload/parse CLI behavior remains out of this slice.
-- `session_memory/session_memory_gc.py`, `transcript_memory_gc.py`, and
-  `transcript_volume_gc.py` — dry-run-only GC safety planners. They select
-  eligible candidates and report the same redaction/mutation flags, but live
-  execute/disable/delete paths are fail-closed in this worker slice. Worker
-  console scripts are exposed as `session-memory-gc`, `transcript-memory-gc`,
-  and `transcript-volume-gc` for dry-run planning and blocked-live-execution
-  evidence only.
-- `session_memory/transcript_backfill.py` — server/brain-side backlog
-  promotion seed helper. It scans RetiredIndexBridge read surfaces for transcript sessions
-  without an active session-memory summary, then marks those sessions dirty in
-  the neuron-local ledger. It performs no RetiredIndexBridge write/delete/disable and is
-  exposed as `transcript-backfill` plus `neuron-knowledge transcript-backfill`.
+- `session_memory/transcript_memory_gc.py` — dry-run-only GC safety planner for
+  the transcript-memory dataset. It selects eligible candidates and reports the
+  same redaction/mutation flags, but live execute/disable/delete paths are
+  fail-closed in this worker slice. The worker console script is exposed as
+  `transcript-memory-gc` for dry-run planning and blocked-live-execution
+  evidence only. The session-memory / transcript-session / transcript-volume GC
+  planners and the recoverable-delete backup store were removed with the
+  retired external index bridge transport.
 - `session_memory/memory_regeneration.py` — server-owned session/project-memory
   regeneration core. Current worker tests cover dry-run document packing,
   ledger-backed transcript source planning, and injected project-memory enqueue
@@ -171,7 +160,7 @@ vendored (`lib/agent_knowledge/`):
   execute-plan building. This is planning-only: Gate F execute, live RetiredIndexBridge
   upload/parse, and private broad-source scans remain excluded.
 - `redaction.py` — server full public redaction 본체(inline 정규식, denylist 파일 의존 없음)
-- `events.py`, `spool.py`, `index_client.py` — 위 모듈의 폐포 의존
+- `events.py`, `spool.py` — 위 모듈의 폐포 의존
 
 **의도적으로 제외(가져오지 않음):**
 - `outbox_client.py` — client(producer) 측 코드. server worker 불필요.
@@ -182,18 +171,19 @@ vendored (`lib/agent_knowledge/`):
 - `transcript_ingest.py` monolith module — still mixed. The server-owned
   transcript worker core is present here, but the old HTTP client/outbox,
   direct RetiredIndexBridge indexing, and public CLI compatibility wiring remain out.
-- `native-memory-sync` CLI/LaunchAgent wiring and GC restore/live GC runners —
-  the worker has only dry-run/fail-closed `native-memory-sync`; live
-  approval-execute/LaunchAgent wiring still includes RetiredIndexBridge upload/disable or
-  private transcript-source surfaces and remains excluded.
+- native-memory mirror write/reconcile CLI wiring and GC restore/live GC runners —
+  the native-memory mirror feature was discontinued (C-1) and the GC
+  restore/live runners were removed with the retired external index bridge
+  transport; live approval-execute wiring that still includes index
+  upload/disable or private transcript-source surfaces remains excluded.
 - Gate F backfill execute/live indexing — approval-gated live RetiredIndexBridge mutation
   remains excluded; only fixture planning is present.
 - `memory-regeneration` live approval-execute wiring — the worker exposes only
   dry-run/read-only planning. Enqueue/sync/promote/cleanup/disable/reset and
   scheduler wiring remain out.
 - GC restore/upload/parse and live GC execute/disable/delete — approval-gated
-  live RetiredIndexBridge mutation remains excluded; only dry-run planners and backup store
-  are present.
+  live index mutation remains excluded; only the dry-run transcript-memory
+  planner is present.
   → `rag_ingress/__init__.py`는 client/Ledger/import-heavy 모듈을 eager import하지
   않도록 유지한다(패키지 import만으로 Ledger가 끌려오지 않게).
 

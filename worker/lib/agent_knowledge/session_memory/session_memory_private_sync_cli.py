@@ -48,7 +48,6 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--retry-backoff-seconds", default="60,180")
     parser.add_argument("--poll-attempts", type=int, default=60)
     parser.add_argument("--poll-interval-seconds", type=float, default=1.0)
-    parser.add_argument("--transcript-read-source", choices=["ledger", "index_read_sot"], default="ledger")
     parser.add_argument("--approval", default="")
     return parser
 
@@ -81,7 +80,6 @@ def _has_live_args(args: argparse.Namespace) -> bool:
             args.retired_index_bridge_url,
             args.retired_index_bridge_token_env,
             args.approval,
-            args.transcript_read_source != "ledger",
         ]
     )
 
