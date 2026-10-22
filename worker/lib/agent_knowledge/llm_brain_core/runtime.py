@@ -56,6 +56,11 @@ __all__ = [
 # joined prose is capped here as well as in OntologyEpisode.__post_init__ to keep
 # one episode from shipping an unbounded extraction body.
 _MAX_EXTRACTION_CHARS = 8000
+# The tool-evidence section is a compact addendum: it says which commands ran
+# and how they turned out. It rides alongside the conversation prose in the
+# same extraction body, so it gets its own (smaller) budget -- the conversation
+# prose stays the primary source and must not be crowded out.
+_MAX_EXTRACTION_EVIDENCE_CHARS = 2000
 _CHUNK_METADATA_HEADER_KEYS = frozenset(
     {
         "session_id_hash",
@@ -79,7 +84,7 @@ def materialize_artifact_from_couchdb_source(
     ontology_version: str = "1.0.0",
     extractor_version: str = "runtime.1",
 ) -> SessionMemoryArtifact:
-    artifact, _chunks = _materialize_artifact_with_snapshot(
+    artifact, _chunks, _evidence = _materialize_artifact_with_snapshot(
         session_id_hash=session_id_hash,
         source_store=source_store,
         artifact_store=artifact_store,
@@ -97,17 +102,21 @@ def _materialize_artifact_with_snapshot(
     ontology_version: str = "1.0.0",
     extractor_version: str = "runtime.1",
     max_attempts: int = 3,
-) -> tuple[SessionMemoryArtifact, tuple[Mapping[str, Any], ...]]:
+) -> tuple[SessionMemoryArtifact, tuple[Mapping[str, Any], ...], tuple[Mapping[str, Any], ...]]:
     """Persist only an eventually-current bounded source snapshot.
 
     CouchDB source families are read independently. A source write can land
-    between those reads, so each candidate is compared with a fresh full source
+    between these reads, so each candidate is compared with a fresh full source
     revision before it is persisted. Failed attempts never enter the artifact
     store or influence delta/currentness selection.
+
+    Returns the artifact, the captured conversation chunks, and the captured
+    tool-evidence bundles. The evidence bundles are the compressed tool lane
+    (which command ran, and how it turned out) and feed the entity pass.
     """
 
     for _attempt in range(max_attempts):
-        artifact, chunks = _materialize_artifact_from_couchdb_source_once(
+        artifact, chunks, evidence = _materialize_artifact_from_couchdb_source_once(
             session_id_hash=session_id_hash,
             source_store=source_store,
             artifact_store=artifact_store,
@@ -121,7 +130,7 @@ def _materialize_artifact_with_snapshot(
         if current_source_revision == artifact.source_revision:
             if artifact_store is not None:
                 artifact_store.upsert(artifact)
-            return artifact, chunks
+            return artifact, chunks, evidence
     raise RuntimeError("session source revision did not stabilize during materialization")
 
 
@@ -233,7 +242,7 @@ def _materialize_artifact_from_couchdb_source_once(
         materialized_at=materialized_at,
         materialization_revision=materialization_revision,
     )
-    return artifact, tuple(chunks)
+    return artifact, tuple(chunks), tuple(evidence)
 
 
 def session_source_revision_from_couchdb_source(
@@ -604,6 +613,43 @@ def _extraction_text_from_chunks(
     return prose[:max_chars]
 
 
+def _extraction_text_from_evidence(
+    evidence_bundles: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...],
+    *,
+    max_chars: int = _MAX_EXTRACTION_EVIDENCE_CHARS,
+) -> str:
+    """Render a session's tool-evidence bundles as compact extraction prose.
+
+    A tool_evidence_bundle body is already the compressed form of the tool
+    lane: one section per evidence record, each carrying the category, the
+    command that ran, and the outcome. That is exactly the "which command, and
+    how did it go" signal an entity pass can extract from -- and it is the only
+    place it survives, because the conversation chunks hold conversation prose
+    only (the rendered tool output is not part of the chunk body).
+
+    The bundle body is public-safe by construction
+    (``assert_source_text_clean`` in ``build_tool_evidence_bundle_document``),
+    so this only extracts the evidence sections and bounds them.
+    """
+
+    sections: list[str] = []
+    for doc in sorted(
+        evidence_bundles,
+        key=lambda item: (int(item.get("part_index") or 0), str(item.get("_id") or "")),
+    ):
+        body = str(doc.get("body") or "")
+        for line in body.splitlines():
+            stripped = line.strip()
+            # Evidence sections are "### N category/outcome" followed by
+            # "- tool:", "- command:", "- result:" lines. Keep exactly those;
+            # the bundle's own Context header adds no extraction signal.
+            if stripped.startswith("### ") or stripped.startswith("- tool:") or stripped.startswith("- command:") or stripped.startswith("- result:"):
+                sections.append(stripped)
+    if not sections:
+        return ""
+    return "\n".join(sections)[:max_chars]
+
+
 def _conversation_chunk_order_key(doc: Mapping[str, Any]) -> tuple[int, int, int, int, str]:
     return (
         _safe_int(doc.get("turn_start_index")),
@@ -665,7 +711,7 @@ def session_episode_from_couchdb_source(
     JSON (recall-safe); only the entity-pass extraction input becomes real prose.
     """
 
-    artifact, captured_chunks = _materialize_artifact_with_snapshot(
+    artifact, captured_chunks, captured_evidence = _materialize_artifact_with_snapshot(
         session_id_hash=session_id_hash,
         source_store=source_store,
         artifact_store=artifact_store,
@@ -675,6 +721,12 @@ def session_episode_from_couchdb_source(
     extraction_text = _extraction_text_from_chunks(
         captured_chunks,
     )
+    # The compressed tool lane rides along as an addendum: it says which
+    # commands ran and how they turned out, which the conversation prose no
+    # longer carries (the rendered tool output is not part of the chunk body).
+    evidence_prose = _extraction_text_from_evidence(captured_evidence)
+    if evidence_prose:
+        extraction_text = f"{extraction_text}\n\n{evidence_prose}" if extraction_text else evidence_prose
     return episode_from_session_artifact(artifact, extraction_text=extraction_text)
 
 

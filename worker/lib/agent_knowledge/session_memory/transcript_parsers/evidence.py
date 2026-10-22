@@ -173,7 +173,35 @@ def _short_summary(out: str, *, max_lines: int = 6) -> str:
 
 
 def _classify_exec_evidence(cmd: str, out: str) -> tuple[str, str, str] | None:
-    """Return (category, outcome, summary) for a shell command, or None to drop."""
+    """Return (category, outcome, summary) for a shell command, or None to drop.
+
+    The evidence lane is a deliberate WHITELIST of high-signal outcomes, not a
+    general command log. A command earns a record only when it carries one of
+    these categories:
+
+    - ``test_result``       -- a test run (any command naming ``pytest``)
+    - ``git_state``         -- a git state-reading subcommand (status/diff/log/...)
+    - ``live_proof``        -- a live reachability probe (curl and friends)
+    - ``command_error``     -- a traceback / fatal error
+    - ``approval_evidence`` -- output showing an approval or gate
+    - ``local_audit``       -- a local inspection (sqlite3, wc)
+
+    Everything else is dropped, and that is the intended behaviour rather than a
+    gap. Two kinds of drop are explicit:
+
+    - Exploration verbs (``ls``, ``cat``, ``grep``, ``find``, ...) are noise for
+      a knowledge graph -- see ``_TRIVIAL_VERBS`` / ``_FILE_VIEW_VERBS`` /
+      ``_SEARCH_VERBS``.
+    - Unrecognized commands fall through to the final ``return None``. A
+      general "command ran, exit code N" category was considered and rejected:
+      on a real Antigravity corpus it would roughly quadruple the lane's volume
+      (avg ~5 records/session -> ~30) and crowd the bounded entity-extraction
+      addendum, while adding little signal beyond what the conversation prose
+      already carries.
+
+    Widening the whitelist is a deliberate change to the evidence contract, not
+    a bug fix: add the category here AND the verb(s) that produce it.
+    """
     norm = _normalize_command(cmd)
     tokens = _command_tokens(cmd)
     verb = tokens[0] if tokens else ""
