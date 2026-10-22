@@ -22,6 +22,10 @@ _REDACTED = re.compile(
     r"(?:<redacted(?:[:_-]secret)?>|\[redacted(?:[:_-]secret)?\]|\*{3,})",
     re.IGNORECASE,
 )
+# Boolean/null literals are values, but they are not credentials. Keep this
+# exact-match exception scoped to key assignments; auth/header values remain
+# conservative even when they happen to be one of these words.
+_NON_SECRET_LITERAL = re.compile(r"^(?:true|false|none|null|yes|no)$", re.IGNORECASE)
 _VALUE = r'''(?:"(?P<double>(?:\\.|[^"\\])*)"|'(?P<single>(?:\\.|[^'\\])*)'|(?P<bare>[^\s,;\}"']+))'''
 _ASSIGNMENT = re.compile(
     # These additional names are exact keys, not broad auth/config vocabulary.
@@ -64,6 +68,8 @@ def assert_pg_embedding_egress_safe(text: str) -> None:
             value = next(value for value in match.groups() if value is not None)
             if pattern is _AUTHORIZATION:
                 value = _SCHEME.sub("", value.strip())
+            if pattern is _ASSIGNMENT and _NON_SECRET_LITERAL.fullmatch(value.strip()):
+                continue
             if _has_value(value):
                 raise ValueError(_ERROR)
     for pattern in (_CREDENTIAL_URL, _PRIVATE_KEY):
