@@ -7,6 +7,7 @@ store. A session is published only after every chunk has an embedding.
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import json
 import math
 import os
@@ -88,6 +89,20 @@ class BoundedPgEmbedding:
         return values
 
     def embed(self, text: str, *, content_hash: str) -> list[float]:
+        # Rolling deployments can briefly share this PVC. Serialize cache
+        # progress and egress so an older writer cannot overwrite a later count.
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(self.path) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise EmbeddingChunksPending() from None
+            return self._embed_locked(text, content_hash=content_hash)
+        finally:
+            os.close(fd)
+
+    def _embed_locked(self, text: str, *, content_hash: str) -> list[float]:
         # Validate even cache hits; an invalid source must never be published.
         assert_pg_text_safe(text)
         requested = 0
