@@ -83,7 +83,7 @@ def _seed_accepted(store, *, memory_id: str, project: str, title: str, summary: 
 
 
 # =============================================================================
-# Challenge 1: Exhaustive Public Surface Isolation (All 32 Admin Tools)
+# Challenge 1: Exhaustive Public Surface Isolation (All 34 Admin Tools)
 # =============================================================================
 
 class TestPublicSurfaceIsolation:
@@ -183,7 +183,7 @@ class TestAdminSurfaceAuthentication:
         assert resp["error"]["code"] == -32000
         assert "unauthorized" in resp["error"]["message"]
 
-    def test_admin_surface_authorized_lists_all_32_tools(self, tmp_path: Path):
+    def test_admin_surface_authorized_lists_all_34_tools(self, tmp_path: Path):
         service = _create_test_service(tmp_path)
         resp = handle_jsonrpc_message(
             {"jsonrpc": "2.0", "id": 20, "method": "tools/list"},
@@ -196,7 +196,7 @@ class TestAdminSurfaceAuthentication:
         tools = resp["result"]["tools"]
         tool_names = {t["name"] for t in tools}
         assert tool_names == ADMIN_TOOL_NAMES
-        assert len(tools) == 32
+        assert len(tools) == 34
 
 
 # =============================================================================

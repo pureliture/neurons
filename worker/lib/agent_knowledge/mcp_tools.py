@@ -32,6 +32,8 @@ BRAIN_REVIEW_PROPOSALS_TOOL_NAME = "brain_review_proposals"
 # Brain Steward — agent-facing, proposal-only memory management surface.
 MEMORY_AUTHORITY_PACK_READ_TOOL_NAME = "memory_authority_pack_read"
 MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME = "memory_review_queue_list"
+MEMORY_REVIEW_BUNDLE_READ_TOOL_NAME = "memory_review_bundle_read"
+MEMORY_REVIEW_BUNDLE_COMMIT_TOOL_NAME = "memory_review_bundle_commit"
 MEMORY_CANDIDATE_CREATE_TOOL_NAME = "memory_candidate_create"
 MEMORY_STALE_MARK_TOOL_NAME = "memory_stale_mark"
 MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME = "memory_supersede_propose"
@@ -47,6 +49,7 @@ STEWARD_RESTRICTED_TOOL_NAMES = (
     MEMORY_CANDIDATE_AUTO_ACCEPT_TOOL_NAME,
     MEMORY_SUPERSEDE_COMMIT_TOOL_NAME,
     MEMORY_STALE_COMMIT_TOOL_NAME,
+    MEMORY_REVIEW_BUNDLE_COMMIT_TOOL_NAME,
 )
 
 PUBLIC_AGENT_TOOL_NAMES = frozenset({
@@ -80,6 +83,8 @@ ADMIN_TOOL_NAMES = frozenset({
     BRAIN_REVIEW_PROPOSALS_TOOL_NAME,
     MEMORY_AUTHORITY_PACK_READ_TOOL_NAME,
     MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME,
+    MEMORY_REVIEW_BUNDLE_READ_TOOL_NAME,
+    MEMORY_REVIEW_BUNDLE_COMMIT_TOOL_NAME,
     MEMORY_STALE_MARK_TOOL_NAME,
     MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME,
     MEMORY_CANDIDATE_APPROVE_TOOL_NAME,
@@ -134,6 +139,8 @@ _DISPATCH_OWNER_BY_TOOL_NAME = {
     BRAIN_REVIEW_PROPOSALS_TOOL_NAME: "jsonrpc_brain",
     MEMORY_AUTHORITY_PACK_READ_TOOL_NAME: "brain_steward",
     MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME: "brain_steward",
+    MEMORY_REVIEW_BUNDLE_READ_TOOL_NAME: "brain_steward",
+    MEMORY_REVIEW_BUNDLE_COMMIT_TOOL_NAME: "brain_steward_restricted",
     MEMORY_CANDIDATE_CREATE_TOOL_NAME: "brain_steward",
     MEMORY_STALE_MARK_TOOL_NAME: "brain_steward",
     MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME: "brain_steward",
@@ -163,6 +170,22 @@ _STEWARD_SOURCE_SPAN_PROPERTIES = {
     "governance_tier": {"type": "string", "enum": ["low", "medium", "high"]},
 }
 _STEWARD_SOURCE_SPAN_REQUIRED = ["card_type", "project", "provider", "typed_payload", "content_hash", "source_ref", "span_ref"]
+
+# Opaque identities are exact, including rejecting trailing newlines rather than trimming.
+_STEWARD_REVIEW_BUNDLE_IDENTITY_PATTERN = r"^\S(?:[\s\S]*\S)?(?![\s\S])"
+_STEWARD_REVIEW_BUNDLE_PROPERTIES = {
+    "project": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": _STEWARD_REVIEW_BUNDLE_IDENTITY_PATTERN},
+    "brain_id": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": _STEWARD_REVIEW_BUNDLE_IDENTITY_PATTERN},
+    "scope": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": _STEWARD_REVIEW_BUNDLE_IDENTITY_PATTERN},
+    "member_ids": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 20,
+        "uniqueItems": True,
+        "items": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": _STEWARD_REVIEW_BUNDLE_IDENTITY_PATTERN},
+    },
+}
+_STEWARD_REVIEW_BUNDLE_REQUIRED = ["project", "brain_id", "scope", "member_ids"]
 
 # 제안 actor(예: hermes) 식별 라벨. card subject 의 provider 와는 다른 축이며 advisory 다.
 # read consumer 와 동일 vocabulary 로 제약해 임의 라벨/누설을 막는다.
@@ -891,6 +914,35 @@ def list_admin_tools() -> list[dict]:
                     "repository": {"type": "string"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
                 },
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": MEMORY_REVIEW_BUNDLE_READ_TOOL_NAME,
+            "description": "[steward/read] 명시한 project/brain_id/scope와 1..20개 member_ids의 맥락 검토 묶음을 읽는다. 승인이나 권한 변경은 수행하지 않는다.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {**_STEWARD_REVIEW_BUNDLE_PROPERTIES},
+                "required": [*_STEWARD_REVIEW_BUNDLE_REQUIRED],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": MEMORY_REVIEW_BUNDLE_COMMIT_TOOL_NAME,
+            "description": "[steward/restricted] 검토 묶음의 snapshot_token과 명시한 member_ids를 확인한 뒤 approve/reject 결정을 일괄 확정한다. 기본 권한에서는 거부되며 자동수락은 수행하지 않는다.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    **_STEWARD_REVIEW_BUNDLE_PROPERTIES,
+                    "snapshot_token": {"type": "string", "minLength": 1, "maxLength": 8192, "pattern": r"\S"},
+                    "action": {"type": "string", "enum": ["approve", "reject"]},
+                    "actor": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": _STEWARD_REVIEW_BUNDLE_IDENTITY_PATTERN},
+                    "decision_id": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": _STEWARD_REVIEW_BUNDLE_IDENTITY_PATTERN},
+                    "reason": {"type": "string", "maxLength": 2000, "default": ""},
+                },
+                "required": [*_STEWARD_REVIEW_BUNDLE_REQUIRED, "snapshot_token", "action", "actor", "decision_id"],
+                "if": {"properties": {"action": {"const": "reject"}}, "required": ["action"]},
+                "then": {"required": ["reason"], "properties": {"reason": {"minLength": 1, "pattern": r"\S"}}},
                 "additionalProperties": False,
             },
         },

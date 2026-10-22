@@ -75,6 +75,22 @@ ALTER TABLE steward_card_decisions ADD COLUMN IF NOT EXISTS result_card JSONB;
 ALTER TABLE steward_card_decisions ADD COLUMN IF NOT EXISTS result_target JSONB;
 CREATE INDEX IF NOT EXISTS idx_steward_card_decisions_memory_id ON steward_card_decisions(memory_id);
 
+-- 서명된 인간 검토 묶음의 불변 결과. 기존 단건 audit/outbox 의미는 바꾸지 않는다.
+-- 전체 안전 응답(result)은 action/actor/reason 등 service의 검증된 메타데이터도 보존한다.
+-- IF NOT EXISTS로 기존 데이터 손실 없이 반복 적용할 수 있는 추가 테이블이다.
+CREATE TABLE IF NOT EXISTS steward_bundle_decisions (
+    decision_id TEXT PRIMARY KEY,
+    request_fingerprint TEXT NOT NULL,
+    project TEXT NOT NULL,
+    brain_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    member_ids JSONB NOT NULL CHECK (jsonb_typeof(member_ids) = 'array'),
+    result JSONB NOT NULL CHECK (jsonb_typeof(result) = 'object'),
+    decided_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_steward_bundle_decisions_scope
+    ON steward_bundle_decisions(project, brain_id, scope, decided_at, decision_id);
+
 -- Indexes for memory_cards
 CREATE INDEX IF NOT EXISTS idx_memory_cards_active 
     ON memory_cards(project, authorization_status, currentness);

@@ -10,6 +10,7 @@ from agent_knowledge.mcp_tools import (
     MEMORY_CANDIDATE_APPROVE_TOOL_NAME,
     MEMORY_CANDIDATE_AUTO_ACCEPT_TOOL_NAME,
     MEMORY_CANDIDATE_REJECT_TOOL_NAME,
+    MEMORY_REVIEW_BUNDLE_COMMIT_TOOL_NAME,
     MEMORY_STALE_COMMIT_TOOL_NAME,
     MEMORY_SUPERSEDE_COMMIT_TOOL_NAME,
     STEWARD_RESTRICTED_TOOL_NAMES,
@@ -43,6 +44,17 @@ _RESTRICTED_TOOL_ARGS = {
         "proposal_memory_id": "proposal-stale-id",
         "approved_by": "unit-test",
         "decision_id": "decision-stale",
+    },
+    MEMORY_REVIEW_BUNDLE_COMMIT_TOOL_NAME: {
+        "project": "project-alpha",
+        "brain_id": "/project/project-alpha",
+        "scope": "project",
+        "member_ids": ["member-two", "member-one"],
+        "snapshot_token": "opaque-snapshot",
+        "action": "approve",
+        "actor": "unit-test",
+        "decision_id": "decision-bundle",
+        "reason": "",
     },
 }
 
@@ -121,6 +133,9 @@ class _FakeSteward:
 
     def stale_commit(self, **kwargs: str) -> dict:
         return self._deny_or_result(MEMORY_STALE_COMMIT_TOOL_NAME, kwargs)
+
+    def review_bundle_commit(self, **kwargs: object) -> dict:
+        return self._deny_or_result(MEMORY_REVIEW_BUNDLE_COMMIT_TOOL_NAME, kwargs)
 
 
 class _FakeService:

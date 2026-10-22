@@ -48,6 +48,8 @@ from .mcp_tools import (
     MEMORY_CANDIDATE_AUTO_ACCEPT_TOOL_NAME,
     MEMORY_CANDIDATE_CREATE_TOOL_NAME,
     MEMORY_CANDIDATE_REJECT_TOOL_NAME,
+    MEMORY_REVIEW_BUNDLE_COMMIT_TOOL_NAME,
+    MEMORY_REVIEW_BUNDLE_READ_TOOL_NAME,
     MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME,
     MEMORY_STALE_COMMIT_TOOL_NAME,
     MEMORY_STALE_MARK_TOOL_NAME,
@@ -74,6 +76,7 @@ _STEWARD_TOOL_NAMES = frozenset(
     {
         MEMORY_AUTHORITY_PACK_READ_TOOL_NAME,
         MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME,
+        MEMORY_REVIEW_BUNDLE_READ_TOOL_NAME,
         MEMORY_CANDIDATE_CREATE_TOOL_NAME,
         MEMORY_STALE_MARK_TOOL_NAME,
         MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME,
@@ -1076,6 +1079,7 @@ def _steward_read_proposal_dispatch_registry() -> dict[str, StewardReadProposalD
     dispatches: tuple[tuple[str, StewardReadProposalDispatch], ...] = (
         (MEMORY_AUTHORITY_PACK_READ_TOOL_NAME, _dispatch_steward_authority_pack_read_tool),
         (MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME, _dispatch_steward_review_queue_list_tool),
+        (MEMORY_REVIEW_BUNDLE_READ_TOOL_NAME, _dispatch_steward_review_bundle_read_tool),
         (MEMORY_CANDIDATE_CREATE_TOOL_NAME, _dispatch_steward_candidate_create_tool),
         (MEMORY_STALE_MARK_TOOL_NAME, _dispatch_steward_stale_mark_tool),
         (MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME, _dispatch_steward_supersede_propose_tool),
@@ -1119,6 +1123,33 @@ def _dispatch_steward_review_queue_list_tool(tool_name: str, arguments: dict, st
         project=_project_arg(arguments),
         limit=_bounded_limit(arguments.get("limit"), default=20, maximum=100),
     )
+
+
+def _dispatch_steward_review_bundle_read_tool(tool_name: str, arguments: dict, steward: object) -> dict:
+    # HTTP disables SDK schema validation; enforce the wire contract before the service call.
+    if not isinstance(arguments, dict) or set(arguments) != {"project", "brain_id", "scope", "member_ids"}:
+        raise ValueError(f"{tool_name} requires the exact scope and member fields")
+    return steward.review_bundle_read(
+        project=_require_bounded_non_empty_string(arguments, "project", tool_name=tool_name, maximum=64, exact=True),
+        brain_id=_require_bounded_non_empty_string(arguments, "brain_id", tool_name=tool_name, maximum=256, exact=True),
+        scope=_require_bounded_non_empty_string(arguments, "scope", tool_name=tool_name, maximum=64, exact=True),
+        member_ids=_review_bundle_member_ids(arguments, tool_name=tool_name),
+    )
+
+
+def _review_bundle_member_ids(arguments: dict, *, tool_name: str) -> list[str]:
+    member_ids = arguments.get("member_ids")
+    if not isinstance(member_ids, list) or not 1 <= len(member_ids) <= 20:
+        raise ValueError(f"{tool_name} requires 1..20 member_ids")
+    if any(
+        not isinstance(member_id, str) or not member_id.strip()
+        or member_id != member_id.strip() or len(member_id) > 64
+        for member_id in member_ids
+    ):
+        raise ValueError(f"{tool_name} member_ids must be non-empty strings of at most 64 characters")
+    if len(set(member_ids)) != len(member_ids):
+        raise ValueError(f"{tool_name} requires unique member_ids")
+    return list(member_ids)
 
 
 def _dispatch_steward_candidate_create_tool(tool_name: str, arguments: dict, steward: object) -> dict:
@@ -1177,6 +1208,7 @@ def _steward_restricted_dispatch_registry() -> dict[str, StewardRestrictedDispat
         (MEMORY_CANDIDATE_AUTO_ACCEPT_TOOL_NAME, _dispatch_steward_candidate_auto_accept_tool),
         (MEMORY_SUPERSEDE_COMMIT_TOOL_NAME, _dispatch_steward_supersede_commit_tool),
         (MEMORY_STALE_COMMIT_TOOL_NAME, _dispatch_steward_stale_commit_tool),
+        (MEMORY_REVIEW_BUNDLE_COMMIT_TOOL_NAME, _dispatch_steward_review_bundle_commit_tool),
     )
     return dict(dispatches)
 
@@ -1251,6 +1283,43 @@ def _dispatch_steward_stale_commit_tool(tool_name: str, arguments: dict, steward
         approved_by=_require_non_empty_string(arguments, "approved_by", tool_name=tool_name),
         decision_id=_require_non_empty_string(arguments, "decision_id", tool_name=tool_name),
     )
+
+
+def _dispatch_steward_review_bundle_commit_tool(tool_name: str, arguments: dict, steward: object) -> dict:
+    required_fields = {
+        "project", "brain_id", "scope", "member_ids", "snapshot_token", "action", "actor", "decision_id",
+    }
+    if (
+        not isinstance(arguments, dict) or not required_fields <= set(arguments)
+        or set(arguments) - required_fields - {"reason"}
+    ):
+        raise ValueError(f"{tool_name} requires the exact scope, member and decision fields")
+    action = _require_non_empty_string(arguments, "action", tool_name=tool_name)
+    if action not in {"approve", "reject"}:
+        raise ValueError(f"{tool_name} action must be approve or reject")
+    reason = arguments.get("reason", "")
+    if not isinstance(reason, str) or len(reason) > 2000 or (action == "reject" and not reason.strip()):
+        raise ValueError(f"{tool_name} reason must be at most 2000 characters and non-empty for reject")
+    return steward.review_bundle_commit(
+        project=_require_bounded_non_empty_string(arguments, "project", tool_name=tool_name, maximum=64, exact=True),
+        brain_id=_require_bounded_non_empty_string(arguments, "brain_id", tool_name=tool_name, maximum=256, exact=True),
+        scope=_require_bounded_non_empty_string(arguments, "scope", tool_name=tool_name, maximum=64, exact=True),
+        member_ids=_review_bundle_member_ids(arguments, tool_name=tool_name),
+        snapshot_token=_require_bounded_non_empty_string(arguments, "snapshot_token", tool_name=tool_name, maximum=8192),
+        action=action,
+        actor=_require_bounded_non_empty_string(arguments, "actor", tool_name=tool_name, maximum=128, exact=True),
+        decision_id=_require_bounded_non_empty_string(arguments, "decision_id", tool_name=tool_name, maximum=256, exact=True),
+        reason=reason,
+    )
+
+
+def _require_bounded_non_empty_string(
+    arguments: dict, key: str, *, tool_name: str, maximum: int, exact: bool = False,
+) -> str:
+    value = _require_non_empty_string(arguments, key, tool_name=tool_name)
+    if len(value) > maximum or (exact and value != value.strip()):
+        raise ValueError(f"{tool_name} {key} must be an exact bounded string")
+    return value
 
 
 def _bounded_limit(value, *, default: int, maximum: int) -> int:
