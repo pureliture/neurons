@@ -57,7 +57,7 @@ _RULES = (
             {
                 "index_client",
                 "mcp_server",
-                "agent_knowledge.index_client",
+                "agent_knowledge.legacy.index_client",
                 "agent_knowledge.mcp_server",
             }
         ),

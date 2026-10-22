@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..ledger import Ledger
-from ..index_client import RetiredIndexBridgeHttpClient
+from ..legacy.index_client import RetiredIndexBridgeHttpClient
 from .transcript_session_gc import _doc_is_active_summary
 
 TRANSCRIPT_BACKFILL_SCHEMA_VERSION = "agent_knowledge_transcript_backfill.v1"

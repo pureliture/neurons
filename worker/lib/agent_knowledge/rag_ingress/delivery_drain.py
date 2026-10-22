@@ -19,7 +19,7 @@ from __future__ import annotations
 import time
 from datetime import datetime, timezone
 
-from .delivery_backend import PAYLOAD_OK, resolve_delivery_payload
+from .delivery_payload_gate import PAYLOAD_OK, resolve_delivery_payload
 from .delivery_executor import DeliveryBackend, DeliveryExecutor
 from .state_db import RAGIngressStateDB
 

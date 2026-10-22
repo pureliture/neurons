@@ -1,8 +1,8 @@
-"""CouchDB RetiredIndexBridgeAdapter: live ingress sink over the CouchDB source plane.
+"""CouchDB IndexAdapter: live ingress sink over the CouchDB source plane.
 
-This module implements :class:`RetiredIndexBridgeAdapter` (the Protocol used by
+This module implements :class:`IndexAdapter` (the Protocol used by
 ``shadow_worker.process_payload``) so the shadow worker can write live ingress
-payloads directly to CouchDB instead of RetiredIndexBridge.
+payloads directly to CouchDB instead of the retired external index bridge.
 
 Relationship to ``CouchDBDeliveryBackend``
 ------------------------------------------
@@ -10,7 +10,7 @@ Relationship to ``CouchDBDeliveryBackend``
 **DeliveryBackend** protocol: it receives a :class:`.DeliveryJobView` and reads
 the raw payload from ``RAGIngressStateDB``.
 
-:class:`CouchDBRetiredIndexBridgeAdapter` speaks the **RetiredIndexBridgeAdapter** protocol:
+:class:`CouchDBIndexAdapter` speaks the **IndexAdapter** protocol:
 it receives an already-built :class:`.RagReadyDocument` directly from
 ``process_payload`` (which has already applied ``apply_server_redaction`` +
 ``public_ingress_leak_violations`` upstream).
@@ -19,7 +19,7 @@ The shared transform that builds the 6 CouchDB doc families from domain objects
 is factored into the module-level helper :func:`build_couchdb_docs_from_rag_document`,
 which is reused by both classes so the CouchDB doc layout stays byte-identical
 whether the ingress path goes through the DeliveryBackend abstraction or the
-RetiredIndexBridgeAdapter abstraction.
+IndexAdapter abstraction.
 
 Fail-closed invariants
 -----------------------
@@ -29,8 +29,8 @@ Fail-closed invariants
 - ``build_conversation_chunk_document`` calls ``assert_source_text_clean``
   internally as a defence-in-depth assertion.  We do NOT bypass it.
 - Any :class:`.CouchDBError` or unexpected exception raises to the caller so
-  ``process_payload`` records a real (retryable) failure — consistent with the
-  RetiredIndexBridge path.
+  ``process_payload`` records a real (retryable) failure — consistent with every
+  other backend path.
 
 doc_ref / dataset_ref conventions (matches CouchDBDeliveryBackend)
 ------------------------------------------------------------------
@@ -83,7 +83,7 @@ from ..couchdb_source.source_store import (
     payload_hash,
 )
 from ..session_memory.transcript_model import REDACTION_VERSION, TranscriptChunk, TranscriptSession
-from .retired_index_bridge import (
+from .index_adapter import (
     BackendDocumentHandle,
     BackendStatusDetail,
     BackendSubmitResult,
@@ -298,11 +298,11 @@ def build_couchdb_docs_from_rag_document(document: RagReadyDocument) -> tuple[
 
 
 # ---------------------------------------------------------------------------
-# CouchDBRetiredIndexBridgeAdapter
+# CouchDBIndexAdapter
 # ---------------------------------------------------------------------------
 
-class CouchDBRetiredIndexBridgeAdapter:
-    """``RetiredIndexBridgeAdapter`` protocol implementation over a
+class CouchDBIndexAdapter:
+    """``IndexAdapter`` protocol implementation over a
     :class:`.CouchDBSourceStore`.
 
     Writes a live ingress :class:`.RagReadyDocument` into the CouchDB source
@@ -319,7 +319,7 @@ class CouchDBRetiredIndexBridgeAdapter:
         self._store = store
 
     # ------------------------------------------------------------------
-    # RetiredIndexBridgeAdapter Protocol
+    # IndexAdapter Protocol
     # ------------------------------------------------------------------
 
     def submit_document(
@@ -591,17 +591,17 @@ class CouchDBRetiredIndexBridgeAdapter:
 # Factory
 # ---------------------------------------------------------------------------
 
-def build_couchdb_retired_index_bridge(
+def build_couchdb_index_adapter(
     *,
     couchdb_url: str,
     couchdb_user: str,
     couchdb_password: str,
     couchdb_db: str,
-) -> CouchDBRetiredIndexBridgeAdapter:
+) -> CouchDBIndexAdapter:
     """Factory used by shadow_worker.main() env-switch wiring.
 
     Kept in this module so shadow_worker does not import couchdb_http_store
-    directly (a retired-index-bridge-free boundary when ``INGRESS_DELIVERY_BACKEND=couchdb``).
+    directly (a boundary that keeps the CouchDB HTTP store out of the worker's import surface).
     """
     import base64
 
@@ -613,11 +613,11 @@ def build_couchdb_retired_index_bridge(
         db=couchdb_db,
         auth_header=f"Basic {credentials}",
     )
-    return CouchDBRetiredIndexBridgeAdapter(store=store)
+    return CouchDBIndexAdapter(store=store)
 
 
 __all__ = [
-    "CouchDBRetiredIndexBridgeAdapter",
+    "CouchDBIndexAdapter",
     "build_couchdb_docs_from_rag_document",
-    "build_couchdb_retired_index_bridge",
+    "build_couchdb_index_adapter",
 ]

@@ -72,15 +72,19 @@ def test_entrypoint_positive_int_helper_uses_base_10_values() -> None:
     assert result.stdout.splitlines() == ["10", "60", "60", "60"]
 
 
-def test_entrypoint_daily_jobs_use_due_window_not_exact_minute() -> None:
+def test_entrypoint_has_no_retired_bridge_daily_lanes() -> None:
+    """The retired external index bridge gc/backfill lanes are gone.
+
+    Those lanes auto-approved live hard-deletes against a retired backend, so
+    they must not come back with the scheduler.
+    """
     script = Path("deploy/session-memory/entrypoint.sh").read_text(encoding="utf-8")
 
-    assert 'read -r now hour minute day <<< "$(date -u "+%s %H %M %Y%m%d")"' in script
-    assert "minute_of_day=$((10#$hour * 60 + 10#$minute))" in script
-    assert '[ "$hm" = "04:30" ]' not in script
-    assert '[ "$hm" = "02:15" ]' not in script
-    assert '[ "$minute_of_day" -ge $((4 * 60 + 30)) ]' in script
-    assert '[ "$minute_of_day" -ge $((2 * 60 + 15)) ]' in script
+    assert "run_scheduled_gc" not in script
+    assert "run_scheduled_backfill" not in script
+    assert "gc-run.py" not in script
+    assert "backfill.py" not in script
+    assert "RETIRED_INDEX_BRIDGE" not in script
 
 
 def test_entrypoint_daily_job_stamps_survive_scheduler_restart(tmp_path: Path) -> None:
@@ -110,41 +114,11 @@ def test_entrypoint_daily_job_stamps_survive_scheduler_restart(tmp_path: Path) -
     assert result.stdout.splitlines() == ["20260705"]
 
 
-def test_entrypoint_daily_scheduler_uses_persisted_stamps() -> None:
+def test_entrypoint_scheduler_runs_only_the_build_lane() -> None:
     script = Path("deploy/session-memory/entrypoint.sh").read_text(encoding="utf-8")
 
     assert "cd /app || exit 1" in script
     assert "[entrypoint] scheduler started" in script
-    assert 'last_bf_stamp="state/session-memory-backfill-last-day"' in script
-    assert 'last_gc_stamp="state/session-memory-gc-last-day"' in script
-    assert 'last_bf=$(read_day_stamp "$last_bf_stamp")' in script
-    assert 'last_gc=$(read_day_stamp "$last_gc_stamp")' in script
-    assert "if run_scheduled_backfill; then" in script
-    assert "if run_scheduled_gc; then" in script
-    assert 'write_day_stamp "$last_bf_stamp" "$day"' in script
-    assert 'write_day_stamp "$last_gc_stamp" "$day"' in script
-
-
-def test_entrypoint_scheduled_retired_bridge_jobs_skip_without_token() -> None:
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            "\n".join(
-                [
-                    "set -euo pipefail",
-                    "source deploy/session-memory/entrypoint.sh",
-                    "unset RETIRED_INDEX_BRIDGE_API_KEY",
-                    "run_scheduled_backfill",
-                    "run_scheduled_gc",
-                ]
-            ),
-        ],
-        cwd=Path(__file__).resolve().parents[1],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-    assert "backfill skipped: RETIRED_INDEX_BRIDGE_API_KEY not set" in result.stdout
-    assert "gc skipped: RETIRED_INDEX_BRIDGE_API_KEY not set" in result.stdout
+    assert "run_build() { /app/deploy/build-once.sh; }" in script
+    assert 'if [ $((now - last_build)) -ge "$build_interval_seconds" ]; then' in script
+    assert "run_build || echo" in script

@@ -11,8 +11,10 @@ G2부터 라이브 delivery는 Java `ingress-worker`가 아니라 이 Python wor
 command/lease state를 사용하고 CouchDB source store로 전달한다. 이 경로에는
 `COUCHDB_URL`, `COUCHDB_USER`, `COUCHDB_PASSWORD`, `COUCHDB_DB`, 그리고
 0700 private parent 아래의 `INGEST_STATE_DB_PATH`가 필요하다. 기본값은 여전히
-`SHADOW_DELIVER=0`이며, `retired_index_bridge` backend는 별도 legacy 환경변수를
-쓴다. 이 문서는 source/CI 계약만 설명하며 production activation 증거는 아니다.
+`SHADOW_DELIVER=0`이며, `couchdb`가 유일한 delivery sink다. 은퇴한 external
+index bridge는 runtime에서 사라졌으므로 다른 backend option은 없다(퇴역 기록:
+`docs/retired/ragflow-retirement.md`). 이 문서는 source/CI 계약만 설명하며
+production activation 증거는 아니다.
 
 `INGRESS_DELIVERY_BACKEND=couchdb`에서만 `MIRROR_DUAL_WRITE=1`은 Qdrant mirror를
 선택적으로 구성한다. mirror는 완전히 server-redacted 되고 leak gate를 통과한
@@ -49,23 +51,23 @@ PG projector는 UTF-8 본문이 8KiB를 넘으면 원문을 보존한 채 청크
 ## 무엇을 가져왔고(vendored) 무엇을 뺐나
 
 라이브 worker가 실제로 실행하는 경로(`shadow_worker.run_consume` →
-`process_payload` → normalize → server full redaction → leak check → RetiredIndexBridge
+`process_payload` → normalize → server full redaction → leak check → backend
 submit)와 그 의존 폐포만 가져왔다.
 
 vendored (`lib/agent_knowledge/`):
 - `ledger.py` — server/brain-side SQLite state authority for knowledge item
-  lifecycle, transcript/session-memory state, memory cards, RetiredIndexBridge projection
+  lifecycle, transcript/session-memory state, memory cards, index projection
   audit, scheduler/GC evidence, and legacy-retirement gates. This is not a
   dendrite/client dependency.
 - `rag_ingress/shadow_worker.py` — NATS JetStream pull-consume worker 엔트리포인트
 - `rag_ingress/server_runtime.py` — `apply_server_redaction` / `normalize_ingest_job_payload` / `document_from_ingress_payload` / `public_ingress_leak_violations`
-- `rag_ingress/retired_index_bridge.py` — `RetiredIndexBridgeRetiredIndexBridgeAdapter` (upload/metadata/parse + `find_by_natural_key`)
+- `rag_ingress/index_adapter.py` — backend-neutral `IndexAdapter` 계약 (`IndexStatus`, natural-key 규칙). concrete adapter는 `couchdb_index_adapter.py` / `qdrant_docling_mirror.py`가 구현한다.
 - `rag_ingress/rag_ready_document.py` — backend-neutral 문서 모델 + content_hash/idempotency_key 빌더
 - `rag_ingress/idempotency.py` / `state_db.py` / `domain_state.py` / `ingress_journal.py`
   — server-owned durable ingress state primitives and byte-faithful replay
   journal. These are now owned here even when the live worker still uses the
   smaller `shadow_ingest_log` path.
-- `rag_ingress/delivery_executor.py` / `delivery_backend.py` /
+- `rag_ingress/delivery_executor.py` / `delivery_payload_gate.py` /
   `delivery_reconcile.py` / `delivery_drain.py` / `backfill.py` /
   `backfill_apply.py` / `state_sink.py` — server delivery/backfill primitives
   plus the state-DB ingress accept seam. `DeliveryExecutor` is wired by the

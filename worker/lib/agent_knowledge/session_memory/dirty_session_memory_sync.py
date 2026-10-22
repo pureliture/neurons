@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Callable
 
 from ..ledger import Ledger
-from ..index_client import RetiredIndexBridgeHttpClient
+from ..legacy.index_client import RetiredIndexBridgeHttpClient
 from .memory_regeneration import (
     LedgerTranscriptMemorySource,
     RetiredIndexBridgeTranscriptMemorySource,

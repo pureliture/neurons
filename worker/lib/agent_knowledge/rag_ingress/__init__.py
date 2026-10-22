@@ -2,17 +2,18 @@
 
 This package is the backend-neutral seam between *source adapters* (which
 normalise arbitrary source files into ``text/markdown + metadata`` RAG-ready
-documents) and *document index backends* (RetiredIndexBridge today, other vector/search
+documents) and *document index backends* (CouchDB today, other vector/search
 stores later).
 
 Design boundary (see
 ``docs/architecture/2026-06-04-rag-ready-document-ingress-bus.md``):
 
 - The generic layer here MUST NOT name a concrete backend. No ``index_*``
-  identifiers, no RetiredIndexBridge ``DONE/FAIL/RUNNING`` status vocabulary, no physical
+  identifiers, no backend-specific status vocabulary, no physical
   dataset id. ``targetProfile`` is a *logical* profile, not a physical dataset.
-- RetiredIndexBridge upload/parse/status semantics live entirely inside
-  :mod:`agent_knowledge.rag_ingress.retired_index_bridge` (the RetiredIndexBridge adapter).
+- The adapter contract lives in :mod:`agent_knowledge.rag_ingress.index_adapter`;
+  every backend-specific upload/parse/status semantic lives inside a concrete
+  adapter (``couchdb_index_adapter.py``, ``qdrant_docling_mirror.py``).
 - This is a RAG-ready document ingress bus, NOT a Kafka-like general event bus.
 """
 

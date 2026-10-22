@@ -41,7 +41,7 @@ COUCHDB_SOURCE_OWNER = "couchdb-transcript-source"
 # RetiredIndexBridge keeps only the derived recall surface after cutover. ``transcript-memory``
 # is retired: never a CouchDB-source doc type, never a post-cutover projection
 # target. These two constants encode the migration's final-state invariant.
-RETIRED_INDEX_BRIDGE_RECALL_PROFILE = "session-memory"
+INDEX_RECALL_PROFILE = "session-memory"
 RETIRED_RETIRED_INDEX_BRIDGE_PROFILE = "transcript-memory"
 
 
@@ -383,9 +383,9 @@ def assert_index_target_allowed(target_profile: str) -> None:
         raise OwnershipViolation(
             "transcript-memory is retired and is not a valid RetiredIndexBridge projection target"
         )
-    if target_profile != RETIRED_INDEX_BRIDGE_RECALL_PROFILE:
+    if target_profile != INDEX_RECALL_PROFILE:
         raise OwnershipViolation(
-            f"RetiredIndexBridge projection target must be {RETIRED_INDEX_BRIDGE_RECALL_PROFILE!r}, got {target_profile!r}"
+            f"RetiredIndexBridge projection target must be {INDEX_RECALL_PROFILE!r}, got {target_profile!r}"
         )
 
 
@@ -701,7 +701,7 @@ def build_projection_state_document(
     provider: str,
     project: str,
     projection_status: str,
-    target_profile: str = RETIRED_INDEX_BRIDGE_RECALL_PROFILE,
+    target_profile: str = INDEX_RECALL_PROFILE,
     session_memory_knowledge_id: str = "",
     active_content_hash: str = "",
     failure_reason: str = "",
@@ -799,7 +799,7 @@ __all__ = [
     "COUCHDB_SOURCE_SCHEMA_VERSION",
     "COUCHDB_SOURCE_OWNER",
     "COUCHDB_OWNED_DOC_TYPES",
-    "RETIRED_INDEX_BRIDGE_RECALL_PROFILE",
+    "INDEX_RECALL_PROFILE",
     "RETIRED_RETIRED_INDEX_BRIDGE_PROFILE",
     "SourceDocType",
     "ProjectionStatus",

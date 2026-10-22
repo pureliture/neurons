@@ -11,7 +11,7 @@ unresolved hits are dropped.
 from __future__ import annotations
 
 from agent_knowledge.ledger import Ledger
-from agent_knowledge.rag_ingress.retired_index_bridge import IndexStatus
+from agent_knowledge.rag_ingress.index_adapter import IndexStatus
 from agent_knowledge.rag_ingress.qdrant_authority_join import (
     LedgerContentHashAuthorityResolver,
     join_mirror_hits_to_authority,

@@ -1,24 +1,5 @@
-x-retired-index-bridge-env: &retired-index-bridge-env
-  RETIRED_INDEX_BRIDGE_BASE_URL: ${RETIRED_INDEX_BRIDGE_BASE_URL:-}
-  RETIRED_INDEX_BRIDGE_API_KEY: ${RETIRED_INDEX_BRIDGE_API_KEY:-}
-  # Per-profile routing via env_profile_dataset_resolver. Keep all target
-  # profile dataset ids here so Java and Python workers share the same defaults.
-  RETIRED_INDEX_BRIDGE_TRANSCRIPT_MEMORY_DATASET_ID: ${RETIRED_INDEX_BRIDGE_TRANSCRIPT_MEMORY_DATASET_ID:-}
-  RETIRED_INDEX_BRIDGE_SESSION_MEMORY_DATASET_ID: ${RETIRED_INDEX_BRIDGE_SESSION_MEMORY_DATASET_ID:-}
-  RETIRED_INDEX_BRIDGE_SESSION_SUMMARY_DATASET_ID: ${RETIRED_INDEX_BRIDGE_SESSION_SUMMARY_DATASET_ID:-}
-  RETIRED_INDEX_BRIDGE_PROJECT_MEMORY_DATASET_ID: ${RETIRED_INDEX_BRIDGE_PROJECT_MEMORY_DATASET_ID:-}
-  RETIRED_INDEX_BRIDGE_PROCEDURAL_MEMORY_DATASET_ID: ${RETIRED_INDEX_BRIDGE_PROCEDURAL_MEMORY_DATASET_ID:-}
-  RETIRED_INDEX_BRIDGE_TASK_SUMMARY_DATASET_ID: ${RETIRED_INDEX_BRIDGE_TASK_SUMMARY_DATASET_ID:-}
-  RETIRED_INDEX_BRIDGE_APPROVED_MEMORY_CARD_DATASET_ID: ${RETIRED_INDEX_BRIDGE_APPROVED_MEMORY_CARD_DATASET_ID:-}
-
 x-ingress-java-env: &ingress-java-env
-  <<: *retired-index-bridge-env
   RAG_INGRESS_NATS_URL: nats://nats-jetstream:4222
-  RETIRED_INDEX_BRIDGE_DELIVERY_ENABLED: ${RETIRED_INDEX_BRIDGE_DELIVERY_ENABLED:-false}
-  RETIRED_INDEX_BRIDGE_PRESSURE_RUNNING_THROTTLE_THRESHOLD: ${RETIRED_INDEX_BRIDGE_PRESSURE_RUNNING_THROTTLE_THRESHOLD:-20}
-  RETIRED_INDEX_BRIDGE_PRESSURE_UNSTART_THROTTLE_THRESHOLD: ${RETIRED_INDEX_BRIDGE_PRESSURE_UNSTART_THROTTLE_THRESHOLD:-5}
-  RETIRED_INDEX_BRIDGE_PRESSURE_RUNNING_CLOSED_THRESHOLD: ${RETIRED_INDEX_BRIDGE_PRESSURE_RUNNING_CLOSED_THRESHOLD:-100}
-  RETIRED_INDEX_BRIDGE_PRESSURE_UNSTART_CLOSED_THRESHOLD: ${RETIRED_INDEX_BRIDGE_PRESSURE_UNSTART_CLOSED_THRESHOLD:-25}
 
 x-llm-brain-worker-env: &llm-brain-worker-env
   COUCHDB_URL: http://llm-brain-couchdb:5984
@@ -117,7 +98,6 @@ services:
       org.opencontainers.image.revision: ${NEURONS_SOURCE_COMMIT:-0000000000000000000000000000000000000000}
       com.local.rag-ingress-queue.runtime: ubuntu-smoke
     environment:
-      <<: *retired-index-bridge-env
       RAG_INGRESS_NATS_URL: nats://nats-jetstream:4222
       # Live consume/deliver is OPT-IN so a bare `compose up` (this file is the
       # ubuntu-smoke project) stays safe: it defaults to the isolated shadow
@@ -131,10 +111,9 @@ services:
       SHADOW_DURABLE: ${RAG_INGRESS_DURABLE:-shadow_python_worker}
       ALLOW_LIVE_QUEUE: ${RAG_INGRESS_ALLOW_LIVE_QUEUE:-0}
       SHADOW_DELIVER: ${RAG_INGRESS_DELIVER:-0}
-      # RetiredIndexBridge stays the development/default rollback path. CouchDB
-      # is selected only by an explicit deployment env-file; this compose source
-      # never enables it by itself.
-      INGRESS_DELIVERY_BACKEND: ${INGRESS_DELIVERY_BACKEND-retired_index_bridge}
+      # CouchDB is the only delivery sink. The retired external index bridge is
+      # gone from the runtime, so there is no alternative backend option.
+      INGRESS_DELIVERY_BACKEND: ${INGRESS_DELIVERY_BACKEND-couchdb}
       COUCHDB_URL: ${COUCHDB_URL}
       COUCHDB_USER: ${COUCHDB_USER}
       COUCHDB_PASSWORD: ${COUCHDB_PASSWORD}
@@ -144,7 +123,6 @@ services:
       MAX_DELIVER: ${RAG_INGRESS_MAX_DELIVER:-100000}
       WORKER_FETCH_BATCH: ${RAG_INGRESS_WORKER_FETCH_BATCH:-1}
       WORKER_CONCURRENCY: ${RAG_INGRESS_WORKER_CONCURRENCY:-1}
-      NATURAL_KEY_BROAD_SCAN_PAGES: ${RAG_INGRESS_NATURAL_KEY_BROAD_SCAN_PAGES:-0}
       INGEST_STATE_DB_PATH: /var/lib/agent-knowledge/ingest-state/ingest-state.sqlite
       # Reuse the ingress-api's own pressure verdict (single source, fail-open).
       RAG_INGRESS_PRESSURE_URL: ${RAG_INGRESS_PRESSURE_URL:-http://ingress-api:8080/status}

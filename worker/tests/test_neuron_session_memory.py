@@ -232,7 +232,7 @@ def test_neuron_session_memory_build_dry_run_reads_shadow_log_without_ids_or_mut
 
 
 def test_neuron_session_memory_build_probe_meta_is_read_only(tmp_path, capsys, monkeypatch):
-    import agent_knowledge.index_client as index_client
+    import agent_knowledge.legacy.index_client as index_client
 
     db = _shadow_db(tmp_path)
     watermark = tmp_path / "state" / "watermark.txt"

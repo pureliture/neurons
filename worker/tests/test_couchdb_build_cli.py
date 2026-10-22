@@ -286,8 +286,8 @@ def _run_main(
         "COUCHDB_USER": "admin",
         "COUCHDB_PASSWORD": "secret",
         "COUCHDB_DB": "transcript_source",
-        "RETIRED_INDEX_BRIDGE_URL": "http://localhost:9380",
-        "RETIRED_INDEX_BRIDGE_API_KEY": "test-token",
+        "SESSION_MEMORY_PROJECTION_BACKEND": "qdrant",
+        "QDRANT_URL": "http://localhost:6333",
     }
     if extra_env:
         env.update(extra_env)
@@ -350,8 +350,8 @@ def _run(argv: list[str], store: InMemoryCouchDBSourceStore, *, projector=None, 
         "COUCHDB_USER": "admin",
         "COUCHDB_PASSWORD": "secret",
         "COUCHDB_DB": "transcript_source",
-        "RETIRED_INDEX_BRIDGE_URL": "http://localhost:9380",
-        "RETIRED_INDEX_BRIDGE_API_KEY": "test-token",
+        "SESSION_MEMORY_PROJECTION_BACKEND": "qdrant",
+        "QDRANT_URL": "http://localhost:6333",
     }
     if extra_env:
         env.update(extra_env)
@@ -395,11 +395,12 @@ def _run(argv: list[str], store: InMemoryCouchDBSourceStore, *, projector=None, 
         stack.enter_context(patch.dict(os.environ, env))
         stack.enter_context(patch("sys.stdout", buf))
         if projector is not None:
-            # Patch at the source module (index_projector), not in build_cli which imports it
+            # Patch the qdrant projector factory: it is the only live projection
+            # target now that the retired external index bridge is gone.
             stack.enter_context(
                 patch(
-                    "agent_knowledge.couchdb_source.index_projector.RetiredIndexBridgeSessionMemoryProjector",
-                    lambda **kw: projector,
+                    "agent_knowledge.couchdb_source.build_cli._build_qdrant_projector",
+                    lambda _environ: projector,
                 )
             )
         rc = main(argv)
@@ -1338,7 +1339,7 @@ class TestLiveRun:
         projector = RecordingSessionMemoryProjector()
         _run(argv, store, projector=projector)
 
-        assert projector.calls[0]["target_profile"] == dm.RETIRED_INDEX_BRIDGE_RECALL_PROFILE
+        assert projector.calls[0]["target_profile"] == dm.INDEX_RECALL_PROFILE
 
 
 class TestProjectorCleanup:

@@ -45,7 +45,6 @@ from .llm_brain_core.objects.runtime_readiness import (
     build_source_to_candidate_runtime_shadow_readiness_report,
 )
 from .memory_read_pipeline import AuthorizedMemoryReader, MemoryReadPipeline, MemorySearchQuery
-from .index_client import RetiredIndexBridgeHttpClient
 from .public_safe_util import ensure_public_safe, public_safe_text, require_sha256, sha256_text, short_hash
 from .permission_audit import run_permission_sensitive_audit_probe
 from .runtime_build_identity import (

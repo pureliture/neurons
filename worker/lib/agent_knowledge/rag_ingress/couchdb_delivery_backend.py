@@ -82,7 +82,7 @@ from ..couchdb_source.source_store import (
     payload_hash as source_payload_hash,
 )
 from ..session_memory.transcript_model import REDACTION_VERSION, TranscriptChunk, TranscriptSession
-from .delivery_backend import (
+from .delivery_payload_gate import (
     PAYLOAD_HASH_MISMATCH,
     PAYLOAD_MISSING,
     PAYLOAD_OK,

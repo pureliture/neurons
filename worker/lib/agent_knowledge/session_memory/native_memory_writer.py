@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from ..index_client import envelope_code, envelope_failed
+from ..legacy.index_client import envelope_code, envelope_failed
 from .memory_card import MAX_MEMORY_STATEMENT_CHARS
 from .native_memory_governance import governance_tier, mirror_prerequisite_block_reason
 from .native_memory_mirror import NativeMemoryMirrorStore, session_tag_for

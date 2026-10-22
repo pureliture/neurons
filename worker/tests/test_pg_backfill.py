@@ -14,7 +14,7 @@ import uuid
 import pytest
 
 from agent_knowledge.couchdb_source.document_model import (
-    RETIRED_INDEX_BRIDGE_RECALL_PROFILE,
+    INDEX_RECALL_PROFILE,
     OwnershipViolation,
     assert_index_target_allowed,
     sha256_hash,
@@ -114,7 +114,7 @@ def test_chunk_id_changes_with_different_session():
 
 def test_assert_index_target_allowed_passes_session_memory():
     # Must not raise for the canonical profile
-    assert_index_target_allowed(RETIRED_INDEX_BRIDGE_RECALL_PROFILE)
+    assert_index_target_allowed(INDEX_RECALL_PROFILE)
 
 
 def test_assert_index_target_allowed_rejects_transcript_memory():

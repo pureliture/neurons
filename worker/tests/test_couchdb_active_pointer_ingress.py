@@ -27,8 +27,8 @@ from agent_knowledge.rag_ingress.couchdb_delivery_backend import (
     CouchDBDeliveryBackend,
     _chunk_documents_match,
 )
-from agent_knowledge.rag_ingress.couchdb_retired_index_bridge import (
-    CouchDBRetiredIndexBridgeAdapter,
+from agent_knowledge.rag_ingress.couchdb_index_adapter import (
+    CouchDBIndexAdapter,
 )
 from agent_knowledge.rag_ingress.delivery_executor import (
     DeliveryExecutor,
@@ -560,7 +560,7 @@ def test_legacy_retired_bridge_repairs_initial_pointer_published_before_chunk_wr
         body="Distinct bridge source written after initial pointer publication.",
     )
     store = _PointerPublishBeforeLegacyChunkWriteStore()
-    adapter = CouchDBRetiredIndexBridgeAdapter(store=store)
+    adapter = CouchDBIndexAdapter(store=store)
 
     adapter.submit_document(document_from_ingress_payload(first))
     store.set_before_next_chunk_write(
@@ -590,7 +590,7 @@ def test_retired_index_bridge_rotates_active_pointer_for_distinct_chunk_not_dupl
         body="Second distinct bridge chunk.",
     )
     store = InMemoryCouchDBSourceStore()
-    adapter = CouchDBRetiredIndexBridgeAdapter(store=store)
+    adapter = CouchDBIndexAdapter(store=store)
 
     adapter.submit_document(document_from_ingress_payload(first))
     first_resolved = activate_source_revision(
@@ -674,7 +674,7 @@ def test_retired_bridge_retry_after_origin_drift_activates_current_successor() -
     store = _OriginDriftAtPointerCasStore(
         dm.conversation_chunk_doc_id(SESSION_ID_HASH, "first-chunk")
     )
-    adapter = CouchDBRetiredIndexBridgeAdapter(store=store)
+    adapter = CouchDBIndexAdapter(store=store)
 
     adapter.submit_document(document_from_ingress_payload(first))
     activate_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
@@ -739,7 +739,7 @@ def test_retired_index_bridge_duplicate_retry_repairs_active_currentness_after_c
         body="Second active bridge chunk.",
     )
     store = _FailOnceCoverageStore()
-    adapter = CouchDBRetiredIndexBridgeAdapter(store=store)
+    adapter = CouchDBIndexAdapter(store=store)
 
     adapter.submit_document(document_from_ingress_payload(first))
     initial = activate_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
@@ -1064,7 +1064,7 @@ def test_retired_index_bridge_reuses_exact_orphan_chunk_in_next_active_revision(
         body="Existing orphan bridge chunk.",
     )
     store = InMemoryCouchDBSourceStore()
-    adapter = CouchDBRetiredIndexBridgeAdapter(store=store)
+    adapter = CouchDBIndexAdapter(store=store)
     adapter.submit_document(document_from_ingress_payload(first))
     activate_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
     pointer_before = _active_pointer(store)
@@ -1092,7 +1092,7 @@ def test_retired_index_bridge_rejects_invalid_active_pointer_before_new_chunk_wr
         body="Second distinct bridge chunk.",
     )
     store = InMemoryCouchDBSourceStore()
-    adapter = CouchDBRetiredIndexBridgeAdapter(store=store)
+    adapter = CouchDBIndexAdapter(store=store)
     adapter.submit_document(document_from_ingress_payload(first))
     resolved = activate_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
     assert resolved.manifest_id is not None
@@ -1242,7 +1242,7 @@ def test_retired_bridge_replay_of_corrective_current_chunk_is_idempotent() -> No
         body="Corrective current source content.",
     )
     store = InMemoryCouchDBSourceStore()
-    adapter = CouchDBRetiredIndexBridgeAdapter(store=store)
+    adapter = CouchDBIndexAdapter(store=store)
 
     adapter.submit_document(document_from_ingress_payload(raw))
     activated, current_chunk = _activate_corrective_current_source(
@@ -1269,7 +1269,7 @@ def test_full_tool_evidence_generation_preserves_corrective_current_identity_for
         body="Corrective current source content.",
     )
     store = InMemoryCouchDBSourceStore()
-    adapter = CouchDBRetiredIndexBridgeAdapter(store=store)
+    adapter = CouchDBIndexAdapter(store=store)
 
     adapter.submit_document(document_from_ingress_payload(raw))
     full_generation = _full_generation_records()
@@ -1311,7 +1311,7 @@ def test_full_tool_evidence_generation_rejects_conflicting_corrective_current_br
         body="Original replay content.",
     )
     store = InMemoryCouchDBSourceStore()
-    adapter = CouchDBRetiredIndexBridgeAdapter(store=store)
+    adapter = CouchDBIndexAdapter(store=store)
 
     adapter.submit_document(document_from_ingress_payload(raw))
     full_generation = _full_generation_records()
@@ -1378,7 +1378,7 @@ def test_retired_bridge_rejects_mismatched_corrective_current_chunk() -> None:
         body="Original replay content.",
     )
     store = InMemoryCouchDBSourceStore()
-    adapter = CouchDBRetiredIndexBridgeAdapter(store=store)
+    adapter = CouchDBIndexAdapter(store=store)
 
     adapter.submit_document(document_from_ingress_payload(raw))
     _activate_corrective_current_source(

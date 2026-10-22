@@ -36,7 +36,7 @@
   <img src="https://img.shields.io/badge/Gradle-02303A?style=for-the-badge&logo=gradle&logoColor=white" alt="Gradle" />
   <img src="https://img.shields.io/badge/uv-Python-DE5FE9?style=for-the-badge&logo=astral&logoColor=white" alt="uv" />
   <img src="https://img.shields.io/badge/Docker_Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white" alt="Docker" />
-  <img src="https://img.shields.io/badge/RetiredIndexBridge-adapter-f97316?style=for-the-badge" alt="RetiredIndexBridge" />
+  <img src="https://img.shields.io/badge/Qdrant_mirror-adapter-f97316?style=for-the-badge" alt="Qdrant mirror" />
   <img src="https://img.shields.io/badge/Graph_memory-OFF_by_default-64748b?style=for-the-badge" alt="graph off" />
 </p>
 
@@ -152,7 +152,7 @@ read/resolve · legacy MCP stdio 10 tools(ledger read-only) · boundary guard.
 
 #### 🟡 / ⚫ gate 뒤
 
-live queue consume(별도 compose project) · `INGRESS_DELIVERY_BACKEND`(retired_index_bridge|couchdb) ·
+live queue consume(별도 compose project) · `INGRESS_DELIVERY_BACKEND=couchdb`(유일한 sink) ·
 ledger **PostgreSQL**(`NEURON_LEDGER_PG_DSN`) · **Graphiti/Neo4j cold projection**
 (`llm-brain-core`) · Graph-first public route/PG authority join(cutover pending) ·
 live write/GC(`--execute` + approval JSON + API key).
@@ -186,8 +186,9 @@ live write/GC(`--execute` + approval JSON + API key).
 > 🔧 **live runtime 사실.** 배달을 실제로 수행하는 worker는 **Python `ingress-worker-py`
 > (`shadow_worker`)** 다. Java `IngestWorker`/`WorkerLoopRunner`는 **retired**(compose
 > `profiles:["retired"]`) — WorkQueue가 같은 durable consumer를 둘로 두는 걸 금지하기 때문이다
-> (single-consumer invariant). 배달 backend는 `INGRESS_DELIVERY_BACKEND`로 `retired_index_bridge`(코드 기본)
-> 또는 `couchdb`를 고른다. bare `compose up`은 **격리 shadow stream + delivery OFF**가 기본이고,
+> (single-consumer invariant). 배달 backend는 `INGRESS_DELIVERY_BACKEND=couchdb` 하나뿐이다
+> (은퇴한 external index bridge는 runtime에서 제거됐다 — `docs/retired/ragflow-retirement.md`).
+> bare `compose up`은 **격리 shadow stream + delivery OFF**가 기본이고,
 > live consume은 별도 env(`RAG_INGRESS_ALLOW_LIVE_QUEUE=1` + `RAG_INGRESS_DELIVER=1`)가 필요하다.
 
 <br/>
@@ -285,8 +286,8 @@ adapter를 절대 역참조하지 않는다.** 이 규칙은 `ArchUnit`(`Archite
 </tr>
 <tr>
 <td><img src="https://img.shields.io/badge/어댑터-Adapter-f97316?style=flat-square" /></td>
-<td><code>adapter/infra/nats/</code> · <code>adapter/ext/retired_index_bridge/</code></td>
-<td>포트 구현체. NATS JetStream(기술 인프라)과 RetiredIndexBridge(외부 서비스)를 도메인 방식으로 감싼다.</td>
+<td><code>adapter/infra/nats/</code> · <code>adapter/ext/unavailable/</code></td>
+<td>포트 구현체. NATS JetStream(기술 인프라)과 미구성 target(외부 서비스 부재)을 도메인 방식으로 감싼다.</td>
 </tr>
 <tr>
 <td><img src="https://img.shields.io/badge/공통-Common-94a3b8?style=flat-square" /></td>
@@ -317,7 +318,7 @@ com.local.ragingressqueue
 ├── target/port/                 # 타깃 포트 (기술 중립)
 │       RagTargetAdapter · BackendKind · TargetStatusSnapshot · TargetPressureSnapshot
 ├── adapter/infra/nats/          # NATS JetStream 어댑터
-├── adapter/ext/retired_index_bridge/         # RetiredIndexBridge 어댑터
+├── adapter/ext/unavailable/      # 미구성 target 어댑터 (fallback)
 └── common/                      # config · logging 공통 타입 + IngestStatus
 ```
 
@@ -448,7 +449,7 @@ builder cron이 per-session **session-memory**를 materialize한다
 > 🔧 **두 빌더를 혼동하지 말 것.** (1) CouchDB-native `couchdb-session-memory-build` CLI 와
 > (2) legacy shadow-log/ledger 기반 `neuron_session_memory`. 컨테이너 cron(`build-once.sh`)은
 > 현재 **legacy 경로**를 호출하고, CouchDB-native builder는 brain-server에 **별도 배포**된다.
-> 또한 live shadow_worker의 sink인 `CouchDBRetiredIndexBridgeAdapter`와 drain 경로의
+> 또한 live shadow_worker의 sink인 `CouchDBIndexAdapter`와 drain 경로의
 > `CouchDBDeliveryBackend`는 서로 다른 대상이다.
 
 - **recall** — `brain.query`(`brain_id=/project/<project>`)가 RetiredIndexBridge hit을 ledger active-set과
@@ -564,7 +565,7 @@ artifact/MemoryCard ledger다. 이 전환 계층은 `GraphMemoryAdapter` 프로�
 <tbody>
 <tr><td>실행 플래그</td><td><code>--execute</code> / <code>--execute-disable</code> (없으면 dry-run)</td></tr>
 <tr><td>operator approval</td><td>argv·dataset·url에 바인딩된 approval JSON</td></tr>
-<tr><td>credential</td><td><code>RETIRED_INDEX_BRIDGE_API_KEY</code> (단일 토큰)</td></tr>
+<tr><td>credential</td><td>은퇴한 external index bridge의 단일 토큰 (활성 runtime credential 아님)</td></tr>
 <tr><td>age floor</td><td>우회 불가 <code>86400s</code> 하한</td></tr>
 <tr><td>정책/회귀</td><td>retention-policy allowlist · recall-regression 재인가 gate</td></tr>
 <tr><td>되돌림</td><td>backup-before-delete · 단일 <code>hard_delete_documents</code> chokepoint</td></tr>
@@ -652,9 +653,10 @@ loopback 바인딩.
 
 #### 별도 `session-memory-worker` project
 
-`network_mode: host`로 builder cron + 3개 GC + backfill scheduler가 동작.
-`SM_STATE_DIR` + `RETIRED_INDEX_BRIDGE_API_KEY` + `NEURON_LEDGER_PG_DSN`를 요구.
-**RetiredIndexBridge와 ledger-PG는 out-of-repo**(loopback / `host.docker.internal`)이며
+`network_mode: host`로 builder cron만 동작한다(은퇴한 external index bridge의
+GC/backfill lane은 제거됐다 — `docs/retired/ragflow-retirement.md`).
+`SM_STATE_DIR` + `NEURON_LEDGER_PG_DSN`를 요구한다.
+**ledger-PG는 out-of-repo**(loopback / `host.docker.internal`)이며
 이 repo의 compose service가 아니다.
 
 </td>
@@ -736,9 +738,10 @@ neuron-knowledge mcp-http               # 동일한 Agent 도구, 기본 loopbac
 neuron-knowledge mcp-http --surface admin --port 8766  # 별도 secret 주입 필요
 ```
 
-> 🔐 **단일 토큰 규칙.** credential은 `RETIRED_INDEX_BRIDGE_API_KEY` **하나만** 쓴다.
-> `RETIRED_INDEX_BRIDGE_WRITE_TOKEN` / `RETIRED_INDEX_BRIDGE_READ_TOKEN`을 새로 만들지 않는다. write/GC/migration
-> subcommand는 flag+approval gate 뒤에 있다.
+> 🔐 **credential 규칙.** 은퇴한 external index bridge의 credential은 **활성 runtime
+> configuration에 존재하지 않는다**(`compose.yaml` / `.env.example`에 없음). 남은
+> operator 도구는 legacy 단일 토큰을 쓰며, write/GC/migration subcommand는
+> flag+approval gate 뒤에 있다.
 
 <br/>
 

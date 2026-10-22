@@ -68,11 +68,9 @@ def test_normal_ingest_and_projection_builders_pass_owned_source(monkeypatch) ->
     }
 
     assert qdrant_dual_write.build_qdrant_mirror_from_env(environ) is sentinel
-    assert build_cli._build_forward_mirror_sink(environ) is not None
     assert build_cli._build_qdrant_projector(environ) is not None
     assert captured == [
         QdrantMutationSource.NORMAL_INGEST,
-        QdrantMutationSource.PROJECTION,
         QdrantMutationSource.PROJECTION,
     ]
 
@@ -88,7 +86,7 @@ def test_foundation_default_is_inactive_even_when_qdrant_url_exists() -> None:
 
 @pytest.mark.parametrize(
     "builder",
-    (build_cli._build_forward_mirror_sink, build_cli._build_qdrant_projector),
+    (build_cli._build_qdrant_projector,),
 )
 def test_projection_builders_fall_back_when_qdrant_activation_is_malformed(builder) -> None:
     environ = {
@@ -158,7 +156,6 @@ def test_foundation_direct_preserves_normal_projection_backfill_and_repair_build
     }
 
     assert qdrant_dual_write.build_qdrant_mirror_from_env(environ) is not None
-    assert build_cli._build_forward_mirror_sink(environ) is not None
     assert build_cli._build_qdrant_projector(environ) is not None
 
     monkeypatch.setenv("QDRANT_WRITE_ACTIVATION", "foundation_direct")
@@ -178,7 +175,7 @@ def test_foundation_direct_preserves_normal_projection_backfill_and_repair_build
             source=source,
         ) is not None
 
-    assert len(direct_calls) == 5
+    assert len(direct_calls) == 4
     assert remote_calls == []
     assert all(
         call["direct_write_contract"]
