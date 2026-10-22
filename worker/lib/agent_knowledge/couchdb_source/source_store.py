@@ -84,8 +84,40 @@ class StoredRevision:
     outcome: str  # accepted | duplicate | conflict_resolved
 
 
+def _selector_value(doc: dict, key: str):
+    value = doc
+    for part in key.split("."):
+        if not isinstance(value, dict):
+            return None
+        value = value.get(part)
+    return value
+
+
 def _matches_selector(doc: dict, selector: dict) -> bool:
-    return all(doc.get(key) == value for key, value in selector.items())
+    """Match the subset of Mango operators used by projection recovery.
+
+    The production store delegates to CouchDB. The in-memory store needs the
+    same dotted paths and comparison operators so recovery tests exercise the
+    real selector contract instead of silently matching nothing.
+    """
+    for key, expected in selector.items():
+        actual = _selector_value(doc, key)
+        if isinstance(expected, dict):
+            for operator, operand in expected.items():
+                if operator == "$lt":
+                    try:
+                        matches = actual is not None and actual < operand
+                    except TypeError:
+                        matches = False
+                elif operator == "$in":
+                    matches = actual in operand
+                else:
+                    return False
+                if not matches:
+                    return False
+        elif actual != expected:
+            return False
+    return True
 
 
 def _project_fields(doc: dict, fields: list[str] | None) -> dict:

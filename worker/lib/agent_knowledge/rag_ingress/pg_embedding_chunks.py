@@ -19,6 +19,9 @@ from typing import Iterator
 CHUNK_BYTES = 8192
 CHUNKED_PROFILE = "lbrain-memory-gemini-embedding-2-bounded-mean-v2"
 INVALID_TEXT_NUL = "invalid_text_nul"
+# Bump when the pre-egress input policy changes. Projection-attempt audits from
+# an older policy are re-evaluated instead of blocking forever.
+PG_INPUT_POLICY_VERSION = 1
 TERMINAL_INPUT_REASONS = frozenset({"secret_egress_policy", INVALID_TEXT_NUL})
 
 
