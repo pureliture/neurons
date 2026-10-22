@@ -6,7 +6,7 @@ import os
 import sys
 from dataclasses import dataclass
 
-from ..index_client import RetiredIndexBridgeHttpClient
+from ..legacy.index_client import RetiredIndexBridgeHttpClient
 
 
 CLEANUP_READINESS_SCHEMA_VERSION = "agent_knowledge_cleanup_readiness.v1"

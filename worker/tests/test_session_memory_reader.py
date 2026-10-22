@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agent_knowledge.index_client import session_memory_records_from_retired_index_bridge
+from agent_knowledge.legacy.index_client import session_memory_records_from_retired_index_bridge
 
 
 class _FakeRetiredIndexBridge:

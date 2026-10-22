@@ -148,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
     if not token:
         print("token env is not set", file=sys.stderr)
         return 2
-    from ..index_client import RetiredIndexBridgeHttpClient
+    from ..legacy.index_client import RetiredIndexBridgeHttpClient
 
     record = read_gc_backup(ns.backup)
     retired_index_bridge = RetiredIndexBridgeHttpClient(base_url=ns.index_url, bearer_token=token, request_timeout_seconds=45)

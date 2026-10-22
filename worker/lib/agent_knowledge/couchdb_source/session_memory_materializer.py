@@ -27,7 +27,7 @@ from ..session_memory.chunk_overlap import ChunkView, canonicalize_chunk_views
 from .document_model import (
     OwnershipViolation,
     ProjectionStatus,
-    RETIRED_INDEX_BRIDGE_RECALL_PROFILE,
+    INDEX_RECALL_PROFILE,
     assert_index_target_allowed,
     build_coverage_manifest_document,
     build_projection_state_document,
@@ -435,7 +435,7 @@ def materialize_session_memory(*, session_id_hash: str, store: CouchDBSourceStor
         session_id_hash=session_id_hash,
         provider=provider,
         project=project,
-        target_profile=RETIRED_INDEX_BRIDGE_RECALL_PROFILE,
+        target_profile=INDEX_RECALL_PROFILE,
         body=body,
         content_hash=sha256_hash(body),
         conversation_chunk_count=len(chunks),
@@ -477,7 +477,7 @@ def _projection_state_for_materialization(
     failure_reason: str = "",
     failure_source_hash: str = "",
     ref: str = "",
-    backend: str = "retired_index_bridge",
+    backend: str = "qdrant",
 ) -> dict:
     if backend == "postgres_pgvector":
         doc = dict(existing) if existing else build_projection_state_document(
@@ -640,7 +640,7 @@ def _commit_projection_state_if_source_current(
     failure_reason: str = "",
     failure_source_hash: str = "",
     ref: str = "",
-    backend: str = "retired_index_bridge",
+    backend: str = "qdrant",
     representation_receipt: dict | None = None,
 ) -> tuple[str, dict]:
     if representation_receipt is not None:
@@ -819,7 +819,7 @@ def project_session_memory(
     store: CouchDBSourceStore,
     projector: SessionMemoryProjector,
     mirror_sink: "QdrantMirrorSink | None" = None,
-    backend: str = "retired_index_bridge",
+    backend: str = "qdrant",
 ) -> dict:
     """Project a materialized session-memory to RetiredIndexBridge, recording projection_state.
 
@@ -966,7 +966,7 @@ def materialize_and_project(
     store: CouchDBSourceStore,
     projector: SessionMemoryProjector | None = None,
     mirror_sink: "QdrantMirrorSink | None" = None,
-    backend: str = "retired_index_bridge",
+    backend: str = "qdrant",
 ) -> dict:
     """End-to-end M3 step for one session: refresh coverage, materialize, project."""
 

@@ -16,7 +16,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from ..ledger import Ledger
-from ..index_client import _transcript_memory_meta_for_document
+from ..legacy.index_client import _transcript_memory_meta_for_document
 
 TRANSCRIPT_MEMORY_TARGET_PROFILE = "index-transcript-memory"
 SCHEMA_VERSION = "agent_knowledge_neuron_session_memory.v1"
@@ -227,7 +227,7 @@ def run_neuron_session_memory_build_once(
     seeded sessions from RetiredIndexBridge read-SoT. The watermark advances only after a
     successful seed scan so deliveries are processed at-least-once.
     """
-    from ..index_client import RetiredIndexBridgeHttpClient
+    from ..legacy.index_client import RetiredIndexBridgeHttpClient
     from .dirty_session_memory_sync import DirtySessionMemorySyncRunner
 
     emit = log or (lambda event: None)
@@ -355,7 +355,7 @@ def _run_dry_run(args: argparse.Namespace) -> int:
     )
     meta_probe = None
     if args.probe_meta:
-        from ..index_client import RetiredIndexBridgeHttpClient
+        from ..legacy.index_client import RetiredIndexBridgeHttpClient
 
         token = os.environ.get(args.retired_index_bridge_token_env, "")
         if not token:
@@ -408,7 +408,7 @@ def _run_live(args: argparse.Namespace, raw_argv: list[str]) -> int:
     import fcntl
     import os
 
-    from ..index_client import RetiredIndexBridgeHttpClient
+    from ..legacy.index_client import RetiredIndexBridgeHttpClient
     from .dirty_session_memory_sync import DirtySessionMemorySyncConfig, resolve_dataset_id
     from .native_memory_sync_approval import ApprovalError, validate_memory_enqueue_approval
 

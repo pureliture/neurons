@@ -11,7 +11,7 @@ from pathlib import Path
 from ..dataset_contract import resolve_retention_policy
 from ..ledger import Ledger
 from .native_memory_sync_approval import ApprovalError, validate_goal3_live_approval
-from ..index_client import RetiredIndexBridgeHttpClient
+from ..legacy.index_client import RetiredIndexBridgeHttpClient
 from .gc_backup import write_gc_backup
 from .gc_safety_auditor import AuditContext, LedgerGCSafetyAuditor, hard_delete_documents
 

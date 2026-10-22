@@ -1,4 +1,4 @@
-"""CouchDBRetiredIndexBridgeAdapter 유닛 테스트.
+"""CouchDBIndexAdapter 유닛 테스트.
 
 검증 항목:
 - submit_document가 session, chunk, coverage, projection_state 4개 문서를 결정론적 id로 기록한다.
@@ -29,11 +29,11 @@ from agent_knowledge.couchdb_source.document_model import (
     sha256_hash,
 )
 from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
-from agent_knowledge.rag_ingress.couchdb_retired_index_bridge import (
-    CouchDBRetiredIndexBridgeAdapter,
+from agent_knowledge.rag_ingress.couchdb_index_adapter import (
+    CouchDBIndexAdapter,
     build_couchdb_docs_from_rag_document,
 )
-from agent_knowledge.rag_ingress.retired_index_bridge import (
+from agent_knowledge.rag_ingress.index_adapter import (
     BackendDocumentHandle,
     BackendSubmitResult,
     IndexStatus,
@@ -68,7 +68,7 @@ def _ingress_payload(
     """process_payload가 받는 것과 동일한 형태의 rag_ingress_enqueue.v1 payload.
 
     document_from_ingress_payload(payload)가 RagReadyDocument를 생성할 수 있어야 하며,
-    metadata에 session_id_hash / chunk_id를 포함해야 CouchDBRetiredIndexBridgeAdapter가
+    metadata에 session_id_hash / chunk_id를 포함해야 CouchDBIndexAdapter가
     올바른 doc_id를 계산한다.
     """
     if body is None:
@@ -116,10 +116,10 @@ def _document_from_payload(payload: dict):
     return document_from_ingress_payload(payload)
 
 
-def _adapter(store: InMemoryCouchDBSourceStore | None = None) -> CouchDBRetiredIndexBridgeAdapter:
+def _adapter(store: InMemoryCouchDBSourceStore | None = None) -> CouchDBIndexAdapter:
     if store is None:
         store = InMemoryCouchDBSourceStore()
-    return CouchDBRetiredIndexBridgeAdapter(store=store)
+    return CouchDBIndexAdapter(store=store)
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +166,7 @@ class TestBuildCouchdbDocsFromRagDocument:
 
 
 # ---------------------------------------------------------------------------
-# CouchDBRetiredIndexBridgeAdapter.submit_document
+# CouchDBIndexAdapter.submit_document
 # ---------------------------------------------------------------------------
 
 class TestSubmitDocument:
@@ -392,7 +392,7 @@ class TestIdempotency:
 # ---------------------------------------------------------------------------
 
 class TestFindByNaturalKey:
-    """CouchDBRetiredIndexBridgeAdapter는 conservative dedup: find_by_natural_key는 항상 None 반환.
+    """CouchDBIndexAdapter는 conservative dedup: find_by_natural_key는 항상 None 반환.
     dedup 책임은 store의 idempotent put과 process_payload의 IngestStateStore에 있다.
     """
 
@@ -610,7 +610,7 @@ class TestErrorPropagation:
             def delete(self, doc_id):
                 return False
 
-        adapter = CouchDBRetiredIndexBridgeAdapter(store=FailingStore())
+        adapter = CouchDBIndexAdapter(store=FailingStore())
         payload = _ingress_payload()
         document = _document_from_payload(payload)
 
@@ -631,13 +631,13 @@ class TestShadowWorkerWiring:
         live routing의 직접 주입은 shadow_worker 테스트에서 별도로 검증한다.
         """
         # 팩토리를 직접 호출해 어댑터 타입 확인
-        from agent_knowledge.rag_ingress.couchdb_retired_index_bridge import (
-            CouchDBRetiredIndexBridgeAdapter,
-            build_couchdb_retired_index_bridge,
+        from agent_knowledge.rag_ingress.couchdb_index_adapter import (
+            CouchDBIndexAdapter,
+            build_couchdb_index_adapter,
         )
         # 실제 HTTP 연결 대신 팩토리 임포트 경로가 올바른지 확인
         # (CouchDBHttpSourceStore는 lazy import이므로 팩토리 자체는 import 가능)
-        assert callable(build_couchdb_retired_index_bridge)
+        assert callable(build_couchdb_index_adapter)
 
     def test_process_payload_deliver_false_no_submit_with_couchdb_adapter(self, tmp_path):
         """deliver=False이면 CouchDB 어댑터가 있어도 submit_document가 호출되지 않는다."""
@@ -671,7 +671,7 @@ class TestShadowWorkerWiring:
         store_path = tmp_path / "s.sqlite"
         ingest_store = IngestStateStore(store_path)
         couchdb_store = InMemoryCouchDBSourceStore()
-        adapter = CouchDBRetiredIndexBridgeAdapter(store=couchdb_store)
+        adapter = CouchDBIndexAdapter(store=couchdb_store)
 
         payload = _ingress_payload()
         res = process_payload(payload, store=ingest_store, backend=adapter, deliver=True)
@@ -683,13 +683,13 @@ class TestShadowWorkerWiring:
 
     def test_process_payload_dedup_via_ingest_store_not_natural_key(self, tmp_path):
         """동일 payload 재전송 시 IngestStateStore 기반으로 dedup된다.
-        CouchDBRetiredIndexBridgeAdapter.find_by_natural_key는 None을 반환하므로
+        CouchDBIndexAdapter.find_by_natural_key는 None을 반환하므로
         dedup은 IngestStateStore.get_delivered가 담당한다."""
         from agent_knowledge.rag_ingress.shadow_worker import IngestStateStore, process_payload
 
         ingest_store = IngestStateStore(tmp_path / "s.sqlite")
         couchdb_store = InMemoryCouchDBSourceStore()
-        adapter = CouchDBRetiredIndexBridgeAdapter(store=couchdb_store)
+        adapter = CouchDBIndexAdapter(store=couchdb_store)
 
         payload = _ingress_payload(idempotency_key="idem_dedup_test")
 

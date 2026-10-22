@@ -95,6 +95,24 @@ Reclassification: archive/recovery compatibility surface. It can become a remova
 
 Next probe: `worker/lib/agent_knowledge/couchdb_source/shadow_cutover.py`.
 
+## M5 Probe 2 resolution: recovery-path contract retired (2026-10-22)
+
+The condition above ("the recovery-path contract must be explicitly retired or
+replaced") is now met. `index_fallback.py` reconstructed sessions by reading the
+retired external index bridge over HTTP; the bridge left the runtime
+(`docs/retired/ragflow-retirement.md`), so the recovery source no longer exists
+and the recovery path cannot run. The module and its test are deleted, and the
+241 reconstructed sessions stay in CouchDB as they were — the historical
+`clean 3326 + index_fallback 241` split in
+`specs/recall-cutover/requirements.md` remains the record of what happened.
+
+The M21 placement guard (`ArchitectureRulesTest` rules for the Java
+`adapter.ext.retired_index_bridge` package) was removed with the package it
+guarded; the Java retired-bridge adapter no longer exists.
+
+The surviving operator-side legacy tooling is listed with its evidence in
+`docs/retired/ragflow-protocol-residue-inventory.md`.
+
 ## M5 Probe 3: `couchdb_source/shadow_cutover.py`
 
 Timestamp: 2026-07-05 20:03:49 KST

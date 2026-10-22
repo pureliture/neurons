@@ -407,7 +407,7 @@ def _select_sessions_incremental(
     limit: int,
     project: str = "",
     provider: str = "",
-    backend: str = "retired_index_bridge",
+    backend: str = "qdrant",
 ) -> tuple[list[dict], dict, int]:
     """Change-feed driven selection.
 
@@ -708,13 +708,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--project", default="", help="Scope selection to this project (empty = all).")
     parser.add_argument("--provider", default="", help="Scope selection to this provider (empty = all).")
     parser.add_argument("--approval", default="", help="Path to live-approval JSON (required for non-dry-run).")
-    parser.add_argument("--dataset-name", default="session-memory", help="RetiredIndexBridge dataset name (default: session-memory).")
-    parser.add_argument("--retired-index-bridge-url", default="", help="RetiredIndexBridge base URL (overrides RETIRED_INDEX_BRIDGE_URL env).")
-    parser.add_argument(
-        "--retired-index-bridge-token-env",
-        default="RETIRED_INDEX_BRIDGE_API_KEY",
-        help="(무시됨) RetiredIndexBridge 토큰은 항상 RETIRED_INDEX_BRIDGE_API_KEY env에서만 읽는다.",
-    )
+    parser.add_argument("--dataset-name", default="session-memory", help="Projection dataset name (default: session-memory).")
 
     args = parser.parse_args(argv)
 
@@ -786,7 +780,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # --- Backend Resolution -------------------------------------------------
-    backend = os.environ.get("SESSION_MEMORY_PROJECTION_BACKEND", "retired_index_bridge").strip().lower()
+    backend = os.environ.get("SESSION_MEMORY_PROJECTION_BACKEND", "qdrant").strip().lower()
 
     # --- Session selection --------------------------------------------------
     sessions = _select_sessions_for_cycle(
@@ -818,16 +812,16 @@ def main(argv: list[str] | None = None) -> int:
 
     # --- Projector construction (live run only) ------------------------------
     from .session_memory_materializer import materialize_and_project
-    # Fail-closed: 오타 등으로 알 수 없는 backend가 들어오면 retired_index_bridge로 조용히
-    # fallback하지 않고 명시적으로 거부한다.
-    if backend not in {"retired_index_bridge", "qdrant", "postgres_pgvector"}:
+    # Fail-closed: 오타 등으로 알 수 없는 backend가 들어오면 조용히 fallback하지 않고
+    # 명시적으로 거부한다.
+    if backend not in {"qdrant", "postgres_pgvector"}:
         print(
             json.dumps(
                 {
                     "schema_version": BUILD_CLI_SCHEMA_VERSION,
                     "error": "env_invalid",
                     "reason": (
-                        "SESSION_MEMORY_PROJECTION_BACKEND는 'retired_index_bridge', 'qdrant', 또는 'postgres_pgvector'여야 한다"
+                        "SESSION_MEMORY_PROJECTION_BACKEND는 'qdrant' 또는 'postgres_pgvector'여야 한다"
                     ),
                     "dry_run": False,
                     "selected": 0,
@@ -893,41 +887,6 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
         mirror_sink = None
-    else:
-        index_url = args.retired_index_bridge_url or os.environ.get("RETIRED_INDEX_BRIDGE_URL", "")
-        # Repo guardrail: RetiredIndexBridge 토큰은 RETIRED_INDEX_BRIDGE_API_KEY 하나만 사용한다. args.retired_index_bridge_token_env로
-        # 임의의 env 이름을 secret 소스로 받지 않도록 하드코딩한다.
-        bearer_token = os.environ.get("RETIRED_INDEX_BRIDGE_API_KEY", "")
-        if not index_url or not bearer_token:
-            print(
-                json.dumps(
-                    {
-                        "schema_version": BUILD_CLI_SCHEMA_VERSION,
-                        "error": "env_missing",
-                        "reason": "index_url and token are required for live runs",
-                        "dry_run": False,
-                        "selected": selected_count,
-                        "projected": 0,
-                        "failed": 0,
-                        "skipped": 0,
-                    },
-                    sort_keys=True,
-                )
-            )
-            return 2
-
-        from .index_projector import RetiredIndexBridgeSessionMemoryProjector
-
-        projector = RetiredIndexBridgeSessionMemoryProjector(
-            index_url=index_url,
-            bearer_token=bearer_token,
-            dataset_name=args.dataset_name,
-        )
-        # Optional best-effort Qdrant forward mirror ALONGSIDE RetiredIndexBridge (legacy dual
-        # path). Off unless MIRROR_DUAL_WRITE=1 AND QDRANT_URL are set; a mirror
-        # misconfig yields a None sink and NEVER blocks the canonical RetiredIndexBridge projection.
-        mirror_sink = _build_forward_mirror_sink(os.environ)
-
     projected = 0
     failed = 0
     skipped = 0
@@ -984,74 +943,6 @@ def _close_if_supported(resource) -> None:
         closer()
     except Exception:
         return
-
-
-def _build_forward_mirror_sink(environ):
-    """Build the best-effort Qdrant forward mirror sink, or None when disabled.
-
-    Enabled only when ``MIRROR_DUAL_WRITE=1`` AND ``QDRANT_URL`` are set. Reuses the
-    OpenAI-compatible embedding provider (``LLM_BRAIN_EMBEDDING_*``) and a passthrough
-    normalizer (session-memory bodies are already redacted). ``ensure_collection`` is
-    False: the forward write targets the existing live mirror collection and must NOT
-    create one implicitly. Any construction failure (missing dep, bad url, absent
-    collection) returns None so a mirror misconfig can never block the canonical
-    CouchDB session-memory builder.
-    """
-
-    if str(environ.get("MIRROR_DUAL_WRITE") or "").strip() != "1":
-        return None
-    try:
-        activation = qdrant_write_activation_from_environment(environ)
-        if activation is QdrantWriteActivation.FOUNDATION_INACTIVE:
-            return None
-        url = str(environ.get("QDRANT_URL") or "").strip()
-        if not url:
-            return None
-        from ..rag_ingress.qdrant_backfill import QdrantSessionMemoryMirrorSink
-        from ..rag_ingress.qdrant_docling_mirror import (
-            DEFAULT_COLLECTION_NAME,
-            FOUNDATION_DIRECT_WRITE_CONTRACT,
-            PassthroughMarkdownNormalizer,
-            build_remote_qdrant_docling_mirror_adapter,
-            build_remote_qdrant_docling_sidecar_adapter,
-        )
-        from ..rag_ingress.qdrant_embedding import build_openai_embedding_provider
-
-        collection = str(environ.get("QDRANT_COLLECTION") or DEFAULT_COLLECTION_NAME).strip()
-        common = {
-            "collection_name": collection,
-            "embedding_provider": build_openai_embedding_provider(environ=environ),
-            "normalizer": PassthroughMarkdownNormalizer(),
-        }
-        if activation is QdrantWriteActivation.FOUNDATION_DIRECT:
-            adapter = build_remote_qdrant_docling_mirror_adapter(
-                url=url,
-                direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
-                **common,
-            )
-        else:
-            adapter = build_remote_qdrant_docling_sidecar_adapter(
-                read_url=url,
-                read_api_key_path=str(environ.get("QDRANT_READ_API_KEY_FILE") or ""),
-                gateway_endpoint=str(
-                    environ.get("QDRANT_WRITE_GATEWAY_ENDPOINT") or ""
-                ),
-                gateway_token_path=str(
-                    environ.get("QDRANT_WRITE_GATEWAY_TOKEN_FILE") or ""
-                ),
-                gateway_ca_path=str(
-                    environ.get("QDRANT_WRITE_GATEWAY_CA_FILE") or ""
-                ),
-                gateway_generation=qdrant_write_gateway_generation_from_environment(
-                    environ
-                ),
-                source=QDRANT_MUTATION_SOURCE,
-                **common,
-            )
-        return QdrantSessionMemoryMirrorSink(adapter)
-    except Exception:
-        # Mirror misconfig must never block the canonical builder.
-        return None
 
 
 def _build_qdrant_projector(environ):

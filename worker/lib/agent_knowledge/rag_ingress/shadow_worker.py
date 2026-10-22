@@ -2,7 +2,7 @@
 
 This is the Phase G1 (R2-full + C) artifact: a Python worker that reuses the
 existing agent-knowledge ingest pipeline (``document_from_ingress_payload`` +
-``RetiredIndexBridgeRetiredIndexBridgeAdapter``) and owns a server-volume IngestStateStore SQLite,
+``IndexAdapter``) and owns a server-volume IngestStateStore SQLite,
 driven by a NATS JetStream consumer.
 
 SAFETY (critical): the live stream ``RAG_INGRESS_QUEUE`` uses ``WorkQueue``
@@ -10,7 +10,7 @@ retention, which forbids a second overlapping consumer (a parallel consumer woul
 steal/delete the live Java worker's messages). Therefore the shadow worker NEVER
 attaches to ``RAG_INGRESS_QUEUE``; it consumes an isolated shadow stream
 (``RAG_INGRESS_SHADOW`` / subject ``rag.shadow.>``) fed by synthetic events. The
-live ingress-api, ``rag_target_delivery_worker``, stream, and RetiredIndexBridge production
+live ingress-api, ``rag_target_delivery_worker``, stream, and production
 delivery are untouched.
 
 Modes:
@@ -35,7 +35,7 @@ from typing import Callable, Mapping
 
 from .couchdb_delivery_backend import CouchDBDeliveryBackend
 from .delivery_executor import DeliveryExecutor
-from .retired_index_bridge import RetiredIndexBridgeRetiredIndexBridgeAdapter
+from .index_adapter import IndexAdapter
 from .server_runtime import (
     apply_server_redaction,
     document_from_ingress_payload,
@@ -44,7 +44,6 @@ from .server_runtime import (
 )
 from .state_db import RAGIngressStateDB
 from .state_sink import StateDBIngressSink
-from ..index_client import RetiredIndexBridgeHttpClient
 from ..redaction import redact_text_v2
 
 SHADOW_LOG_DDL = """
@@ -63,10 +62,7 @@ CREATE TABLE IF NOT EXISTS shadow_ingest_log (
 """
 
 _DELIVERY_BACKEND_COUCHDB = "couchdb"
-_DELIVERY_BACKEND_RETIRED_INDEX_BRIDGE = "retired_index_bridge"
-_DELIVERY_BACKENDS = frozenset(
-    {_DELIVERY_BACKEND_COUCHDB, _DELIVERY_BACKEND_RETIRED_INDEX_BRIDGE}
-)
+_DELIVERY_BACKENDS = frozenset({_DELIVERY_BACKEND_COUCHDB})
 
 
 @dataclass
@@ -95,7 +91,7 @@ class DeliveryDeferred(RuntimeError):
 class IngestStateStore:
     """Legacy observer SQLite plus an explicit, lazy canonical-state mode.
 
-    The default remains the RetiredIndexBridge observer contract: it creates only
+    The default remains the legacy observer contract: it creates only
     the legacy SQLite parent/table.  CouchDB delivery opts in with
     ``canonical_state=True``; its state DB is created only on first access so the
     strict private-parent check is confined to that mode.
@@ -174,41 +170,6 @@ class IngestStateStore:
             conn.close()
 
 
-def build_backend(*, index_base_url: str, index_api_key: str,
-                  dataset_id: str | None = None,
-                  resolve_dataset_id: Callable[[str], str] | None = None,
-                  broad_scan_pages: int = 0) -> RetiredIndexBridgeRetiredIndexBridgeAdapter:
-    client = RetiredIndexBridgeHttpClient(base_url=index_base_url, bearer_token=index_api_key)
-    if resolve_dataset_id is None:
-        # smoke/dry-run: resolve every profile to one configured dataset.
-        resolve_dataset_id = lambda _profile: dataset_id
-    return RetiredIndexBridgeRetiredIndexBridgeAdapter(
-        client=client,
-        resolve_dataset_id=resolve_dataset_id,
-        broad_scan_pages=broad_scan_pages,
-    )
-
-
-def env_profile_dataset_resolver(getenv: Callable[[str], str | None]) -> Callable[[str], str]:
-    """Live routing: map a target profile to its dataset via env, mirroring the
-    Java worker's per-profile datasets. ``index-transcript-memory`` ->
-    ``RETIRED_INDEX_BRIDGE_TRANSCRIPT_MEMORY_DATASET_ID`` etc. Raises for an unconfigured
-    profile so a mis-routed delivery fails (and quarantines) rather than landing
-    in the wrong dataset."""
-    def resolve(profile: str) -> str:
-        key = str(profile).upper().replace("-", "_")
-        if key.startswith("INDEX_"):
-            key = key[len("INDEX_"):]
-        key = f"RETIRED_INDEX_BRIDGE_{key}"
-        if not key.endswith("_DATASET_ID"):
-            key = key + "_DATASET_ID"
-        dataset = getenv(key)
-        if not dataset:
-            raise ValueError(f"no dataset configured for target profile {profile!r} (env {key})")
-        return dataset
-    return resolve
-
-
 def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -240,15 +201,16 @@ def _wire_payload_is_conservatively_redacted(value: object) -> bool:
 
 
 def process_payload(payload: dict, *, store: IngestStateStore,
-                    backend: RetiredIndexBridgeRetiredIndexBridgeAdapter | CouchDBDeliveryBackend | None,
+                    backend: IndexAdapter | CouchDBDeliveryBackend | None,
                     deliver: bool, lease_owner: str | None = None) -> ShadowResult:
     """Build the RagReadyDocument from a rag_ingress_enqueue.v1 payload, record
     state, and (if deliver) submit to the selected backend. No live stream is touched.
 
     The CouchDB branch first fail-closes any wire payload that is not already
     conservatively redacted, then commits its canonical state row and lets the
-    backend enforce full public-ingress redaction. The RetiredIndexBridge branch
-    keeps its established direct redaction -> dedup -> submit -> observer behavior."""
+    backend enforce full public-ingress redaction. Any other ``IndexAdapter``
+    implementation keeps its own direct redaction -> dedup -> submit -> observer
+    behavior."""
     payload = normalize_ingest_job_payload(payload)
     document = document_from_ingress_payload(payload)
     ik = document.idempotency_key
@@ -383,7 +345,7 @@ def process_payload(payload: dict, *, store: IngestStateStore,
 
 async def run_consume(*, nats_url: str, stream: str, subject: str, durable: str,
                       store: IngestStateStore,
-                      backend: RetiredIndexBridgeRetiredIndexBridgeAdapter | CouchDBDeliveryBackend | None,
+                      backend: IndexAdapter | CouchDBDeliveryBackend | None,
                       deliver: bool, max_messages: int | None, idle_timeout: float = 5.0,
                       allow_live: bool = False, max_deliver: int = 5,
                       fetch_batch: int = 1, concurrency: int = 1,
@@ -588,7 +550,7 @@ def build_synthetic_event(*, tag: str) -> dict:
 
 async def run_smoke(*, nats_url: str, stream: str, subject: str, durable: str,
                     store: IngestStateStore,
-                    backend: RetiredIndexBridgeRetiredIndexBridgeAdapter | CouchDBDeliveryBackend | None,
+                    backend: IndexAdapter | CouchDBDeliveryBackend | None,
                     deliver: bool, tag: str, lease_owner: str | None = None,
                     log: Callable[[str], None] = print) -> dict:
     """Isolated end-to-end NATS smoke: ensure shadow stream → publish 1 synthetic
@@ -621,12 +583,10 @@ def main() -> int:
 
     Required env: RAG_INGRESS_NATS_URL, SHADOW_STREAM(!=RAG_INGRESS_QUEUE),
     SHADOW_SUBJECT, SHADOW_DURABLE, INGEST_STATE_DB_PATH. Delivery is OFF by
-    default (SHADOW_DELIVER=0). The explicit
-    INGRESS_DELIVERY_BACKEND=couchdb branch constructs a CouchDBDeliveryBackend
-    with COUCHDB_URL/COUCHDB_USER/COUCHDB_PASSWORD/COUCHDB_DB and uses the
-    private canonical SQLite state at INGEST_STATE_DB_PATH. The default
-    retired_index_bridge branch instead requires its legacy
-    RETIRED_INDEX_BRIDGE_* variables."""
+    default (SHADOW_DELIVER=0). ``INGRESS_DELIVERY_BACKEND=couchdb`` is the only
+    supported sink: it constructs a CouchDBDeliveryBackend with
+    COUCHDB_URL/COUCHDB_USER/COUCHDB_PASSWORD/COUCHDB_DB and uses the private
+    canonical SQLite state at INGEST_STATE_DB_PATH."""
     import argparse
     import asyncio
 
@@ -642,16 +602,15 @@ def main() -> int:
     if stream == "RAG_INGRESS_QUEUE" and not allow_live:
         raise SystemExit("refusing: set ALLOW_LIVE_QUEUE=1 to consume the live RAG_INGRESS_QUEUE")
     deliver = os.environ.get("SHADOW_DELIVER", "0") == "1"
-    broad_scan_pages = int(os.environ.get("NATURAL_KEY_BROAD_SCAN_PAGES", "0"))
     configured_backend = os.environ.get("INGRESS_DELIVERY_BACKEND")
     delivery_backend = (
-        _DELIVERY_BACKEND_RETIRED_INDEX_BRIDGE
+        _DELIVERY_BACKEND_COUCHDB
         if configured_backend is None
         else configured_backend.strip().lower()
     )
     if delivery_backend not in _DELIVERY_BACKENDS:
         raise SystemExit(
-            "INGRESS_DELIVERY_BACKEND must be one of: couchdb, retired_index_bridge"
+            "INGRESS_DELIVERY_BACKEND must be one of: couchdb"
         )
     couchdb_config = None
     if deliver and delivery_backend == _DELIVERY_BACKEND_COUCHDB:
@@ -688,24 +647,6 @@ def main() -> int:
                 couchdb_db=couchdb_config["COUCHDB_DB"],
                 environ=os.environ,
             )
-        else:
-            # RetiredIndexBridge remains the default only when the selector is unset.
-            single = os.environ.get("RETIRED_INDEX_BRIDGE_DATASET_ID", "")
-            # live (no single dataset): route per target profile like the Java worker.
-            resolver = None if single else env_profile_dataset_resolver(os.environ.get)
-            backend = build_backend(
-                index_base_url=os.environ["RETIRED_INDEX_BRIDGE_BASE_URL"],
-                index_api_key=os.environ["RETIRED_INDEX_BRIDGE_API_KEY"],
-                dataset_id=single or None,
-                resolve_dataset_id=resolver,
-                broad_scan_pages=broad_scan_pages,
-            )
-            # M6 dual-write shadow (OFF unless MIRROR_DUAL_WRITE=1 + QDRANT_URL set).
-            # Best-effort Qdrant mirror alongside the authoritative primary; a mirror
-            # failure never breaks RetiredIndexBridge delivery. Default-off keeps the live
-            # worker byte-identical.
-            from .qdrant_dual_write import maybe_wrap_dual_write
-            backend = maybe_wrap_dual_write(backend, environ=os.environ)
     nats_url = os.environ.get("RAG_INGRESS_NATS_URL", "nats://127.0.0.1:4222")
     subject = os.environ.get("SHADOW_SUBJECT", "rag.shadow.>")
     durable = os.environ.get("SHADOW_DURABLE", "shadow_python_worker")
@@ -736,9 +677,9 @@ def main() -> int:
 def build_delivery_pressure_check(status_url: str, *, delivery_backend: str) -> Callable[[], bool] | None:
     """Return the live pressure gate for backends that are governed by /status.
 
-    The /status endpoint reports the legacy RetiredIndexBridge target pressure. A CouchDB
-    sink must not pause behind that signal, or CouchDB-native ingest deadlocks
-    whenever RetiredIndexBridge is intentionally unconfigured.
+    The /status endpoint reports the retired target adapter's backlog pressure. A
+    CouchDB sink must not pause behind that signal, or CouchDB-native ingest
+    deadlocks whenever the retired target is intentionally unconfigured.
     """
     if str(delivery_backend or "").strip().lower() == "couchdb":
         return None

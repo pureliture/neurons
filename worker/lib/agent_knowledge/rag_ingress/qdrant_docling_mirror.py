@@ -31,7 +31,7 @@ from agent_knowledge.qdrant_write_gateway_runtime import (
     QdrantWriteActivation,
 )
 
-from .retired_index_bridge import (
+from .index_adapter import (
     BackendDocumentHandle,
     BackendStatusDetail,
     BackendSubmitResult,
@@ -152,9 +152,9 @@ class MirrorDeletionResult:
 
 
 class MirrorDeletionCapable(Protocol):
-    """Optional deletion capability layered on top of ``RetiredIndexBridgeAdapter``.
+    """Optional deletion capability layered on top of ``IndexAdapter``.
 
-    The backend-neutral ``RetiredIndexBridgeAdapter`` protocol covers submit / find /
+    The backend-neutral ``IndexAdapter`` protocol covers submit / find /
     status only; it has no delete. RetiredIndexBridge document deletion currently bypasses
     the adapter and goes through the GC ``hard_delete_documents`` chokepoint, so
     there is no neutral delete seam yet. This optional protocol is the draft seam
@@ -229,7 +229,7 @@ class HashEmbeddingProvider:
 
 
 class QdrantDoclingMirrorAdapter:
-    """``RetiredIndexBridgeAdapter`` implementation over Qdrant.
+    """``IndexAdapter`` implementation over Qdrant.
 
     ``client`` is a qdrant-client-shaped object. Tests inject a fake client so no
     network or optional dependency is required for the contract checks.

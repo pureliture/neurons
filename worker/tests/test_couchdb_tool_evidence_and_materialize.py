@@ -515,7 +515,7 @@ def test_materialized_session_memory_embeds_tool_evidence() -> None:
     store_tool_evidence_bundles([_record(0, summary="12 passed unique-marker")], store=store)
     update_coverage_with_tool_evidence(session_id_hash=_sid(), store=store)
     mat = materialize_session_memory(session_id_hash=_sid(), store=store)
-    assert mat.target_profile == dm.RETIRED_INDEX_BRIDGE_RECALL_PROFILE
+    assert mat.target_profile == dm.INDEX_RECALL_PROFILE
     assert mat.fully_materialized is True
     # tool evidence summary is embedded for RetiredIndexBridge-only recall
     assert "unique-marker" in mat.body
@@ -531,11 +531,11 @@ def test_projection_goes_to_session_memory_only() -> None:
     report = materialize_and_project(session_id_hash=_sid(), store=store, projector=projector)
     assert report["projection"]["status"] == dm.ProjectionStatus.PROJECTED
     assert len(projector.calls) == 1
-    assert projector.calls[0]["target_profile"] == dm.RETIRED_INDEX_BRIDGE_RECALL_PROFILE
+    assert projector.calls[0]["target_profile"] == dm.INDEX_RECALL_PROFILE
     # projection_state recorded in the store
     state = store.get(dm.projection_state_doc_id(_sid()))
     assert state["projection_status"] == dm.ProjectionStatus.PROJECTED
-    assert state["target_profile"] == dm.RETIRED_INDEX_BRIDGE_RECALL_PROFILE
+    assert state["target_profile"] == dm.INDEX_RECALL_PROFILE
     session = store.get(dm.session_doc_id(_sid()))
     assert session["source_hash"] == state["projected_source_hash"]
     assert session["materialized_at"] == state["materialized_at"]

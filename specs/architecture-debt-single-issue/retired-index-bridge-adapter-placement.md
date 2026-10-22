@@ -1,10 +1,29 @@
 # RetiredIndexBridge Adapter Placement Guard
 
-Status: done.
+Status: superseded (2026-10-22) — the guarded package was deleted.
 
 Tracker: GitHub issue #40.
 
-## Scope
+## Superseded By
+
+The retired external index bridge left the `neurons` runtime, so the Java
+`adapter.ext.retired_index_bridge` package no longer exists. With it gone, the
+two `ArchitectureRulesTest` rules that guarded its placement ("target ports must
+not depend on the retired bridge implementation", "retired bridge
+implementation classes stay in the ext adapter package") had no subject and were
+removed as well.
+
+The surviving boundary is the **Python** adapter contract in
+`worker/lib/agent_knowledge/rag_ingress/index_adapter.py`, which is
+backend-neutral and implemented by the CouchDB and Qdrant adapters. Its
+invariants are pinned by
+`worker/tests/test_retired_index_bridge_protocol_guard.py`.
+
+See `docs/retired/ragflow-retirement.md` (retirement record) and
+`docs/retired/ragflow-protocol-residue-inventory.md` (per-surface decisions)
+for the full change.
+
+## Original Scope (historical)
 
 Guard current Java package placement for retired external index bridge adapter code.
 
@@ -14,23 +33,12 @@ Guard current Java package placement for retired external index bridge adapter c
 - No live retired bridge call.
 - No target port API break.
 
-## Required Invariants
-
-- Retired bridge implementation classes live under `adapter.ext.retired_index_bridge`.
-- `target.port` remains backend-neutral and does not depend on retired bridge implementation classes.
-- Historical `targetAdapter` wording cannot reintroduce old placement.
-
-## Test Plan
+## Original Test Plan (historical)
 
 - Add a Java package-boundary test using ArchUnit or source/static inspection.
 - Keep targeted adapter tests green.
 
-## Done Criteria
+## Original Done Criteria (historical)
 
 - Placement guard passes.
 - Evidence is recorded in `milestones.md`.
-
-## Evidence
-
-- `ArchitectureRulesTest` guards `target.port` against dependencies on `adapter.ext.retired_index_bridge`.
-- `ArchitectureRulesTest` keeps RetiredIndexBridge implementation classes under `adapter.ext.retired_index_bridge`.

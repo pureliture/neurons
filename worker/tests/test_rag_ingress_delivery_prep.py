@@ -3,8 +3,8 @@
 Covers:
 - Slice A: delivery_payloads persistence (record/get/conflict/fill-gap) and the
   fail-closed triple-hash recovery gate.
-- Slice B: RetiredIndexBridgeDeliveryBackend submit/uncertain/retryable/payload-unavailable
-  mapping over a fake RetiredIndexBridgeAdapter (no network anywhere).
+- Slice B: delivery backend submit/uncertain/retryable/payload-unavailable mapping
+  over a fake IndexAdapter (no network anywhere).
 - Slice C: drain_pending_deliveries dry-run-first contract + live counters via a
   fake DeliveryBackend.
 """
@@ -17,11 +17,10 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from agent_knowledge.rag_ingress.backfill_apply import apply_backfill_to_state_db
-from agent_knowledge.rag_ingress.delivery_backend import (
+from agent_knowledge.rag_ingress.delivery_payload_gate import (
     PAYLOAD_HASH_MISMATCH,
     PAYLOAD_MISSING,
     PAYLOAD_OK,
-    RetiredIndexBridgeDeliveryBackend,
     resolve_delivery_payload,
 )
 from agent_knowledge.rag_ingress.delivery_drain import drain_pending_deliveries
@@ -30,7 +29,7 @@ from agent_knowledge.rag_ingress.delivery_executor import (
     DeliveryExecutor,
     DeliveryOutcomeUncertain,
 )
-from agent_knowledge.rag_ingress.retired_index_bridge import (
+from agent_knowledge.rag_ingress.index_adapter import (
     BackendDocumentHandle,
     BackendStatusDetail,
     BackendSubmitResult,
@@ -156,215 +155,12 @@ def test_resolve_delivery_payload_detects_tampered_body(tmp_path):
     assert gate == PAYLOAD_HASH_MISMATCH
 
 
-# ---- Slice B: RetiredIndexBridgeDeliveryBackend ----
-
-class _FakeIndexAdapter:
-    def __init__(self, *, result=None, error=None, detail=None, natural_key_handle=None):
-        self._result = result
-        self._error = error
-        self._detail = detail
-        self._natural_key_handle = natural_key_handle
-        self.submitted = []
-        self.natural_key_calls = []
-
-    def submit_document(self, document, *, on_step_complete=None):
-        if self._error is not None:
-            raise self._error
-        self.submitted.append(document)
-        return self._result
-
-    def document_status(self, handle):
-        return self._detail.status
-
-    def document_status_detail(self, handle):
-        return self._detail
-
-    def find_by_natural_key(self, *, target_profile, idempotency_key, payload_hash):
-        self.natural_key_calls.append((target_profile, idempotency_key, payload_hash))
-        return self._natural_key_handle
-
-
-def _job_view(state_db, key):
-    from agent_knowledge.rag_ingress.delivery_executor import DeliveryJobView
-
-    row = state_db.get_row("delivery_jobs", "idempotency_key", key)
-    return DeliveryJobView.from_row(row)
-
-
-def test_backend_submit_success_returns_succeeded_evidence(tmp_path):
-    state_db = _state_db(tmp_path)
-    payload = _payload(key="kf", body="body f")
-    _seed(state_db, payload)
-    adapter = _FakeIndexAdapter(
-        result=BackendSubmitResult(dataset_ref="ds_1", document_ref="doc_1", status=IndexStatus.PENDING)
-    )
-    backend = RetiredIndexBridgeDeliveryBackend(state_db=state_db, retired_index_bridge=adapter)
-
-    evidence = backend.submit(_job_view(state_db, "kf"))
-
-    assert evidence.status == "succeeded"
-    assert evidence.dataset_ref == "ds_1"
-    assert evidence.document_ref == "doc_1"
-    # the submitted document is the recovered redacted payload, byte-faithful body
-    assert adapter.submitted[0].body == "body f"
-    assert adapter.submitted[0].idempotency_key == "kf"
-    assert adapter.submitted[0].metadata["content_hash"] == payload["contentHash"]
-
-
-def test_backend_submit_reuses_existing_natural_key_without_upload(tmp_path):
-    state_db = _state_db(tmp_path)
-    payload = _payload(key="k_existing", body="body existing")
-    _seed(state_db, payload)
-    adapter = _FakeIndexAdapter(
-        result=BackendSubmitResult(dataset_ref="ds_new", document_ref="doc_new", status=IndexStatus.PENDING),
-        natural_key_handle=BackendDocumentHandle(dataset_ref="ds_existing", document_ref="doc_existing"),
-        detail=BackendStatusDetail(status=IndexStatus.INDEXED, progress=1.0, backend_raw_status="DONE"),
-    )
-    backend = RetiredIndexBridgeDeliveryBackend(state_db=state_db, retired_index_bridge=adapter)
-
-    evidence = backend.submit(_job_view(state_db, "k_existing"))
-
-    assert evidence.status == "succeeded"
-    assert evidence.dataset_ref == "ds_existing"
-    assert evidence.document_ref == "doc_existing"
-    assert evidence.run == "DONE"
-    assert adapter.submitted == []
-    assert adapter.natural_key_calls == [
-        ("index-transcript-memory", "k_existing", payload["contentHash"])
-    ]
-
-
-def test_backend_submit_exception_raises_uncertain(tmp_path):
-    state_db = _state_db(tmp_path)
-    _seed(state_db, _payload(key="kg", body="body g"))
-    adapter = _FakeIndexAdapter(error=TimeoutError("mid-flight"))
-    backend = RetiredIndexBridgeDeliveryBackend(state_db=state_db, retired_index_bridge=adapter)
-
-    with pytest.raises(DeliveryOutcomeUncertain):
-        backend.submit(_job_view(state_db, "kg"))
-
-
-def test_backend_explicit_failed_maps_to_retryable(tmp_path):
-    state_db = _state_db(tmp_path)
-    _seed(state_db, _payload(key="kh", body="body h"))
-    adapter = _FakeIndexAdapter(
-        result=BackendSubmitResult(dataset_ref="ds", document_ref="doc", status=IndexStatus.FAILED)
-    )
-    backend = RetiredIndexBridgeDeliveryBackend(state_db=state_db, retired_index_bridge=adapter)
-
-    evidence = backend.submit(_job_view(state_db, "kh"))
-    assert evidence.status == "failed_retryable"
-
-
-def test_backend_missing_payload_is_distinct_status_and_no_submit(tmp_path):
-    state_db = _state_db(tmp_path)
-    _seed(state_db, _payload(key="ki", body="body i"))
-    with state_db.connect() as connection:
-        connection.execute("DELETE FROM delivery_payloads WHERE idempotency_key = ?", ("ki",))
-    adapter = _FakeIndexAdapter(
-        result=BackendSubmitResult(dataset_ref="ds", document_ref="doc", status=IndexStatus.PENDING)
-    )
-    backend = RetiredIndexBridgeDeliveryBackend(state_db=state_db, retired_index_bridge=adapter)
-
-    evidence = backend.submit(_job_view(state_db, "ki"))
-
-    assert evidence.status == "payload_unavailable"
-    assert adapter.submitted == []
-
-
-def test_backend_with_executor_quarantines_after_uncertain_cap(tmp_path):
-    state_db = _state_db(tmp_path)
-    payload = _payload(key="kj", body="body j")
-    _seed(state_db, payload)
-    backend = RetiredIndexBridgeDeliveryBackend(
-        state_db=state_db, retired_index_bridge=_FakeIndexAdapter(error=TimeoutError("boom"))
-    )
-    executor = DeliveryExecutor(state_db=state_db, backend=backend, lease_owner="t")
-
-    outcome = executor.execute_once(job_id_for_payload(payload), max_attempts=1)
-
-    assert outcome == "quarantined"
-    row = state_db.get_row("delivery_jobs", "idempotency_key", "kj")
-    assert row["status"] == "quarantined"
-
-
-def test_backend_find_by_natural_key_returns_status_evidence(tmp_path):
-    state_db = _state_db(tmp_path)
-    payload = _payload(key="kk", body="body k")
-    _seed(state_db, payload)
-    adapter = _FakeIndexAdapter(
-        natural_key_handle=BackendDocumentHandle(dataset_ref="ds_lookup", document_ref="doc_lookup"),
-        detail=BackendStatusDetail(status=IndexStatus.INDEXING, progress=0.2, backend_raw_status="RUNNING"),
-    )
-    backend = RetiredIndexBridgeDeliveryBackend(state_db=state_db, retired_index_bridge=adapter)
-
-    evidence = backend.find_by_natural_key("kk", payload["contentHash"])
-
-    assert evidence is not None
-    assert evidence.status == "succeeded"
-    assert evidence.dataset_ref == "ds_lookup"
-    assert evidence.document_ref == "doc_lookup"
-    assert evidence.run == "RUNNING"
-    assert adapter.natural_key_calls == [
-        ("index-transcript-memory", "kk", payload["contentHash"])
-    ]
-
-
-def test_backend_natural_key_without_status_detail_fails_closed(tmp_path):
-    state_db = _state_db(tmp_path)
-    payload = _payload(key="k_missing_status_detail", body="body")
-    _seed(state_db, payload)
-
-    class AdapterWithoutStatusDetail:
-        def find_by_natural_key(self, **_kwargs):
-            return BackendDocumentHandle(dataset_ref="ds_lookup", document_ref="doc_lookup")
-
-        def submit_document(self, _document):
-            raise AssertionError("natural-key probe must fail before submit")
-
-    backend = RetiredIndexBridgeDeliveryBackend(
-        state_db=state_db,
-        retired_index_bridge=AdapterWithoutStatusDetail(),
-    )
-
-    with pytest.raises(DeliveryOutcomeUncertain) as captured:
-        backend.submit(_job_view(state_db, "k_missing_status_detail"))
-
-    assert str(captured.value) == "AttributeError"
-    executor = DeliveryExecutor(state_db=state_db, backend=backend, lease_owner="malformed-adapter")
-    outcome = executor.execute_once(job_id_for_payload(payload), max_attempts=1)
-    assert outcome == "quarantined"
-    row = state_db.get_row(
-        "delivery_jobs",
-        "idempotency_key",
-        "k_missing_status_detail",
-    )
-    assert row["status"] == "quarantined"
-
-
-def test_backend_find_by_natural_key_is_none_for_unknown_or_mismatched_job(tmp_path):
-    state_db = _state_db(tmp_path)
-    backend = RetiredIndexBridgeDeliveryBackend(
-        state_db=state_db,
-        retired_index_bridge=_FakeIndexAdapter(
-            natural_key_handle=BackendDocumentHandle(dataset_ref="ds", document_ref="doc"),
-            detail=BackendStatusDetail(status=IndexStatus.INDEXED, progress=1.0, backend_raw_status="DONE"),
-        ),
-    )
-    assert backend.find_by_natural_key("k", "sha256:x") is None
-
-
-def test_backend_status_maps_detail(tmp_path):
-    state_db = _state_db(tmp_path)
-    backend = RetiredIndexBridgeDeliveryBackend(
-        state_db=state_db,
-        retired_index_bridge=_FakeIndexAdapter(
-            detail=BackendStatusDetail(status=IndexStatus.INDEXED, progress=1.0, backend_raw_status="DONE")
-        ),
-    )
-    evidence = backend.status("ds_1", "doc_1")
-    assert evidence.status == "succeeded"
-    assert evidence.run == "DONE"
+# ---- Slice B: CouchDB delivery backend contract ----
+# The live DeliveryBackend implementation is ``CouchDBDeliveryBackend``; its
+# submit / natural-key / payload-gate contract is covered in
+# ``test_couchdb_delivery_backend.py``. The retired external index bridge
+# backend and its adapter were removed, so no bridge-specific backend slice
+# remains here.
 
 
 # ---- Slice C: drain seam ----
