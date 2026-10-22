@@ -249,6 +249,7 @@ def _write_selection_checkpoint(
         os.makedirs(directory, exist_ok=True)
     payload: dict = {
         "schema_version": _SELECTION_CHECKPOINT_SCHEMA,
+        "pg_input_policy_version": 1,
         "last_seq": str(last_seq or ""),
         "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
@@ -514,7 +515,12 @@ def _select_sessions_for_cycle(
     path = _selection_checkpoint_path()
     checkpoint = _read_selection_checkpoint(path)
     last_seq = str(checkpoint.get("last_seq") or "")
-    full_walk_pending = bool(checkpoint.get("full_walk_in_progress"))
+    # Re-evaluate historical DataError rows once when the input policy is
+    # upgraded. Preserve pending IDs and the watermark; no checkpoint reset.
+    full_walk_pending = bool(checkpoint.get("full_walk_in_progress")) or (
+        backend == "postgres_pgvector"
+        and checkpoint.get("pg_input_policy_version") != 1
+    )
     pending_sessions = _resolve_pending_sessions(
         store, _pending_session_ids(checkpoint), project=project, provider=provider
     )
