@@ -18,7 +18,10 @@ import logging
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from ..rag_ingress.pg_embedding_chunks import PG_INPUT_POLICY_VERSION
+from ..rag_ingress.pg_embedding_chunks import (
+    PG_INPUT_POLICY_VERSION,
+    TERMINAL_INPUT_REASONS,
+)
 from ..session_memory.chunk_overlap import ChunkView, canonicalize_chunk_views
 
 from .document_model import (
@@ -540,6 +543,11 @@ def _projection_state_for_materialization(
 
 
 PROJECTION_ATTEMPT_FIELD = "projection_attempt"
+_TERMINAL_FAILURE_FIELDS = (
+    "terminal_failure_policy_version",
+    "terminal_failure_source_hash",
+    "terminal_failure_reason",
+)
 
 
 def _with_projection_attempt(
@@ -568,6 +576,15 @@ def _with_projection_attempt(
         "policy_version": PG_INPUT_POLICY_VERSION,
     }
     updated[PROJECTION_ATTEMPT_FIELD] = attempts
+    if status == ProjectionStatus.FAILED and reason in TERMINAL_INPUT_REASONS:
+        # Top-level summary for the one-time policy-version recovery query. The
+        # full attempt remains the per-backend source of truth.
+        updated["terminal_failure_policy_version"] = PG_INPUT_POLICY_VERSION
+        updated["terminal_failure_source_hash"] = source_hash
+        updated["terminal_failure_reason"] = reason
+    elif status == ProjectionStatus.PROJECTED:
+        for key in _TERMINAL_FAILURE_FIELDS:
+            updated.pop(key, None)
     return updated
 
 

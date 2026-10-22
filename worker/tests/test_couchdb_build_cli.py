@@ -1565,6 +1565,90 @@ class TestProjectionAttemptAudit:
             == []
         )
 
+    def test_policy_version_bump_requeues_stale_terminal_attempt(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sid = _build_synthetic_session(
+            store, provider="claude", project="neurons", raw_id="policy-bump"
+        )
+        source_hash = session_source_revision_from_couchdb_source(
+            session_id_hash=sid, source_store=store
+        )
+        old_version = PG_INPUT_POLICY_VERSION - 1
+        state = dm.build_projection_state_document(
+            session_id_hash=sid,
+            provider="claude",
+            project="neurons",
+            projection_status=dm.ProjectionStatus.PENDING,
+        )
+        state["source_hash"] = source_hash
+        state["backend_receipts"] = {
+            "postgres_pgvector": {
+                "projection_status": dm.ProjectionStatus.PROJECTED,
+                "projected_source_hash": "sha256:" + "e" * 64,
+                "active_content_hash": "sha256:" + "a" * 64,
+                "session_memory_knowledge_id": "old-ref",
+                "provider": "claude",
+                "project": "neurons",
+            }
+        }
+        state["projection_attempt"] = {
+            "postgres_pgvector": {
+                "status": dm.ProjectionStatus.FAILED,
+                "reason": "secret_egress_policy",
+                "source_hash": source_hash,
+                "recorded_at": "2026-10-22T00:00:00+00:00",
+                "policy_version": old_version,
+            }
+        }
+        state["terminal_failure_policy_version"] = old_version
+        state["terminal_failure_source_hash"] = source_hash
+        state["terminal_failure_reason"] = "secret_egress_policy"
+        store.put(state)
+
+        checkpoint_path = tmp_path / "selection-checkpoint.json"
+        monkeypatch.setenv("SESSION_MEMORY_SELECTION_CHECKPOINT", str(checkpoint_path))
+        monkeypatch.setenv("SESSION_MEMORY_SELECTION_MODE", "incremental")
+        sequence = store.read_change_sequence()
+
+        def write_checkpoint(policy_version: int) -> None:
+            checkpoint_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "session_memory_selection_checkpoint.v1",
+                        "pg_input_policy_version": policy_version,
+                        "last_seq": sequence,
+                        "updated_at": "2026-10-22T00:00:00+00:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+        write_checkpoint(PG_INPUT_POLICY_VERSION)
+        assert (
+            _select_sessions_for_cycle(
+                store,
+                limit=10,
+                project="",
+                provider="",
+                backend="postgres_pgvector",
+                mode="incremental",
+            )
+            == []
+        )
+
+        write_checkpoint(old_version)
+        selected = _select_sessions_for_cycle(
+            store,
+            limit=10,
+            project="",
+            provider="",
+            backend="postgres_pgvector",
+            mode="incremental",
+        )
+        assert [session["session_id_hash"] for session in selected] == [sid]
+
     def test_source_revision_change_is_audited_without_blocking_new_revision(self) -> None:
         store = InMemoryCouchDBSourceStore()
         sid = _build_synthetic_session(

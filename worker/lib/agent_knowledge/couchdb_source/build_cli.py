@@ -553,18 +553,35 @@ def _select_sessions_for_cycle(
     pending_ids = _pending_session_ids(checkpoint)
     if backend == "postgres_pgvector" and checkpoint.get("pg_input_policy_version") != PG_INPUT_POLICY_VERSION:
         from .document_model import SourceDocType, projection_state_doc_id
-        # Re-evaluate only historical PG DataError receipts on policy upgrade.
+        # Re-evaluate only failures whose input policy changed: terminal attempts
+        # written under an older policy, plus historical PG DataError receipts.
         # A full scan would also activate unrelated, never-projected sources.
+        stale_terminal = store.find_by_type(
+            SourceDocType.PROJECTION_STATE,
+            fields=["_id", "session_id_hash"],
+            selector={
+                "terminal_failure_policy_version": {"$lt": PG_INPUT_POLICY_VERSION},
+                "terminal_failure_reason": {"$in": sorted(TERMINAL_INPUT_REASONS)},
+            },
+        )
         failures = store.find_by_type(
             SourceDocType.PROJECTION_STATE,
             fields=["_id", "session_id_hash"],
             selector={"backend_receipts.postgres_pgvector.failure_reason": "DataError"},
         )
+
+        def _valid_projection_ids(rows: list[dict]) -> list[str]:
+            return [
+                str(row["session_id_hash"])
+                for row in rows
+                if row.get("session_id_hash")
+                and row.get("_id") == projection_state_doc_id(str(row["session_id_hash"]))
+            ]
+
         pending_ids = list(dict.fromkeys([
             *pending_ids,
-            *(str(row["session_id_hash"]) for row in failures
-              if row.get("session_id_hash") and row.get("_id") ==
-              projection_state_doc_id(str(row["session_id_hash"]))),
+            *_valid_projection_ids(stale_terminal),
+            *_valid_projection_ids(failures),
         ]))
     pending_sessions = _resolve_pending_sessions(
         store, pending_ids, project=project, provider=provider
