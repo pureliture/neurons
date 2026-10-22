@@ -19,6 +19,7 @@ from ..model_connectors import (
 )
 from ..postgres_store.pgvector_store import PgVectorStore, SessionChunk
 from .pg_embedding_privacy import assert_pg_embedding_egress_safe
+from .pg_embedding_chunks import CHUNK_BYTES, CHUNKED_PROFILE, assert_pg_text_safe
 
 
 def _derive_pg_chunk_id_impl(
@@ -215,10 +216,11 @@ class PgSessionMemoryProjector:
     and verifies the stored chunk is ready after save.
     """
 
-    def __init__(self, store: PgVectorStore, embed_provider: Any) -> None:
+    def __init__(self, store: PgVectorStore, embed_provider: Any, *, chunk_embedder=None) -> None:
         self._profile = validated_pg_embedding_profile(embed_provider)
         self._store = store
         self._embed = embed_provider
+        self._chunk_embedder = chunk_embedder
 
     def project(self, *, target_profile: str, document: dict[str, Any]) -> str:
         assert_index_target_allowed(target_profile)
@@ -231,9 +233,13 @@ class PgSessionMemoryProjector:
         project = str(document.get("project") or "")
         provider = str(document.get("provider") or "unspecified")
         source_hash = str(document.get("source_hash") or "")
+        assert_pg_text_safe(body, session_id_hash, project, provider, source_hash, content_hash)
         embedding_model = getattr(self._embed, "model", "")
         embedding_size = getattr(self._embed, "size", 0)
-        embedding_profile = self._profile
+        # len(text) is a cheap lower bound; only small strings need a byte count.
+        chunked = len(body) > CHUNK_BYTES or len(body.encode("utf-8")) > CHUNK_BYTES
+        embedding_profile = CHUNKED_PROFILE if chunked else self._profile
+        embedding_revision = 2 if chunked else 1
 
         chunk_id = _derive_pg_chunk_id_impl(
             project=project,
@@ -258,6 +264,8 @@ class PgSessionMemoryProjector:
         def reuse_ready(row: SessionChunk | None) -> str | None:
             if row is None or row.embedding_state != "ready":
                 return None
+            if row.embedding_revision != embedding_revision:
+                return None
             validate_identity(row)
             if row.embedding is None or len(row.embedding) != embedding_size:
                 raise ValueError("PG ready chunk vector mismatch")
@@ -266,7 +274,7 @@ class PgSessionMemoryProjector:
         reused = reuse_ready(self._store.get_chunk(chunk_id))
         if reused is not None:
             return reused
-        reused = reuse_ready(
+        reused = None if chunked else reuse_ready(
             self._store.find_ready_chunk_by_identity(
                 session_id_hash=session_id_hash,
                 project=project,
@@ -287,7 +295,12 @@ class PgSessionMemoryProjector:
         # body's historical embedding provenance. Only new embedding is gated.
         # Reject, never redact: the unchanged body must match its content hash.
         assert_pg_embedding_egress_safe(body)
-        vector = self._embed.embed(body)
+        if chunked:
+            if self._chunk_embedder is None:
+                raise ValueError("bounded PG chunk embedder is required for large input")
+            vector = self._chunk_embedder.embed(body, content_hash=content_hash)
+        else:
+            vector = self._embed.embed(body)
         if len(vector) != embedding_size:
             raise ValueError(
                 f"embedding returned {len(vector)} dims, expected {embedding_size}"
@@ -304,6 +317,7 @@ class PgSessionMemoryProjector:
             embedding_state="ready",
             embedding=vector,
             embedding_model=embedding_model,
+            embedding_revision=embedding_revision,
         )
         # Serialize this projection lane per identity, including the absent-row
         # case (a row lock alone cannot fence concurrent first inserts).
@@ -316,7 +330,7 @@ class PgSessionMemoryProjector:
             concurrent = reuse_ready(self._store.get_chunk(chunk_id, conn=conn))
             if concurrent is not None:
                 return concurrent
-            concurrent = reuse_ready(
+            concurrent = None if chunked else reuse_ready(
                 self._store.find_ready_chunk_by_identity(
                     session_id_hash=session_id_hash,
                     project=project,
@@ -343,6 +357,8 @@ class PgSessionMemoryProjector:
         return chunk_id
 
     def close(self) -> None:
+        if self._chunk_embedder is not None:
+            self._chunk_embedder.close()
         embed_close = getattr(self._embed, "close", None)
         if callable(embed_close):
             embed_close()
