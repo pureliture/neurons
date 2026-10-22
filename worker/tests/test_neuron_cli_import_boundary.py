@@ -31,6 +31,7 @@ def test_lazy_command_handlers_import_their_targets_only_when_dispatched(monkeyp
     expected_targets = {
         "brain-context-resolve": (".llm_brain_core.cli", "main"),
         "pg-memory-propose": (".session_memory.candidate_intake_cli", "main"),
+        "pg-schema-apply": (".postgres_store.schema_apply_cli", "main"),
         "object-query": (".llm_brain_core.objects.object_cli", "object_query_main"),
         "agent-context-startup": (".llm_brain_core.objects.object_cli", "agent_context_startup_main"),
         "artifact-preference-evaluate": (".llm_brain_core.objects.object_cli", "artifact_preference_evaluate_main"),
