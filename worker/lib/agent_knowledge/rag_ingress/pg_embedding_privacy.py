@@ -59,6 +59,22 @@ def _has_value(value: str) -> bool:
     return bool(value.strip()) and _REDACTED.fullmatch(value.strip()) is None
 
 
+def _is_non_secret_assignment(match: re.Match, value: str) -> bool:
+    """Allow only a complete assignment value that is exactly a boolean/null.
+
+    The bare-value regex stops at whitespace, so a trailing scalar such as
+    ``password: false my-secret`` must not be exempted. Quoted values are
+    matched without trimming inside the quotes, so ``" false "`` stays a
+    value and is rejected.
+    """
+    if _NON_SECRET_LITERAL.fullmatch(value) is None:
+        return False
+    line_end = match.string.find("\n", match.end())
+    rest = match.string[match.end() : line_end if line_end >= 0 else len(match.string)]
+    stripped = rest.lstrip()
+    return not stripped or stripped[0] in ",;}]" or stripped.startswith("#")
+
+
 def assert_pg_embedding_egress_safe(text: str) -> None:
     """Raise a fixed, source-free error before external egress; never mutate text."""
     if _KNOWN_TOKEN.search(text):
@@ -68,7 +84,7 @@ def assert_pg_embedding_egress_safe(text: str) -> None:
             value = next(value for value in match.groups() if value is not None)
             if pattern is _AUTHORIZATION:
                 value = _SCHEME.sub("", value.strip())
-            if pattern is _ASSIGNMENT and _NON_SECRET_LITERAL.fullmatch(value.strip()):
+            if pattern is _ASSIGNMENT and _is_non_secret_assignment(match, value):
                 continue
             if _has_value(value):
                 raise ValueError(_ERROR)

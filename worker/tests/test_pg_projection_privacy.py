@@ -95,11 +95,16 @@ NON_SECRET_LITERAL_ASSIGNMENTS = [
     'api_key: False',
     'secret: NULL',
     'credential: no',
+    'token: "false"',
+    'password: false # comment',
+    '{"token": false, "other": 1}',
 ]
 NON_LITERAL_SHORT_ASSIGNMENTS = [
     'token: falsey',
     'password: none-of-your-business',
     'api_key: 0',
+    'password: false my-secret',
+    'token: " false "',
 ]
 
 
