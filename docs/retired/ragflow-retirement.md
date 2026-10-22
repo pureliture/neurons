@@ -28,17 +28,20 @@ The retirement is complete on the **runtime, CLI, env and backend-option** surfa
 | Session-memory GC/backfill lane | The `session-memory-worker` container no longer injects a bridge credential and no longer schedules the gc/backfill lanes (`deploy/session-memory/entrypoint.sh`). |
 | Recovery tooling | `couchdb_source/index_fallback.py` (a RAGFlow HTTP reader) is deleted; with no bridge there is nothing to recover from. |
 | Live verification | `scripts/live-index-verify.py` is deleted. |
+| Legacy operator-tool package | `agent_knowledge/legacy/index_client.py` and the operator tooling it served are deleted. The GC 3종, `transcript-backfill`, `cleanup-readiness`, the native-memory write path, the legacy builder and their `legacy/` transport are gone; only the read-only planners and the CouchDB-native builder remain. |
 
-The regression guard for all of the above is `worker/tests/test_retired_index_bridge_protocol_guard.py`.
+The regression guard for all of the above is `worker/tests/test_retired_bridge_deploy_surface_guard.py`.
 
 ## What survives, and why
 
-Two things intentionally remain, neither of which is the RAGFlow protocol:
+One thing intentionally remains, and it is not the RAGFlow protocol:
 
 1. **A backend-neutral adapter boundary.** `rag_ingress/index_adapter.py` defines the `IndexAdapter` protocol, `IndexStatus` and the natural-key rules. The CouchDB adapter (`rag_ingress/couchdb_index_adapter.py`) and the Qdrant adapter (`rag_ingress/qdrant_docling_mirror.py`) implement it. The previous RAGFlow implementation of the same protocol is gone.
-2. **A legacy operator-tool package.** `agent_knowledge/legacy/index_client.py` still speaks the retired wire protocol. It is used only by operator-side archive/GC tooling that has no other backend, and it is not importable from the ingress runtime, the recall surfaces, or the deploy configuration.
 
-A third, deliberately unchanged item is the **logical** target-profile contract: the `index-*` profile ids, their dataset roles, and the `BackendKind` enum value are routing labels, not a backend implementation. They stay so the public enqueue contract does not move.
+A second, deliberately unchanged item is the **logical** target-profile contract: the `index-*` profile ids, their dataset roles, and the `BackendKind` enum value are routing labels, not a backend implementation. They stay so the public enqueue contract does not move.
+
+A third item is the **data**: the `native_memory_mirror` and `memory_gc_audit` ledger tables and their schema stay, so existing rows are preserved. Only the Python helpers that read or wrote them through the retired bridge are gone.
+
 
 ## Operator follow-up (live deployment)
 

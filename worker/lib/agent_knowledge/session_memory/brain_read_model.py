@@ -7,8 +7,6 @@ ledger phase-out 제약(2026-06-11): brain_query.py는 Ledger를 모른다.
 
 from __future__ import annotations
 
-from .native_memory_recall import recall_active_native_memory
-
 
 class LegacyLedgerBrainReadModel:
     """behavior-preserving ledger 어댑터. BrainReadModel protocol 구현."""
@@ -80,18 +78,3 @@ class PgStewardBrainReadModel:
 
     def list_project_card_counts(self) -> list[tuple[str, int]]:
         return self._store.list_steward_project_counts()
-
-
-def build_semantic_recall(*, ledger, retired_index_bridge, memory_id: str):
-    """(query, brain_id) -> hits 클로저. store는 lazy 생성 —
-    read-only ledger 등 구성 예외가 run 시점 fallback으로 흡수되게 한다."""
-
-    def semantic_recall(query: str, brain_id: str) -> list[dict]:
-        from .native_memory_mirror import NativeMemoryMirrorStore
-
-        store = NativeMemoryMirrorStore(ledger)
-        return recall_active_native_memory(
-            retired_index_bridge=retired_index_bridge, store=store, memory_id=memory_id, query=query, brain_id=brain_id
-        )
-
-    return semantic_recall

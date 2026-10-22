@@ -1,5 +1,14 @@
 # Agent Memory Cleanup Readiness
 
+> **은퇴(retired).** 이 runbook이 다루는 operator 도구(`cleanup-readiness`,
+> `session-memory-gc`, `transcript-backfill`, `neuron-session-memory-build`의
+> bridge 경로)는 모두 은퇴한 external index bridge 전용이며, 그 bridge의
+> transport 패키지와 함께 삭제되었다. live secret에 `RETIRED_INDEX_BRIDGE*` 키가
+> 하나도 없으므로 이 절차는 더 이상 실행할 수 없다. 아래는 **기록**이며 현재
+> 절차가 아니다. 현재 live build lane은 CouchDB-native
+> `couchdb-session-memory-build`이고, transcript-memory GC 후보 산출은
+> `transcript-memory-gc`가 담당한다.
+
 이 runbook은 잘못 매핑된 `transcript-memory` / `session-memory` RetiredIndexBridge
 문서를 정리하기 전 준비 절차다. 여기서는 live disable/delete를 실행하지 않는다.
 

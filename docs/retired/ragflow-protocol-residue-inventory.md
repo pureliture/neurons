@@ -47,22 +47,25 @@ Three questions decided every row:
 | `compose.yaml` — `RETIRED_INDEX_BRIDGE_DELIVERY_ENABLED`, four `RETIRED_INDEX_BRIDGE_PRESSURE_*` keys | 제거 | They configured the deleted Java adapter. |
 | `compose.yaml` — `NATURAL_KEY_BROAD_SCAN_PAGES` | 제거 | It tuned the deleted RAGFlow adapter's natural-key scan. |
 
-## Operator tooling — kept, but quarantined
+## Operator tooling — removed with the legacy transport
 
-These modules exist only to operate a retired backend, so they cannot be
-"repointed" to CouchDB or Qdrant without becoming different tools. They keep
-working against the retired protocol, but the transport now lives in an
-explicitly-legacy package and is not importable from any runtime path.
+These modules existed only to operate a retired backend, so they could not be
+"repointed" to CouchDB or Qdrant without becoming different tools. The
+retirement procedure for the legacy operator-tool package has now run: the
+transport and the tools that needed it are deleted, and the read-only
+CouchDB-native builder is the live path.
 
 | Surface | Decision | Evidence |
 | --- | --- | --- |
-| `agent_knowledge/index_client.py` → `agent_knowledge/legacy/index_client.py` | 유지 (격리) | The wire-protocol transport itself. Moving it under `legacy/` makes the boundary structural; the guard test proves no runtime, ingress or recall module imports it. |
-| `session_memory/session_memory_gc.py`, `transcript_session_gc.py`, `transcript_volume_gc.py`, `gc_backup.py` | 유지 | GC against the retired backend. They are operator-gated CLI tools (approval JSON + `--execute`), not runtime. |
-| `session_memory/transcript_backfill.py` | 유지 | Backfill into the retired backend. Operator CLI, not routed by `COMMAND_HANDLERS`. |
-| `session_memory/cleanup_readiness.py` | 유지 | Dataset census against the retired backend. Operator CLI. |
-| `session_memory/neuron_session_memory.py`, `dirty_session_memory_sync.py` | 유지 | Legacy session-memory builder that reads the retired backend. The CouchDB-native builder (`couchdb-session-memory-build`) is the live path. |
-| `session_memory/native_memory_writer.py`, `native_memory_reconcile.py` | 유지 | The native-memory feature is built on the retired bridge's Memory API. Removing the feature is a product decision, not a protocol cleanup. |
-| `dataset_contract.py` (`CANONICAL_RETIRED_INDEX_BRIDGE_DATASET_NAMES`, `DEPRECATED_RETIRED_INDEX_BRIDGE_DATASET_PREFIXES`) | 유지 | A dataset-*naming* contract, not a protocol. Consumed by the legacy GC tool and its own test. |
+| `agent_knowledge/legacy/index_client.py` (was `agent_knowledge/index_client.py`) | 제거 | The wire-protocol transport itself. The live deployment carries no `RETIRED_INDEX_BRIDGE_*` credential, so every tool built on it was unreachable. The guard test now proves the package is gone and that no active source imports it. |
+| `session_memory/session_memory_gc.py`, `transcript_session_gc.py`, `transcript_volume_gc.py`, `gc_backup.py` | 제거 | GC against the retired backend. With the backend gone there is no target to delete from, and an auto-approved live hard-delete against a retired backend must not exist. `transcript_memory_gc.py` (the transcript-memory dataset GC) is a separate, retained planner. |
+| `session_memory/transcript_backfill.py` | 제거 | Backfill into the retired backend. Operator CLI, not routed by `COMMAND_HANDLERS`. |
+| `session_memory/cleanup_readiness.py` | 제거 | Dataset census against the retired backend. Operator CLI. |
+| `session_memory/native_memory_writer.py`, `native_memory_reconcile.py`, `native_memory_write_runner.py`, `native_memory_recall.py`, `native_memory_mirror.py` | 제거 (C-1) | The native-memory feature was built on the retired bridge's Memory API. The product decision is **C-1: native_memory discontinued**, so the feature and its write/read helpers are removed. The `native_memory_mirror` **ledger table and its rows stay** — only the Python helper is gone. `native_memory_sync_approval.py` and `native_memory_governance.py` survive as the live CouchDB approval gate and the shared high-risk card-type policy. |
+| `session_memory/regeneration_index_sync.py`, `sync_roundtrip.py`, `session_memory_roundtrip.py` | 제거 | The session-memory upload/verify/rollback lane. It was reachable only from the removed `sync=True` path of `SessionMemoryRegenerationRunner`, which is now plan-only. |
+| `session_memory/neuron_session_memory.py`, `dirty_session_memory_sync.py` | 유지 (read-only로 축소) | The legacy session-memory builder that read the retired backend. The CouchDB-native builder (`couchdb-session-memory-build`) is the live path; the legacy lane survives only as a read-only planner (shadow-log scan + dirty-session drain plan) and its live path reports a structured `blocked_live_execution`. |
+| `dataset_contract.py` (`CANONICAL_RETIRED_INDEX_BRIDGE_DATASET_NAMES`, `DEPRECATED_RETIRED_INDEX_BRIDGE_DATASET_PREFIXES`) | 유지 | A dataset-*naming* contract, not a protocol. |
+
 
 ## Names and contracts — kept on purpose
 
@@ -76,7 +79,7 @@ explicitly-legacy package and is not importable from any runtime path.
 | `couchdb_source/document_model.py` — `INDEX_RECALL_PROFILE` (renamed from `RETIRED_INDEX_BRIDGE_RECALL_PROFILE`) | 중립화 | The value (`session-memory`) did not change; only the constant name did. |
 | `session_memory/brain_query.py` — `"source": "retired_index_bridge"` | 유지 | A label in the public `brain.query` response shape. The lane is the M9 bridge seam, and changing the label would change the response contract. |
 | `session_memory/transcript_parsers/evidence.py` — the `/api/v1/` regex | 유지 | A generic URL-shape matcher used to spot live-proof markers in transcripts. Not the retired protocol. |
-| `session_memory/index_projection.py` · `session_memory/regeneration_index_sync.py` · `rag_ingress/file_ingest.py` | 유지 | They call the retired bridge's document API (`upload_document` / `update_metadata` / `request_parse` / `list_documents` / `get_document_status`) through an **injected** client. They import no transport, so they cannot reach the bridge on their own, and they are not on the live recall path. `session_memory/index_projection.py` is re-exported as public API by `session_memory/__init__.py`. |
+| `session_memory/index_projection.py` · `rag_ingress/file_ingest.py` | 유지 | They call the retired bridge's document API (`upload_document` / `update_metadata` / `request_parse` / `list_documents`) through an **injected** client. They import no transport, so they cannot reach the bridge on their own, and they are not on the live recall path. `session_memory/index_projection.py` is re-exported as public API by `session_memory/__init__.py`. `session_memory/regeneration_index_sync.py` was removed with the session-memory upload lane. |
 | `couchdb_source/document_model.py` — `RETIRED_TRANSCRIPT_MEMORY_PROFILE` (renamed from `RETIRED_RETIRED_INDEX_BRIDGE_PROFILE`) | 중립화 | A pre-existing double-prefixed name (a leftover of an earlier rename), not introduced here. The value (`transcript-memory`) is unchanged; only the constant name became backend-neutral. |
 | `ledger.py`, `rag_ingress/state_db.py` — legacy `ragflow_*` column names | 유지 | The data-preserving migration that copies historical `ragflow_dataset_id` / `ragflow_document_id` / `ragflow_run` / `ragflow_datasets` into their `index_*` equivalents. Renaming the source column names would break the migration. |
 | `knowledge_search_service.py`, `llm_brain_core/objects/*` — `ragflow_dataset:` / `ragflow_document:` redaction patterns | 유지 | Secret-like key-name *detection* patterns for values that must never reach a public surface. They reference no product and can select or reach nothing. |
@@ -86,7 +89,7 @@ explicitly-legacy package and is not importable from any runtime path.
 
 | Guard | Location |
 | --- | --- |
-| No retired-bridge transport outside the legacy operator allowlist | `worker/tests/test_retired_index_bridge_protocol_guard.py` |
+| The legacy transport package is gone and no active source imports it | `worker/tests/test_retired_bridge_deploy_surface_guard.py` |
 | The ingress runtime imports no legacy transport | same |
 | No retired wire-protocol endpoint shape in active source (Python or Java) | same |
 | The Java retired-bridge adapter package stays deleted | same |

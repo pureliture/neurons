@@ -67,15 +67,14 @@ Owned here:
 - ingress queue/runtime, worker, durable state DB, and RAG target adapters
 - `ledger.py`, transcript ingest worker, replay/reconcile/backfill server state
 - CouchDB transcript source plane and session/project-memory build/read surfaces
-- brain query, MemoryCard, native-memory mirror/sync/reconcile
+- brain query and MemoryCard
 - Graphiti/Neo4j derived graph index and the Graph-first target read plane
   (public cutover status is recorded below)
 - 사용자 MCP surface: `mcp-stdio`와 기본 `mcp-http`는
   `brain.resolve`, `memory_candidate_create`만 노출한다.
   관리 도구는 별도 `mcp-http --surface admin` 프로세스에서 인증 후 제공한다.
 - GC safety planners and fail-closed GC command surfaces:
-  `session-memory-gc`, `transcript-memory-gc`, `transcript-session-gc`,
-  `transcript-volume-gc`, `session-memory-quarantine-terminal-skipped`, and
+  `transcript-memory-gc`, `session-memory-quarantine-terminal-skipped`, and
   `session-memory-repair-zombie-snapshots`
 
 Not owned here:
@@ -475,8 +474,7 @@ builder cron이 per-session **session-memory**를 materialize한다
   MCP stdio server는 ledger를 **read-only**로 연다.
 - 모든 응답은 **public-safe redactor**(`ensure_public_safe` / `_safe_source_ref` whitelist)를 통과하며,
   raw path·Bearer·secret이 보이면 raise한다. MemoryCard는 forbidden-content 규칙을 가진다.
-- augmenting mirror는 gate된다 — RetiredIndexBridge mirror는 `--dataset-id`, native-memory recall은
-  `--native-memory-id` / `RETIRED_INDEX_BRIDGE_NATIVE_MEMORY_ID`, graph는 enable 시에만.
+- augmenting mirror는 gate된다 — search mirror는 `--dataset-id`, graph는 enable 시에만.
 
 <details>
 <summary><b>🔌 Legacy MCP read surface — 10 tools 펼치기</b></summary>

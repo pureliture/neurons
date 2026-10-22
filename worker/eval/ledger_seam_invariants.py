@@ -26,20 +26,17 @@ FORBIDDEN_RETIRED_INDEX_BRIDGE_MUTATIONS = frozenset(
 # A2 shrink: GC 3 스크립트의 ``delete_documents`` 직접 호출이 GC Safety Lane seam
 # (``gc_safety_auditor.hard_delete_documents``) 경유로 라우팅됐다. 이제 비가역 RetiredIndexBridge
 # 삭제의 직접 호출은 **seam 모듈 한 곳**에만 존재한다. GC 스크립트에 delete_documents가
-# 다시 나타나면 allowlist 밖 위반으로 잡힌다(seam 우회 금지). sync_roundtrip/
-# native_memory_reconcile의 disable_*는 Phase A 밖(envelope 안)이라 allowlist 유지.
+# 다시 나타나면 allowlist 밖 위반으로 잡힌다(seam 우회 금지). 은퇴한 external index
+# bridge의 client 패키지 삭제와 함께 GC runner 3종과 sync_roundtrip도 제거되어
+# allowlist에는 seam 한 곳만 남는다.
 FROZEN_DELETE_ALLOWLIST: dict[str, frozenset[str]] = {
     "session_memory/gc_safety_auditor.py": frozenset({"delete_documents"}),
-    "session_memory/sync_roundtrip.py": frozenset({"disable_document"}),
-    "session_memory/native_memory_reconcile.py": frozenset({"disable_message"}),
 }
 
 # 주입 seam을 노출해야 하는 GC runner: 상대 경로 -> (클래스명, 필수 파라미터).
-REQUIRED_INJECTION_SEAMS: dict[str, tuple[str, str]] = {
-    "session_memory/session_memory_gc.py": ("SessionMemoryGcRunner", "index_client"),
-    "session_memory/transcript_volume_gc.py": ("TranscriptVolumeGcRunner", "index_client"),
-    "session_memory/transcript_session_gc.py": ("TranscriptSessionGcRunner", "index_client"),
-}
+# 은퇴한 external index bridge를 유일한 write target으로 삼던 GC runner 3종은
+# bridge client 패키지 삭제와 함께 정리되므로 seam 대상이 더는 없다.
+REQUIRED_INJECTION_SEAMS: dict[str, tuple[str, str]] = {}
 
 
 def _agent_knowledge_root(start: Path | None = None) -> Path:
