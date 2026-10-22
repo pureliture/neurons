@@ -1855,6 +1855,40 @@ class PgVectorStore:
                 rows = cur.fetchall()
         return [_graph_outbox_from_row(row) for row in rows]
 
+    def reset_graph_projection_dead_letters(
+        self,
+        *,
+        source_ids: list[str] | None = None,
+        conn: Any | None = None,
+    ) -> int:
+        """Reset dead-lettered graph projection jobs to failed for retry.
+
+        Only rows currently in ``dead_letter`` are touched.  ``retry_count`` is
+        reset to 0 so the worker can claim them again.  When ``source_ids`` is
+        given, only those source IDs are reset.  Returns the number of rows
+        updated.
+        """
+        params: list[Any] = []
+        where = " WHERE status = 'dead_letter'"
+        if source_ids:
+            placeholders = ", ".join(["%s"] * len(source_ids))
+            where += f" AND source_id IN ({placeholders})"
+            params.extend(source_ids)
+        with self._scope(conn=conn, write=True) as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    "UPDATE graph_projection_outbox"
+                    + " SET status = 'failed',"
+                    + "     retry_count = 0,"
+                    + "     lease_until = NULL,"
+                    + "     worker_id = NULL,"
+                    + "     claimed_at = NULL,"
+                    + "     updated_at = NOW()"
+                    + where,
+                    params,
+                )
+                return cur.rowcount
+
     @staticmethod
     def _validate_card(card: MemoryCard) -> None:
         if not card.memory_id or not card.project or not card.card_type:

@@ -65,6 +65,16 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Run a single batch and exit (for cron mode)",
     )
+    parser.add_argument(
+        "--retry-dead-letters",
+        action="store_true",
+        help="Reset dead-lettered graph projection jobs to failed before running",
+    )
+    parser.add_argument(
+        "--source-ids",
+        default="",
+        help="Comma-separated source IDs to retry (only with --retry-dead-letters)",
+    )
     args = parser.parse_args(argv)
 
     if not args.pg_dsn:
@@ -79,6 +89,21 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         print(f"error: failed to initialize PG store: {exc}", file=sys.stderr)
         return 1
+
+    if args.retry_dead_letters:
+        source_ids = [s.strip() for s in args.source_ids.split(",") if s.strip()]
+        if not source_ids:
+            print(
+                "error: --retry-dead-letters requires --source-ids (empty would retry ALL dead letters)",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            reset_count = store.reset_graph_projection_dead_letters(source_ids=source_ids)
+            print(f"reset {reset_count} dead-letter job(s) to failed for retry")
+        except Exception as exc:
+            print(f"error: failed to reset dead letters: {exc}", file=sys.stderr)
+            return 1
 
     try:
         from ..llm_brain_core.runtime_graph import build_graph_adapter_from_env
