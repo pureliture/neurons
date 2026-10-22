@@ -86,7 +86,7 @@ def _select_sessions_needing_projection(
     }
     blocked_source_hashes: dict[str, str] = {}
     if backend == "postgres_pgvector":
-        from ..rag_ingress.pg_embedding_privacy import SECRET_EGRESS_FAILURE_REASON
+        from ..rag_ingress.pg_embedding_chunks import TERMINAL_INPUT_REASONS
 
         # Secret-egress rejections are policy outcomes, not transient faults. Leave the
         # session out of the queue while its source revision equals the blocked one; a
@@ -97,7 +97,7 @@ def _select_sessions_needing_projection(
             if (session_id_hash := str(state.get("session_id_hash") or ""))
             and str(state.get("_id") or "") == projection_state_doc_id(session_id_hash)
             and str(state.get("projection_status") or "") == ProjectionStatus.FAILED
-            and str(state.get("failure_reason") or "") == SECRET_EGRESS_FAILURE_REASON
+            and str(state.get("failure_reason") or "") in TERMINAL_INPUT_REASONS
             and str(state.get("failure_source_hash") or "")
         }
     selected: list[dict] = []
@@ -249,6 +249,7 @@ def _write_selection_checkpoint(
         os.makedirs(directory, exist_ok=True)
     payload: dict = {
         "schema_version": _SELECTION_CHECKPOINT_SCHEMA,
+        "pg_input_policy_version": 1,
         "last_seq": str(last_seq or ""),
         "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
@@ -279,7 +280,7 @@ def _evaluate_session_change(
     successor checks, and blocked (secret-egress) revisions stay out of the queue.
     Returns ``(needs_projection, session_document_to_select)``.
     """
-    from ..rag_ingress.pg_embedding_privacy import SECRET_EGRESS_FAILURE_REASON
+    from ..rag_ingress.pg_embedding_chunks import TERMINAL_INPUT_REASONS
     from .document_model import (
         ProjectionStatus,
         assert_hash_like,
@@ -306,7 +307,7 @@ def _evaluate_session_change(
     blocked_source_hash = ""
     if (
         str(merged.get("projection_status") or "") == ProjectionStatus.FAILED
-        and str(merged.get("failure_reason") or "") == SECRET_EGRESS_FAILURE_REASON
+        and str(merged.get("failure_reason") or "") in TERMINAL_INPUT_REASONS
     ):
         blocked_source_hash = str(merged.get("failure_source_hash") or "")
 
@@ -515,8 +516,24 @@ def _select_sessions_for_cycle(
     checkpoint = _read_selection_checkpoint(path)
     last_seq = str(checkpoint.get("last_seq") or "")
     full_walk_pending = bool(checkpoint.get("full_walk_in_progress"))
+    pending_ids = _pending_session_ids(checkpoint)
+    if backend == "postgres_pgvector" and checkpoint.get("pg_input_policy_version") != 1:
+        from .document_model import SourceDocType, projection_state_doc_id
+        # Re-evaluate only historical PG DataError receipts on policy upgrade.
+        # A full scan would also activate unrelated, never-projected sources.
+        failures = store.find_by_type(
+            SourceDocType.PROJECTION_STATE,
+            fields=["_id", "session_id_hash"],
+            selector={"backend_receipts.postgres_pgvector.failure_reason": "DataError"},
+        )
+        pending_ids = list(dict.fromkeys([
+            *pending_ids,
+            *(str(row["session_id_hash"]) for row in failures
+              if row.get("session_id_hash") and row.get("_id") ==
+              projection_state_doc_id(str(row["session_id_hash"]))),
+        ]))
     pending_sessions = _resolve_pending_sessions(
-        store, _pending_session_ids(checkpoint), project=project, provider=provider
+        store, pending_ids, project=project, provider=provider
     )
     if limit <= 0:
         processed_pending = pending_sessions
@@ -882,7 +899,7 @@ def main(argv: list[str] | None = None) -> int:
                 status = str(projection.get("status") or "")
                 if status == "projected":
                     projected += 1
-                elif not result.get("fully_materialized"):
+                elif status == "pending" or not result.get("fully_materialized"):
                     skipped += 1
                 else:
                     failed += 1
@@ -1063,12 +1080,20 @@ def _build_pg_projector(environ):
         return None
     from ..rag_ingress.pg_backfill import PgSessionMemoryProjector
     from ..postgres_store.pgvector_store import PgVectorStore
-    from ..rag_ingress.qdrant_embedding import build_openai_embedding_provider
+    from ..rag_ingress.qdrant_embedding import build_openai_embedding_provider, resolve_embedding_config
+    from ..rag_ingress.pg_embedding_chunks import BoundedPgEmbedding
 
     store = PgVectorStore(dsn=dsn, pgvector_version=environ.get("LLM_BRAIN_PGVECTOR_VERSION", "0.8.0"))
     provider = build_openai_embedding_provider(environ=environ)
     try:
-        return PgSessionMemoryProjector(store=store, embed_provider=provider)
+        chunks = BoundedPgEmbedding(
+            provider,
+            cache_path=environ.get("PG_EMBEDDING_CHUNK_CACHE", "/app/state/pg-embedding-chunks.sqlite3"),
+            endpoint_scope=str(resolve_embedding_config(environ)["base_url"]),
+            cycle_budget=int(environ.get("PG_EMBEDDING_CHUNKS_PER_CYCLE", "192")),
+            session_budget=int(environ.get("PG_EMBEDDING_CHUNKS_PER_SESSION", "64")),
+        )
+        return PgSessionMemoryProjector(store=store, embed_provider=provider, chunk_embedder=chunks)
     except Exception:
         _close_if_supported(provider)
         raise
