@@ -86,6 +86,26 @@ REDACTED_ASSIGNMENTS = [
     'password=""',
     'API_KEY=',
 ]
+NON_SECRET_LITERAL_ASSIGNMENTS = [
+    'token: true',
+    'token: false',
+    'token: none',
+    'token: null',
+    'password: TRUE',
+    'api_key: False',
+    'secret: NULL',
+    'credential: no',
+    'token: "false"',
+    'password: false # comment',
+    '{"token": false, "other": 1}',
+]
+NON_LITERAL_SHORT_ASSIGNMENTS = [
+    'token: falsey',
+    'password: none-of-your-business',
+    'api_key: 0',
+    'password: false my-secret',
+    'token: " false "',
+]
 
 
 AUTH_CREDENTIALS = [
@@ -158,6 +178,29 @@ def test_redacted_assignment_preserved(body):
     projector.project(target_profile="session-memory", document=doc)
     provider.embed.assert_called_once_with(body)
     assert store.insert_chunk.call_args.args[0].content_markdown == body
+
+
+@pytest.mark.parametrize("body", NON_SECRET_LITERAL_ASSIGNMENTS)
+def test_boolean_null_assignment_is_not_a_secret(body):
+    projector, store, provider, doc, _ = projection_boundary(body)
+    projector.project(target_profile="session-memory", document=doc)
+    provider.embed.assert_called_once_with(body)
+
+
+@pytest.mark.parametrize("body", NON_LITERAL_SHORT_ASSIGNMENTS)
+def test_non_literal_short_assignment_still_rejected(body):
+    projector, store, provider, doc, _ = projection_boundary(body)
+    with pytest.raises(ValueError, match="^PG embedding input rejected by secret egress policy$"):
+        projector.project(target_profile="session-memory", document=doc)
+    provider.embed.assert_not_called()
+
+
+@pytest.mark.parametrize("body", ["Authorization: Bearer false", "Authorization: none"])
+def test_boolean_auth_header_still_rejected(body):
+    projector, store, provider, doc, _ = projection_boundary(body)
+    with pytest.raises(ValueError, match="^PG embedding input rejected by secret egress policy$"):
+        projector.project(target_profile="session-memory", document=doc)
+    provider.embed.assert_not_called()
 
 
 @pytest.mark.parametrize("reuse", ["id", "identity"])

@@ -22,6 +22,10 @@ _REDACTED = re.compile(
     r"(?:<redacted(?:[:_-]secret)?>|\[redacted(?:[:_-]secret)?\]|\*{3,})",
     re.IGNORECASE,
 )
+# Boolean/null literals are values, but they are not credentials. Keep this
+# exact-match exception scoped to key assignments; auth/header values remain
+# conservative even when they happen to be one of these words.
+_NON_SECRET_LITERAL = re.compile(r"^(?:true|false|none|null|yes|no)$", re.IGNORECASE)
 _VALUE = r'''(?:"(?P<double>(?:\\.|[^"\\])*)"|'(?P<single>(?:\\.|[^'\\])*)'|(?P<bare>[^\s,;\}"']+))'''
 _ASSIGNMENT = re.compile(
     # These additional names are exact keys, not broad auth/config vocabulary.
@@ -55,6 +59,22 @@ def _has_value(value: str) -> bool:
     return bool(value.strip()) and _REDACTED.fullmatch(value.strip()) is None
 
 
+def _is_non_secret_assignment(match: re.Match, value: str) -> bool:
+    """Allow only a complete assignment value that is exactly a boolean/null.
+
+    The bare-value regex stops at whitespace, so a trailing scalar such as
+    ``password: false my-secret`` must not be exempted. Quoted values are
+    matched without trimming inside the quotes, so ``" false "`` stays a
+    value and is rejected.
+    """
+    if _NON_SECRET_LITERAL.fullmatch(value) is None:
+        return False
+    line_end = match.string.find("\n", match.end())
+    rest = match.string[match.end() : line_end if line_end >= 0 else len(match.string)]
+    stripped = rest.lstrip()
+    return not stripped or stripped[0] in ",;}]" or stripped.startswith("#")
+
+
 def assert_pg_embedding_egress_safe(text: str) -> None:
     """Raise a fixed, source-free error before external egress; never mutate text."""
     if _KNOWN_TOKEN.search(text):
@@ -64,6 +84,8 @@ def assert_pg_embedding_egress_safe(text: str) -> None:
             value = next(value for value in match.groups() if value is not None)
             if pattern is _AUTHORIZATION:
                 value = _SCHEME.sub("", value.strip())
+            if pattern is _ASSIGNMENT and _is_non_secret_assignment(match, value):
+                continue
             if _has_value(value):
                 raise ValueError(_ERROR)
     for pattern in (_CREDENTIAL_URL, _PRIVATE_KEY):
