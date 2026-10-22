@@ -29,6 +29,10 @@ from agent_knowledge.qdrant_write_gateway_runtime import (
     qdrant_write_activation_from_environment,
     qdrant_write_gateway_generation_from_environment,
 )
+from agent_knowledge.rag_ingress.pg_embedding_chunks import (
+    PG_INPUT_POLICY_VERSION,
+    TERMINAL_INPUT_REASONS,
+)
 
 BUILD_CLI_SCHEMA_VERSION = "couchdb_session_memory_build.v1"
 BUILD_CLI_OPERATION = "couchdb_session_memory_build"
@@ -38,6 +42,36 @@ QDRANT_MUTATION_SOURCE = QdrantMutationSource.PROJECTION
 def _build_auth_header(user: str, password: str) -> str:
     token = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
     return f"Basic {token}"
+
+
+def _blocked_source_hash_from_state(state: dict, backend: str) -> str:
+    """Return the terminal-failure source hash for a top-level state document.
+
+    This must be called on the raw projection_state, before ``backend_receipts``
+    is merged over it. For an already-projected session the receipt's
+    ``projection_status`` is ``projected`` and would otherwise hide the
+    top-level failed attempt.
+    """
+    if backend != "postgres_pgvector":
+        return ""
+    from .document_model import ProjectionStatus
+
+    attempt = (state.get("projection_attempt") or {}).get(backend) or {}
+    if (
+        attempt.get("policy_version") == PG_INPUT_POLICY_VERSION
+        and str(attempt.get("status") or "") == ProjectionStatus.FAILED
+        and str(attempt.get("reason") or "") in TERMINAL_INPUT_REASONS
+        and str(attempt.get("source_hash") or "")
+    ):
+        return str(attempt["source_hash"])
+    # Backward compatibility for states written before projection_attempt existed.
+    if (
+        str(state.get("projection_status") or "") == ProjectionStatus.FAILED
+        and str(state.get("failure_reason") or "") in TERMINAL_INPUT_REASONS
+        and str(state.get("failure_source_hash") or "")
+    ):
+        return str(state["failure_source_hash"])
+    return ""
 
 
 def _select_sessions_needing_projection(
@@ -60,23 +94,42 @@ def _select_sessions_needing_projection(
 
     scope_selector = _scope_selector(project=project, provider=provider)
     hash_field = "backend_receipts" if backend == "postgres_pgvector" else "projected_source_hash"
-    states = store.find_by_type(
+    raw_states = store.find_by_type(
         SourceDocType.PROJECTION_STATE,
         fields=[
             "_id",
             "session_id_hash",
             "projection_status",
             "source_hash",
+            "failure_reason",
             "failure_source_hash",
+            "projection_attempt",
             hash_field,
         ],
         selector=scope_selector if backend == "postgres_pgvector" else {"projection_status": ProjectionStatus.PROJECTED, **scope_selector},
     )
+    blocked_source_hashes: dict[str, str] = {}
     if backend == "postgres_pgvector":
+        # Terminal input failures are policy outcomes, not transient faults. Leave the
+        # session out of the queue while its source revision equals the blocked one; a
+        # source change (or operator action) naturally re-queues it. Read the raw
+        # state here: backend_receipts is merged below and can hide a failed attempt
+        # behind the last successful projected receipt.
+        for state in raw_states:
+            session_id_hash = str(state.get("session_id_hash") or "")
+            if (
+                session_id_hash
+                and str(state.get("_id") or "") == projection_state_doc_id(session_id_hash)
+            ):
+                blocked = _blocked_source_hash_from_state(state, backend)
+                if blocked:
+                    blocked_source_hashes[session_id_hash] = blocked
         states = [
             {**state, **(state.get("backend_receipts") or {}).get(backend, {})}
-            for state in states
+            for state in raw_states
         ]
+    else:
+        states = raw_states
     projected_source_hashes = {
         session_id_hash: str(state.get("projected_source_hash") or "")
         for state in states
@@ -84,22 +137,6 @@ def _select_sessions_needing_projection(
         and str(state.get("_id") or "") == projection_state_doc_id(session_id_hash)
         and str(state.get("projection_status") or "") == ProjectionStatus.PROJECTED
     }
-    blocked_source_hashes: dict[str, str] = {}
-    if backend == "postgres_pgvector":
-        from ..rag_ingress.pg_embedding_chunks import TERMINAL_INPUT_REASONS
-
-        # Secret-egress rejections are policy outcomes, not transient faults. Leave the
-        # session out of the queue while its source revision equals the blocked one; a
-        # source change (or operator action) naturally re-queues it.
-        blocked_source_hashes = {
-            session_id_hash: str(state.get("failure_source_hash") or "")
-            for state in states
-            if (session_id_hash := str(state.get("session_id_hash") or ""))
-            and str(state.get("_id") or "") == projection_state_doc_id(session_id_hash)
-            and str(state.get("projection_status") or "") == ProjectionStatus.FAILED
-            and str(state.get("failure_reason") or "") in TERMINAL_INPUT_REASONS
-            and str(state.get("failure_source_hash") or "")
-        }
     selected: list[dict] = []
     canonical_session_ids: set[str] = set()
     current_only_session_ids: list[str] = []
@@ -249,7 +286,7 @@ def _write_selection_checkpoint(
         os.makedirs(directory, exist_ok=True)
     payload: dict = {
         "schema_version": _SELECTION_CHECKPOINT_SCHEMA,
-        "pg_input_policy_version": 1,
+        "pg_input_policy_version": PG_INPUT_POLICY_VERSION,
         "last_seq": str(last_seq or ""),
         "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
@@ -280,7 +317,6 @@ def _evaluate_session_change(
     successor checks, and blocked (secret-egress) revisions stay out of the queue.
     Returns ``(needs_projection, session_document_to_select)``.
     """
-    from ..rag_ingress.pg_embedding_chunks import TERMINAL_INPUT_REASONS
     from .document_model import (
         ProjectionStatus,
         assert_hash_like,
@@ -296,7 +332,11 @@ def _evaluate_session_change(
     state_id = projection_state_doc_id(session_id_hash)
     state = store.get(state_id)
     merged: dict = {}
+    blocked_source_hash = ""
     if isinstance(state, dict) and str(state.get("_id") or "") == state_id:
+        blocked_source_hash = _blocked_source_hash_from_state(
+            state, "postgres_pgvector"
+        )
         merged = {
             **state,
             **((state.get("backend_receipts") or {}).get("postgres_pgvector") or {}),
@@ -304,12 +344,6 @@ def _evaluate_session_change(
     projected_source_hash = ""
     if str(merged.get("projection_status") or "") == ProjectionStatus.PROJECTED:
         projected_source_hash = str(merged.get("projected_source_hash") or "")
-    blocked_source_hash = ""
-    if (
-        str(merged.get("projection_status") or "") == ProjectionStatus.FAILED
-        and str(merged.get("failure_reason") or "") in TERMINAL_INPUT_REASONS
-    ):
-        blocked_source_hash = str(merged.get("failure_source_hash") or "")
 
     canonical = next(
         (
@@ -517,7 +551,7 @@ def _select_sessions_for_cycle(
     last_seq = str(checkpoint.get("last_seq") or "")
     full_walk_pending = bool(checkpoint.get("full_walk_in_progress"))
     pending_ids = _pending_session_ids(checkpoint)
-    if backend == "postgres_pgvector" and checkpoint.get("pg_input_policy_version") != 1:
+    if backend == "postgres_pgvector" and checkpoint.get("pg_input_policy_version") != PG_INPUT_POLICY_VERSION:
         from .document_model import SourceDocType, projection_state_doc_id
         # Re-evaluate only historical PG DataError receipts on policy upgrade.
         # A full scan would also activate unrelated, never-projected sources.

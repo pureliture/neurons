@@ -18,6 +18,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
+from ..rag_ingress.pg_embedding_chunks import PG_INPUT_POLICY_VERSION
 from ..session_memory.chunk_overlap import ChunkView, canonicalize_chunk_views
 
 from .document_model import (
@@ -538,6 +539,82 @@ def _projection_state_for_materialization(
     return doc
 
 
+PROJECTION_ATTEMPT_FIELD = "projection_attempt"
+
+
+def _with_projection_attempt(
+    document: dict,
+    *,
+    backend: str,
+    status: str,
+    reason: str,
+    source_hash: str,
+) -> dict:
+    """Attach an additive attempt audit without changing the last good receipt.
+
+    The PG selector reads this field from the top-level projection_state before
+    merging ``backend_receipts``. Keeping it separate from the receipt is what
+    makes a failed refresh on an already-projected session observable.
+    """
+    if backend != "postgres_pgvector":
+        return document
+    updated = dict(document)
+    attempts = dict(updated.get(PROJECTION_ATTEMPT_FIELD) or {})
+    attempts[backend] = {
+        "status": status,
+        "reason": reason,
+        "source_hash": source_hash,
+        "recorded_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "policy_version": PG_INPUT_POLICY_VERSION,
+    }
+    updated[PROJECTION_ATTEMPT_FIELD] = attempts
+    return updated
+
+
+def _persist_projection_attempt(
+    store: CouchDBSourceStore,
+    state: dict | None,
+    *,
+    backend: str,
+    status: str,
+    reason: str,
+    source_hash: str,
+) -> dict:
+    """Best-effort audit write for early-return paths.
+
+    A failed refresh must preserve the last successful receipt, but it must not
+    disappear from observability. This writes only the additive attempt field
+    and retries the projection_state CAS a small bounded number of times.
+    """
+    if backend != "postgres_pgvector" or not isinstance(state, dict) or not state.get("_id"):
+        return state or {}
+    doc_id = str(state["_id"])
+    for _attempt in range(3):
+        current = store.get(doc_id) or state
+        updated = _with_projection_attempt(
+            current,
+            backend=backend,
+            status=status,
+            reason=reason,
+            source_hash=source_hash,
+        )
+        try:
+            store.put_if_revision(
+                updated,
+                expected_rev=str(current.get("_rev") or ""),
+            )
+        except SourceStoreConflict:
+            continue
+        return store.get(doc_id) or updated
+    logging.getLogger(__name__).warning(
+        "projection attempt audit skipped: backend=%s status=%s reason=%s",
+        backend,
+        status,
+        reason,
+    )
+    return state
+
+
 def _commit_projection_state_if_source_current(
     *,
     materialized: MaterializedSessionMemory,
@@ -571,12 +648,28 @@ def _commit_projection_state_if_source_current(
             )
             != materialized.source_hash
         ):
-            return "source_revision_changed", store.get(state_id) or {}
+            existing = _persist_projection_attempt(
+                store,
+                store.get(state_id) or {},
+                backend=backend,
+                status=projection_status,
+                reason=failure_reason,
+                source_hash=failure_source_hash or materialized.source_hash,
+            )
+            return "source_revision_changed", existing
         existing = store.get(state_id) or {}
         receipt = (existing.get("backend_receipts") or {}).get(backend, {}) if backend == "postgres_pgvector" else existing
         if (backend == "postgres_pgvector" and projection_status != ProjectionStatus.PROJECTED
             and receipt.get("projection_status") == ProjectionStatus.PROJECTED):
             # Failed refresh must not destroy the last successful mapping.
+            existing = _persist_projection_attempt(
+                store,
+                existing,
+                backend=backend,
+                status=projection_status,
+                reason=failure_reason,
+                source_hash=failure_source_hash or materialized.source_hash,
+            )
             return "previous_receipt_preserved", existing
         pg_metadata_valid = True
         if backend == "postgres_pgvector":
@@ -601,6 +694,16 @@ def _commit_projection_state_if_source_current(
                 and (representation_receipt is not None or "representation_content_hash" not in receipt)
             ))
         ):
+            attempt = (existing.get(PROJECTION_ATTEMPT_FIELD) or {}).get(backend) or {}
+            if attempt and attempt.get("status") != ProjectionStatus.PROJECTED:
+                existing = _persist_projection_attempt(
+                    store,
+                    existing,
+                    backend=backend,
+                    status=ProjectionStatus.PROJECTED,
+                    reason="",
+                    source_hash=materialized.source_hash,
+                )
             return "already_projected", existing
         state = _projection_state_for_materialization(
             materialized=materialized,
@@ -610,6 +713,13 @@ def _commit_projection_state_if_source_current(
             failure_source_hash=failure_source_hash,
             ref=ref,
             backend=backend,
+        )
+        state = _with_projection_attempt(
+            state,
+            backend=backend,
+            status=projection_status,
+            reason=failure_reason,
+            source_hash=failure_source_hash or materialized.source_hash,
         )
         if representation_receipt is not None:
             state["backend_receipts"][backend].update(representation_receipt)
