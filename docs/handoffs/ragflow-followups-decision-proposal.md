@@ -80,49 +80,104 @@ report = run_native_memory_sync(..., retired_index_bridge=None, dry_run=True)
 
 ## 세 가지 선택지
 
-| | 선택지 A: 현행 유지 | 선택지 B: 죽은 코드만 정리 | 선택지 C: legacy/ 폐기 |
-|---|---|---|---|
-| 범위 | 없음 | 참조 0인 2개 source class + 미사용 builder 정리 | GC/backfill/cleanup 도구를 대체 백엔드로 이전 후 `legacy/` 통째 삭제 |
-| native_memory | 미결 그대로 | 미결 그대로 | **대체 백엔드 결정 필요** (가장 큰 결정) |
-| 위험 | RAGFlow 부활 시 경로 복원 가능 | 낮음 | 중간 — GC의 hard delete 경로 대체가 필요 |
-| 효과 | 없음 | dead code 제거 | 748줄 + 격리 계약 제거 |
+> ⚠️ **사용자 질문으로 선택지가 정리됨**: "통역사를 완전 제거하면 6개 도구도 제거해야 하는 거 아닌가?"
+> → **맞습니다.** 통역사를 지우면 6개 도구는 `ImportError`로 죽습니다. 그리고 6개 도구는
+> RAGFlow 접속 외에 유의미한 일을 하지 않습니다(아래 실측). 따라서 "통역사만 남기고 도구는
+> 주석 처리"(B)는 **일관되지 않은 중간 상태**입니다. **A 또는 C**가 정답입니다.
 
-**권고: B.** 근거는 두 가지입니다.
+| | 선택지 A: 현행 유지 | 선택지 C: 통역사 + 6개 도구 함께 폐기 |
+|---|---|---|
+| 범위 | 없음 | `legacy/index_client.py` 748줄 + 6개 도구 + native_memory 2개 제거 |
+| native_memory | 미결 그대로 | **같이 결정 필요** (아래) |
+| 위험 | RAGFlow 부활 시 경로 복원 가능 | 낮음 — 이미 죽은 경로만 제거 |
+| 효과 | 없음 | 죽은 surface 전량 제거 |
 
-첫째, **A는 748줄을 영원히 유지**하는데 그 代码가 가리키는 서버는 죽었고 credential도 0건입니다.
+## 6개 도구가 RAGFlow 외에 하는 일 (실측)
 
-> ⚠️ **정정 (초안 검토 중 발견)**: 이 초안은 처음에 (a)분류 도구를 "자동 승인 하드 delete"라고 적었으나 **틀렸습니다**. 실측 결과 GC는 `validate_goal3_live_approval`(`native_memory_sync_approval.py:62`) 게이트 뒤에 있습니다. 이 게이트는 approval 파일의 schema(`agent_knowledge_live_approval.v1`)·operation 일치·`operator_approval.approved is True`를 요구하고, dataset·base URL·argv에 바인딩되어 불일치 시 fail-closed합니다. 또한 `--execute`는 `--backup-dir` 없이는 거부됩니다(`session_memory_gc.py:462`). **즉 자동 승인이 아니라 엄격한 operator 승인 절차입니다.** "자동 승인"을 근거로 삼을 수 없으므로 아래 논리는 그 부분을 빼고 다시 세웁니다.
+| 도구 | RAGFlow 외 작업 | 결론 |
+|---|---|---|
+| `session_memory_gc.py` | `_mark_gc_deleted`·`_record_audit`로 ledger 기록. 단 이 기록(`memory_gc_audit` 테이블)의 **프로덕션 리더는 없고 테스트만** (`grep list_memory_gc_audit` → `test_gc_safety_auditor.py`·`test_pg_parity.py`·`test_db_adapter.py`·`test_ledger_pg_migrate.py` 전부 테스트) | RAGFlow 삭제 대상 선정에 필요한 부수 기록 |
+| `transcript_volume_gc.py` | 없음 (RAGFlow 문서만 다룸) | 순수 RAGFlow 도구 |
+| `transcript_session_gc.py` | 없음 | 순수 RAGFlow 도구 |
+| `transcript_backfill.py` | `mark_session_memory_dirty` — **RAGFlow에서 읽은** 문서를 ledger에 "다시 만들어야 한다"고 표시 | RAGFlow 없으면 할 일 없음 |
+| `gc_backup.py` | 없음 (백업을 RAGFlow에 올리는 도구) | 순수 RAGFlow 도구 |
+| `cleanup_readiness.py` | 없음 (RAGFlow dataset 상태 점검) | 순수 RAGFlow 도구 |
 
-유지해도 되는 논지는 이렇습니다: `session_memory_gc.py`·`transcript_volume_gc.py`는 `execute=True`면 `hard_delete_documents`로 RAGFlow에 **실제 하드 delete**를 수행합니다([`session_memory_gc.py:143`](worker/lib/agent_knowledge/session_memory/session_memory_gc.py:143)). RAGFlow 정리 세션은 `worker/deploy/session-memory/entrypoint.sh`에서 이 lane을 **삭제**했고, 그 이유를 이렇게 적었습니다:
+**⇒ 6개 도구 중 RAGFlow 접속 외에 남길 가치가 있는 것은 없습니다.** `session_memory_gc.py`의 ledger
+기록도 RAGFlow 삭제 대상을 **기록**할 뿐이고 그 기록을 읽는 프로덕션 코드는 없습니다.
 
-> "retired external index bridge lane(gc/backfill)은 삭제됐다: 그 백엔드는 이미 퇴역했고 라이브에도 없으므로, 은퇴한 백엔드에 대해 자동 승인 live delete를 실행하는 lane은 유지할 수 없다. live GC는 operator 승인 절차로만 수행한다."
+## native_memory 도 함께 판단해야 함
 
-**코드(worker/lib)와 배포(worker/deploy)의 정리 수준이 어긋나 있습니다.** deploy 쪽 gc/backfill lane은 지웠는데, 그 lane의 구현 코드(`session_memory_gc.py`·`transcript_volume_gc.py`·`transcript_session_gc.py`·`transcript_backfill.py`·`gc_backup.py`·`cleanup_readiness.py`)는 남아 있습니다. 승인 절차는 이미 제대로 갖춰져 있으니 **즉시 위험은 낮습니다.** 다만 라이브에 없는 백엔드를 대상으로 하드 delete를 하는 코드가 남아 있는 것 자체가 불필요한 surface이고, `legacy/`가 748줄을 유지하는 근거가 됩니다. **B는 이 어긋남을 해소합니다.**
+`native_memory_writer.py`·`native_memory_reconcile.py`는 `legacy/index_client`에서
+`envelope_code`·`envelope_failed`(순수 파서)를 import하고, RAGFlow **메모리 API**에 씁니다
+(`add_message`·`search_messages`·`disable_message`).
 
-둘째, **C는 native_memory 결정이 선행돼야** 하고, 그 결정은 "외부 브리지에 직접 쓰는 memory 기능"이라는 제품 질문입니다. 이번 작업 범위 밖입니다.
+- 실측: `native_memory_write_runner.py:203` — live 실행은 `failed_error_class: "live_native_memory_sync_not_vendored"`로 **명시적 차단**, dry-run조차 `retired_index_bridge=None`
+- 실사용 데이터는 로컬 ledger `native_memory_mirror` 테이블에만 저장
+- `knowledge_search_service`의 native-memory semantic recall은 disabled client라 **항상 no-hit**
+- 실사용 recall은 PG/Qdrant + ledger
 
-## B의 구체 범위
+**⇒ native_memory(외부 서버에 직접 쓰는 memory 기능)는 RAGFlow F/O 후 대체 백엔드로 옮겨지지
+않았습니다.** 이건 미결 제품 결정입니다.
 
-**삭제** (참조 0, 동작 영향 없음):
-- `memory_regeneration.py:145` `RetiredIndexBridgeRetrievalTranscriptMemorySource`
-- `memory_regeneration.py:322` `SessionFileTranscriptMemorySource`
-- `build_create_memory_request`, `build_list_memories_request` (외부 caller 없음; 내부 참조도 함께 정리)
+`envelope_code`·`envelope_failed`는 RAGFlow 응답 envelope 파서이므로 native_memory가 사라지면
+사용처도 사라집니다. 두 헬퍼는 `legacy/` 안에 남길 이유가 없습니다.
 
-**상태 명시** (삭제하지 않되, "지금 동작 불가"를 코드에 남김):
-- `session_memory_gc.py`, `transcript_volume_gc.py`, `transcript_session_gc.py`, `transcript_backfill.py`, `gc_backup.py`, `cleanup_readiness.py` — 각 모듈 docstring에 "RAGFlow는 퇴역·라이브 credential 0건이므로 이 도구는 현재 동작 불가" 명시
-- `native_memory_writer.py`, `native_memory_reconcile.py` — "외부 memory 쓰기는 `live_native_memory_sync_not_vendored`로 차단, 데이터는 로컬 `native_memory_mirror`에만" 명시
+## C의 구체 범위 (native_memory 결정에 따라 2 갈래)
 
-**유지**: `legacy/index_client.py` 자체와 guard 테스트 allowlist (a)분류 도구가 아직 살아있으므로 파일이 필요합니다.
+### C-1: native_memory를 **discontinued** (RAGFlow 기능 폐기)
 
-**영향 범위**: 삭제 대상 2개 class는 참조 0이라 어떤 CLI도 영향받지 않습니다. `build_create_memory_request`·`build_list_memories_request`는 `RetiredIndexBridgeHttpClient` 내부에서만 쓰이므로, client 내부 참조를 함께 정리해야 합니다.
+가장 단순하고 일관됩니다. "외부 브리지에 직접 쓰는 memory"라는 기능 자체가 F/O된 백엔드에
+묶여 있었으므로, 그 백엔드가 죽으면 기능도 죽습니다.
 
-## native_memory 결정 (별도)
+**삭제 대상**:
+- `worker/lib/agent_knowledge/legacy/` 전체 (`index_client.py` 748줄 + `__init__.py`)
+- `session_memory/session_memory_gc.py`, `transcript_volume_gc.py`, `transcript_session_gc.py`,
+  `transcript_backfill.py`, `gc_backup.py`, `cleanup_readiness.py`
+- `session_memory/native_memory_writer.py`, `native_memory_reconcile.py`,
+  `native_memory_write_runner.py`, `native_memory_recall.py`, `native_memory_sync.py`,
+  `native_memory_mirror.py`, `native_memory_reconcile.py`
+- `session_memory/memory_regeneration.py:145` `RetiredIndexBridgeRetrievalTranscriptMemorySource`
+- `session_memory/memory_regeneration.py:322` `SessionFileTranscriptMemorySource`
+- `session_memory/memory_regeneration.py:122` `RetiredIndexBridgeTranscriptMemorySource`
+  (이것도 `dirty_session_memory_sync.py`의 `index_read_sot` 경로에서만 쓰이므로 함께 제거)
+- `cli.py`의 6개 명령 등록 (`cleanup-readiness`, `session-memory-gc`, `transcript-backfill`,
+  `transcript-session-gc`, `transcript-volume-gc`) + native_memory 관련 명령
+- `worker/tests/test_retired_index_bridge_protocol_guard.py`의 allowlist(전부 삭제 대상이므로
+  테스트 자체 삭제) 및 `test_autopilot_no_index_client_before_m9.py`의 관련 항목
+- 각 도구의 테스트 파일
 
-위 B는 native_memory를 **결정하지 않습니다**. 결정이 필요한 질문:
+**유지/추가**:
+- `native_memory_mirror` ledger 테이블과 이미 저장된 행 — **데이터는 지우지 않습니다.** recall
+  경로(`knowledge_search_service`)가 여전히 읽을 수 있으므로 읽기 전용으로 남기고, 쓰기 경로만
+  제거하는 게 안전합니다. 단 native-memory semantic recall이 `search_messages`를 호출하는데
+  bridge가 disabled면 이미 no-hit이므로 동작 변화는 없습니다.
+- `memory_gc_audit` 테이블 — 빈 감사 로그. 스키마는 남겨도 되고, 통째로 지워도 됩니다.
 
-> "외부 브리지에 직접 쓰는 native memory"를 Postgres+pgvector / CouchDB / Qdrant 중 어디로 옮길 것인가, 아니면 이 기능 자체를 discontinued할 것인가?
+### C-2: native_memory를 **대체 백엔드로 이전**
 
-이건 제품 판단이라 별도 승인이 필요합니다. 본 작업은 B만 수행하고 native_memory는 상태 문서화로 남깁니다.
+`Postgres+pgvector` / `CouchDB` / `Qdrant` 중 하나를 골라 "외부 서버에 직접 쓰는 memory"를
+그쪽으로 옮깁니다. native memory의 의미(에이전트 대化的 요약/메모리를 벡터 저장소에 직접 기록)를
+그대로 옮기는 작업이라, C-1보다 큽니다.
+
+**이건 이번 작업에서 결정하지 않습니다.** 제품 결정입니다.
+
+## 권고
+
+**C-1(native_memory discontinued)**, 단 **native_memory의 데이터는 남기고 쓰기 경로만 제거**합니다.
+
+근거:
+1. 통역사·6개 도구·native_memory가 **하나의 사슬**입니다. RAGFlow가 죽으면 이 사슬 전체가
+   동작 불능이고, 이미 라이브 deploy 쪽 gc/backfill lane은 삭제된 상태입니다. **일부만 남기는
+   B는 가장 나쁜 상태**(죽은 코드가 두 형태로 남음)입니다.
+2. native_memory의 실사용 데이터는 이미 로컬 `native_memory_mirror`에 있고, semantic recall은
+   이미 no-hit입니다. 즉 **사용자가 체감하는 기능 손실이 없습니다.**
+3. C-2(대체 백엔드)는 PG/Qdrant recall이 이미 그 역할을 수행 중입니다. 같은 일을 하는 경로를
+   두 개 유지할 이유가 없습니다.
+4. `memory_gc_audit` 프로덕션 리더가 없어 GC 감사 기록도 실용 가치가 없습니다.
+
+**보류 사항**: native_memory가 discontinued가 아니라 "다른 백엔드로 옮김"이 맞다면 C-2가 됩니다.
+이 한 가지가 1단계의 나머지를 결정합니다.
 
 ---
 
@@ -168,30 +223,47 @@ report = run_native_memory_sync(..., retired_index_bridge=None, dry_run=True)
 
 **권고**: 공통 렌더러를 만들되, 입력 형태를 통일하는 게 먼저입니다. 지금 바로 만들면 두 경로의 출력 형식을 억지로 맞추느라 어느 쪽도 정확하지 않게 됩니다. 판단 3의 정리와 함께 하면 자연스럽게 정리됩니다.
 
-## 판단 3 — recall 경로에 추가 조치 필요한가 (여기가 실질 발견)
+## 판단 3 — recall 경로에 추가 조치 필요한가
 
-**있습니다. 한 가지.**
+### ⚠️ 초안의 지적이 틀렸습니다 (구현 전 실측에서 발견, 정정)
 
-recall의 chunk는 `ki.status = 'indexed'` 조건으로 걸러지지만, **evidence는 status 필터 없이 전부** 읽습니다:
+초안은 "recall의 evidence에 `status` 필터가 없어서 index 안 된 세션의 evidence가 섞인다"고 지적하고
+`status = 'indexed'` 조건 추가를 권고했습니다. **구현 전 실측 결과 이 지적은 성립하지 않습니다.**
 
-```python
-# ledger_ingress_mixin.py:1147  — chunk는 걸러진다
-filters = ["ki.type = 'conversation_chunk'", "ki.status = 'indexed'"]
+**근거 1 — evidence의 `status`는 `indexed`로 전이되지 않습니다.**
+- `ToolEvidenceSummaryRecord`(`transcript_model.py:272`)에 `status` 필드가 **없습니다**.
+- `upsert_tool_evidence_summary`(`ledger.py:2605`)의 `ON CONFLICT(evidence_id_hash) DO UPDATE SET` 목록에도
+  `status`가 **없습니다** → 갱신되지 않고 DB 기본값 `'prepared'`로 남습니다.
+- `tool_evidence_summaries` 테이블의 `status`를 갱신하는 코드가 저장소 전체에 **없습니다**
+  (grep: `ledger.py`·`ledger_ingress_mixin.py`·`ledger_native_memory_mixin.py` 모두).
+- `knowledge_items`(`ki`)에도 evidence는 등록되지 않습니다.
 
-# ledger_native_memory_mixin.py:761-768  — evidence는 안 걸러진다
-SELECT * FROM tool_evidence_summaries {where}
+즉 **`status = 'indexed'` 조건을 추가하면 recall의 evidence가 전부 사라집니다.** 초안 권고는
+recall evidence를 삭제하는 변경이었습니다.
+
+**근거 2 — 범위 불일치는 구조적으로 발생하지 않습니다.**
+recall이 evidence를 읽는 경로:
 ```
+[1] list_indexed_transcript_chunks  → WHERE ki.type='conversation_chunk' AND ki.status='indexed'
+[2] _group_by_session(chunks)        → index된 chunk들을 (session_id_hash, provider, project)로 그룹
+[3] _list_tool_evidence_for(group)   → lister(..., session_id_hash=group.session_id_hash)
+```
+evidence는 **[3]에서 이미 그룹과 동일한 `session_id_hash`로 조회**됩니다. 그룹 자체가 index된 세션으로만
+만들어지므로, "index 안 된 세션의 evidence"가 recall 문서에 들어올 경로가 없습니다.
 
-`tool_evidence_summaries.status`는 `'prepared'`(기본값) → `'queued'` → `'indexed'`로 전이합니다. 그런데 recall은 `prepared` 상태의 evidence까지 전부 읽습니다.
+### 결론 — 판단 3: 조치 불필요 (현행 유지)
 
-**결과**: recall 문서에 인덱스에 아직 올라가지 않은(=검색 불가능한) evidence가 섞여 들어갈 수 있습니다. recall 문서의 "## Tool Evidence"가 실제 검색 가능 범위와 어긋날 수 있습니다.
+recall의 범위는 이미 정합합니다. **코드 변경 없음.** 근거를 기록으로 남깁니다.
 
-**권고 조치** (1줄 수정):
-- `list_tool_evidence_summaries`에 `status = 'indexed'` 조건을 chunk와 동일하게 추가
+단, `list_tool_evidence_summaries`가 `status`를 무시한다는 점은 **의도된 설계**로 코드에 명시하는 게
+좋습니다. 향후 누군가 chunk 쪽에만 필터를 추가하거나, evidence에 `status` 전이를 도입하면
+`prepared`/`indexed`가 갈라질 수 있기 때문입니다. 이는 동작 변경이 아니라 **의도 기록**입니다.
 
-**영향 범위**: recall 문서가 "검색 가능한 세션의 도구 실행 기록"으로 정합해집니다. `prepared`/`queued` evidence가 recall에서 빠집니다. 이는 chunk와 동일한 규칙이므로 정합성 개선입니다.
-
-**대안**: evidence는 chunk보다 먼저 준비되므로(evidence가 있어야 chunk가 index된다) `indexed` 조건을 걸어도 실제로 빠지는 게 없을 수 있습니다. 이 경우 수정은 "정합성" 차원에서만 가치가 있고 동작 변화는 없습니다. **이 확인은 구현 시 ledger 상태 분포를 조회해서 실측해야 합니다.**
+**기록 위치**: `ledger_native_memory_mixin.py:741` `list_tool_evidence_summaries` docstring.
+"`tool_evidence_summaries`는 `knowledge_items`에 등록되지 않고 `status` 전이도 없다. 따라서 이 조회는
+status로 걸러지 않으며, 호출자는 session 단위 범위(=같은 `session_id_hash`)로만 걸러진다는 점을
+전제로 한다. recall 경로는 `_group_by_session`이 index된 chunk로 그룹을 만든 뒤 같은
+`session_id_hash`로 evidence를 조회하므로 범위가 정합한다."
 
 ## 판단 4 — provider 간 차이
 
