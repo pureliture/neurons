@@ -16,8 +16,8 @@ import sqlite3
 import struct
 from typing import Iterator
 
-CHUNK_BYTES = 8192
-CHUNKED_PROFILE = "lbrain-memory-gemini-embedding-2-bounded-mean-v2"
+CHUNK_BYTES = 16384
+CHUNKED_PROFILE = "lbrain-memory-gemini-embedding-2-bounded-mean-v3"
 INVALID_TEXT_NUL = "invalid_text_nul"
 # Bump when the pre-egress input policy changes. Projection-attempt audits from
 # an older policy are re-evaluated instead of blocking forever.
@@ -62,7 +62,7 @@ class BoundedPgEmbedding:
         self.remaining = cycle_budget
         self.session_budget = session_budget
         self.cache_entries = cache_entries
-        self.scope = json.dumps([CHUNKED_PROFILE, provider.model, provider.size,
+        self.scope = json.dumps([CHUNKED_PROFILE, CHUNK_BYTES, provider.model, provider.size,
                                  endpoint_scope], separators=(",", ":"))
         self.path = Path(cache_path)
         self.db = None
