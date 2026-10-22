@@ -64,9 +64,12 @@ def _blocked_source_hash_from_state(state: dict, backend: str) -> str:
         and str(attempt.get("source_hash") or "")
     ):
         return str(attempt["source_hash"])
-    # Backward compatibility for states written before projection_attempt existed.
+    # Backward compatibility for states written before projection_attempt
+    # existed. Those fields predate policy versioning and are treated as policy
+    # version 1; after a bump they must be re-evaluated, not block forever.
     if (
-        str(state.get("projection_status") or "") == ProjectionStatus.FAILED
+        PG_INPUT_POLICY_VERSION == 1
+        and str(state.get("projection_status") or "") == ProjectionStatus.FAILED
         and str(state.get("failure_reason") or "") in TERMINAL_INPUT_REASONS
         and str(state.get("failure_source_hash") or "")
     ):

@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
+from agent_knowledge.couchdb_source import build_cli
 from agent_knowledge.couchdb_source import document_model as dm
 from agent_knowledge.couchdb_source.build_cli import (
     BUILD_CLI_SCHEMA_VERSION,
@@ -669,6 +670,15 @@ class TestSelectSessionsNeedingProjection:
             failure_reason="secret_egress_policy",
         )
         state["failure_source_hash"] = source_hash
+        state["projection_attempt"] = {
+            "postgres_pgvector": {
+                "status": "failed",
+                "reason": "secret_egress_policy",
+                "source_hash": source_hash,
+                "recorded_at": "2026-10-12T00:00:00+00:00",
+                "policy_version": PG_INPUT_POLICY_VERSION,
+            }
+        }
         state["backend_receipts"] = {
             "postgres_pgvector": {
                 "projection_status": "failed",
@@ -1531,8 +1541,7 @@ class TestProjectionAttemptAudit:
         )
         assert [session["session_id_hash"] for session in selected] == [sid]
 
-    def test_legacy_top_level_failure_is_not_hidden_by_projected_receipt(self) -> None:
-        store = InMemoryCouchDBSourceStore()
+    def _put_legacy_terminal_state(self, store) -> str:
         sid = _build_synthetic_session(
             store, provider="claude", project="neurons", raw_id="legacy-egress"
         )
@@ -1558,6 +1567,12 @@ class TestProjectionAttemptAudit:
             }
         }
         store.put(state)
+        return sid
+
+    def test_legacy_top_level_failure_blocks_under_v1(self, monkeypatch) -> None:
+        store = InMemoryCouchDBSourceStore()
+        self._put_legacy_terminal_state(store)
+        monkeypatch.setattr(build_cli, "PG_INPUT_POLICY_VERSION", 1)
 
         assert (
             _select_sessions_needing_projection(
@@ -1565,6 +1580,15 @@ class TestProjectionAttemptAudit:
             )
             == []
         )
+
+    def test_legacy_top_level_failure_is_re_evaluated_after_policy_bump(self) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sid = self._put_legacy_terminal_state(store)
+
+        selected = _select_sessions_needing_projection(
+            store, limit=0, backend="postgres_pgvector"
+        )
+        assert [session["session_id_hash"] for session in selected] == [sid]
 
     def test_policy_version_bump_requeues_stale_terminal_attempt(
         self, tmp_path, monkeypatch
