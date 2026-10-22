@@ -26,6 +26,18 @@ _REDACTED = re.compile(
 # exact-match exception scoped to key assignments; auth/header values remain
 # conservative even when they happen to be one of these words.
 _NON_SECRET_LITERAL = re.compile(r"^(?:true|false|none|null|yes|no)$", re.IGNORECASE)
+# Exact-match placeholder words observed in quarantined sessions. Keep this
+# list narrow and reviewed; a real secret that happens to be one of these
+# words is still a secret, but the guard is a heuristic and the policy is
+# reviewed.
+_PLACEHOLDER_WORDS = frozenset({
+    "true", "false", "none", "null", "yes", "no",
+    "example", "sample", "placeholder", "changeme", "dummy", "test",
+    "xxx", "token", "password", "secret", "key", "admin", "root",
+    "user", "default", "foo", "bar", "baz", "qux", "asdf", "qwerty",
+    "agent", "amb", "ambiguous", "redacted", "todo", "synthetic",
+    "fake", "mock", "stub", "demo", "trial", "temp", "temporary",
+})
 _VALUE = r'''(?:"(?P<double>(?:\\.|[^"\\])*)"|'(?P<single>(?:\\.|[^'\\])*)'|(?P<bare>[^\s,;\}"']+))'''
 _ASSIGNMENT = re.compile(
     # These additional names are exact keys, not broad auth/config vocabulary.
@@ -59,20 +71,31 @@ def _has_value(value: str) -> bool:
     return bool(value.strip()) and _REDACTED.fullmatch(value.strip()) is None
 
 
+def _assignment_trailing_ok(match: re.Match) -> bool:
+    line_end = match.string.find("\n", match.end())
+    rest = match.string[match.end() : line_end if line_end >= 0 else len(match.string)]
+    stripped = rest.lstrip()
+    return not stripped or stripped[0] in ",;}]" or stripped.startswith("#")
+
+
 def _is_non_secret_assignment(match: re.Match, value: str) -> bool:
-    """Allow only a complete assignment value that is exactly a boolean/null.
+    """Allow only a complete assignment value that is a boolean/null literal or
+    a known placeholder word.
 
     The bare-value regex stops at whitespace, so a trailing scalar such as
     ``password: false my-secret`` must not be exempted. Quoted values are
     matched without trimming inside the quotes, so ``" false "`` stays a
     value and is rejected.
     """
-    if _NON_SECRET_LITERAL.fullmatch(value) is None:
+    if not _assignment_trailing_ok(match):
         return False
-    line_end = match.string.find("\n", match.end())
-    rest = match.string[match.end() : line_end if line_end >= 0 else len(match.string)]
-    stripped = rest.lstrip()
-    return not stripped or stripped[0] in ",;}]" or stripped.startswith("#")
+    if _NON_SECRET_LITERAL.fullmatch(value) is not None:
+        return True
+    # Quoted values are compared verbatim: inner whitespace is part of the
+    # value, so `token: " false "` must not be treated as `false`.
+    if match.group("double") is not None or match.group("single") is not None:
+        return value.lower() in _PLACEHOLDER_WORDS
+    return value.strip().lower() in _PLACEHOLDER_WORDS
 
 
 def assert_pg_embedding_egress_safe(text: str) -> None:

@@ -106,6 +106,18 @@ NON_LITERAL_SHORT_ASSIGNMENTS = [
     'password: false my-secret',
     'token: " false "',
 ]
+PLACEHOLDER_ASSIGNMENTS = [
+    'token: example',
+    'password: changeme',
+    'api_key: dummy',
+    'secret: test',
+    'credential: placeholder',
+    'token: agent',
+    'password: AMB',
+    'token: sample',
+    'api_key: xxx',
+    'password: token',
+]
 
 
 AUTH_CREDENTIALS = [
@@ -197,6 +209,21 @@ def test_non_literal_short_assignment_still_rejected(body):
 
 @pytest.mark.parametrize("body", ["Authorization: Bearer false", "Authorization: none"])
 def test_boolean_auth_header_still_rejected(body):
+    projector, store, provider, doc, _ = projection_boundary(body)
+    with pytest.raises(ValueError, match="^PG embedding input rejected by secret egress policy$"):
+        projector.project(target_profile="session-memory", document=doc)
+    provider.embed.assert_not_called()
+
+
+@pytest.mark.parametrize("body", PLACEHOLDER_ASSIGNMENTS)
+def test_placeholder_assignment_is_not_a_secret(body):
+    projector, store, provider, doc, _ = projection_boundary(body)
+    projector.project(target_profile="session-memory", document=doc)
+    provider.embed.assert_called_once_with(body)
+
+
+@pytest.mark.parametrize("body", ["token: example my-secret", 'password: " test "'])
+def test_placeholder_with_trailing_text_still_rejected(body):
     projector, store, provider, doc, _ = projection_boundary(body)
     with pytest.raises(ValueError, match="^PG embedding input rejected by secret egress policy$"):
         projector.project(target_profile="session-memory", document=doc)
