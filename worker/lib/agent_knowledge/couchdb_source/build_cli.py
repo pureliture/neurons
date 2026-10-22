@@ -407,7 +407,7 @@ def _select_sessions_incremental(
     limit: int,
     project: str = "",
     provider: str = "",
-    backend: str = "retired_index_bridge",
+    backend: str = "qdrant",
 ) -> tuple[list[dict], dict, int]:
     """Change-feed driven selection.
 
