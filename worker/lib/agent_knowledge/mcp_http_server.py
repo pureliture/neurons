@@ -38,6 +38,11 @@ from starlette.routing import Route
 from .knowledge_search_service import KnowledgeSearchService
 from .mcp_jsonrpc import ADMIN_AUTH_IDENTITY, dispatch_tool_call
 from .mcp_tools import list_tools
+from .runtime_build_identity import (
+    DEFAULT_RUNTIME_BUILD_IDENTITY_PATH,
+    RuntimeBuildIdentityError,
+    load_runtime_build_identity,
+)
 
 DEFAULT_PORT = 8765
 _LOGGER = logging.getLogger(__name__)
@@ -339,9 +344,20 @@ async def _dispatch_call_tool(
     )
 
 
+_BUILD_IDENTITY_PATH = DEFAULT_RUNTIME_BUILD_IDENTITY_PATH
+
+
 async def _healthz(_request):
     # service/ledger/graph 미조회 정적 200 = plane 분리. HTTP listen 생존만 검증.
-    return JSONResponse({"status": "ok"})
+    payload = {"status": "ok"}
+    try:
+        identity = load_runtime_build_identity(_BUILD_IDENTITY_PATH)
+    except RuntimeBuildIdentityError:
+        # 이미지에 빌드 식별자가 없거나 손상돼도 생존 응답은 유지한다.
+        return JSONResponse(payload)
+    payload["source_commit"] = identity["source_commit"]
+    payload["build_content_manifest_hash"] = identity["build_content_manifest_hash"]
+    return JSONResponse(payload)
 
 
 def build_app(
