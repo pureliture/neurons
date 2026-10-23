@@ -530,6 +530,7 @@ def test_healthz_reports_packaged_build_identity(monkeypatch, tmp_path):
     assert body["status"] == "ok"
     assert body["source_commit"] == identity["source_commit"]
     assert body["build_content_manifest_hash"] == identity["build_content_manifest_hash"]
+    assert body["identity_schema_version"] == identity["schema_version"]
 
 
 def test_healthz_ignores_unavailable_or_malformed_identity(monkeypatch, tmp_path):
