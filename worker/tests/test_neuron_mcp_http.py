@@ -513,6 +513,37 @@ def test_healthz_static_ok():
     assert resp.body == b'{"status":"ok"}'
 
 
+def test_healthz_reports_packaged_build_identity(monkeypatch, tmp_path):
+    import json
+
+    identity = {
+        "schema_version": "brain_runtime_build_identity.v1",
+        "source_commit": "a" * 40,
+        "build_content_manifest_hash": "sha256:" + "b" * 64,
+    }
+    path = tmp_path / "build-identity.json"
+    path.write_text(json.dumps(identity), encoding="utf-8")
+    monkeypatch.setattr(mh, "_BUILD_IDENTITY_PATH", path)
+    resp = asyncio.run(mh._healthz(None))
+    assert resp.status_code == 200
+    body = json.loads(resp.body)
+    assert body["status"] == "ok"
+    assert body["source_commit"] == identity["source_commit"]
+    assert body["build_content_manifest_hash"] == identity["build_content_manifest_hash"]
+
+
+def test_healthz_ignores_unavailable_or_malformed_identity(monkeypatch, tmp_path):
+    path = tmp_path / "build-identity.json"
+    path.write_text('{"schema_version":"other"}', encoding="utf-8")
+    monkeypatch.setattr(mh, "_BUILD_IDENTITY_PATH", path)
+    resp = asyncio.run(mh._healthz(None))
+    assert resp.status_code == 200
+    assert resp.body == b'{"status":"ok"}'
+    missing = tmp_path / "absent.json"
+    monkeypatch.setattr(mh, "_BUILD_IDENTITY_PATH", missing)
+    assert asyncio.run(mh._healthz(None)).body == b'{"status":"ok"}'
+
+
 # --- _dispatch_call_tool: 위임 + 결과 매핑 ---
 
 
