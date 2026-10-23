@@ -357,6 +357,7 @@ async def _healthz(_request):
         return JSONResponse(payload)
     payload["source_commit"] = identity["source_commit"]
     payload["build_content_manifest_hash"] = identity["build_content_manifest_hash"]
+    payload["identity_schema_version"] = identity["schema_version"]
     return JSONResponse(payload)
 
 
