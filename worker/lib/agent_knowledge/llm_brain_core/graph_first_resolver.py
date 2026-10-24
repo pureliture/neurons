@@ -720,6 +720,7 @@ class GraphFirstResolver:
         for card in cards:
             context_mode = request.mode == "context"
             item = _context_item(card) if context_mode else _item(card)
+            section_identity = {"id": item["id"]} if context_mode else {k: v for k, v in item.items() if k != "typed_payload"}
             # Temporal envelope (FR-AGE): only on the non-context (slim) item,
             # so the compact context lane stays minimal.
             if not context_mode:
@@ -728,7 +729,6 @@ class GraphFirstResolver:
             raw_typed = card.get("typed_payload")
             typed: dict[str, Any] = dict(raw_typed) if isinstance(raw_typed, Mapping) else {}
             card_type = str(card.get("card_type") or "")
-            section_identity = {"id": item["id"]} if context_mode else item
             if card_type == "decision":
                 decision_entry = {**section_identity, "decision": _safe(typed.get("decision") or card.get("summary") or card.get("title"), 65536)}
                 rationale = _safe(typed.get("rationale"), 65536)
@@ -1074,6 +1074,9 @@ def _item(card: Mapping[str, Any], *, include_created_at: bool = True) -> dict[s
         "currentness": _safe(card.get("currentness") or "current", 32),
         "content_hash": _safe(card.get("content_hash"), 80),
     }
+    raw_typed = card.get("typed_payload")
+    if isinstance(raw_typed, Mapping):
+        item["typed_payload"] = dict(raw_typed)
     if card.get("authority_source"):
         item["authority_source"] = _safe(card.get("authority_source"), 64)
     if card.get("temporal_conflict"):
@@ -1149,7 +1152,61 @@ def _card_temporal_block(card: Mapping[str, Any], as_of: str = "") -> dict[str, 
         superseded_by = [superseded_by] if superseded_by else []
 
     temporal_conflict = bool(card.get("temporal_conflict")) or currentness == "conflicted"
-    freshness_state = str(card.get("freshness_state") or "unchecked")
+
+    # --- Freshness Revalidation Logic (M3 / FR-AGE-040 ~ 045, AC-AGE-010, AC-AGE-012) ---
+    raw_typed = card.get("typed_payload")
+    typed = raw_typed if isinstance(raw_typed, Mapping) else {}
+
+    raw_gaps = card.get("freshness_gaps") or typed.get("freshness_gaps")
+    freshness_gaps: list[str] = list(raw_gaps) if isinstance(raw_gaps, (list, tuple, set)) else []
+    raw_checked_at = card.get("freshness_checked_at") or typed.get("freshness_checked_at")
+    checked_at_dt = _parse_temporal_instant(raw_checked_at)
+    checked_at = _iso(checked_at_dt)
+    raw_next_check = card.get("freshness_next_check_after") or typed.get("freshness_next_check_after")
+    next_check_dt = _parse_temporal_instant(raw_next_check)
+    next_check_after = _iso(next_check_dt)
+    raw_state = card.get("freshness_state") or typed.get("freshness_state")
+
+    # Rule 1: Missing checked_at -> state='unchecked', gap='no_recent_freshness_check'
+    if checked_at_dt is None:
+        freshness_state = "unchecked"
+        if "no_recent_freshness_check" not in freshness_gaps:
+            freshness_gaps.append("no_recent_freshness_check")
+    else:
+        freshness_state = str(raw_state or "unchecked")
+
+    # Rule 3: source_hash mismatch / verified_changed (FR-AGE-042/045)
+    source_hash = card.get("source_hash") or typed.get("source_hash")
+    expected_source_hash = card.get("expected_source_hash") or card.get("latest_source_hash") or typed.get("expected_source_hash")
+    source_changed = False
+    if expected_source_hash is not None and source_hash is not None:
+        if str(expected_source_hash).strip() != str(source_hash).strip():
+            source_changed = True
+            if "source_changed" not in freshness_gaps:
+                freshness_gaps.append("source_changed")
+    elif raw_state == "verified_changed" or "source_changed" in freshness_gaps or "source_hash_mismatch" in freshness_gaps:
+        source_changed = True
+
+    if source_changed:
+        freshness_state = "verified_changed"
+
+    # Rule 2: next_check_after expired -> state='check_due' (FR-AGE-044)
+    is_check_due = False
+    if next_check_dt is not None and instant >= next_check_dt:
+        is_check_due = True
+
+    if freshness_state != "verified_changed" and is_check_due:
+        freshness_state = "check_due"
+
+    # Task card protection (FR-AGE-035, AC-AGE-012)
+    card_type = str(card.get("card_type") or "")
+    task_state = typed.get("task_state")
+    is_task = (card_type in ("task", "work", "work_unit")) or (task_state is not None)
+    if is_task:
+        task_age_60d = (age_seconds is not None and age_seconds >= 60 * 86400)
+        if task_age_60d or is_check_due:
+            if freshness_state != "verified_changed":
+                freshness_state = "check_due"
 
     rec_action: str | None = None
     if temporal_conflict or currentness == "conflicted":
@@ -1164,6 +1221,13 @@ def _card_temporal_block(card: Mapping[str, Any], as_of: str = "") -> dict[str, 
         rec_action = "use_with_verification"
     elif bucket in ("old", "historical") and freshness_state == "unchecked":
         rec_action = "use_with_verification"
+
+    freshness_block: dict[str, Any] = {
+        "state": freshness_state,
+        "checked_at": checked_at,
+        "next_check_after": next_check_after,
+        "gaps": freshness_gaps,
+    }
 
     temporal_block: dict[str, Any] = {
         "observed_at": observed,
@@ -1181,6 +1245,7 @@ def _card_temporal_block(card: Mapping[str, Any], as_of: str = "") -> dict[str, 
         "time_confidence": confidence,
         "currentness": currentness,
         "temporal_conflict": temporal_conflict,
+        "freshness": freshness_block,
     }
     if rec_action is not None:
         temporal_block["recommended_action"] = rec_action

@@ -654,6 +654,108 @@ def test_ac_age_012_task_items_check_due_no_auto_obsolete():
     assert t.get("recommended_action") == "use_with_verification"
 
 
+# ==============================================================================
+# Milestone M3: Freshness Revalidation Logic Unit Tests (R3)
+# ==============================================================================
+
+def test_m3_freshness_source_hash_changed_yields_verify_or_supersede():
+    """M3 Unit: Card marked verified_changed (source_hash mismatch) exposes verified_changed & verify_or_supersede."""
+    card = _card(
+        "card-source-changed",
+        currentness="current",
+        observed_days_ago=3,
+        freshness_state="verified_changed",
+        source_hash="sha256:oldhash1234567890abcdef",
+        freshness_checked_at=datetime.now(timezone.utc).isoformat(),
+        freshness_gaps=["source_hash_mismatch"],
+    )
+    resolver = GraphFirstResolver(_Store([card]), None, None)
+    result = resolver.resolve(project="neurons", mode="list", query="card", limit=5)
+
+    t = result["items"][0]["temporal"]
+    assert t["freshness"]["state"] == "verified_changed"
+    assert t["freshness"]["checked_at"] is not None
+    assert "source_hash_mismatch" in t["freshness"]["gaps"]
+    assert t.get("recommended_action") == "verify_or_supersede"
+    assert result["items"][0]["currentness"] == "current"
+
+
+def test_m3_freshness_source_hash_mismatch_detection():
+    """M3 Unit: Dynamic source_hash mismatch against expected_source_hash yields verified_changed & verify_or_supersede."""
+    card = _card(
+        "card-doc-drift",
+        currentness="current",
+        observed_days_ago=5,
+        freshness_checked_at=datetime.now(timezone.utc).isoformat(),
+        source_hash="sha256:" + "1" * 64,
+    )
+    card["expected_source_hash"] = "sha256:" + "2" * 64
+
+    resolver = GraphFirstResolver(_Store([card]), None, None)
+    result = resolver.resolve(project="neurons", mode="list", query="card", limit=5)
+
+    item = result["items"][0]
+    t = item["temporal"]
+    assert t["freshness"]["state"] == "verified_changed"
+    assert "source_changed" in t["freshness"]["gaps"]
+    assert t.get("recommended_action") == "verify_or_supersede"
+    assert item["currentness"] == "current"
+
+
+def test_m3_freshness_verified_current_with_future_check_deadline():
+    """M3 Unit: When checked_at is recent and next_check_after is in future, state remains verified_current."""
+    now = datetime.now(timezone.utc)
+    card = _card(
+        "card-verified-fresh",
+        currentness="current",
+        observed_days_ago=2,
+        freshness_state="verified_current",
+        freshness_checked_at=(now - timedelta(hours=1)).isoformat(),
+        freshness_next_check_after=(now + timedelta(days=7)).isoformat(),
+        source_hash="sha256:current1234567890abcdef",
+    )
+    resolver = GraphFirstResolver(_Store([card]), None, None)
+    result = resolver.resolve(project="neurons", mode="list", query="card", limit=5)
+
+    t = result["items"][0]["temporal"]
+    assert t["freshness"]["state"] == "verified_current"
+    assert t["freshness"]["checked_at"] is not None
+    assert "no_recent_freshness_check" not in t["freshness"]["gaps"]
+    assert t.get("recommended_action") != "use_with_verification"
+
+
+def test_m3_freshness_next_check_after_boundary_with_as_of():
+    """M3 Unit: next_check_after is evaluated against query as_of rather than wall clock."""
+    base = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    card = _card(
+        "card-as-of-check-due",
+        currentness="current",
+        observed_at=(base - timedelta(days=30)).isoformat(),
+        freshness_state="verified_current",
+        freshness_checked_at=(base - timedelta(days=10)).isoformat(),
+        freshness_next_check_after=base.isoformat(),
+    )
+    store = _Store([card])
+    resolver = GraphFirstResolver(store, None, None)
+
+    # Before check deadline: still verified_current
+    res_before = resolver.resolve(
+        project="neurons", mode="list", query="card",
+        as_of=(base - timedelta(hours=1)).isoformat()
+    )
+    t_before = res_before["items"][0]["temporal"]
+    assert t_before["freshness"]["state"] == "verified_current"
+
+    # After check deadline: becomes check_due
+    res_after = resolver.resolve(
+        project="neurons", mode="list", query="card",
+        as_of=(base + timedelta(hours=1)).isoformat()
+    )
+    t_after = res_after["items"][0]["temporal"]
+    assert t_after["freshness"]["state"] == "check_due"
+    assert t_after.get("recommended_action") == "use_with_verification"
+
+
 def test_ac_age_013_observed_at_stable_pagination():
     """AC-AGE-013: Pagination sorted by observed_at produces zero duplicates and zero omissions across pages."""
     cards = [
