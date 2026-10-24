@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Annotated, Any, Callable, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -74,14 +74,20 @@ class _ResolveRequest(BaseModel):
         except ValueError:
             parsed_date = None
         if parsed_date is not None and len(value) == 10:
-            return datetime.combine(parsed_date, time.min, tzinfo=timezone.utc).isoformat()
-        candidate = value.replace("Z", "+00:00")
-        try:
-            parsed = datetime.fromisoformat(candidate)
-        except ValueError as exc:
-            raise ValueError("as_of must be an ISO-8601 timestamp") from exc
-        if parsed.tzinfo is None:
-            raise ValueError("as_of must include a timezone")
+            parsed = datetime.combine(parsed_date, time.min, tzinfo=timezone.utc)
+        else:
+            candidate = value.replace("Z", "+00:00")
+            try:
+                parsed = datetime.fromisoformat(candidate)
+            except ValueError as exc:
+                raise ValueError("as_of must be an ISO-8601 timestamp") from exc
+            if parsed.tzinfo is None:
+                raise ValueError("as_of must include a timezone")
+        now = datetime.now(timezone.utc)
+        if parsed > now + timedelta(minutes=5):
+            raise ValueError(
+                f"invalid_as_of_future: as_of cannot be more than 5 minutes in the future (requested={parsed.isoformat()}, now={now.isoformat()})"
+            )
         return parsed.isoformat()
 
     @model_validator(mode="after")
@@ -582,7 +588,7 @@ class GraphFirstResolver:
             if memory_id in by_id and str(by_id[memory_id].get("content_hash") or "") == content_hash
         ]
         join_status = "verified" if len(cards) == len(ranked) else "mismatch"
-        if not cards and not request.as_of and callable(getattr(self._store, "search_session_chunks", None)):
+        if not cards and callable(getattr(self._store, "search_session_chunks", None)):
             chunk_cards = self._session_chunk_cards(request, vector)
             if chunk_cards:
                 return chunk_cards, None, True, join_status
@@ -592,8 +598,7 @@ class GraphFirstResolver:
         self, request: _ResolveRequest, vector: list[float] | None = None
     ) -> list[dict[str, Any]]:
         if (
-            request.as_of
-            or request.response_mode == "with_evidence"
+            request.response_mode == "with_evidence"
             or not callable(getattr(self._store, "search_session_chunks", None))
         ):
             return []
@@ -642,21 +647,24 @@ class GraphFirstResolver:
                 continue
             first_line = next((line.strip("#* -") for line in safe_summary.splitlines() if line.strip("#* -")), "")
             title = _safe(first_line or f"{request.project} session context", 1000)
-            results.append(
-                {
-                    "memory_id": f"chunk:{chunk_id[:56]}",
-                    "project": str(row.get("project") or request.project),
-                    "card_type": "status",
-                    "title": title,
-                    "summary": safe_summary,
-                    "typed_payload": {
-                        "status": safe_summary,
-                        "status_value": safe_summary,
-                    },
-                    "currentness": "current",
-                    "content_hash": content_hash,
-                }
-            )
+            chunk_card: dict[str, Any] = {
+                "memory_id": f"chunk:{chunk_id[:56]}",
+                "project": str(row.get("project") or request.project),
+                "card_type": "status",
+                "title": title,
+                "summary": safe_summary,
+                "typed_payload": {
+                    "status": safe_summary,
+                    "status_value": safe_summary,
+                },
+                "currentness": str(row.get("currentness") or "current"),
+                "content_hash": content_hash,
+            }
+            if row.get("observed_at") is not None:
+                chunk_card["observed_at"] = row.get("observed_at")
+            if row.get("created_at") is not None:
+                chunk_card["created_at"] = row.get("created_at")
+            results.append(chunk_card)
             if len(results) >= request.limit + 1:
                 break
         return results
@@ -688,6 +696,29 @@ class GraphFirstResolver:
             c for c in deduped
             if _card_matches_filters(c, request, as_of=request.as_of, projection_lag_seconds=proj_lag_sec)
         ]
+
+        # FR-AGE-075: Demote anomalous items so they are not ranked ahead of valid items.
+        # Stable sort preserves relative order among valid items and among anomalous items.
+        def _is_card_anomalous(c: Mapping[str, Any]) -> int:
+            t = c.get("_temporal") if isinstance(c, Mapping) else None
+            if t is None:
+                t = c.get("temporal") if isinstance(c, Mapping) else None
+            if t is None:
+                t = _card_temporal_block(c, request.as_of, projection_lag_seconds=proj_lag_sec)
+            if isinstance(t, Mapping):
+                age_info = t.get("age") if isinstance(t.get("age"), Mapping) else {}
+                if (
+                    t.get("time_confidence") == "anomalous"
+                    or age_info.get("confidence") == "anomalous"
+                    or age_info.get("label") == "future"
+                    or t.get("temporal_relation") == "future"
+                ):
+                    return 1
+            if isinstance(c, Mapping) and c.get("time_confidence") == "anomalous":
+                return 1
+            return 0
+
+        filtered.sort(key=_is_card_anomalous)
 
         fingerprint = _fingerprint(request, [] if keyset else filtered)
         cursor = self._decode_cursor(request.cursor, fingerprint)
@@ -778,10 +809,14 @@ class GraphFirstResolver:
             # Temporal envelope (FR-AGE): only on the non-context (slim) item,
             # so the compact context lane stays minimal.
             if not context_mode:
-                item["temporal"] = _card_temporal_block(
-                    card,
-                    request.as_of,
-                    projection_lag_seconds=proj_lag_sec,
+                item["temporal"] = (
+                    card.get("_temporal")
+                    if isinstance(card, Mapping) and card.get("_temporal") is not None
+                    else _card_temporal_block(
+                        card,
+                        request.as_of,
+                        projection_lag_seconds=proj_lag_sec,
+                    )
                 )
             items.append(item)
             raw_typed = card.get("typed_payload")
@@ -855,10 +890,13 @@ class GraphFirstResolver:
                 **metadata,
                 "has_more": has_more,
                 **({"temporal_coverage": _temporal_coverage} if _temporal_coverage is not None else {}),
+                **({"temporal_view": "as_of", "as_of": request.as_of} if request.as_of else {}),
             },
             "has_more": has_more,
             "next_cursor": None,
         }
+        if request.as_of:
+            payload["temporal_view"] = "as_of"
         if request.response_mode == "with_evidence":
             payload["evidence_hashes"] = list(dict.fromkeys(evidence_hashes))
             payload["evidence"] = _evidence_payload(evidence, cards)
@@ -1215,6 +1253,8 @@ def _card_matches_filters(
 ) -> bool:
     """Evaluate candidate card against request temporal filters and historical lane exclusion."""
     temporal = _card_temporal_block(card, as_of=as_of, projection_lag_seconds=projection_lag_seconds)
+    if isinstance(card, dict):
+        card["_temporal"] = temporal
 
     card_curr = str(temporal.get("currentness") or card.get("currentness") or "current").strip().lower()
     has_conflict = bool(card.get("temporal_conflict")) or bool(temporal.get("temporal_conflict")) or (card_curr == "conflicted")
@@ -1222,14 +1262,21 @@ def _card_matches_filters(
     as_of_dt = _parse_temporal_instant(as_of) or datetime.now(timezone.utc)
     v_to_val = card.get("valid_to") or temporal.get("valid_to")
     v_to_dt = _parse_temporal_instant(v_to_val) if v_to_val else None
+    v_from_val = card.get("valid_from") or temporal.get("valid_from")
+    v_from_dt = _parse_temporal_instant(v_from_val) if v_from_val else None
     is_expired = (v_to_dt is not None and v_to_dt <= as_of_dt)
 
-    # 1. Historical lane exclusion (FR-AGE-020, 021, 023, Section 7.2, AC-AGE-002)
-    # A card is in the historical lane if card_currentness in ("superseded", "retired", "stale") or valid_to <= as_of_dt.
-    # EXCEPTION 1: If temporal_conflict is True or currentness == "conflicted", NEVER exclude (FR-AGE-028, AC-AGE-004).
-    # INVARIANT: If currentness == "current" and not expired, even if age_bucket in ("old", "historical"),
-    # it is in CURRENT lane and must NOT be excluded by default (FR-AGE-015, AC-AGE-001, AC-AGE-008).
-    is_historical_lane = (card_curr in ("superseded", "retired", "stale")) or is_expired
+    # 1. Historical lane exclusion (FR-AGE-020, 021, 023, 024, Section 7.2, AC-AGE-002, AC-AGE-006)
+    if request.as_of:
+        # FR-AGE-024: as_of query considers items inside valid_from <= as_of < valid_to as the current lane for that point in time
+        if v_from_dt is not None or v_to_dt is not None:
+            is_valid_at_as_of = (v_from_dt is None or v_from_dt <= as_of_dt) and (v_to_dt is None or as_of_dt < v_to_dt)
+            is_historical_lane = not is_valid_at_as_of
+        else:
+            is_historical_lane = card_curr in ("superseded", "retired", "stale")
+    else:
+        is_historical_lane = (card_curr in ("superseded", "retired", "stale")) or is_expired
+
     if not request.include_historical:
         if is_historical_lane and not has_conflict:
             caller_explicit_historical = (
@@ -1241,7 +1288,12 @@ def _card_matches_filters(
 
     # 2. currentness filter
     if request.currentness is not None:
-        if card_curr != request.currentness.strip().lower():
+        allowed = (
+            {"current", "superseded"}
+            if (request.as_of and request.currentness.strip().lower() == "current")
+            else {request.currentness.strip().lower()}
+        )
+        if card_curr not in allowed:
             return False
 
     # 3. age_bucket filter (FR-AGE-053)

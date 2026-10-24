@@ -8,7 +8,7 @@ ready, integrity-valid PostgreSQL rows directly. No path falls back to Qdrant.
 from __future__ import annotations
 
 import base64
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from ..postgres_store.pgvector_store import PgVectorStore
@@ -143,10 +143,29 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
             closer()
         raise RuntimeError("PG recall construction failed") from None
 
-    def _search(query: str, brain_id: str) -> list[dict[str, Any]]:
+    def _search(
+        query: str,
+        brain_id: str,
+        *,
+        as_of: str | None = None,
+        include_historical: bool = False,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
         project = project_from_brain_id(brain_id)
         if project is None:
             raise RuntimeError("PG recall requires project scope")
+
+        as_of_dt = None
+        if as_of:
+            from ..llm_brain_core.temporal_envelope import _parse_instant, CLOCK_SKEW_TOLERANCE_SECONDS
+            as_of_dt, _ = _parse_instant(as_of)
+            if as_of_dt is None:
+                raise ValueError("as_of must be an ISO-8601 timestamp")
+            now = datetime.now(timezone.utc)
+            if as_of_dt > now + timedelta(seconds=CLOCK_SKEW_TOLERANCE_SECONDS):
+                raise ValueError(
+                    f"invalid_as_of_future: as_of cannot be more than 5 minutes in the future (requested={as_of_dt.isoformat()}, now={now.isoformat()})"
+                )
 
         # Query embedding leaves the tailnet too; preserve text or reject it.
         assert_pg_embedding_egress_safe(query)
@@ -193,6 +212,7 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
                 "score": 1.0 - float(candidate["distance"]),
                 "observed_at": row.observed_at,
                 "recorded_at": row.created_at,
+                "authority_currentness": getattr(row, "authority_currentness", getattr(row, "currentness", "current")),
             })
 
         if direct_migrated:
@@ -205,25 +225,53 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
                 validated_hits, resolver=resolver, drop_unresolved=True
             )
 
-        results = [
-            {
+        all_hits: list[dict[str, Any]] = []
+        for hit in authorized_hits:
+            if _is_synthetic_canary_pg_row(str(hit.get("provider") or "")):
+                continue
+            curr = str(hit.get("authority_currentness") or "current")
+            temporal_block = _session_temporal_block(
+                observed_at=hit.get("observed_at"),
+                recorded_at=hit.get("recorded_at"),
+                as_of=as_of,
+                currentness=curr,
+                projection_lag_seconds=hit.get("projection_lag_seconds"),
+            )
+            all_hits.append({
                 "result_type": "session_memory",
                 "retrieval_lane": "pg_semantic",
                 "memory_id": str(hit["memory_id"]),
                 "card_type": "",
                 "summary": str(hit["summary"]),
-                "currentness": str(hit.get("authority_currentness") or "current"),
+                "currentness": curr,
                 "score": hit["score"],
                 "content_hash": str(hit["content_hash"]),
-                "temporal": _session_temporal_block(
-                    observed_at=hit.get("observed_at"),
-                    recorded_at=hit.get("recorded_at"),
-                    projection_lag_seconds=hit.get("projection_lag_seconds"),
-                ),
-            }
-            for hit in authorized_hits
-            if not _is_synthetic_canary_pg_row(str(hit.get("provider") or ""))
-        ]
+                "temporal": temporal_block,
+            })
+
+        current_hits: list[dict[str, Any]] = []
+        past_hits: list[dict[str, Any]] = []
+        for hit in all_hits:
+            t = hit["temporal"]
+            curr = hit["currentness"]
+            if t.get("time_confidence") == "anomalous" or t.get("temporal_relation") == "future":
+                continue
+            if curr in ("superseded", "stale", "retired"):
+                past_hits.append(hit)
+            elif curr == "current":
+                current_hits.append(hit)
+            else:
+                past_hits.append(hit)
+
+        if include_historical:
+            results = current_hits + past_hits
+        elif current_hits:
+            results = current_hits
+        else:
+            results = past_hits
+            for hit in results:
+                hit["fallback_reason"] = "no_current_match"
+
         if len(results) < _RECALL_LIMIT and len(raw_chunks) > _RECALL_CANDIDATE_LIMIT:
             # brain.query maps this to projection_state=unavailable, not fresh [].
             raise RuntimeError("PG recall candidate limit exhausted")

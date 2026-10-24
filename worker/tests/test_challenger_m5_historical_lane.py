@@ -171,7 +171,7 @@ def test_historical_status_excluded_by_default(status: str, mode: str):
 )
 def test_valid_to_boundary_exclusion(valid_to_delta: timedelta, should_exclude: bool):
     """Stress: Expiration check (valid_to <= as_of) strictly excludes cards at or past boundary."""
-    now = datetime(2026, 10, 24, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 10, 24, 5, 0, 0, tzinfo=timezone.utc)
     as_of = now.isoformat()
     valid_to = (now + valid_to_delta).isoformat()
 
@@ -210,7 +210,7 @@ def test_timezone_aware_expiration_comparison():
 
 def test_mixed_candidate_pool_exact_lane_partitioning():
     """Stress: A pool of 20 mixed cards: exactly current unexpired cards returned under default query."""
-    now = datetime(2026, 10, 24, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 10, 24, 5, 0, 0, tzinfo=timezone.utc)
     as_of = now.isoformat()
 
     cards = []

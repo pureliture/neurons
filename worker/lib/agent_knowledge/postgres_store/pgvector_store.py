@@ -514,6 +514,38 @@ class PgVectorStore:
                 return [(str(_row_value(row, 'project', 0)), int(_row_value(row, 'n', 1)))
                         for row in cur.fetchall()]
 
+    def get_temporal_coverage_metrics(self, project: str) -> dict[str, Any]:
+        """Calculate temporal metadata coverage and missing/unknown ratios for a project (FR-AGE-064)."""
+        with self._scope() as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        count(*) AS total_items,
+                        count(observed_at) AS with_observed_at
+                    FROM memory_cards
+                    WHERE project = %s
+                      AND authorization_status = 'active'
+                    """,
+                    (project,),
+                )
+                row = cur.fetchone()
+                total = int(_row_value(row, "total_items", 0) or 0) if row else 0
+                with_obs = int(_row_value(row, "with_observed_at", 1) or 0) if row else 0
+                missing = total - with_obs
+
+        unknown_ratio = round(missing / total, 4) if total > 0 else 0.0
+        coverage_ratio = round(with_obs / total, 4) if total > 0 else 0.0
+
+        return {
+            "project": project,
+            "total_items": total,
+            "with_observed_at": with_obs,
+            "missing_observed_at": missing,
+            "unknown_ratio": unknown_ratio,
+            "coverage_ratio": coverage_ratio,
+        }
+
     def get_steward_decision(self, decision_id: str) -> dict[str, Any] | None:
         with self._scope() as db:
             with db.cursor() as cur:
