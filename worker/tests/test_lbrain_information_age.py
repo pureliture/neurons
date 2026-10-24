@@ -798,7 +798,7 @@ def test_ac_age_013_observed_at_stable_pagination():
 def test_ac_age_014_public_safety_no_raw_session_or_secrets():
     """AC-AGE-014: Public safety: temporal metadata and serialized output never leak raw tokens, credentials, or private paths."""
     sensitive_token = "Bearer sk-ant-secret1234567890abcdef"
-    private_path = "/Users/ddalkak/Projects/neurons/.secret_env"
+    private_path = "/srv/private/.secret_env"
     raw_session = "sess_raw_private_uuid_8849"
 
     card = _card(
