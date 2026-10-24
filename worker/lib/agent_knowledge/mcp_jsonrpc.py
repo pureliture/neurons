@@ -1043,21 +1043,15 @@ def _dispatch_brain_resolve_tool(tool_name: str, arguments: dict, service: Knowl
 
     if "max_age" in arguments and arguments["max_age"] is not None:
         val = arguments["max_age"]
-        if isinstance(val, bool) or not isinstance(val, (int, float)):
-            raise ValueError("max_age/min_age must be non-negative")
-        int_val = int(val)
-        if int_val < 0:
-            raise ValueError("max_age/min_age must be non-negative")
-        resolve_kwargs["max_age"] = int_val
+        if isinstance(val, bool) or not isinstance(val, int) or val < 0:
+            raise ValueError("max_age/min_age must be non-negative integer")
+        resolve_kwargs["max_age"] = val
 
     if "min_age" in arguments and arguments["min_age"] is not None:
         val = arguments["min_age"]
-        if isinstance(val, bool) or not isinstance(val, (int, float)):
-            raise ValueError("max_age/min_age must be non-negative")
-        int_val = int(val)
-        if int_val < 0:
-            raise ValueError("max_age/min_age must be non-negative")
-        resolve_kwargs["min_age"] = int_val
+        if isinstance(val, bool) or not isinstance(val, int) or val < 0:
+            raise ValueError("max_age/min_age must be non-negative integer")
+        resolve_kwargs["min_age"] = val
 
     if resolve_kwargs.get("min_age") is not None and resolve_kwargs.get("max_age") is not None:
         if resolve_kwargs["min_age"] > resolve_kwargs["max_age"]:
