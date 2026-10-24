@@ -105,7 +105,9 @@ def test_sql_evidence_batch_roots_row_limit_and_caller_guc_preserved(graph):
 
 
 def test_public_with_evidence_contains_real_sql_edge_within_wire_budget(graph, tmp_path, monkeypatch):
-    monkeypatch.setattr(resolver_module, "_MAX_BYTES", 3072)
+    # 3KB 제품 상한은 필수 temporal 22필드를 잘라내므로 폐기했다. 이 테스트는
+    # 예산이 조여질 때 evidence가 명시적으로 잘리는지만 확인한다.
+    monkeypatch.setattr(resolver_module, "_MAX_BYTES", 8192)
     from agent_knowledge.session_memory.brain_steward import BrainStewardService
 
     store, project, ids, start = graph
@@ -157,7 +159,8 @@ def test_public_with_evidence_contains_real_sql_edge_within_wire_budget(graph, t
             assert public_edges[0]["provenance_hash"] == digest("ab")
         else:
             assert payload["metadata"]["evidence_truncated"] is True
-        assert len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()) <= 3072
+        # 3KB 제품 상한은 폐기했다. 남은 것은 전송 안전 상한뿐이다.
+        assert len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()) <= resolver_module._MAX_BYTES
     finally:
         with store.transaction() as conn:
             if edge_id is not None:

@@ -2376,6 +2376,31 @@ class KnowledgeSearchService:
             embed_query=getattr(self._semantic_ranker, "embed_query", None),
         ).resolve(**arguments)
 
+    def get_temporal_coverage_metrics(self, project: str) -> dict[str, Any]:
+        """Expose temporal coverage metrics (FR-AGE-064) for a project."""
+        if self.pgvector_store is not None and hasattr(self.pgvector_store, "get_temporal_coverage_metrics"):
+            return self.pgvector_store.get_temporal_coverage_metrics(project=project)
+        read_model = getattr(self._brain_card_cache, "_read_model", None)
+        cards = []
+        if read_model is not None and hasattr(read_model, "list_accepted_cards"):
+            cards = read_model.list_accepted_cards(project=project, limit=1000)
+        total = len(cards)
+        with_obs = sum(
+            1 for c in cards
+            if (c.get("observed_at") if isinstance(c, Mapping) else getattr(c, "observed_at", None)) is not None
+        )
+        missing = total - with_obs
+        unknown_ratio = round(missing / total, 4) if total > 0 else 0.0
+        coverage_ratio = round(with_obs / total, 4) if total > 0 else 0.0
+        return {
+            "project": project,
+            "total_items": total,
+            "with_observed_at": with_obs,
+            "missing_observed_at": missing,
+            "unknown_ratio": unknown_ratio,
+            "coverage_ratio": coverage_ratio,
+        }
+
 
 def _knowledge_search_public_limit(limit: int) -> int:
     return max(1, min(10, int(limit)))

@@ -29,6 +29,7 @@ def _write_package_root(
 def test_llm_brain_core_package_depth_passes_on_current_code(monkeypatch):
     updated = {k: set(v) for k, v in lint.ROOT_MODULE_AREAS.items()}
     updated["runtime_services"].update({"graph_first_resolver", "slim_serializer"})
+    updated["domain_contracts"].add("temporal_envelope")
     monkeypatch.setattr(
         lint, "ROOT_MODULE_AREAS", {k: frozenset(v) for k, v in updated.items()}
     )

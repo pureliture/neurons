@@ -266,6 +266,36 @@ def list_public_agent_tools() -> list[dict]:
                         "maxLength": 2048,
                         "description": "이전 응답의 next_cursor. 동일한 query·project·mode·limit으로 사용",
                     },
+                    "include_historical": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "과거/폐기 레인 항목 포함 여부 (기본값: False)",
+                    },
+                    "max_age": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Maximum age in seconds",
+                    },
+                    "min_age": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Minimum age in seconds",
+                    },
+                    "age_bucket": {
+                        "type": "string",
+                        "enum": ["fresh", "recent", "aging", "old", "historical", "unknown"],
+                        "description": "6대 나이 버킷 필터",
+                    },
+                    "currentness": {
+                        "type": "string",
+                        "enum": ["current", "superseded", "stale", "retired", "conflicted", "unknown"],
+                        "description": "6대 상태 필터",
+                    },
+                    "time_confidence": {
+                        "type": "string",
+                        "enum": ["high", "medium", "low", "anomalous", "unknown"],
+                        "description": "시간 신뢰도 필터",
+                    },
                 },
                 "required": ["project"],
                 "additionalProperties": False,

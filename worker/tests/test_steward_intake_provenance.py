@@ -397,7 +397,10 @@ def test_demotions_keep_authorization_consistent_and_retries_return_immutable_sn
     assert old["currentness"] == "superseded" and old["valid_to"] == connection.committed_at.isoformat()
     assert new["currentness"] == "current" and new["lifecycle_state"] == "human_accepted"
     assert replacement_snapshot["result_card"] == new and replacement_snapshot["result_target"] == old
-    assert len(connection.embedding_jobs) == len(connection.graph_jobs) == 2
+    # Demotions now propagate to the graph projection (Neo4j must stop serving
+    # the demoted card as current), so graph jobs can outnumber embedding jobs.
+    assert len(connection.embedding_jobs) == 2
+    assert len(connection.graph_jobs) == 3
 
     stale_id = steward.stale_mark(memory_id=new_id, reason="Outdated fixture decision")["memory_id"]
     assert store.get_steward_card(new_id) == new
@@ -413,7 +416,8 @@ def test_demotions_keep_authorization_consistent_and_retries_return_immutable_sn
     assert stale_snapshot["result_card"] == store.get_steward_card(stale_id)
     assert stale_snapshot["result_target"] == store.get_steward_card(new_id)
     assert store.get_steward_card(new_id)["valid_to"] == connection.committed_at.isoformat()
-    assert len(connection.embedding_jobs) == len(connection.graph_jobs) == 2
+    assert len(connection.embedding_jobs) == 2
+    assert len(connection.graph_jobs) == 4
 
     writes_before = [query for query, _params in connection.executed if query.startswith(("UPDATE", "INSERT"))]
     assert steward.candidate_approve(candidate_memory_id=old_id, approved_by="fixture-operator",

@@ -1398,7 +1398,7 @@ def _episode_node_to_ontology(node: Any) -> OntologyEpisode | None:
                             source_event_ids=(event_id,),
                             source_ref_ids=(),
                             valid_from=str(getattr(node, "valid_at", "") or ""),
-                            valid_to="",
+                            valid_to=str(getattr(node, "invalid_at", "") or getattr(node, "expired_at", "") or ""),
                             observed_at=str(getattr(node, "created_at", "") or ""),
                             reference_time=str(getattr(node, "valid_at", "") or getattr(node, "created_at", "") or ""),
                             content_hash=content_hash,
