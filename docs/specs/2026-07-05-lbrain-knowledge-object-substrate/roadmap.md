@@ -1462,6 +1462,7 @@ Expected outputs:
 `requirements.md` FR13과 `design.md` `brain_object_correct`는 P7/P8/P9 live-evidence loop와 별도로 추적한다. 이 변경만으로 기존 loop의 상태를 바꾸거나 production 쓰기를 활성화하지 않는다. 구현과 production-validation은 하나의 사용자 goal에 포함하며, 배포 MCP와 실제 agent 흐름이 live proof를 통과할 때까지 goal을 유지한다.
 
 - `milestones.md` M9에서 구현과 검증을 진행한다. source 변경·로컬 test·canary·운영 활성화 증거를 각각 명시하며, 아직 입증하지 않은 gate를 완료로 표시하지 않는다.
+- 2026-10-25 초기 `registered_json` 구현과 실제 LLM의 Ubuntu 격리 배포 HTTP/stdio proof는 [검증 보고서](../../validation/2026-10-25-lbrain-evidence-correction.md) 기준 PASS다. main merge와 운영 활성화는 미수행이며, 기존 P7/P8/P9 상태를 변경하지 않는다.
 - 격리된 환경에서 evidence validator와 successor 쓰기를 먼저 검증한다.
 - production 활성화는 별도 production-validation gate를 따른다.
 - 활성화한 대상의 적격 사실 교정은 건별 승인 없이 반영한다. 부적격 근거는 authority를 변경하지 않고 review로 넘긴다.

@@ -518,6 +518,7 @@ Rules:
 - 교정은 해당 필드와 정책에 지정한 표시 필드에 한정한다. successor를 추가하고 이전 revision을 non-current로 보존하며, `supersedes`와 field evidence/source hash를 결속한다.
 - 부적격·stale·충돌·malformed·불완전·cross-scope·CAS 충돌 근거는 authority를 변경하지 않고 typed reason과 review proposal을 반환한다.
 - evidence는 정의된 범위만 입증한다. repo code/config로 deployed runtime을 입증하지 않으며, runtime 주장에는 해당 runtime identity와 관측 window의 live evidence가 필요하다.
+- 배포 검증은 설치된 artifact의 Python 코드와 schema resource를 source/image identity에 결속한다. source override 없이 초기화하고 실제 HTTP·stdio 프로세스를 호출하며, canonical 전후 hash·decision·audit·readback을 함께 확인한다. 격리 proof와 운영 활성화는 별도 상태로 남긴다.
 - Review queue empty is not success. For cleanup/impact queries, empty queue plus discovered candidates returns `review_proposals_needed`.
 - `write_performed=false` is reserved for denied restricted actions. Successful proposal creation reports `proposal_write_performed=true` and `authoritative_memory_changed=false`.
 - `brain_object_decision_commit` is the restricted object-native authority surface. Its first implementation may adapt object proposals into existing `memory_*` restricted commit paths, but the response must be object-shaped.

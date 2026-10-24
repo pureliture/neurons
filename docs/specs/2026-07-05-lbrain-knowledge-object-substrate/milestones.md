@@ -42,7 +42,7 @@
 - next gate: merge and deploy the source image, merge the matching ops receipt contract, reapply the canonical Jenkins configuration, then run only the bounded `PRECHECK_ONLY` dry-run. CouchDB execute remains blocked until fresh plan, snapshot/restore, approval, and postcheck evidence are present.
 
 ## M9 근거 기반 사실 교정
-- 상태: in_progress. source adapter, PostgreSQL successor 트랜잭션, 전용 MCP 권한과 회귀 검증을 구현했다. live proof 완료 전에는 완료로 표시하지 않는다.
+- 상태: 구현 및 Ubuntu 격리 배포 proof PASS. main 반영·운영 활성화는 미수행이다. 초기 adapter 범위와 실제 증거는 [검증 보고서](../../validation/2026-10-25-lbrain-evidence-correction.md)에 기록한다.
 - 근거 스펙: `requirements.md` FR13, `design.md` `brain_object_correct`.
 - 목표: agent가 작업 중 authoritative evidence로 accepted/current 사실의 불일치를 확인하면, 적격한 교정을 건별 사람 승인 없이 반영한다.
 - 적격 경로: source 정책, 정확한 target/project/repository, expected revision/hash, freshness·integrity·field 대응을 검증한다. 멱등 successor, `correct_fact` 감사, `supersedes`를 원자 기록하고 재조회한다.
@@ -55,4 +55,5 @@
 - live 부정 경로: stale·unverifiable·conflicting·cross-project·CAS 실패마다 canonical before/after 무변경과 denial audit를 입증한다. 보호된 내용은 노출하지 않는다.
 - 정리: append-only audit를 보존하고 synthetic object를 non-current로 전환한 뒤 재조회한다. non-synthetic project/object 무변경도 확인한다.
 - production-validation은 릴리스 절차상 별도 gate여도 같은 사용자 goal에 포함된다. 로컬 test 또는 배포 성공만으로 전체 goal을 닫지 않는다.
-- 현재 source 검사: worker `5194 passed, 605 skipped`(환경 선택형 검사 포함), PostgreSQL 교정 검사 `30 passed`, 기존 PG steward 회귀를 포함한 검사 `41 passed`, Java `gradle test` 통과. 배포 및 실제 agent proof는 아직 미완료다.
+- 현재 source 검사: worker `5200 passed, 607 skipped`(환경 선택형 검사 포함), PostgreSQL 교정 test 파일 `32 passed`, 기존 PG steward 회귀를 포함한 별도 검사 `41 passed`, 최신 main freshness 전용 DB 검사 `8 passed`, Java `gradle test` 통과.
+- 배포 증거: source `f552bf5`의 설치된 wheel/schema와 이미지 일치를 검증했다. 실제 root LLM의 HTTP 조회→source 확인→교정→동일 route 재조회, stdio CLI 재시도, 5개 부정 경로 canonical 무변경, 감사 보존 및 synthetic 정리를 통과했다. graph backend 소비와 운영 서비스 활성화는 이 결과에 포함하지 않는다.

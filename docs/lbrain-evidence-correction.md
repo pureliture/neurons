@@ -77,3 +77,5 @@ LLM은 `brain.resolve(mode=list)`에서 얻은 `id`와 `content_hash`, 작업에
 구현과 단위 test만으로 완료하지 않는다. source commit → build content hash → image digest → Ubuntu deployed MCP identity가 연결되어야 한다. 격리 synthetic object 하나에 대해 실제 LLM이 조회 → 독립 source 확인 → MCP 교정 호출 → 동일 route 재조회를 수행해야 한다. stale/unverifiable/conflicting/cross-scope/CAS 경로는 canonical before/after와 denial audit로 무변경을 입증한다.
 
 검증 뒤 synthetic current object를 audit를 보존하는 non-current 상태로 정리하고 다시 조회한다. 운영 활성화 여부와 canary 검증 여부를 명시하며, 사용자 memory를 변경하지 않았다는 postcheck를 남긴다. live receipt와 운영값은 `neurons-ops` 또는 private storage에만 저장한다.
+
+2026-10-25 초기 adapter의 source·설치 artifact·Ubuntu 격리 배포 HTTP/stdio·실제 LLM 검증 결과는 [검증 보고서](validation/2026-10-25-lbrain-evidence-correction.md)에 기록했다. 운영 활성화는 아직 수행하지 않았다.

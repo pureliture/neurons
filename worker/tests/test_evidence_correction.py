@@ -230,6 +230,8 @@ def test_actual_pg_correction_public_read_retry_audit_and_outboxes(correction):
     assert old["currentness"] == "superseded" and old["superseded_by"] == [new_id]
     assert new["supersedes"] == [old["memory_id"]]
     assert new["typed_payload"]["status_value"] == "ready"
+    cached_after = f.service._brain_card_cache.list_accepted_cards(project=PROJECT, limit=100)
+    assert {card["memory_id"] for card in cached_after if card["currentness"] == "current"} == {new_id}
     assert new["typed_payload"]["current_authority"] == f.old["typed_payload"]["current_authority"]
     assert "approved_by" not in new
     assert f.store.get_steward_decision(result["decision_id"])["action"] == "correct_fact"

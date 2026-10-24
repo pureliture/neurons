@@ -644,9 +644,11 @@ agent가 저장소 작업 중 accepted/current memory와 다른 사실을 정확
 - code/test evidence가 입증 범위를 넘어 runtime/deployment fact로 승격되지 않는다.
 - 안전 검증은 raw evidence body, secret, private path, raw external identifier 없이 통과한다.
 - source commit → build/image identity → deployed MCP identity가 서로 결속되고, `tools/list`에서 correction tool의 배포된 schema를 확인한다.
+- 설치된 wheel/image의 Python 코드와 필수 schema resource가 source와 일치해야 한다. source 경로 override 없이 새 DB 초기화와 실제 HTTP/stdio 프로세스 시작·호출을 검증한다.
 - 격리 synthetic project의 known mismatch를 실제 연결된 LLM agent가 동일한 LBrain read route로 조회하고, authoritative source를 확인한 뒤 tool을 호출해 교정한다. 같은 read route의 재조회에서 successor가 반환되고, 호출·decision·supersession·audit가 redacted receipt로 연결된다.
 - 동일 live environment에서 stale/unverifiable/conflicting/cross-scope evidence와 stale expected revision을 넣은 부정 경로는 `authority_write_performed=false`를 반환하고 ledger before/after에 authority mutation이 없음을 증명한다.
 - positive/negative runtime proof를 마친 뒤 synthetic current record는 audit 이력을 보존하는 successor 또는 격리 상태로 정리하고, 사용자 memory에는 mutation이 없음을 확인한다.
+- 구현·격리 배포 proof·main merge·운영 활성화 상태는 각각 보고한다. canary 통과를 운영 서비스 활성화로 표시하지 않는다.
 
 ## 확정된 Phase 2 결정
 
