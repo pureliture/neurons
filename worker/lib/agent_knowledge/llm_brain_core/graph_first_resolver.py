@@ -315,6 +315,7 @@ class GraphFirstResolver:
                         projection_lag_ms=lag,
                     ),
                 )
+        auth_src = "postgres" if any(c.get("authority_source") == "postgres" for c in graph_cards) else None
         return self._serialize(
             request,
             graph_cards,
@@ -324,6 +325,7 @@ class GraphFirstResolver:
                 authority_join_status=join_status,
                 fallback_used=False,
                 projection_lag_ms=lag,
+                authority_source=auth_src,
             ),
         )
 
@@ -333,7 +335,8 @@ class GraphFirstResolver:
         keys: list[tuple[str, str] | None] = []
         ids: list[str] = []
         saw_missing = False
-        instant = datetime.fromisoformat(request.as_of) if request.as_of else datetime.now(timezone.utc)
+        instant = _parse_temporal_instant(request.as_of) or datetime.now(timezone.utc)
+        graph_temporal_by_id: dict[str, dict[str, Any]] = {}
         for episode in episodes:
             payload = getattr(episode, "payload", None)
             payload = payload if isinstance(payload, Mapping) else {}
@@ -368,6 +371,45 @@ class GraphFirstResolver:
                         continue
                     ids.append(memory_id)
                 keys.append((memory_id, content_hash))
+
+                if memory_id not in graph_temporal_by_id:
+                    g_vf = (
+                        source.get("valid_from")
+                        if "valid_from" in source
+                        else payload.get("valid_from")
+                        if "valid_from" in payload
+                        else getattr(episode, "valid_from", None)
+                    )
+                    has_vf = g_vf is not None and g_vf != ""
+
+                    g_vt = (
+                        source.get("valid_to")
+                        if "valid_to" in source
+                        else payload.get("valid_to")
+                        if "valid_to" in payload
+                        else getattr(episode, "valid_to", None)
+                    )
+                    has_vt = g_vt is not None and g_vt != ""
+
+                    ep_curr = getattr(episode, "currentness", None)
+                    g_curr = (
+                        source.get("currentness")
+                        if "currentness" in source
+                        else payload.get("currentness")
+                        if "currentness" in payload
+                        else ep_curr
+                    )
+                    has_curr = g_curr is not None and g_curr not in ("", "unknown")
+
+                    graph_temporal_by_id[memory_id] = {
+                        "has_valid_from": has_vf,
+                        "valid_from": g_vf,
+                        "has_valid_to": has_vt,
+                        "valid_to": g_vt,
+                        "has_currentness": has_curr,
+                        "currentness": g_curr,
+                    }
+
         if not ids:
             return [], "unavailable" if saw_missing else "verified"
         try:
@@ -393,6 +435,28 @@ class GraphFirstResolver:
                 saw_mismatch = True
                 continue
             if memory_id not in seen:
+                # FR-AGE-060, FR-AGE-065, AC-AGE-004:
+                # Check for temporal mismatch between Graph episode and PostgreSQL Card
+                g_meta = graph_temporal_by_id.get(memory_id)
+                has_temporal_conflict = False
+                if g_meta:
+                    if g_meta.get("has_valid_from") and _temporal_instants_differ(g_meta.get("valid_from"), card.get("valid_from")):
+                        has_temporal_conflict = True
+                    elif g_meta.get("has_valid_to") and _temporal_instants_differ(g_meta.get("valid_to"), card.get("valid_to")):
+                        has_temporal_conflict = True
+                    elif g_meta.get("has_currentness"):
+                        g_c = str(g_meta.get("currentness") or "").strip().lower()
+                        pg_c = str(card.get("currentness") or "current").strip().lower()
+                        if g_c and g_c != pg_c:
+                            has_temporal_conflict = True
+
+                if has_temporal_conflict:
+                    # Do NOT drop the card. Adopt PostgreSQL Card values as authority.
+                    card["authority_source"] = "postgres"
+                    card["temporal_conflict"] = True
+                elif card.get("currentness") == "conflicted":
+                    card["temporal_conflict"] = True
+
                 result.append(card)
                 seen.add(memory_id)
         if result:
@@ -571,6 +635,9 @@ class GraphFirstResolver:
                 continue
             seen.add(memory_id)
             deduped.append(_copy_card(card))
+        _detect_cross_card_conflicts(deduped, request.as_of)
+        if any(c.get("authority_source") == "postgres" for c in deduped):
+            metadata = {**metadata, "authority_source": "postgres"}
         fingerprint = _fingerprint(request, [] if keyset else deduped)
         cursor = self._decode_cursor(request.cursor, fingerprint)
         offset = 0 if keyset else cursor.offset
@@ -641,6 +708,9 @@ class GraphFirstResolver:
         error_code: str | None = None,
         evidence: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        _detect_cross_card_conflicts(cards, request.as_of)
+        if any(c.get("authority_source") == "postgres" for c in cards):
+            metadata = {**metadata, "authority_source": "postgres"}
         decisions: list[dict[str, Any]] = []
         preferences: list[dict[str, Any]] = []
         tasks: list[dict[str, Any]] = []
@@ -796,8 +866,24 @@ class GraphFirstResolver:
         return "unavailable"
 
     @staticmethod
-    def _metadata(retrieval_path: str, graph_status: str, authority_join_status: str, fallback_used: bool, projection_lag_ms: int | None) -> dict[str, Any]:
-        return {"retrieval_path": retrieval_path, "graph_status": graph_status, "authority_join_status": authority_join_status, "fallback_used": fallback_used, "projection_lag_ms": projection_lag_ms}
+    def _metadata(
+        retrieval_path: str,
+        graph_status: str,
+        authority_join_status: str,
+        fallback_used: bool,
+        projection_lag_ms: int | None,
+        authority_source: str | None = None,
+    ) -> dict[str, Any]:
+        meta = {
+            "retrieval_path": retrieval_path,
+            "graph_status": graph_status,
+            "authority_join_status": authority_join_status,
+            "fallback_used": fallback_used,
+            "projection_lag_ms": projection_lag_ms,
+        }
+        if authority_source is not None:
+            meta["authority_source"] = authority_source
+        return meta
 
     @staticmethod
     def _decode_cursor(cursor: str | None, fingerprint: str) -> _Cursor:
@@ -816,8 +902,182 @@ class GraphFirstResolver:
         return decoded
 
 
+def _parse_temporal_instant(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _temporal_instants_differ(val_a: Any, val_b: Any, tolerance_seconds: float = 1.0) -> bool:
+    """Check if two temporal instant values differ beyond tolerance (FR-AGE-060)."""
+    dt_a = _parse_temporal_instant(val_a)
+    dt_b = _parse_temporal_instant(val_b)
+    if dt_a is not None and dt_b is not None:
+        return abs((dt_a - dt_b).total_seconds()) > tolerance_seconds
+    if dt_a is not None or dt_b is not None:
+        return True
+    s_a = str(val_a).strip() if val_a is not None else ""
+    s_b = str(val_b).strip() if val_b is not None else ""
+    if s_a and s_b:
+        return s_a != s_b
+    return bool(s_a or s_b)
+
+
+def _evaluate_card_decision_table(
+    *,
+    bucket: str,
+    currentness: str,
+    confidence: str,
+    reason: str | None,
+    freshness_state: str,
+    temporal_conflict: bool,
+) -> tuple[str, str]:
+    """Map card temporal attributes to Section 7.1 Decision Table (display_label, recommended_action)."""
+    # Row 12: Concurrently conflicted or explicit conflicted state
+    if temporal_conflict or currentness == "conflicted":
+        return "현재 항목 간 충돌", "review_conflict"
+
+    # Row 11: Future / anomalous timestamp
+    if confidence == "anomalous" or bucket == "future" or (reason and "observed_after" in reason):
+        return "시간 이상", "ask_user"
+
+    # Rows 9 & 10: Unknown time or authority
+    if confidence == "unknown" or currentness == "unknown":
+        if currentness == "current":
+            return "현재 권위이나 나이 불명", "ask_user"
+        return "시간/권위 불명", "ask_user"
+
+    # Row 4 & Row 7: Superseded
+    if currentness == "superseded":
+        label = "최근이지만 이미 폐기됨" if bucket == "fresh" else "폐기됨·대체 있음"
+        return label, "prefer_replacement"
+
+    # Row 6: Retired
+    if currentness == "retired":
+        return "의도적으로 폐기됨", "prefer_replacement"
+
+    # Row 5: Stale
+    if currentness == "stale":
+        return "신뢰 철회됨", "treat_as_historical"
+
+    # Rows 1, 2, 3, 8: Current
+    if freshness_state == "verified_changed":
+        return "현재 권위이나 소스 변경됨", "verify_or_supersede"
+    if freshness_state == "check_due":
+        return "오래됨·재검증 필요", "use_with_verification"
+    if bucket in ("old", "historical") and freshness_state == "unchecked":
+        return "오래되었지만 현재 유효", "use_with_verification"
+    if freshness_state == "verified_current":
+        return "최신·검증됨", "use"
+
+    label = "최신·검증됨" if bucket == "fresh" else "현재 유효"
+    return label, "use"
+
+
+def _detect_cross_card_conflicts(cards: list[dict[str, Any]], as_of: str = "") -> None:
+    """Detect cross-card temporal conflicts and supersede relationships in-place."""
+    if not cards:
+        return
+
+    instant = _parse_temporal_instant(as_of) or datetime.now(timezone.utc)
+
+    cards_by_id: dict[str, dict[str, Any]] = {}
+    for card in cards:
+        mid = str(card.get("memory_id") or card.get("id") or "")
+        if mid:
+            cards_by_id[mid] = card
+
+    def _is_active_at(c: Mapping[str, Any]) -> bool:
+        v_from = c.get("valid_from")
+        v_to = c.get("valid_to")
+        if v_from:
+            dt_from = _parse_temporal_instant(v_from)
+            if dt_from is not None and dt_from > instant:
+                return False
+        if v_to:
+            dt_to = _parse_temporal_instant(v_to)
+            if dt_to is not None and dt_to <= instant:
+                return False
+        return True
+
+    # 1. Supersede relationships
+    for mid, card in list(cards_by_id.items()):
+        sup_by = card.get("superseded_by")
+        if not isinstance(sup_by, list):
+            sup_by = [sup_by] if sup_by else []
+            card["superseded_by"] = sup_by
+
+        for repl_id in sup_by:
+            if repl_id in cards_by_id:
+                repl_card = cards_by_id[repl_id]
+                a_active = _is_active_at(card) and card.get("currentness") in ("current", "conflicted")
+                b_active = _is_active_at(repl_card) and repl_card.get("currentness") in ("current", "conflicted")
+                if a_active and b_active:
+                    card["temporal_conflict"] = True
+                    repl_card["temporal_conflict"] = True
+
+    # 2. Subject / Scope overlap conflict
+    def _subject_key(c: Mapping[str, Any]) -> str | None:
+        typed = c.get("typed_payload")
+        typed_dict = typed if isinstance(typed, Mapping) else {}
+        scope = typed_dict.get("scope") or typed_dict.get("subject")
+        if scope and str(scope).strip().lower() not in ("general", "*", ""):
+            return str(scope).strip().lower()
+        return None
+
+    for i in range(len(cards)):
+        c1 = cards[i]
+        c1_id = str(c1.get("memory_id") or c1.get("id") or "")
+        c1_curr = str(c1.get("currentness") or "current")
+        if c1_curr == "conflicted":
+            c1["temporal_conflict"] = True
+
+        for j in range(i + 1, len(cards)):
+            c2 = cards[j]
+            c2_id = str(c2.get("memory_id") or c2.get("id") or "")
+            c2_curr = str(c2.get("currentness") or "current")
+
+            c1_sup = c1.get("superseded_by") or []
+            c2_sup = c2.get("superseded_by") or []
+            is_superseded_pair = (c2_id in c1_sup) or (c1_id in c2_sup)
+
+            s1 = _subject_key(c1)
+            s2 = _subject_key(c2)
+            same_subject = (s1 is not None and s2 is not None and s1 == s2)
+
+            if is_superseded_pair or same_subject:
+                if (c1_curr in ("current", "conflicted") and c2_curr in ("current", "conflicted")
+                    and _is_active_at(c1) and _is_active_at(c2)):
+                    c1["temporal_conflict"] = True
+                    c2["temporal_conflict"] = True
+
+
 def _item(card: Mapping[str, Any], *, include_created_at: bool = True) -> dict[str, Any]:
-    item = {"id": _safe(card.get("memory_id") or card.get("id"), 180), "card_type": _safe(card.get("card_type"), 64), "title": _safe(card.get("title"), 1000), "summary": _safe(card.get("summary"), 65536), "currentness": _safe(card.get("currentness") or "current", 32), "content_hash": _safe(card.get("content_hash"), 80)}
+    item = {
+        "id": _safe(card.get("memory_id") or card.get("id"), 180),
+        "card_type": _safe(card.get("card_type"), 64),
+        "title": _safe(card.get("title"), 1000),
+        "summary": _safe(card.get("summary"), 65536),
+        "currentness": _safe(card.get("currentness") or "current", 32),
+        "content_hash": _safe(card.get("content_hash"), 80),
+    }
+    if card.get("authority_source"):
+        item["authority_source"] = _safe(card.get("authority_source"), 64)
+    if card.get("temporal_conflict"):
+        item["temporal_conflict"] = True
     created_at = card.get("created_at") or card.get("observed_at")
     if include_created_at and created_at:
         # A card can stay current long after its observation. Expose when the
@@ -843,12 +1103,8 @@ def _card_temporal_block(card: Mapping[str, Any], as_of: str = "") -> dict[str, 
     valid_from = _iso(card.get("valid_from"))
     valid_to = _iso(card.get("valid_to"))
     currentness = str(card.get("currentness") or "current")
-    try:
-        instant = datetime.fromisoformat(as_of.replace("Z", "+00:00")) if as_of else datetime.now(timezone.utc)
-        if instant.tzinfo is None:
-            instant = instant.replace(tzinfo=timezone.utc)
-    except Exception:
-        instant = datetime.now(timezone.utc)
+    instant = _parse_temporal_instant(as_of) or datetime.now(timezone.utc)
+
     # Age from observed_at (fall back to created_at with low confidence).
     clock = "observed_at"
     age_obs = observed
@@ -891,7 +1147,25 @@ def _card_temporal_block(card: Mapping[str, Any], as_of: str = "") -> dict[str, 
     superseded_by = card.get("superseded_by")
     if not isinstance(superseded_by, list):
         superseded_by = [superseded_by] if superseded_by else []
-    return {
+
+    temporal_conflict = bool(card.get("temporal_conflict")) or currentness == "conflicted"
+    freshness_state = str(card.get("freshness_state") or "unchecked")
+
+    rec_action: str | None = None
+    if temporal_conflict or currentness == "conflicted":
+        rec_action = "review_conflict"
+    elif currentness in ("superseded", "retired"):
+        rec_action = "prefer_replacement"
+    elif currentness == "stale":
+        rec_action = "treat_as_historical"
+    elif freshness_state == "verified_changed":
+        rec_action = "verify_or_supersede"
+    elif freshness_state == "check_due":
+        rec_action = "use_with_verification"
+    elif bucket in ("old", "historical") and freshness_state == "unchecked":
+        rec_action = "use_with_verification"
+
+    temporal_block: dict[str, Any] = {
         "observed_at": observed,
         "recorded_at": created,
         "valid_from": valid_from,
@@ -906,8 +1180,14 @@ def _card_temporal_block(card: Mapping[str, Any], as_of: str = "") -> dict[str, 
         },
         "time_confidence": confidence,
         "currentness": currentness,
-        "temporal_conflict": currentness == "conflicted",
+        "temporal_conflict": temporal_conflict,
     }
+    if rec_action is not None:
+        temporal_block["recommended_action"] = rec_action
+    authority_source = card.get("authority_source") or ("postgres" if temporal_conflict else None)
+    if authority_source is not None:
+        temporal_block["authority_source"] = str(authority_source)
+    return temporal_block
 
 
 def _context_item(card: Mapping[str, Any]) -> dict[str, Any]:
@@ -919,11 +1199,16 @@ def _context_item(card: Mapping[str, Any]) -> dict[str, Any]:
     # the hash costs ~87 bytes per card while a 3 KB tool result that carries the
     # payload twice leaves only ~200 bytes of text budget per card. Full-hash
     # provenance stays available through mode=list and response_mode=with_evidence.
-    return {
+    item = {
         "id": _safe(card.get("memory_id") or card.get("id"), 180),
         "card_type": _safe(card_type, 64),
         "currentness": _safe(card.get("currentness") or "current", 32),
     }
+    if card.get("authority_source"):
+        item["authority_source"] = _safe(card.get("authority_source"), 64)
+    if card.get("temporal_conflict"):
+        item["temporal_conflict"] = True
+    return item
 
 
 def _normalized_evidence_edges(edges: list[Any], root_ids: set[str]) -> list[dict[str, Any]]:
