@@ -18,6 +18,8 @@ from agent_knowledge.session_memory.brain_query import (
     _finite_score_or_none,
     _query_tokens,
 )
+from .temporal_envelope import build_temporal_envelope
+
 
 
 _MAX_BYTES = 10 * 1024 * 1024
@@ -168,6 +170,21 @@ class GraphFirstResolver:
             )
         except Exception:
             return self._error_payload(request, error_code="authority_store_unavailable")
+
+        lag = None
+        if hasattr(self._store, "graph_projection_health"):
+            try:
+                health = self._store.graph_projection_health(
+                    request.project,
+                    as_of=request.as_of or None,
+                    steward_only=True,
+                )
+                lag = _lag(health.get("projection_lag_ms"))
+            except Exception:
+                lag = None
+        if lag is None and hasattr(self._store, "projection_lag_ms"):
+            lag = _lag(getattr(self._store, "projection_lag_ms"))
+
         return self._serialize(
             request,
             list(cards),
@@ -176,7 +193,7 @@ class GraphFirstResolver:
                 graph_status="unavailable",
                 authority_join_status="verified",
                 fallback_used=False,
-                projection_lag_ms=None,
+                projection_lag_ms=lag,
             ),
             keyset=True,
         )
@@ -717,6 +734,9 @@ class GraphFirstResolver:
         statuses: list[dict[str, Any]] = []
         items: list[dict[str, Any]] = []
         evidence_hashes: list[str] = []
+        lag_ms = metadata.get("projection_lag_ms") if metadata else None
+        proj_lag_sec = int(lag_ms / 1000) if lag_ms is not None else None
+
         for card in cards:
             context_mode = request.mode == "context"
             item = _context_item(card) if context_mode else _item(card)
@@ -724,7 +744,11 @@ class GraphFirstResolver:
             # Temporal envelope (FR-AGE): only on the non-context (slim) item,
             # so the compact context lane stays minimal.
             if not context_mode:
-                item["temporal"] = _card_temporal_block(card, request.as_of)
+                item["temporal"] = _card_temporal_block(
+                    card,
+                    request.as_of,
+                    projection_lag_seconds=proj_lag_sec,
+                )
             items.append(item)
             raw_typed = card.get("typed_payload")
             typed: dict[str, Any] = dict(raw_typed) if isinstance(raw_typed, Mapping) else {}
@@ -1065,6 +1089,17 @@ def _detect_cross_card_conflicts(cards: list[dict[str, Any]], as_of: str = "") -
                     c2["temporal_conflict"] = True
 
 
+def _safe_typed_value(val: Any) -> Any:
+    """Recursively mask sensitive tokens in typed_payload while preserving structured data."""
+    if isinstance(val, str):
+        return _safe(val, 65536)
+    if isinstance(val, Mapping):
+        return {_safe(k, 128): _safe_typed_value(v) for k, v in val.items()}
+    if isinstance(val, (list, tuple)):
+        return [_safe_typed_value(x) for x in val]
+    return val
+
+
 def _item(card: Mapping[str, Any], *, include_created_at: bool = True) -> dict[str, Any]:
     item = {
         "id": _safe(card.get("memory_id") or card.get("id"), 180),
@@ -1076,7 +1111,7 @@ def _item(card: Mapping[str, Any], *, include_created_at: bool = True) -> dict[s
     }
     raw_typed = card.get("typed_payload")
     if isinstance(raw_typed, Mapping):
-        item["typed_payload"] = dict(raw_typed)
+        item["typed_payload"] = _safe_typed_value(raw_typed)
     if card.get("authority_source"):
         item["authority_source"] = _safe(card.get("authority_source"), 64)
     if card.get("temporal_conflict"):
@@ -1090,169 +1125,51 @@ def _item(card: Mapping[str, Any], *, include_created_at: bool = True) -> dict[s
     return item
 
 
-def _card_temporal_block(card: Mapping[str, Any], as_of: str = "") -> dict[str, Any]:
-    '''Build a minimal temporal envelope for a memory card (FR-AGE).'''
-    def _iso(value: Any) -> str | None:
-        if value is None:
-            return None
-        if isinstance(value, datetime):
-            v = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
-            return v.isoformat()
-        text = str(value).strip()
-        return text or None
-
-    observed = _iso(card.get("observed_at") or (card.get("typed_payload") or {}).get("observed_at"))
-    created = _iso(card.get("created_at") or card.get("updated_at"))
-    valid_from = _iso(card.get("valid_from"))
-    valid_to = _iso(card.get("valid_to"))
-    currentness = str(card.get("currentness") or "current")
-    instant = _parse_temporal_instant(as_of) or datetime.now(timezone.utc)
-
-    # Age from observed_at (fall back to created_at with low confidence).
-    clock = "observed_at"
-    age_obs = observed
-    if age_obs is None and created is not None:
-        age_obs = created
-        clock = "recorded_at"
-    age_seconds = None
-    confidence = "unknown"
-    reason = "observed_at_missing"
-    if age_obs is not None:
-        try:
-            dt = datetime.fromisoformat(age_obs.replace("Z", "+00:00"))
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            delta = (instant - dt).total_seconds()
-            if delta < -300:
-                confidence = "anomalous"
-                reason = "observed_after_now"
-                age_seconds = 0
-            else:
-                age_seconds = max(0, int(delta))
-                confidence = "low" if clock == "recorded_at" else "high"
-                reason = None
-        except Exception:
-            confidence = "unknown"
-            reason = "parse_error"
-    bucket = "unknown"
-    if age_seconds is not None:
-        days = age_seconds // 86400
-        if days < 1:
-            bucket = "fresh"
-        elif days < 7:
-            bucket = "recent"
-        elif days < 30:
-            bucket = "aging"
-        elif days < 180:
-            bucket = "old"
-        else:
-            bucket = "historical"
-    superseded_by = card.get("superseded_by")
-    if not isinstance(superseded_by, list):
-        superseded_by = [superseded_by] if superseded_by else []
-
-    temporal_conflict = bool(card.get("temporal_conflict")) or currentness == "conflicted"
-
-    # --- Freshness Revalidation Logic (M3 / FR-AGE-040 ~ 045, AC-AGE-010, AC-AGE-012) ---
+def _card_temporal_block(
+    card: Mapping[str, Any],
+    as_of: str = "",
+    projection_lag_seconds: float | int | None = None,
+) -> dict[str, Any]:
+    """Build a Section 8 compliant 22-field temporal envelope delegating to temporal_envelope."""
     raw_typed = card.get("typed_payload")
-    typed = raw_typed if isinstance(raw_typed, Mapping) else {}
+    typed: Mapping[str, Any] = raw_typed if isinstance(raw_typed, Mapping) else {}
 
-    raw_gaps = card.get("freshness_gaps") or typed.get("freshness_gaps")
-    freshness_gaps: list[str] = list(raw_gaps) if isinstance(raw_gaps, (list, tuple, set)) else []
-    raw_checked_at = card.get("freshness_checked_at") or typed.get("freshness_checked_at")
-    checked_at_dt = _parse_temporal_instant(raw_checked_at)
-    checked_at = _iso(checked_at_dt)
-    raw_next_check = card.get("freshness_next_check_after") or typed.get("freshness_next_check_after")
-    next_check_dt = _parse_temporal_instant(raw_next_check)
-    next_check_after = _iso(next_check_dt)
-    raw_state = card.get("freshness_state") or typed.get("freshness_state")
+    proj_lag = projection_lag_seconds
+    if proj_lag is None:
+        if card.get("projection_lag_seconds") is not None:
+            proj_lag = card["projection_lag_seconds"]
+        elif card.get("projection_lag_ms") is not None:
+            try:
+                proj_lag = float(card["projection_lag_ms"]) / 1000.0
+            except (ValueError, TypeError):
+                proj_lag = None
 
-    # Rule 1: Missing checked_at -> state='unchecked', gap='no_recent_freshness_check'
-    if checked_at_dt is None:
-        freshness_state = "unchecked"
-        if "no_recent_freshness_check" not in freshness_gaps:
-            freshness_gaps.append("no_recent_freshness_check")
-    else:
-        freshness_state = str(raw_state or "unchecked")
-
-    # Rule 3: source_hash mismatch / verified_changed (FR-AGE-042/045)
-    source_hash = card.get("source_hash") or typed.get("source_hash")
-    expected_source_hash = card.get("expected_source_hash") or card.get("latest_source_hash") or typed.get("expected_source_hash")
-    source_changed = False
-    if expected_source_hash is not None and source_hash is not None:
-        if str(expected_source_hash).strip() != str(source_hash).strip():
-            source_changed = True
-            if "source_changed" not in freshness_gaps:
-                freshness_gaps.append("source_changed")
-    elif raw_state == "verified_changed" or "source_changed" in freshness_gaps or "source_hash_mismatch" in freshness_gaps:
-        source_changed = True
-
-    if source_changed:
-        freshness_state = "verified_changed"
-
-    # Rule 2: next_check_after expired -> state='check_due' (FR-AGE-044)
-    is_check_due = False
-    if next_check_dt is not None and instant >= next_check_dt:
-        is_check_due = True
-
-    if freshness_state != "verified_changed" and is_check_due:
-        freshness_state = "check_due"
-
-    # Task card protection (FR-AGE-035, AC-AGE-012)
-    card_type = str(card.get("card_type") or "")
-    task_state = typed.get("task_state")
-    is_task = (card_type in ("task", "work", "work_unit")) or (task_state is not None)
-    if is_task:
-        task_age_60d = (age_seconds is not None and age_seconds >= 60 * 86400)
-        if task_age_60d or is_check_due:
-            if freshness_state != "verified_changed":
-                freshness_state = "check_due"
-
-    rec_action: str | None = None
-    if temporal_conflict or currentness == "conflicted":
-        rec_action = "review_conflict"
-    elif currentness in ("superseded", "retired"):
-        rec_action = "prefer_replacement"
-    elif currentness == "stale":
-        rec_action = "treat_as_historical"
-    elif freshness_state == "verified_changed":
-        rec_action = "verify_or_supersede"
-    elif freshness_state == "check_due":
-        rec_action = "use_with_verification"
-    elif bucket in ("old", "historical") and freshness_state == "unchecked":
-        rec_action = "use_with_verification"
-
-    freshness_block: dict[str, Any] = {
-        "state": freshness_state,
-        "checked_at": checked_at,
-        "next_check_after": next_check_after,
-        "gaps": freshness_gaps,
-    }
-
-    temporal_block: dict[str, Any] = {
-        "observed_at": observed,
-        "recorded_at": created,
-        "valid_from": valid_from,
-        "valid_to": valid_to,
-        "superseded_by": superseded_by,
-        "age": {
-            "seconds": age_seconds,
-            "label": bucket,
-            "clock": clock if age_obs is not None else "unknown",
-            "confidence": confidence,
-            "reason_codes": [reason] if reason else [],
-        },
-        "time_confidence": confidence,
-        "currentness": currentness,
-        "temporal_conflict": temporal_conflict,
-        "freshness": freshness_block,
-    }
-    if rec_action is not None:
-        temporal_block["recommended_action"] = rec_action
+    currentness = str(card.get("currentness") or "current")
+    temporal_conflict = bool(card.get("temporal_conflict")) or currentness == "conflicted"
     authority_source = card.get("authority_source") or ("postgres" if temporal_conflict else None)
-    if authority_source is not None:
-        temporal_block["authority_source"] = str(authority_source)
-    return temporal_block
+
+    return build_temporal_envelope(
+        observed_at=card.get("observed_at") or typed.get("observed_at"),
+        recorded_at=card.get("recorded_at") or card.get("created_at") or card.get("updated_at"),
+        valid_from=card.get("valid_from"),
+        valid_to=card.get("valid_to"),
+        superseded_by=card.get("superseded_by"),
+        as_of=as_of or None,
+        currentness=currentness,
+        lifecycle_status=str(card.get("lifecycle_status") or card.get("lifecycle_state") or "accepted"),
+        freshness_state=card.get("freshness_state") or typed.get("freshness_state"),
+        freshness_checked_at=card.get("freshness_checked_at") or typed.get("freshness_checked_at"),
+        freshness_next_check_after=card.get("freshness_next_check_after") or typed.get("freshness_next_check_after"),
+        freshness_gaps=card.get("freshness_gaps") or typed.get("freshness_gaps"),
+        source_hash=card.get("source_hash") or typed.get("source_hash"),
+        expected_source_hash=card.get("expected_source_hash") or card.get("latest_source_hash") or typed.get("expected_source_hash"),
+        temporal_conflict=temporal_conflict,
+        projection_lag_seconds=proj_lag,
+        authority_source=str(authority_source) if authority_source else None,
+        card_type=str(card.get("card_type") or ""),
+        task_state=str(typed.get("task_state") or "") if typed.get("task_state") else None,
+        time_confidence=card.get("time_confidence"),
+    )
 
 
 def _context_item(card: Mapping[str, Any]) -> dict[str, Any]:

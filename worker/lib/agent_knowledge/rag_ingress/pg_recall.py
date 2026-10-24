@@ -12,90 +12,37 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from ..postgres_store.pgvector_store import PgVectorStore
+from ..llm_brain_core.temporal_envelope import build_temporal_envelope
 
 
-def _session_temporal_block(*, observed_at: Any, recorded_at: Any) -> dict[str, Any]:
-    '''Build a public-safe temporal block for one PG session chunk.
+def _session_temporal_block(
+    *,
+    observed_at: Any,
+    recorded_at: Any,
+    valid_from: Any = None,
+    valid_to: Any = None,
+    as_of: Any = None,
+    currentness: str = "current",
+    lifecycle_status: str = "accepted",
+    projection_lag_seconds: float | int | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Build a public-safe 22-field Section 8 temporal block for one PG session chunk.
 
-    observed_at is the source observation time; recorded_at is the
-    ingestion time. Age is computed against now (UTC) and never substituted
-    with ingestion time when observation time is missing.
-    '''
-    obs_original = observed_at if isinstance(observed_at, datetime) else None
-    rec = recorded_at if isinstance(recorded_at, datetime) else None
-    clock = "observed_at"
-    obs = obs_original
-    if obs is None and rec is not None:
-        # Fallback allowed by FR-AGE-011, but clearly marked as low confidence.
-        obs = rec
-        clock = "recorded_at"
-    now = datetime.now(timezone.utc)
-    if obs is None:
-        age_seconds = None
-        confidence = "unknown"
-        reason = "observed_at_missing"
-        clock = "unknown"
-    else:
-        if obs.tzinfo is None:
-            obs = obs.replace(tzinfo=timezone.utc)
-        delta = (now - obs).total_seconds()
-        if delta < -300:
-            confidence = "anomalous"
-            reason = "observed_after_now"
-            age_seconds = 0
-        else:
-            age_seconds = max(0, int(delta))
-            confidence = "low" if clock == "recorded_at" else "high"
-            reason = None
-    bucket = "unknown"
-    if age_seconds is not None:
-        days = age_seconds // 86400
-        if days < 1:
-            bucket = "fresh"
-        elif days < 7:
-            bucket = "recent"
-        elif days < 30:
-            bucket = "aging"
-        elif days < 180:
-            bucket = "old"
-        else:
-            bucket = "historical"
-    ingestion_lag = None
-    if obs_original is not None and rec is not None:
-        try:
-            ingestion_lag = int((rec - obs_original).total_seconds())
-        except Exception:
-            ingestion_lag = None
-    return {
-        "observed_at": obs_original.isoformat() if obs_original is not None else None,
-        "recorded_at": rec.isoformat() if rec is not None else None,
-        "valid_from": None,
-        "valid_to": None,
-        "superseded_by": [],
-        "as_of": now.isoformat(),
-        "age": {
-            "seconds": age_seconds,
-            "label": bucket,
-            "bucket": bucket,
-            "clock": clock if obs is not None else "unknown",
-            "confidence": confidence,
-            "reason_codes": [reason] if reason else [],
-        },
-        "ingestion_lag_seconds": ingestion_lag,
-        "time_confidence": confidence,
-        "currentness": "current",
-        "lifecycle_status": "accepted",
-        "freshness": {
-            "state": "unchecked",
-            "checked_at": None,
-            "next_check_after": None,
-            "gaps": ["no_recent_freshness_check"],
-        },
-        "temporal_relation": "past" if (age_seconds or 0) > 0 else "present",
-        "temporal_conflict": False,
-        "recommended_action": "use_with_verification",
-        "summary": _age_summary(obs, age_seconds, confidence),
-    }
+    Delegates to build_temporal_envelope to guarantee schema parity between card and chunk lanes.
+    """
+    return build_temporal_envelope(
+        observed_at=observed_at,
+        recorded_at=recorded_at,
+        valid_from=valid_from,
+        valid_to=valid_to,
+        as_of=as_of,
+        currentness=currentness,
+        lifecycle_status=lifecycle_status,
+        projection_lag_seconds=projection_lag_seconds,
+        card_type="",
+        **kwargs,
+    )
 
 
 def _age_summary(obs, age_seconds, confidence):
@@ -271,6 +218,7 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
                 "temporal": _session_temporal_block(
                     observed_at=hit.get("observed_at"),
                     recorded_at=hit.get("recorded_at"),
+                    projection_lag_seconds=hit.get("projection_lag_seconds"),
                 ),
             }
             for hit in authorized_hits
