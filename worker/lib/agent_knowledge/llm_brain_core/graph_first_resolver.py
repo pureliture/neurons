@@ -22,6 +22,9 @@ from .temporal_envelope import build_temporal_envelope
 
 
 
+# 전송 안전 상한이다. 응답 내용을 3KB로 줄이던 제품 상한은 필수 temporal 22필드를
+# 잘라내므로 폐기했다. 응답 크기는 limit/next_cursor 페이지로 조절하고, 이 값은
+# 클라이언트가 감당할 수 없는 비정상적으로 큰 응답만 막는다.
 _MAX_BYTES = 10 * 1024 * 1024
 _CARD_LIMIT = 100
 _EVIDENCE_ROOT_LIMIT = 20

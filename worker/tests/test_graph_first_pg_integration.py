@@ -14,11 +14,31 @@ from agent_knowledge.ledger import Ledger
 from agent_knowledge.llm_brain_core.models import GraphMemoryResult, OntologyEpisode
 from agent_knowledge.llm_brain_core.graphiti_adapter import GraphitiNeo4jGraphMemoryAdapter, _AsyncLoopRunner
 from agent_knowledge.mcp_jsonrpc import handle_jsonrpc_message
+from agent_knowledge.mcp_payload import tool_result_bytes
 import agent_knowledge.llm_brain_core.graph_first_resolver as resolver_module
 from agent_knowledge.postgres_store.pgvector_store import MemoryCard, PgVectorStore, make_dummy_vector
 
 PG_DSN = os.environ.get("LBRAIN_TEST_PG_DSN", "")
 pytestmark = pytest.mark.skipif(not PG_DSN, reason="전용 PostgreSQL integration DSN 필요")
+
+# Section 8 응답 계약(22개 temporal 필드)은 실제 전송 경계에서도 그대로 유지된다.
+# 응답 내용을 3KB로 줄이던 상한은 이 필수 필드를 잘라냈으므로 폐기했고, 남은 상한은
+# 전송 안전 상한뿐이다. 따라서 크기 대신 필수 필드의 완전성을 검사한다.
+REQUIRED_TEMPORAL_FIELDS = {
+    "observed_at", "recorded_at", "valid_from", "valid_to", "superseded_by", "as_of",
+    "age", "ingestion_lag_seconds", "time_confidence", "currentness", "lifecycle_status",
+    "freshness", "temporal_relation", "temporal_conflict", "projection_lag_seconds",
+    "recommended_action", "summary",
+}
+REQUIRED_AGE_SUBFIELDS = {"seconds", "label", "clock", "confidence", "reason_codes"}
+REQUIRED_FRESHNESS_SUBFIELDS = {"state", "checked_at", "next_check_after", "gaps"}
+
+
+def _assert_complete_temporal_block(item: dict) -> None:
+    temporal = item["temporal"]
+    assert not (REQUIRED_TEMPORAL_FIELDS - set(temporal)), "temporal 필수 필드 누락"
+    assert not (REQUIRED_AGE_SUBFIELDS - set(temporal["age"])), "temporal.age 하위 필드 누락"
+    assert not (REQUIRED_FRESHNESS_SUBFIELDS - set(temporal["freshness"])), "temporal.freshness 하위 필드 누락"
 
 
 @pytest.mark.parametrize("graph_path", ["direct", "relationship", "historical_relationship", "unavailable"])
@@ -117,7 +137,8 @@ def test_public_query_graph_authority_join_and_explicit_pg_fallback(tmp_path, gr
         serialized = json.dumps(payload, ensure_ascii=False)
         assert "정본에서 읽은 결정" in serialized
         assert "그래프의 추론 문구" not in serialized
-        assert len(json.dumps(response["result"], ensure_ascii=False, separators=(",", ":")).encode()) <= 3072
+        _assert_complete_temporal_block(payload["items"][0])
+        assert tool_result_bytes(payload) <= resolver_module._MAX_BYTES
     finally:
         if runner:
             runner.shutdown()
@@ -147,8 +168,7 @@ def test_public_query_authority_outage_is_tool_error_without_legacy_fallback(tmp
     assert "127.0.0.1" not in json.dumps(response)
 
 
-def test_public_list_keyset_crosses_100_rows_with_actual_mcp_wire_budget(tmp_path, monkeypatch):
-    monkeypatch.setattr(resolver_module, "_MAX_BYTES", 3072)
+def test_public_list_keyset_crosses_100_rows_with_actual_mcp_wire_budget(tmp_path):
     store = PgVectorStore(dsn=PG_DSN)
     store.execute_ddl()
     project = "m3-pages-" + uuid.uuid4().hex[:8]
@@ -182,7 +202,9 @@ def test_public_list_keyset_crosses_100_rows_with_actual_mcp_wire_budget(tmp_pat
             }, service)
             result = response["result"]
             assert result["isError"] is False
-            assert len(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()) <= 3072
+            for item in result["structuredContent"]["items"]:
+                _assert_complete_temporal_block(item)
+            assert tool_result_bytes(result["structuredContent"]) <= resolver_module._MAX_BYTES
             payload = result["structuredContent"]
             observed.extend(item["id"] for item in payload["items"])
             cursor = payload["next_cursor"]
