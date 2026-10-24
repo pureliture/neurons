@@ -40,3 +40,19 @@
 - observed blocker and amendment: the live dry-run applied `target_document_limit=1` to the provider/project-wide snapshot before locating the selected legacy target. The corrective path first derives bounded exact identities from one staged Codex source, then queries only matching empty-locator legacy records; missing, multiple, malformed, over-limit, or timed-out evidence fails closed. Nested-provider layouts remain explicitly unsupported by this one-entry operation rather than being partially scanned.
 - source evidence: focused historical repair tests passed (`88 passed`); `cd worker && uv run pytest -q` passed (`3304 passed, 12 skipped`); the Java `gradle test` gate passed with an isolated temporary Gradle cache.
 - next gate: merge and deploy the source image, merge the matching ops receipt contract, reapply the canonical Jenkins configuration, then run only the bounded `PRECHECK_ONLY` dry-run. CouchDB execute remains blocked until fresh plan, snapshot/restore, approval, and postcheck evidence are present.
+
+## M9 근거 기반 사실 교정
+- 상태: in_progress. source adapter, PostgreSQL successor 트랜잭션, 전용 MCP 권한과 회귀 검증을 구현했다. live proof 완료 전에는 완료로 표시하지 않는다.
+- 근거 스펙: `requirements.md` FR13, `design.md` `brain_object_correct`.
+- 목표: agent가 작업 중 authoritative evidence로 accepted/current 사실의 불일치를 확인하면, 적격한 교정을 건별 사람 승인 없이 반영한다.
+- 적격 경로: source 정책, 정확한 target/project/repository, expected revision/hash, freshness·integrity·field 대응을 검증한다. 멱등 successor, `correct_fact` 감사, `supersedes`를 원자 기록하고 재조회한다.
+- 실패 경로: stale·불완전·malformed·충돌·비권위·cross-scope·CAS 실패는 authority 변경 없이 typed review/conflict를 반환한다.
+- privacy: evidence refs/hash만 결속하며 raw source body, secret, private path, raw external ID를 응답·감사에 넣지 않는다.
+- 구현 gate: sanitized fixture와 격리 DB로 먼저 검증한다. production 활성화는 별도 gate이며, 활성화한 대상의 적격 교정에는 건별 승인을 요구하지 않는다.
+- 코드 완료 증거: HTTP/stdio schema·dispatch, source/field 정책, successor·감사·supersession의 단일 authority 트랜잭션, idempotency·CAS·rollback 테스트, worker/Java 전체 검사와 `git diff --check`.
+- 접근 정책: 전용 correction identity와 source/field allowlist를 사용한다. admin identity를 agent에게 부여하거나 교정마다 `approved=true`를 요구하지 않는다. service 정책이 없으면 비활성이다.
+- 전체 goal 완료 증거: source commit → image/build → Ubuntu `llm-brain-server` deployed MCP identity를 결속한다. `tools/list`를 확인하고, 실제 LLM이 synthetic object 하나에서 조회 → source 확인 → 교정 도구 호출 → 동일 route 재조회를 수행한 receipt를 남긴다.
+- live 부정 경로: stale·unverifiable·conflicting·cross-project·CAS 실패마다 canonical before/after 무변경과 denial audit를 입증한다. 보호된 내용은 노출하지 않는다.
+- 정리: append-only audit를 보존하고 synthetic object를 non-current로 전환한 뒤 재조회한다. non-synthetic project/object 무변경도 확인한다.
+- production-validation은 릴리스 절차상 별도 gate여도 같은 사용자 goal에 포함된다. 로컬 test 또는 배포 성공만으로 전체 goal을 닫지 않는다.
+- 현재 source 검사: worker `5194 passed, 605 skipped`(환경 선택형 검사 포함), PostgreSQL 교정 검사 `30 passed`, 기존 PG steward 회귀를 포함한 검사 `41 passed`, Java `gradle test` 통과. 배포 및 실제 agent proof는 아직 미완료다.

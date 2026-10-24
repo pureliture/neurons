@@ -34,6 +34,7 @@ from .mcp_tools import (
     BRAIN_INCIDENT_SEARCH_TOOL_NAME,
     BRAIN_MEMORY_SEARCH_TOOL_NAME,
     BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
+    BRAIN_OBJECT_CORRECT_TOOL_NAME,
     BRAIN_ARTIFACT_PREFERENCE_EVALUATE_TOOL_NAME,
     BRAIN_OBJECT_EXPLAIN_TOOL_NAME,
     BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
@@ -108,6 +109,28 @@ class ToolRuntimeContract:
 
 
 ADMIN_AUTH_IDENTITY = "lbrain_admin"
+CORRECTION_AUTH_IDENTITY = "lbrain_evidence_corrector"
+
+
+def _evidence_correction_surface_enabled(service: KnowledgeSearchService) -> bool:
+    return bool(
+        getattr(service, "allow_evidence_backed_object_corrections", False)
+        and getattr(service, "evidence_correction_policies", ())
+    )
+
+
+def _stdio_tool_names(service: KnowledgeSearchService) -> frozenset[str]:
+    names = set(PUBLIC_AGENT_TOOL_NAMES)
+    if _evidence_correction_surface_enabled(service):
+        names.add(BRAIN_OBJECT_CORRECT_TOOL_NAME)
+    return frozenset(names)
+
+
+def _visible_tools(surface: str, service: KnowledgeSearchService) -> list[dict]:
+    tools = list_tools(surface=surface)
+    if surface in {"admin", "stdio", "correction"} and not _evidence_correction_surface_enabled(service):
+        return [tool for tool in tools if tool.get("name") != BRAIN_OBJECT_CORRECT_TOOL_NAME]
+    return tools
 
 
 def handle_jsonrpc_message(
@@ -138,21 +161,33 @@ def handle_jsonrpc_message(
         if method == "notifications/initialized":
             return None
         if method == "tools/list":
+            if surface == "correction":
+                if auth_token != CORRECTION_AUTH_IDENTITY:
+                    return _error(request_id, -32000, "unauthorized: correction identity required")
+                return _success(request_id, {"tools": _visible_tools("correction", service)})
             if surface == "admin":
                 if auth_token != ADMIN_AUTH_IDENTITY:
                     return _error(request_id, -32000, "unauthorized: lbrain_admin identity required")
-                return _success(request_id, {"tools": list_tools(surface="admin")})
+                return _success(request_id, {"tools": _visible_tools("admin", service)})
             if surface == "agent":
                 return _success(request_id, {"tools": list_tools(surface="agent")})
+            if surface == "stdio":
+                return _success(request_id, {"tools": _visible_tools("stdio", service)})
             return _success(request_id, {"tools": list_tools(surface=surface)})
 
         if method == "tools/call":
             params = message.get("params") or {}
             tool_name = str(params.get("name") or "")
+            if surface == "correction" and auth_token != CORRECTION_AUTH_IDENTITY:
+                return _error(request_id, -32000, "unauthorized: correction identity required")
 
             # Security Guard: public/agent surface only allows PUBLIC_AGENT_TOOL_NAMES
             if surface == "agent":
                 if tool_name not in PUBLIC_AGENT_TOOL_NAMES:
+                    return _error(request_id, -32601, f"unknown tool: {tool_name}")
+
+            if surface == "stdio":
+                if tool_name not in _stdio_tool_names(service):
                     return _error(request_id, -32601, f"unknown tool: {tool_name}")
 
             if surface == "admin":
@@ -199,7 +234,7 @@ def run_stdio_server(
         except json.JSONDecodeError:
             response = _error(None, -32700, "parse error")
         else:
-            response = handle_jsonrpc_message(message, service)
+            response = handle_jsonrpc_message(message, service, surface="stdio")
         if response is None:
             continue
         stdout.write(json.dumps(response, ensure_ascii=False, separators=(",", ":")) + "\n")
@@ -217,6 +252,17 @@ def dispatch_tool_call(
     arguments = params.get("arguments") or {}
 
     if surface == "agent" and tool_name not in PUBLIC_AGENT_TOOL_NAMES:
+        raise ValueError(f"unknown tool: {tool_name}")
+
+    if surface == "stdio" and tool_name not in _stdio_tool_names(service):
+        raise ValueError(f"unknown tool: {tool_name}")
+
+    if surface == "correction":
+        if auth_token != CORRECTION_AUTH_IDENTITY:
+            raise PermissionError("unauthorized: correction identity required")
+        if tool_name not in {BRAIN_RESOLVE_TOOL_NAME, BRAIN_OBJECT_CORRECT_TOOL_NAME}:
+            raise ValueError(f"unknown tool: {tool_name}")
+    if surface == "admin" and tool_name == BRAIN_OBJECT_CORRECT_TOOL_NAME:
         raise ValueError(f"unknown tool: {tool_name}")
 
     if surface == "admin" and auth_token != ADMIN_AUTH_IDENTITY:
@@ -297,6 +343,7 @@ def _tool_dispatch_registry() -> dict[str, ToolDispatch]:
         ),
         (BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME, _dispatch_brain_object_proposal_create_tool),
         (BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME, _dispatch_brain_object_decision_commit_tool),
+        (BRAIN_OBJECT_CORRECT_TOOL_NAME, _dispatch_brain_object_correct_tool),
         (BRAIN_REVIEW_PROPOSALS_TOOL_NAME, _dispatch_brain_review_proposals_tool),
         (BRAIN_QUERY_TOOL_NAME, _dispatch_brain_query_tool),
         (BRAIN_RESOLVE_TOOL_NAME, _dispatch_brain_resolve_tool),
@@ -865,6 +912,47 @@ def _dispatch_brain_object_decision_commit_tool(tool_name: str, arguments: dict,
     decision["production_mutation_performed"] = False
     _attach_authority_decision_lineage(arguments, decision, tool_name=tool_name)
     result = service.commit_object_authority_decision(decision)
+    return _tool_result(result)
+
+
+def _dispatch_brain_object_correct_tool(
+    tool_name: str,
+    arguments: dict,
+    service: KnowledgeSearchService,
+) -> dict:
+    required = {
+        "project",
+        "repository",
+        "expected_content_hash",
+        "policy_id",
+        "idempotency_key",
+        "evidence_refs",
+    }
+    targets = {"target_object_id", "target_memory_id"} & set(arguments)
+    if len(targets) != 1 or set(arguments) != required | targets:
+        raise ValueError(f"{tool_name} requires the exact evidence correction input fields")
+    evidence_refs = arguments.get("evidence_refs")
+    if not isinstance(evidence_refs, list) or not 1 <= len(evidence_refs) <= 5:
+        raise ValueError(f"{tool_name} requires one to five evidence refs")
+    for ref in evidence_refs:
+        if not isinstance(ref, Mapping) or set(ref) != {
+            "source_ref_id",
+            "source_content_hash",
+        }:
+            raise ValueError(f"{tool_name} evidence ref fields are invalid")
+    result = service.brain_object_correct(
+        project=_require_non_empty_string(arguments, "project", tool_name=tool_name),
+        repository=_require_non_empty_string(arguments, "repository", tool_name=tool_name),
+        **{key: _require_non_empty_string(arguments, key, tool_name=tool_name) for key in targets},
+        expected_content_hash=_require_non_empty_string(
+            arguments,
+            "expected_content_hash",
+            tool_name=tool_name,
+        ),
+        policy_id=_require_non_empty_string(arguments, "policy_id", tool_name=tool_name),
+        idempotency_key=_require_non_empty_string(arguments, "idempotency_key", tool_name=tool_name),
+        evidence_refs=evidence_refs,
+    )
     return _tool_result(result)
 
 

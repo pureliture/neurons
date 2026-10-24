@@ -45,7 +45,13 @@ from .llm_brain_core.objects.runtime_readiness import (
     build_source_to_candidate_runtime_shadow_readiness_report,
 )
 from .memory_read_pipeline import AuthorizedMemoryReader, MemoryReadPipeline, MemorySearchQuery
-from .public_safe_util import ensure_public_safe, public_safe_text, require_sha256, sha256_text, short_hash
+from .public_safe_util import (
+    ensure_public_safe,
+    public_safe_text,
+    require_sha256,
+    sha256_text,
+    short_hash,
+)
 from .permission_audit import run_permission_sensitive_audit_probe
 from .runtime_build_identity import (
     load_runtime_build_identity,
@@ -61,6 +67,7 @@ from .session_memory.brain_query import (
     run_brain_query_v2,
 )
 from .session_memory.brain_read_model import LegacyLedgerBrainReadModel, PgStewardBrainReadModel, build_semantic_recall
+from .evidence_correction import EvidenceCorrectionService, POLICY_SCHEMA, validate_policies
 
 
 _SYNTHETIC_CANARY_PROVIDER = "lbrain-temporal-canary"
@@ -917,12 +924,9 @@ class _SessionCardCache:
     실제 read model을 감싸며 나머지 read path는 그대로 전달하므로 graph 상태,
     evidence policy, 다른 조회 경로는 건드리지 않는다.
 
-    stale 범위: 현재 노출된 brain tool은 모두 read-only이고 세션 내부 write path가
-    없으므로 세션 동안 스냅샷은 유효하다. 다른 프로세스(worker/ingestion)가 같은
-    ledger에 쓰는 변경은 세션 재시작 전까지 반영되지 않는다. cross-process 또는 TTL
-    invalidation은 없다. `invalidate()`는 향후 세션 내부 write path가 생기면 호출할
-    명시적 refresh seam이다. production wrapper인 `invalidate_brain_card_cache`는
-    아직 production caller가 없고, 현재는 테스트에서만 닿는다.
+    같은 service의 authority commit과 evidence correction은
+    `invalidate_brain_card_cache`로 스냅샷을 비운다. HTTP는 호출마다 invalidation한다.
+    stdio에서 다른 프로세스가 바꾼 내용에 대한 cross-process/TTL invalidation은 없다.
     """
 
     def __init__(self, read_model) -> None:
@@ -967,6 +971,8 @@ class KnowledgeSearchService:
         allow_steward_auto_accept: bool = False,
         allow_local_test_object_authority_writes: bool = False,
         allow_production_object_authority_writes: bool = False,
+        allow_evidence_backed_object_corrections: bool = False,
+        evidence_correction_policies: tuple[dict, ...] = (),
         runtime_build_identity_reader: Callable[[], Mapping[str, Any]] | None = None,
         allow_permission_sensitive_audit_probe: bool = False,
         permission_audit_token_reviewer: Callable[[str], Mapping[str, Any]] | None = None,
@@ -986,6 +992,11 @@ class KnowledgeSearchService:
         self.allow_steward_auto_accept = bool(allow_steward_auto_accept)
         self.allow_local_test_object_authority_writes = bool(allow_local_test_object_authority_writes)
         self.allow_production_object_authority_writes = bool(allow_production_object_authority_writes)
+        self.allow_evidence_backed_object_corrections = bool(allow_evidence_backed_object_corrections)
+        self.evidence_correction_policies = (
+            validate_policies({"schema_version": POLICY_SCHEMA, "rules": list(evidence_correction_policies)})
+            if evidence_correction_policies else ()
+        )
         self._runtime_build_identity_reader = (
             runtime_build_identity_reader or load_runtime_build_identity
         )
@@ -1022,6 +1033,14 @@ class KnowledgeSearchService:
         """세션 card snapshot을 비워 다음 brain tool 호출이 ledger를 다시 읽게 한다."""
 
         self._brain_card_cache.invalidate()
+
+    def brain_object_correct(self, **arguments: Any) -> dict:
+        return EvidenceCorrectionService(
+            ledger=self.ledger, store=self.pgvector_store,
+            enabled=self.allow_evidence_backed_object_corrections,
+            policies=self.evidence_correction_policies,
+            invalidate=self.invalidate_brain_card_cache, read=self.brain_memory_resolve,
+        ).correct(**arguments)
 
     def brain_runtime_build_identity(self) -> dict[str, Any]:
         identity = validate_runtime_build_identity_projection(

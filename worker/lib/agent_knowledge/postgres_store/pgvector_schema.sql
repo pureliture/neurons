@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS steward_card_decisions (
     decision_id TEXT PRIMARY KEY,
     memory_id VARCHAR(64) NOT NULL REFERENCES memory_cards(memory_id),
     content_hash VARCHAR(71) NOT NULL,
-    action VARCHAR(32) NOT NULL CHECK (action IN ('approve', 'auto_accept', 'reject', 'supersede', 'stale')),
+    action VARCHAR(32) NOT NULL CHECK (action IN ('approve', 'auto_accept', 'reject', 'supersede', 'stale', 'correct_fact')),
     actor TEXT NOT NULL,
     target_memory_id VARCHAR(64),
     result_card JSONB,
@@ -93,7 +93,17 @@ CREATE TABLE IF NOT EXISTS steward_card_decisions (
 );
 ALTER TABLE steward_card_decisions ADD COLUMN IF NOT EXISTS result_card JSONB;
 ALTER TABLE steward_card_decisions ADD COLUMN IF NOT EXISTS result_target JSONB;
+ALTER TABLE steward_card_decisions DROP CONSTRAINT IF EXISTS steward_card_decisions_action_check;
+ALTER TABLE steward_card_decisions ADD CONSTRAINT steward_card_decisions_action_check
+    CHECK (action IN ('approve', 'auto_accept', 'reject', 'supersede', 'stale', 'correct_fact'));
 CREATE INDEX IF NOT EXISTS idx_steward_card_decisions_memory_id ON steward_card_decisions(memory_id);
+
+CREATE TABLE IF NOT EXISTS steward_correction_denials (
+    audit_event_id TEXT PRIMARY KEY,
+    request_hash VARCHAR(71) NOT NULL,
+    reason_code VARCHAR(80) NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 -- 서명된 인간 검토 묶음의 불변 결과. 기존 단건 audit/outbox 의미는 바꾸지 않는다.
 -- 전체 안전 응답(result)은 action/actor/reason 등 service의 검증된 메타데이터도 보존한다.

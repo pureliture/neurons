@@ -382,7 +382,7 @@ class PgVectorStore:
                         raise ValueError("steward proposal scope collision")
                     kind = str(envelope.get("steward_proposal_kind") or "")
                     committed = _row_value(row, "lifecycle_state", 2) not in ("candidate", "needs_review", "suggested_accept")
-                    if committed and kind not in ("candidate", "needs_review"):
+                    if committed and kind not in ("candidate", "needs_review", "evidence_correction"):
                         raise ValueError("proposal identity collision or already committed")
                     identity_fields = ("card_type", "source_refs", "span_refs", "provider", "observed_at")
                     if kind != "stale":
@@ -556,6 +556,20 @@ class PgVectorStore:
                 return {name: _row_value(row, name, index) for index, name in enumerate(
                     ('decision_id', 'memory_id', 'content_hash', 'action', 'actor', 'target_memory_id', 'result_card', 'result_target'))}
 
+    def record_correction_denial(self, *, request_hash: str, reason: str) -> str:
+        from ..public_safe_util import require_sha256, short_hash
+
+        require_sha256(request_hash, "request_hash")
+        if not re.fullmatch(r"[a-z_]{1,80}", reason):
+            raise ValueError("invalid correction denial reason")
+        audit_id = "correction-denial:" + short_hash([request_hash, reason], length=40)
+        with self.transaction() as db:
+            with db.cursor() as cur:
+                cur.execute("""INSERT INTO steward_correction_denials
+                    (audit_event_id, request_hash, reason_code) VALUES (%s, %s, %s)
+                    ON CONFLICT(audit_event_id) DO NOTHING""", (audit_id, request_hash, reason))
+        return audit_id
+
     def steward_bundle_decision(
         self, *, decision_id: str, request_fingerprint: str, project: str,
         brain_id: str, scope: str, member_ids: list[str] | tuple[str, ...], decide: Any,
@@ -625,7 +639,7 @@ class PgVectorStore:
     def steward_decision(self, *, decision_id: str, memory_id: str, action: str, actor: str,
                          content_hash: str, target_memory_id: str = "", transform: Any) -> dict[str, Any]:
         """Lock, validate and change steward rows, audit and outboxes in one PG transaction."""
-        if not decision_id or not actor or action not in {'approve', 'auto_accept', 'reject', 'supersede', 'stale'}:
+        if not decision_id or not actor or action not in {'approve', 'auto_accept', 'reject', 'supersede', 'stale', 'correct_fact'}:
             raise ValueError("steward decision identity required")
         with self.transaction() as db:
             self._lock_steward_authority_on(db)
@@ -644,10 +658,11 @@ class PgVectorStore:
                     if stored_card is None:
                         raise ValueError('steward decision result unavailable for safe retry')
                     stored_target = _row_value(previous, 'result_target', 7)
-                    if action == 'supersede':
+                    if action in {'supersede', 'correct_fact'}:
                         _require_same_supersede_scope(_json_value(stored_card), _json_value(stored_target))
                     return {'card': _json_value(stored_card),
-                            'target': _json_value(stored_target) if stored_target is not None else None}
+                            'target': _json_value(stored_target) if stored_target is not None else None,
+                            **({'duplicate': True} if action == 'correct_fact' else {})}
                 # Consistent lock ordering across competing decisions.
                 ids = sorted({memory_id, *([target_memory_id] if target_memory_id else [])})
                 for card_id in ids:
@@ -660,7 +675,7 @@ class PgVectorStore:
                     raise ValueError("steward card content hash changed")
                 card = _json_value(_row_value(rows[memory_id], 'steward_envelope', 1))
                 target = _json_value(_row_value(rows[target_memory_id], 'steward_envelope', 1)) if target_memory_id else None
-                if action == 'supersede':
+                if action in {'supersede', 'correct_fact'}:
                     _require_same_supersede_scope(card, target)
                 changed_card, changed_target = transform(card, target)
                 # Use one DB timestamp inside the decision transaction for every
@@ -724,6 +739,18 @@ class PgVectorStore:
                                 'observed_at': str((changed.get('typed_payload') or {}).get('observed_at') or changed.get('valid_from') or ''),
                                 'created_at': str(changed.get('created_at') or ''),
                             })
+                if action == 'correct_fact':
+                    from ..public_safe_util import hash_payload
+                    cur.execute("""UPDATE memory_cards SET observed_at=%s::timestamptz,
+                        freshness_state='verified_current', freshness_checked_at=%s::timestamptz,
+                        freshness_next_check_after=%s::timestamptz, source_hash=%s WHERE memory_id=%s""",
+                        (changed_card['observed_at'], changed_card['freshness_checked_at'],
+                         changed_card['freshness_next_check_after'], changed_card['source_hash'], changed_card['memory_id']))
+                    self.insert_edge(MemoryEdge(
+                        src_id=changed_card['memory_id'], rel_type='supersedes',
+                        dst_id=changed_target['memory_id'], provenance_hash=hash_payload(decision_id),
+                        properties={'authority_basis': 'evidence_policy', 'decision_id': decision_id},
+                    ), conn=db)
                 cur.execute("""INSERT INTO steward_card_decisions
                     (decision_id, memory_id, content_hash, action, actor, target_memory_id, result_card, result_target)
                     VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)""",

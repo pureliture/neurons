@@ -27,6 +27,7 @@ BRAIN_RUNTIME_BUILD_IDENTITY_TOOL_NAME = "brain_runtime_build_identity"
 BRAIN_PERMISSION_SENSITIVE_AUDIT_PROBE_TOOL_NAME = PERMISSION_AUDIT_TOOL_NAME
 BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME = "brain_object_proposal_create"
 BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME = "brain_object_decision_commit"
+BRAIN_OBJECT_CORRECT_TOOL_NAME = "brain_object_correct"
 BRAIN_REVIEW_PROPOSALS_TOOL_NAME = "brain_review_proposals"
 
 # Brain Steward — agent-facing, proposal-only memory management surface.
@@ -136,6 +137,7 @@ _DISPATCH_OWNER_BY_TOOL_NAME = {
     BRAIN_PERMISSION_SENSITIVE_AUDIT_PROBE_TOOL_NAME: "jsonrpc_brain",
     BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME: "jsonrpc_brain",
     BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME: "jsonrpc_brain",
+    BRAIN_OBJECT_CORRECT_TOOL_NAME: "jsonrpc_brain",
     BRAIN_REVIEW_PROPOSALS_TOOL_NAME: "jsonrpc_brain",
     MEMORY_AUTHORITY_PACK_READ_TOOL_NAME: "brain_steward",
     MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME: "brain_steward",
@@ -1081,11 +1083,62 @@ def list_admin_tools() -> list[dict]:
 def list_tools(surface: str = "all") -> list[dict]:
     if surface in ("agent", "public"):
         return list_public_agent_tools()
+    if surface == "stdio":
+        return list_public_agent_tools() + [_evidence_correction_tool()]
+    if surface == "correction":
+        return [tool for tool in list_public_agent_tools() if tool["name"] == BRAIN_RESOLVE_TOOL_NAME] + [_evidence_correction_tool()]
     if surface == "admin":
         return list_admin_tools()
     if surface == "all":
-        return list_public_agent_tools() + list_admin_tools()
+        return list_public_agent_tools() + list_admin_tools() + [_evidence_correction_tool()]
     raise ValueError(f"unknown surface: {surface}")
+
+
+def _evidence_correction_tool() -> dict:
+    return {
+        "name": BRAIN_OBJECT_CORRECT_TOOL_NAME,
+        "description": (
+            "서버 정책에 지정된 source의 JSON 필드에서 값을 직접 읽어 accepted/current MemoryCard를 교정한다. "
+            "호출자가 새 값을 전달하지 않으며, 서버가 project·object revision·source revision·field policy를 확인한다. "
+            "적격한 사실 교정은 per-correction human approval 없이 successor로 기록한다."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "minLength": 1, "maxLength": 64},
+                "repository": {"type": "string", "minLength": 1, "maxLength": 240},
+                "target_object_id": {"type": "string", "minLength": 1, "maxLength": 180},
+                "target_memory_id": {"type": "string", "minLength": 1, "maxLength": 64},
+                "expected_content_hash": {"type": "string", "pattern": r"^sha256:[0-9a-f]{64}$"},
+                "policy_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 128},
+                "evidence_refs": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 5,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "source_ref_id": {"type": "string", "minLength": 1, "maxLength": 180},
+                            "source_content_hash": {"type": "string", "pattern": r"^sha256:[0-9a-f]{64}$"},
+                        },
+                        "required": ["source_ref_id", "source_content_hash"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": [
+                "project",
+                "repository",
+                "expected_content_hash",
+                "policy_id",
+                "idempotency_key",
+                "evidence_refs",
+            ],
+            "oneOf": [{"required": ["target_object_id"]}, {"required": ["target_memory_id"]}],
+            "additionalProperties": False,
+        },
+    }
 
 
 def _build_tool_registry(surface: str = "all") -> dict[str, dict]:

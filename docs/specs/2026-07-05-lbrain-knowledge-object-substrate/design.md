@@ -59,6 +59,13 @@ flowchart TD
     G["Accepted MemoryCard / authority pack"] --> E
     H["Preference / style cards"] --> E
 
+    F --> V["Field-scoped evidence validator"]
+    G --> V
+    V --> C["brain_object_correct"]
+    C --> D["Policy-validated correction commit"]
+    D --> O
+    V -. "ineligible / conflicting evidence" .-> L
+
     E --> I["KnowledgeObjectEnvelope store"]
     E --> J["KnowledgeEdge store"]
     E --> K["EvidenceRef store"]
@@ -95,9 +102,16 @@ Proposal tools
   -> BrainStewardService or KnowledgeObjectProposalService
     -> review queue only
     -> restricted authority gate for accepted/current changes
+
+Evidence-backed correction
+  -> KnowledgeObjectCorrectionService
+    -> field-scoped source-of-truth and evidence validator
+    -> atomic successor + policy-bound AuthorityDecision when eligible
+    -> ReviewProposal with failure reason when ineligible
 ```
 
 No component in this design may treat raw corpus, graph hits, search mirror hits, or session archive as accepted/current authority without an `AuthorityDecision`.
+FR13을 통과한 교정은 별도의 accepted/current 쓰기 경로다. 결정 감사는 해당 사실 갱신의 근거가 source 정책임을 기록하며, deployment·runtime 설정 변경 권한은 부여하지 않는다.
 
 ## Data Model
 
@@ -484,20 +498,26 @@ authoritative_memory_changed: false
 
 ```yaml
 decision_id: decision:<stable_hash>
-decision_type: accept_current
+decision_type: accept_current | correct_fact
 target_object_id: ko:RepoDocument:<hash>
 previous_authority_lane: candidate
 new_authority_lane: accepted_current
-approved_by: human
-approved_at: "2026-07-05T00:00:00Z"
+authority_basis: human_approval | evidence_policy
+decision_at: "2026-07-05T00:00:00Z"
+approved_by: optional_human_actor # required for human_approval; omitted for evidence_policy
+evidence_validation_id: optional
 evidence_refs: []
 ```
 
 Rules:
 
 - Proposal creation is a proposal write, not a read. It may write to local/test ledger by default but must not mutate accepted/current authority.
-- Accepted/current mutation is restricted and uses an object decision adapter over the existing Brain Steward pattern.
+- 일반 accepted/current 변경은 기존 Brain Steward의 restricted object decision adapter를 사용하고, FR13은 별도 evidence-policy adapter를 사용한다.
 - Stale/superseded/retired decisions first create proposals, then commit through a restricted gate.
+- `correct_fact`는 객관적 필드, 정확한 target scope/revision, source 권위·무결성·freshness를 검증한 경우 건별 사람 승인 없이 반영한다. 정책과 validator는 감사 가능한 gate로 남긴다.
+- 교정은 해당 필드와 정책에 지정한 표시 필드에 한정한다. successor를 추가하고 이전 revision을 non-current로 보존하며, `supersedes`와 field evidence/source hash를 결속한다.
+- 부적격·stale·충돌·malformed·불완전·cross-scope·CAS 충돌 근거는 authority를 변경하지 않고 typed reason과 review proposal을 반환한다.
+- evidence는 정의된 범위만 입증한다. repo code/config로 deployed runtime을 입증하지 않으며, runtime 주장에는 해당 runtime identity와 관측 window의 live evidence가 필요하다.
 - Review queue empty is not success. For cleanup/impact queries, empty queue plus discovered candidates returns `review_proposals_needed`.
 - `write_performed=false` is reserved for denied restricted actions. Successful proposal creation reports `proposal_write_performed=true` and `authoritative_memory_changed=false`.
 - `brain_object_decision_commit` is the restricted object-native authority surface. Its first implementation may adapt object proposals into existing `memory_*` restricted commit paths, but the response must be object-shaped.
@@ -624,6 +644,7 @@ candidate object or edge
 Rules:
 
 - `accept_current`, `commit_supersession`, `commit_stale`, `retire` are restricted.
+- `correct_fact`는 FR13 validator를 통과한 필드만 자동 반영한다. 실패하면 authority 변경 없이 review proposal을 만든다.
 - A query can recommend proposals but must not commit them.
 - Existing accepted/current `MemoryCard` can be adapted into `KnowledgeObjectEnvelope` with `authority_lane=accepted_current`.
 - Existing graph/search results join as `derived_projection` evidence only.
@@ -644,6 +665,16 @@ Freshness results:
 - `changed`: create new snapshot candidate and `propose_stale` or `propose_supersede`.
 - `missing_manual_text`: keep reference object but add freshness gap.
 - `uncheckable`: return gap and preserve existing authority status.
+
+### Evidence-backed factual correction
+
+`brain_object_correct`는 작업 중 발견한 사실 불일치를 교정한다. 호출자는 공개 조회가 반환한 `memory_id` 또는 정확한 `object_id`, expected content hash, 서버가 미리 설정한 `policy_id`, evidence refs를 전달한다. 새 값은 호출자가 제출하지 않으며, 서버가 정책에 지정된 source 필드를 재조회해 계산한다.
+
+초기 adapter는 `registered_json`이다. 서버 정책은 project/repository, 원본 MemoryCard 계보, 허용 필드, source의 device/root/path hash, JSON pointer, 값 대응표와 표시 template, freshness window를 정확히 지정한다. 모든 필수 source가 같은 값을 입증해야 한다. source는 `full_sync`/project 정책을 만족하고, 등록된 전체 redacted bytes의 재계산 hash와 content-addressed source ref가 일치해야 한다. source registry의 최신 관측 revision만 사용한다. 임의 citation, LLM이 작성한 claim 문장, preference·intent·평가, code 의미 해석 및 runtime 상태 추론은 이 adapter의 근거가 될 수 없다. 지원되지 않는 source/field는 review 경로로 넘긴다.
+
+적격한 요청은 expected target revision을 CAS로 확인하고, 변경 필드만 반영한 successor·정책 기반 `correct_fact` 결정·`supersedes`를 원자 기록한다. cache를 비우고 read-after-write로 successor를 확인한다. 같은 요청은 멱등이며, 근거나 target 검증이 실패하면 authority 변경 없이 typed reason과 필요한 review action을 반환한다.
+
+canonical write adapter는 PostgreSQL steward store다. 새 MemoryCard의 자동 승인, 이전 카드의 supersession, `correct_fact` 결정 감사, 명시적 `supersedes` edge, embedding/graph outbox를 한 authority 트랜잭션으로 commit한다. cache invalidation 후 공개 `brain.resolve(mode=list)` 경로로 successor와 값을 재조회한다. commit 뒤 재조회가 실패하면 `committed_readback_gap`으로 명시한다. 같은 요청의 재시도는 이미 저장된 결정 결과를 재사용하며, authority를 추가 변경하지 않는다. 교정 전용 HTTP bearer identity와 명시적으로 활성화한 stdio capability를 제공하고, public agent/admin 권한과 분리한다. production 활성화와 실제 검증은 M9의 별도 gate이며 전체 goal에 포함된다.
 
 ## Query Flow
 
@@ -905,7 +936,7 @@ reason: proposal_write_requires_local_test_ledger_or_later_production_gate
 
 ### `brain_object_decision_commit`
 
-Restricted object-native authority action. This is the only object API that may change accepted/current, stale, superseded, retired, or rejected authority.
+accepted/current·stale·superseded·retired·rejected를 처리하는 일반 restricted authority action이다. 별도 `brain_object_correct`는 FR13을 통과한 사실에 한해 건별 사람 검토 없이 반영한다.
 
 Input:
 
@@ -926,6 +957,42 @@ cache_invalidated: true
 ```
 
 Default permission is denied. The first implementation may adapt to existing `memory_candidate_approve`, `memory_candidate_reject`, `memory_supersede_commit`, and `memory_stale_commit` restricted gates, but the public response remains object-shaped.
+
+### `brain_object_correct`
+
+source로 검증된 객관적 사실 필드의 교정 action이다. 임의 `approved_by` 입력을 받지 않는다.
+
+Input:
+
+```yaml
+target_memory_id: string # 공개 brain.resolve의 id; target_object_id와 정확히 하나만 사용
+target_object_id: optional_string
+project: string
+repository: string
+expected_content_hash: sha256
+policy_id: string
+evidence_refs: [{source_ref_id: string, source_content_hash: sha256}]
+idempotency_key: string
+```
+
+Eligible response:
+
+```yaml
+correction_status: committed
+authority_write_performed: true
+authority_basis: evidence_policy
+decision_type: correct_fact
+previous_revision: string
+successor_revision: string
+supersedes: string
+evidence_validation_id: string
+cache_invalidated: true
+read_after_write_verified: true
+```
+
+서버가 등록된 source adapter로 evidence locator를 독립 조회하고 hash를 다시 계산한다. 호출자가 보낸 hash는 expected 값이며, adapter가 해당 source를 검증할 수 없으면 review로 넘긴다.
+
+근거 부적격이나 target 동시 변경은 `review_required` 또는 `conflict`, `authority_write_performed=false`, typed reason과 생성한 review 참조를 반환한다. production 대상은 별도 검증 gate로 활성화하기 전까지 기본 거부하며, 활성화한 대상의 적격 교정에는 건별 사람 승인을 요구하지 않는다.
 
 ### `brain_review_proposals`
 
@@ -1277,6 +1344,7 @@ Compatibility rules:
 - Existing Brain Steward restricted gates remain.
 - Graph/search mirror remains derived.
 - No accepted/current promotion happens during migration.
+- FR13은 별도 successor action으로 구현하며, migration만으로 production 대상에 활성화하지 않는다.
 - Object proposal writes are local/test ledger only in this design.
 - No production ledger or runtime mutation happens without a later explicit production-validation goal.
 
@@ -1322,7 +1390,7 @@ Production validation is out of this design execution's mutation scope. After M7
 - UI is excluded from the first mega-program.
 - Raw corpus storage mode is independent from accepted/current authority.
 - Authority lane and runtime verification state are separate axes.
-- Current/stale/superseded/retired changes require proposal/review/decision lifecycle.
+- 일반 current/stale/superseded/retired 변경은 proposal/review/decision lifecycle을 따른다. FR13 적격 사실만 source 검증 후 건별 검토 없이 successor로 반영한다.
 - Graph/search/session archive remain candidate or derived lanes.
 - Device/project 360 is supported with hashed identifiers and typed edges, not raw machine identity.
 - Palantir concepts are reduced to object/link/action/function/pipeline/governance mechanics needed by LBrain.

@@ -36,7 +36,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from .knowledge_search_service import KnowledgeSearchService
-from .mcp_jsonrpc import ADMIN_AUTH_IDENTITY, dispatch_tool_call
+from .mcp_jsonrpc import ADMIN_AUTH_IDENTITY, CORRECTION_AUTH_IDENTITY, dispatch_tool_call
 from .mcp_tools import list_tools
 
 DEFAULT_PORT = 8765
@@ -355,9 +355,18 @@ def build_app(
     allowed_hosts: Sequence[str] | None = None,
     surface: str = "agent",
     admin_token: str | None = None,
+    correction_token: str | None = None,
 ) -> Starlette:
-    if surface not in {"agent", "admin"}:
-        raise ValueError("mcp-http surface must be agent or admin")
+    if surface not in {"agent", "admin", "correction"}:
+        raise ValueError("mcp-http surface must be agent or admin or correction")
+    if surface == "correction":
+        if not service.allow_evidence_backed_object_corrections or not service.evidence_correction_policies:
+            raise ValueError("mcp-http correction surface requires an enabled policy")
+        if (not isinstance(correction_token, str) or len(correction_token) < 32
+                or correction_token == CORRECTION_AUTH_IDENTITY or correction_token == admin_token
+                or not correction_token.isascii()
+                or any(char.isspace() or ord(char) < 33 or ord(char) > 126 for char in correction_token)):
+            raise ValueError("mcp-http correction token is invalid")
     if surface == "admin":
         if admin_token == ADMIN_AUTH_IDENTITY:
             raise ValueError("mcp-http fixed admin identity is not a credential")
@@ -401,7 +410,8 @@ def build_app(
             surface=surface,
             # `lbrain_admin`은 credential가 아닌 내부 identity다. admin process의 Bearer
             # ASGI 경계를 통과한 handler closure에서만 dispatcher에 전달한다.
-            auth_token=ADMIN_AUTH_IDENTITY if surface == "admin" else None,
+            auth_token=(ADMIN_AUTH_IDENTITY if surface == "admin" else
+                        CORRECTION_AUTH_IDENTITY if surface == "correction" else None),
         )
 
     # DNS rebinding 보호는 loopback/tailnet 모두 활성화한다.
@@ -422,8 +432,9 @@ def build_app(
         Route(
             "/mcp",
             endpoint=(
-                _AdminBearerAuthASGIApp(_StreamableHTTPASGIApp(session_manager), admin_token)
-                if surface == "admin"
+                _AdminBearerAuthASGIApp(_StreamableHTTPASGIApp(session_manager),
+                                       admin_token if surface == "admin" else correction_token)
+                if surface in {"admin", "correction"}
                 else _StreamableHTTPASGIApp(session_manager)
             ),
         ),
@@ -443,6 +454,7 @@ def serve(
     allowed_hosts: Sequence[str] | None = None,
     surface: str = "agent",
     admin_token: str | None = None,
+    correction_token: str | None = None,
 ) -> None:
     import uvicorn
 
@@ -456,5 +468,6 @@ def serve(
         allowed_hosts=allowed_hosts,
         surface=surface,
         admin_token=admin_token,
+        correction_token=correction_token,
     )
     uvicorn.run(app, host=host, port=int(port), log_level="warning")

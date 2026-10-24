@@ -231,9 +231,10 @@ class LedgerSessionMemoryArtifactStore:
 class LedgerSourceRefCatalog:
     """SourceRef metadata catalog backed by the existing neurons Ledger."""
 
-    def __init__(self, ledger: Any) -> None:
+    def __init__(self, ledger: Any, *, initialize_schema: bool = True) -> None:
         self._ledger = ledger
-        self._ensure_schema()
+        if initialize_schema:
+            self._ensure_schema()
 
     def register(self, record: SourceRefRecord) -> None:
         with self._ledger._connect() as connection:
@@ -315,6 +316,17 @@ class LedgerSourceRefCatalog:
 
     def resolver(self) -> SourceRefResolver:
         return SourceRefResolver(self.list_all())
+
+    def list_for_path(self, *, root_id: str, device_id_hash: str, relative_path_hash: str) -> list[SourceRefRecord]:
+        with self._ledger._connect() as connection:
+            rows = connection.execute(
+                """SELECT record_json FROM llm_brain_source_refs
+                   WHERE root_id = ? AND device_id_hash = ? AND relative_path_hash = ?
+                   LIMIT 1001""", (root_id, device_id_hash, relative_path_hash),
+            ).fetchall()
+        if len(rows) > 1000:
+            raise ValueError("source revision scan exceeds the bounded window")
+        return [_source_ref_from_json(str(row["record_json"])) for row in rows]
 
     def _ensure_schema(self) -> None:
         if getattr(self._ledger, "read_only", False):
