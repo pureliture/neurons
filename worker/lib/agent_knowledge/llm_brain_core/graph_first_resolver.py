@@ -650,6 +650,10 @@ class GraphFirstResolver:
         for card in cards:
             context_mode = request.mode == "context"
             item = _context_item(card) if context_mode else _item(card)
+            # Temporal envelope (FR-AGE): only on the non-context (slim) item,
+            # so the compact context lane stays minimal.
+            if not context_mode:
+                item["temporal"] = _card_temporal_block(card, request.as_of)
             items.append(item)
             raw_typed = card.get("typed_payload")
             typed: dict[str, Any] = dict(raw_typed) if isinstance(raw_typed, Mapping) else {}
@@ -696,6 +700,20 @@ class GraphFirstResolver:
             content_hash = str(card.get("content_hash") or "")
             if content_hash:
                 evidence_hashes.append(content_hash)
+        # Temporal coverage metrics (FR-AGE-064): how many returned items carry
+        # observed time, how many are unknown, and how many are anomalous.
+        # Only added outside the tight context lane to preserve the wire budget.
+        _temporal_coverage = None
+        if request.mode != "context":
+            _observed = sum(1 for it in items if (it.get("temporal") or {}).get("observed_at"))
+            _unknown = sum(1 for it in items if (it.get("temporal") or {}).get("age", {}).get("confidence") == "unknown")
+            _anomalous = sum(1 for it in items if (it.get("temporal") or {}).get("age", {}).get("confidence") == "anomalous")
+            _temporal_coverage = {
+                "items": len(items),
+                "with_observed_at": _observed,
+                "unknown_age": _unknown,
+                "anomalous_time": _anomalous,
+            }
         payload: dict[str, Any] = {
             "schema_version": "lbrain_slim_context.v1",
             "project": request.project,
@@ -705,7 +723,11 @@ class GraphFirstResolver:
             "statuses": statuses,
             "items": items,
             "active_guardrails": [preference["rule"] for preference in preferences],
-            "metadata": {**metadata, "has_more": has_more},
+            "metadata": {
+                **metadata,
+                "has_more": has_more,
+                **({"temporal_coverage": _temporal_coverage} if _temporal_coverage is not None else {}),
+            },
             "has_more": has_more,
             "next_cursor": None,
         }
@@ -803,6 +825,89 @@ def _item(card: Mapping[str, Any], *, include_created_at: bool = True) -> dict[s
         # current state instead of having to stale-mark every old card.
         item["created_at"] = _safe(created_at, 40)
     return item
+
+
+def _card_temporal_block(card: Mapping[str, Any], as_of: str = "") -> dict[str, Any]:
+    '''Build a minimal temporal envelope for a memory card (FR-AGE).'''
+    def _iso(value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            v = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+            return v.isoformat()
+        text = str(value).strip()
+        return text or None
+
+    observed = _iso(card.get("observed_at") or (card.get("typed_payload") or {}).get("observed_at"))
+    created = _iso(card.get("created_at") or card.get("updated_at"))
+    valid_from = _iso(card.get("valid_from"))
+    valid_to = _iso(card.get("valid_to"))
+    currentness = str(card.get("currentness") or "current")
+    try:
+        instant = datetime.fromisoformat(as_of.replace("Z", "+00:00")) if as_of else datetime.now(timezone.utc)
+        if instant.tzinfo is None:
+            instant = instant.replace(tzinfo=timezone.utc)
+    except Exception:
+        instant = datetime.now(timezone.utc)
+    # Age from observed_at (fall back to created_at with low confidence).
+    clock = "observed_at"
+    age_obs = observed
+    if age_obs is None and created is not None:
+        age_obs = created
+        clock = "recorded_at"
+    age_seconds = None
+    confidence = "unknown"
+    reason = "observed_at_missing"
+    if age_obs is not None:
+        try:
+            dt = datetime.fromisoformat(age_obs.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            delta = (instant - dt).total_seconds()
+            if delta < -300:
+                confidence = "anomalous"
+                reason = "observed_after_now"
+                age_seconds = 0
+            else:
+                age_seconds = max(0, int(delta))
+                confidence = "low" if clock == "recorded_at" else "high"
+                reason = None
+        except Exception:
+            confidence = "unknown"
+            reason = "parse_error"
+    bucket = "unknown"
+    if age_seconds is not None:
+        days = age_seconds // 86400
+        if days < 1:
+            bucket = "fresh"
+        elif days < 7:
+            bucket = "recent"
+        elif days < 30:
+            bucket = "aging"
+        elif days < 180:
+            bucket = "old"
+        else:
+            bucket = "historical"
+    superseded_by = card.get("superseded_by")
+    if not isinstance(superseded_by, list):
+        superseded_by = [superseded_by] if superseded_by else []
+    return {
+        "observed_at": observed,
+        "recorded_at": created,
+        "valid_from": valid_from,
+        "valid_to": valid_to,
+        "superseded_by": superseded_by,
+        "age": {
+            "seconds": age_seconds,
+            "label": bucket,
+            "clock": clock if age_obs is not None else "unknown",
+            "confidence": confidence,
+            "reason_codes": [reason] if reason else [],
+        },
+        "time_confidence": confidence,
+        "currentness": currentness,
+        "temporal_conflict": currentness == "conflicted",
+    }
 
 
 def _context_item(card: Mapping[str, Any]) -> dict[str, Any]:

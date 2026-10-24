@@ -8,9 +8,116 @@ ready, integrity-valid PostgreSQL rows directly. No path falls back to Qdrant.
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from ..postgres_store.pgvector_store import PgVectorStore
+
+
+def _session_temporal_block(*, observed_at: Any, recorded_at: Any) -> dict[str, Any]:
+    '''Build a public-safe temporal block for one PG session chunk.
+
+    observed_at is the source observation time; recorded_at is the
+    ingestion time. Age is computed against now (UTC) and never substituted
+    with ingestion time when observation time is missing.
+    '''
+    obs_original = observed_at if isinstance(observed_at, datetime) else None
+    rec = recorded_at if isinstance(recorded_at, datetime) else None
+    clock = "observed_at"
+    obs = obs_original
+    if obs is None and rec is not None:
+        # Fallback allowed by FR-AGE-011, but clearly marked as low confidence.
+        obs = rec
+        clock = "recorded_at"
+    now = datetime.now(timezone.utc)
+    if obs is None:
+        age_seconds = None
+        confidence = "unknown"
+        reason = "observed_at_missing"
+        clock = "unknown"
+    else:
+        if obs.tzinfo is None:
+            obs = obs.replace(tzinfo=timezone.utc)
+        delta = (now - obs).total_seconds()
+        if delta < -300:
+            confidence = "anomalous"
+            reason = "observed_after_now"
+            age_seconds = 0
+        else:
+            age_seconds = max(0, int(delta))
+            confidence = "low" if clock == "recorded_at" else "high"
+            reason = None
+    bucket = "unknown"
+    if age_seconds is not None:
+        days = age_seconds // 86400
+        if days < 1:
+            bucket = "fresh"
+        elif days < 7:
+            bucket = "recent"
+        elif days < 30:
+            bucket = "aging"
+        elif days < 180:
+            bucket = "old"
+        else:
+            bucket = "historical"
+    ingestion_lag = None
+    if obs_original is not None and rec is not None:
+        try:
+            ingestion_lag = int((rec - obs_original).total_seconds())
+        except Exception:
+            ingestion_lag = None
+    return {
+        "observed_at": obs_original.isoformat() if obs_original is not None else None,
+        "recorded_at": rec.isoformat() if rec is not None else None,
+        "valid_from": None,
+        "valid_to": None,
+        "superseded_by": [],
+        "as_of": now.isoformat(),
+        "age": {
+            "seconds": age_seconds,
+            "label": bucket,
+            "bucket": bucket,
+            "clock": clock if obs is not None else "unknown",
+            "confidence": confidence,
+            "reason_codes": [reason] if reason else [],
+        },
+        "ingestion_lag_seconds": ingestion_lag,
+        "time_confidence": confidence,
+        "currentness": "current",
+        "lifecycle_status": "accepted",
+        "freshness": {
+            "state": "unchecked",
+            "checked_at": None,
+            "next_check_after": None,
+            "gaps": ["no_recent_freshness_check"],
+        },
+        "temporal_relation": "past" if (age_seconds or 0) > 0 else "present",
+        "temporal_conflict": False,
+        "recommended_action": "use_with_verification",
+        "summary": _age_summary(obs, age_seconds, confidence),
+    }
+
+
+def _age_summary(obs, age_seconds, confidence):
+    if obs is None:
+        return "나이 불명 (observed_at 없음)"
+    if confidence == "anomalous":
+        return "시간 이상 (미래 관측 시각)"
+    if age_seconds is None:
+        return "나이 불명"
+    days = age_seconds // 86400
+    if days >= 180:
+        bucket = "historical"
+    elif days >= 30:
+        bucket = "old"
+    elif days >= 7:
+        bucket = "aging"
+    elif days >= 1:
+        bucket = "recent"
+    else:
+        bucket = "fresh"
+    return f"관측 {days}일 전 · 현재 유효 · 신선도 미검증 ({bucket})"
+
 from ..couchdb_source.document_model import sha256_hash
 from .pg_backfill import validated_pg_embedding_profile
 from .pg_embedding_privacy import assert_pg_embedding_egress_safe
@@ -137,6 +244,8 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
                 "provider": row.provider,
                 "project": row.project,
                 "score": 1.0 - float(candidate["distance"]),
+                "observed_at": row.observed_at,
+                "recorded_at": row.created_at,
             })
 
         if direct_migrated:
@@ -159,6 +268,10 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
                 "currentness": str(hit.get("authority_currentness") or "current"),
                 "score": hit["score"],
                 "content_hash": str(hit["content_hash"]),
+                "temporal": _session_temporal_block(
+                    observed_at=hit.get("observed_at"),
+                    recorded_at=hit.get("recorded_at"),
+                ),
             }
             for hit in authorized_hits
             if not _is_synthetic_canary_pg_row(str(hit.get("provider") or ""))

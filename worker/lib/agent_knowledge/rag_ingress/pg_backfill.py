@@ -17,7 +17,7 @@ from ..model_connectors import (
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_EMBEDDING_PROFILE_ID,
 )
-from ..postgres_store.pgvector_store import PgVectorStore, SessionChunk
+from ..postgres_store.pgvector_store import PgVectorStore, SessionChunk, _as_optional_datetime
 from .pg_embedding_privacy import assert_pg_embedding_egress_safe
 from .pg_embedding_chunks import (
     CHUNK_BYTES, CHUNKED_PROFILE, INVALID_TEXT_NUL,
@@ -129,6 +129,13 @@ def project_pg_representation(*, materialized, source_store, sql_store, embed_pr
         return {"status": "failed", "reason": (
             status if status == "source_revision_changed" else INVALID_TEXT_NUL), "ref": ""}
     b_hash = sha256_hash(body)
+    # Preserve the source's observation time (see project() for rationale).
+    observed_raw = (
+        getattr(current, "observed_at_start", None)
+        or getattr(current, "observed_at_end", None)
+        or getattr(current, "materialized_at", None)
+    )
+    observed_at = _as_optional_datetime(observed_raw)
     chunk_id = _derive_pg_chunk_id_impl(
         project=current.project, provider=current.provider, session_id_hash=current.session_id_hash,
         source_hash=current.source_hash, content_hash=b_hash, embedding_profile=profile,
@@ -209,6 +216,7 @@ def project_pg_representation(*, materialized, source_store, sql_store, embed_pr
                 project=current.project, provider=current.provider, content_markdown=body,
                 content_hash=b_hash, embedding_model=embed_provider.model,
                 embedding_state="ready", embedding=vector,
+                observed_at=observed_at,
             )
             validate(row, supplied=reusable is None)
             sql_store.insert_chunk(row, conn=conn, insert_only=True)
@@ -249,6 +257,14 @@ class PgSessionMemoryProjector:
         project = str(document.get("project") or "")
         provider = str(document.get("provider") or "unspecified")
         source_hash = str(document.get("source_hash") or "")
+        # Preserve the source's observation time. Never fall back to now(): an
+        # unknown age must stay unknown rather than masquerade as fresh.
+        observed_raw = (
+            document.get("observed_at_start")
+            or document.get("observed_at_end")
+            or document.get("materialized_at")
+        )
+        observed_at = _as_optional_datetime(observed_raw)
         assert_pg_text_safe(body, session_id_hash, project, provider, source_hash, content_hash)
         embedding_model = getattr(self._embed, "model", "")
         embedding_size = getattr(self._embed, "size", 0)
@@ -334,6 +350,7 @@ class PgSessionMemoryProjector:
             embedding=vector,
             embedding_model=embedding_model,
             embedding_revision=embedding_revision,
+            observed_at=observed_at,
         )
         # Serialize this projection lane per identity, including the absent-row
         # case (a row lock alone cannot fence concurrent first inserts).

@@ -110,6 +110,7 @@ class SessionChunk:
     embedding: list[float] | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    observed_at: datetime | None = None
 
 
 @dataclass
@@ -312,6 +313,10 @@ class PgVectorStore:
                 "typed_payload": card.typed_payload,
                 "lifecycle_state": card.lifecycle_state,
                 "currentness": card.currentness,
+                "valid_from": card.valid_from.isoformat() if getattr(card, "valid_from", None) else "",
+                "valid_to": (card.valid_to.isoformat() if getattr(card, "valid_to", None) else ""),
+                "observed_at": str((card.typed_payload or {}).get("observed_at") or card.created_at.isoformat()),
+                "created_at": card.created_at.isoformat() if getattr(card, "created_at", None) else "",
             }
             self._enqueue_graph_outbox_on(
                 db,
@@ -654,12 +659,19 @@ class PgVectorStore:
                         WHERE memory_id = %s""", (_json_text(changed), changed['lifecycle_state'],
                         changed['authorization_status'],
                         changed.get('currentness') or 'unknown', changed.get('valid_from'), changed.get('valid_to'), card_id))
+                    # Graph projection must reflect both approvals and demotions
+                    # (stale/superseded/retired). Enqueue for authority cards, not
+                    # for proposals being committed (those carry a proposal kind).
                     if (changed.get('approval_state') in ('approved', 'auto_accepted')
-                            and changed.get('currentness') == 'current'
-                            and changed.get('steward_proposal_kind') != 'stale'):
-                        self._enqueue_outbox_on(db, target_type='memory_card', target_id=card_id,
-                                                content_hash=changed['content_hash'], payload_text=str(changed.get('summary') or ''))
-                        revision = f"{changed['content_hash']}:{changed['lifecycle_state']}:current"
+                            and str(changed.get('steward_proposal_kind') or '') != 'stale'):
+                        changed_currentness = str(changed.get('currentness') or 'unknown')
+                        # Re-embed only when the card is (or becomes) current and
+                        # is not a stale proposal; demotions keep their embedding.
+                        if (changed_currentness == 'current'
+                                and changed.get('steward_proposal_kind') != 'stale'):
+                            self._enqueue_outbox_on(db, target_type='memory_card', target_id=card_id,
+                                                    content_hash=changed['content_hash'], payload_text=str(changed.get('summary') or ''))
+                        revision = f"{changed['content_hash']}:{changed['lifecycle_state']}:{changed_currentness}"
                         self._enqueue_graph_outbox_on(db, source_type='memory_card', source_id=card_id,
                             source_revision=revision,
                             content_hash=changed['content_hash'], episode_payload={
@@ -668,7 +680,13 @@ class PgVectorStore:
                                 'project': changed['project'], 'card_type': changed['card_type'],
                                 'title': changed['title'], 'summary': changed['summary'],
                                 'typed_payload': changed.get('typed_payload') or {},
-                                'lifecycle_state': changed['lifecycle_state'], 'currentness': 'current'})
+                                'lifecycle_state': changed['lifecycle_state'],
+                                'currentness': changed_currentness,
+                                'valid_from': str(changed.get('valid_from') or ''),
+                                'valid_to': str(changed.get('valid_to') or ''),
+                                'observed_at': str((changed.get('typed_payload') or {}).get('observed_at') or changed.get('valid_from') or ''),
+                                'created_at': str(changed.get('created_at') or ''),
+                            })
                 cur.execute("""INSERT INTO steward_card_decisions
                     (decision_id, memory_id, content_hash, action, actor, target_memory_id, result_card, result_target)
                     VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)""",
@@ -802,7 +820,8 @@ class PgVectorStore:
                 embedding_state = EXCLUDED.embedding_state,
                 embedding_revision = EXCLUDED.embedding_revision,
                 embedding = EXCLUDED.embedding,
-                updated_at = EXCLUDED.updated_at
+                updated_at = EXCLUDED.updated_at,
+                observed_at = COALESCE(EXCLUDED.observed_at, session_memory_chunks.observed_at)
         """
         values = (
             normalized.chunk_id,
@@ -819,6 +838,7 @@ class PgVectorStore:
             _vector_literal(normalized.embedding),
             normalized.created_at,
             normalized.updated_at,
+            normalized.observed_at,
         )
         with self._scope(conn=conn, write=conn is None and self.connection is None) as db:
             with db.cursor() as cur:
@@ -827,10 +847,11 @@ class PgVectorStore:
                     INSERT INTO session_memory_chunks (
                         chunk_id, session_id_hash, project, provider, chunk_index,
                         content_markdown, token_count, content_hash, embedding_model,
-                        embedding_state, embedding_revision, embedding, created_at, updated_at
+                        embedding_state, embedding_revision, embedding, created_at, updated_at,
+                        observed_at
                     ) VALUES (
                         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s::halfvec, %s, %s
+                        %s::halfvec, %s, %s, %s
                     )
                     {conflict_clause}
                     """,
@@ -877,7 +898,7 @@ class PgVectorStore:
                     SELECT chunk_id, session_id_hash, project, provider, chunk_index,
                            content_markdown, token_count, content_hash, embedding_model,
                            embedding_state, embedding_revision, embedding,
-                           created_at, updated_at
+                           created_at, updated_at, observed_at
                       FROM session_memory_chunks
                      WHERE chunk_id = %s
                     """,
@@ -910,7 +931,7 @@ class PgVectorStore:
                     SELECT chunk_id, session_id_hash, project, provider, chunk_index,
                            content_markdown, token_count, content_hash, embedding_model,
                            embedding_state, embedding_revision, embedding,
-                           created_at, updated_at
+                           created_at, updated_at, observed_at
                       FROM session_memory_chunks
                      WHERE session_id_hash = %s
                        AND project = %s
@@ -953,6 +974,7 @@ class PgVectorStore:
                     f"""
                     SELECT chunk_id, session_id_hash, project, provider, chunk_index,
                            content_markdown, token_count, content_hash,
+                           created_at, observed_at,
                            embedding <=> %s::halfvec AS distance
                       FROM session_memory_chunks
                      WHERE {' AND '.join(clauses)}
@@ -2372,6 +2394,7 @@ def _chunk_from_row(row: Any) -> SessionChunk:
         embedding=_parse_vector(_row_value(row, "embedding", 11)),
         created_at=_as_aware_datetime(_row_value(row, "created_at", 12)),
         updated_at=_as_aware_datetime(_row_value(row, "updated_at", 13)),
+        observed_at=_as_optional_datetime(_row_value(row, "observed_at", 14)),
     )
 
 

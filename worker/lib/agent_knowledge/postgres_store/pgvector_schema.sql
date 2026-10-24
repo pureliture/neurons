@@ -138,6 +138,10 @@ CREATE TABLE IF NOT EXISTS session_memory_chunks (
     embedding halfvec(3072),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- Observed (source) time of the session this chunk came from. Nullable:
+    -- legacy/backfilled rows may not carry it. It must never default to NOW(),
+    -- because that would masquerade ingestion time as observation time (age bug).
+    observed_at TIMESTAMPTZ,
     CONSTRAINT chk_session_chunks_emb_state CHECK (embedding_state IN ('pending', 'ready', 'stale', 'failed')),
     CONSTRAINT chk_session_chunks_emb_revision CHECK (embedding_revision >= 1)
 );
@@ -159,6 +163,11 @@ ALTER TABLE session_memory_chunks
     ADD COLUMN IF NOT EXISTS embedding_revision INT NOT NULL DEFAULT 1;
 ALTER TABLE session_memory_chunks
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+-- Additive upgrade: preserve source observation time. Nullable on purpose; a
+-- missing value means "unknown age", never "now".
+ALTER TABLE session_memory_chunks
+    ADD COLUMN IF NOT EXISTS observed_at TIMESTAMPTZ;
 
 -- Indexes for session_memory_chunks
 CREATE INDEX IF NOT EXISTS idx_session_chunks_lookup 
