@@ -36,6 +36,11 @@ from agent_knowledge.rag_ingress.pg_embedding_chunks import (
 
 BUILD_CLI_SCHEMA_VERSION = "couchdb_session_memory_build.v1"
 BUILD_CLI_OPERATION = "couchdb_session_memory_build"
+# Pending debt must not monopolise every cycle: a session that stays pending
+# across this many selections is dropped from the pending set so fresh work can
+# proceed (no-progress guard). Its change-feed entry re-enters if the source
+# still differs from the projected revision.
+MAX_PENDING_ATTEMPTS = 6
 QDRANT_MUTATION_SOURCE = QdrantMutationSource.PROJECTION
 
 
@@ -278,6 +283,7 @@ def _write_selection_checkpoint(
     *,
     pending_session_ids: list[str] | tuple[str, ...] = (),
     full_walk_in_progress: bool = False,
+    pending_attempts: dict[str, int] | None = None,
 ) -> None:
     import datetime
 
@@ -297,6 +303,10 @@ def _write_selection_checkpoint(
     pending = [value for value in dict.fromkeys(str(v) for v in pending_session_ids) if value]
     if pending:
         payload["pending_session_ids"] = pending
+    if pending_attempts:
+        payload["pending_session_attempts"] = {
+            str(key): int(value) for key, value in pending_attempts.items() if str(key)
+        }
     # A full walk that stopped at its cap has not examined the remaining tail.
     # Record that instead of claiming the database-wide sequence as seen, so the
     # next cycle repeats the full walk rather than switching to an incremental
@@ -494,6 +504,27 @@ def _dedupe_sessions(sessions: list[dict]) -> list[dict]:
     return deduped
 
 
+def _apply_pending_attempt_cap(
+    sessions: list[dict], attempts: dict, *, limit: int = MAX_PENDING_ATTEMPTS
+) -> tuple[list[dict], dict, int]:
+    """Keep pending sessions fair: drop one that never finishes after N tries."""
+
+    surviving: list[dict] = []
+    updated: dict[str, int] = {}
+    dropped = 0
+    for session in sessions:
+        identity = _session_identity(session)
+        if not identity:
+            continue
+        seen = int(attempts.get(identity) or 0) + 1
+        if seen > limit:
+            dropped += 1
+            continue
+        updated[identity] = seen
+        surviving.append(session)
+    return surviving, updated, dropped
+
+
 def _resolve_pending_sessions(
     store, pending_ids: list[str], *, project: str, provider: str
 ) -> list[dict]:
@@ -586,6 +617,15 @@ def _select_sessions_for_cycle(
     pending_sessions = _resolve_pending_sessions(
         store, pending_ids, project=project, provider=provider
     )
+    pending_attempts = dict(checkpoint.get("pending_session_attempts") or {})
+    pending_sessions, pending_attempts, dropped_pending = _apply_pending_attempt_cap(
+        pending_sessions, pending_attempts
+    )
+    if dropped_pending:
+        print(
+            f"[selection] pending_attempts_exhausted dropped={dropped_pending}",
+            file=sys.stderr,
+        )
     if limit <= 0:
         processed_pending = pending_sessions
         fresh_limit: int | None = None  # unlimited
@@ -662,6 +702,11 @@ def _select_sessions_for_cycle(
                 next_seq,
                 pending_session_ids=durable_pending,
                 full_walk_in_progress=next_full_walk_pending,
+                pending_attempts={
+                    key: value
+                    for key, value in pending_attempts.items()
+                    if key in set(durable_pending)
+                },
             )
         except OSError:
             pass
