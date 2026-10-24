@@ -1457,7 +1457,8 @@ class PgVectorStore:
                     f"""SELECT memory_id, project, card_type, title, summary,
                                typed_payload, currentness, content_hash, source_ref,
                                lifecycle_state, authorization_status, created_at,
-                               valid_from, valid_to
+                               valid_from, valid_to,
+                               freshness_state, freshness_checked_at, freshness_next_check_after, source_hash
                           FROM memory_cards WHERE {' AND '.join(clauses)}
                          ORDER BY memory_id LIMIT %s""",
                     [*params, limit],
@@ -1660,7 +1661,8 @@ class PgVectorStore:
                            currentness, confidence, content_hash,
                            {score_expression} AS similarity_score,
                            1.0 - distance AS semantic_score,
-                           valid_from, valid_to
+                           valid_from, valid_to,
+                           freshness_state, freshness_checked_at, freshness_next_check_after, source_hash
                       FROM candidates
                      ORDER BY similarity_score DESC, memory_id
                      LIMIT %s
@@ -1684,6 +1686,10 @@ class PgVectorStore:
                 # 레인을 다시 판정하므로 유효기간을 함께 돌려줘야 한다.
                 "valid_from": _row_value(row, "valid_from", 10),
                 "valid_to": _row_value(row, "valid_to", 11),
+                "freshness_state": str(_row_value(row, "freshness_state", 12, default="unchecked") or "unchecked"),
+                "freshness_checked_at": _row_value(row, "freshness_checked_at", 13),
+                "freshness_next_check_after": _row_value(row, "freshness_next_check_after", 14),
+                "source_hash": _row_value(row, "source_hash", 15),
             }
             for row in rows
         ]
