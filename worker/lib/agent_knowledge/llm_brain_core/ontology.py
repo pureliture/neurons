@@ -168,7 +168,18 @@ def episode_from_memory_card(card: Mapping[str, Any], *, project: str = "") -> O
         currentness=str(card.get("currentness") or "unknown"),
         source_event_ids=tuple(str(ref) for ref in list_or_empty(card.get("derived_from"))),
         source_ref_ids=tuple(_source_ref_ids(card)),
-        observed_at=str(card.get("approved_at") or card.get("accepted_at") or card.get("updated_at") or utc_now_iso()),
+        observed_at=str(
+            (card.get("typed_payload") or {}).get("observed_at")
+            or card.get("observed_at")
+            or card.get("valid_from")
+            or card.get("approved_at")
+            or card.get("accepted_at")
+            or card.get("created_at")
+            or card.get("updated_at")
+            or utc_now_iso()
+        ),
+        valid_from=str(card.get("valid_from") or ""),
+        valid_to=str(card.get("valid_to") or ""),
         ontology_version=str(card.get("ontology_version") or "1.0.0"),
         extractor_version="memory-card-runtime.1",
         extraction_text=extraction_text,

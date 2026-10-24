@@ -269,16 +269,24 @@ def test_recall_returns_valid_ready_row_without_couchdb_receipt(monkeypatch):
     }]
     store.get_chunk.return_value = row
 
-    assert search("migrated row", "/project/privacy-test") == [{
-        "result_type": "session_memory",
-        "retrieval_lane": "pg_semantic",
-        "memory_id": row.chunk_id,
-        "card_type": "",
-        "summary": body,
-        "currentness": "current",
-        "score": 1.0,
-        "content_hash": row.content_hash,
-    }]
+    result = search("migrated row", "/project/privacy-test")
+    assert len(result) == 1
+    hit = result[0]
+    assert hit["result_type"] == "session_memory"
+    assert hit["retrieval_lane"] == "pg_semantic"
+    assert hit["memory_id"] == row.chunk_id
+    assert hit["card_type"] == ""
+    assert hit["summary"] == body
+    assert hit["currentness"] == "current"
+    assert hit["score"] == 1.0
+    assert hit["content_hash"] == row.content_hash
+    # Age plumbing: a temporal block must be present and must not fabricate
+    # an observation time from the ingestion time.
+    assert "temporal" in hit
+    assert hit["temporal"]["observed_at"] is None
+    assert hit["temporal"]["recorded_at"] is not None
+    assert hit["temporal"]["age"]["clock"] == "recorded_at"
+    assert hit["temporal"]["age"]["confidence"] == "low"
     assert source.mock_calls == []
 
 

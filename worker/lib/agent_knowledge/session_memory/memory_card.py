@@ -50,7 +50,7 @@ JUDGMENT_STATES = (
 APPROVAL_STATES = ("suggested", "approved", "rejected", "auto_accepted", "needs_review")
 GOVERNANCE_TIERS = ("low", "medium", "high")
 FRESHNESS_VALUES = ("current", "recent", "historical", "unknown")
-CURRENTNESS_VALUES = ("current", "stale", "superseded", "conflicted", "unknown")
+CURRENTNESS_VALUES = ("current", "stale", "superseded", "conflicted", "unknown", "retired")
 AUTHORIZATION_STATUSES = ("active", "disabled")
 SHA256_HEX_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 # 검토 대기(pending review) lifecycle. Brain Steward review queue 조회(ledger)와

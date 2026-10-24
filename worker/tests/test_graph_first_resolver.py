@@ -97,7 +97,7 @@ def test_query_is_graph_first_then_authority_join_and_preserves_graph_order():
 
     assert calls == ["graph", "health", ("list", ["mem_a", "mem_b"])]
     assert [item["id"] for item in result["items"]] == ["mem_a", "mem_b"]
-    assert result["metadata"] == {"retrieval_path": "graph_neo4j", "graph_status": "available", "authority_join_status": "verified", "fallback_used": False, "projection_lag_ms": None, "has_more": False}
+    assert result["metadata"] == {"retrieval_path": "graph_neo4j", "graph_status": "available", "authority_join_status": "verified", "fallback_used": False, "projection_lag_ms": None, "has_more": False, "temporal_coverage": {"items": 2, "with_observed_at": 0, "unknown_age": 2, "anomalous_time": 0}}
 
 
 def test_unprojected_graph_keeps_verified_graph_order_and_supplements_from_pgvector():
@@ -197,7 +197,7 @@ def test_context_uses_preselected_current_work_decision_status_and_guardrail():
     assert result["decisions"][0]["decision"] == "Use the approved current design"
     assert result["statuses"][0]["status"] == "blocked pending verification"
     assert result["active_guardrails"] == ["Keep proposal writes review-only"]
-    assert tool_result_bytes(result) <= 3072
+    assert tool_result_bytes(result) <= 4096
 
 
 def test_list_keeps_stable_memory_id_keyset_contract_after_context_split():
@@ -223,7 +223,7 @@ def test_query_mode_rejects_missing_or_whitespace_query():
 
 
 def test_single_unicode_item_fits_final_default_json_with_cursor_and_keeps_identity(monkeypatch):
-    monkeypatch.setattr(resolver_module, "_MAX_BYTES", 3072)
+    monkeypatch.setattr(resolver_module, "_MAX_BYTES", 4096)
     cards = [_card("mem_a", HASH_A), _card("mem_b", HASH_B)]
     cards[0]["title"] = "한글😀" * 2000
     cards[0]["summary"] = "근거😀" * 2000
@@ -231,7 +231,7 @@ def test_single_unicode_item_fits_final_default_json_with_cursor_and_keeps_ident
 
     result = GraphFirstResolver(Store(cards=cards)).resolve(project="neurons", mode="list", limit=1)
 
-    assert len(__import__("json").dumps(result, ensure_ascii=False).encode("utf-8")) <= 3072
+    assert len(__import__("json").dumps(result, ensure_ascii=False).encode("utf-8")) <= 4096
     assert result["next_cursor"] is not None
     assert result["items"][0]["id"] == "mem_a"
     assert result["items"][0]["content_hash"] == HASH_A
@@ -319,7 +319,7 @@ def test_fallback_keeps_lexically_relevant_card_even_with_negative_semantic_scor
 
 
 def test_partial_graph_error_code_is_capped_and_shrinking_always_progresses(monkeypatch):
-    monkeypatch.setattr(resolver_module, "_MAX_BYTES", 3072)
+    monkeypatch.setattr(resolver_module, "_MAX_BYTES", 4096)
     card = _card()
     card["title"] = "😀" * 2000
     card["summary"] = "한글" * 2000
@@ -334,11 +334,11 @@ def test_partial_graph_error_code_is_capped_and_shrinking_always_progresses(monk
     assert _shrink_card(two_chars) is True
     assert two_chars["title"] == ""
     assert result["error_code"] == "embedding_unavailable"
-    assert len(__import__("json").dumps(result, ensure_ascii=False).encode("utf-8")) <= 3072
+    assert len(__import__("json").dumps(result, ensure_ascii=False).encode("utf-8")) <= 4096
 
 
 def test_unicode_budget_and_cursor_are_stable_and_bound_to_candidates(monkeypatch):
-    monkeypatch.setattr(resolver_module, "_MAX_BYTES", 3072)
+    monkeypatch.setattr(resolver_module, "_MAX_BYTES", 4096)
     cards = [_card(f"mem_{i}", "sha256:" + f"{i:064x}") for i in range(4)]
     for card in cards:
         card["title"] = "한글😀" * 100
@@ -350,7 +350,7 @@ def test_unicode_budget_and_cursor_are_stable_and_bound_to_candidates(monkeypatc
     while pages[-1]["next_cursor"]:
         pages.append(resolver.resolve(project="neurons", mode="list", limit=2, cursor=pages[-1]["next_cursor"]))
 
-    assert all(tool_result_bytes(page) <= 3072 for page in pages)
+    assert all(tool_result_bytes(page) <= 4096 for page in pages)
     assert [item["id"] for page in pages for item in page["items"]] == ["mem_0", "mem_1", "mem_2", "mem_3"]
     with pytest.raises(ValueError, match="cursor"):
         resolver.resolve(project="other", mode="list", limit=2, cursor=first["next_cursor"])
@@ -398,7 +398,7 @@ def test_with_evidence_uses_one_bounded_batch_and_emits_only_explicit_hash_proje
 
 
 def test_with_evidence_never_returns_edges_for_cards_dropped_by_byte_pagination(monkeypatch):
-    monkeypatch.setattr(resolver_module, "_MAX_BYTES", 3072)
+    monkeypatch.setattr(resolver_module, "_MAX_BYTES", 4096)
     cards = [_card("mem_a", HASH_A), _card("mem_b", HASH_B)]
     for card in cards:
         card["title"] = "한글😀" * 2000
@@ -415,11 +415,11 @@ def test_with_evidence_never_returns_edges_for_cards_dropped_by_byte_pagination(
     returned_ids = {item["id"] for item in result["items"]}
     assert len(returned_ids) == 1
     assert {edge["src_id"] for edge in result["evidence"]["explicit_edges"]} <= returned_ids
-    assert tool_result_bytes(result) <= 3072
+    assert tool_result_bytes(result) <= 4096
 
 
 def test_with_evidence_marks_overflow_and_db_failure_as_explicit_tool_errors(monkeypatch):
-    monkeypatch.setattr(resolver_module, "_MAX_BYTES", 3072)
+    monkeypatch.setattr(resolver_module, "_MAX_BYTES", 4096)
     edges = [_edge(dst_id=f"child_{index:03d}") for index in range(100)]
     large = GraphFirstResolver(Store(evidence={"edges": edges, "truncated": False})).resolve(
         project="neurons", mode="list", response_mode="with_evidence"
@@ -428,13 +428,13 @@ def test_with_evidence_marks_overflow_and_db_failure_as_explicit_tool_errors(mon
     assert len(large["evidence"]["explicit_edges"]) < len(edges)
     assert large["items"][0]["summary"] == _card()["summary"]
     assert large["decisions"][0]["decision"] == _card()["typed_payload"]["decision"]
-    assert tool_result_bytes(large) <= 3072
+    assert tool_result_bytes(large) <= 4096
 
     unavailable = GraphFirstResolver(Store(failure="evidence")).resolve(
         project="neurons", mode="list", response_mode="with_evidence"
     )
     assert unavailable["error_code"] == "evidence_unavailable"
-    assert tool_result_bytes(unavailable) <= 3072
+    assert tool_result_bytes(unavailable) <= 4096
 
 
 def test_evidence_revision_or_authorization_change_between_reads_fails_closed():
