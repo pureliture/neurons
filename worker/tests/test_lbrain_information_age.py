@@ -338,6 +338,14 @@ def test_ac_age_002_historical_items_excluded_by_default():
     assert "card-active" in returned_ids
     assert "card-superseded" not in returned_ids
 
+    # Explicit include_historical=True: both current and historical lanes returned
+    res_hist = resolver.resolve(
+        project="neurons", mode="list", query="card", limit=10, include_historical=True,
+    )
+    returned_hist_ids = [it["id"] for it in res_hist["items"]]
+    assert "card-active" in returned_hist_ids
+    assert "card-superseded" in returned_hist_ids
+
 
 def test_ac_age_003_missing_observed_at_yields_unknown():
     """AC-AGE-003: Missing observed_at yields age=unknown, time_confidence=unknown, and reason_codes."""

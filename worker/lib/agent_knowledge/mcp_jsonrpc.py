@@ -1023,14 +1023,68 @@ def _dispatch_brain_resolve_tool(tool_name: str, arguments: dict, service: Knowl
         if "project" not in arguments and "mode" not in arguments and hasattr(service, "brain_resolve"):
             return _tool_result(service.brain_resolve(query=str(arguments.get("query") or "")))
         raise ValueError(f"{tool_name} requires project or repository")
-    return _tool_result(service.brain_memory_resolve(
-        project=project, query=arguments.get("query", ""),
-        mode=arguments.get("mode", "context"),
-        response_mode=arguments.get("response_mode", "slim"),
-        as_of=arguments.get("as_of", ""),
-        limit=_bounded_limit(arguments.get("limit"), default=5, maximum=20),
-        cursor=arguments.get("cursor"),
-    ))
+
+    resolve_kwargs: dict[str, Any] = {
+        "project": project,
+        "query": arguments.get("query", ""),
+        "mode": arguments.get("mode", "context"),
+        "response_mode": arguments.get("response_mode", "slim"),
+        "as_of": arguments.get("as_of", ""),
+        "limit": _bounded_limit(arguments.get("limit"), default=5, maximum=20),
+        "cursor": arguments.get("cursor"),
+        "include_historical": False,
+    }
+
+    if "include_historical" in arguments and arguments["include_historical"] is not None:
+        inc = arguments["include_historical"]
+        if not isinstance(inc, bool):
+            raise ValueError(f"{tool_name} include_historical must be a boolean")
+        resolve_kwargs["include_historical"] = inc
+
+    if "max_age" in arguments and arguments["max_age"] is not None:
+        val = arguments["max_age"]
+        if isinstance(val, bool) or not isinstance(val, (int, float)):
+            raise ValueError("max_age/min_age must be non-negative")
+        int_val = int(val)
+        if int_val < 0:
+            raise ValueError("max_age/min_age must be non-negative")
+        resolve_kwargs["max_age"] = int_val
+
+    if "min_age" in arguments and arguments["min_age"] is not None:
+        val = arguments["min_age"]
+        if isinstance(val, bool) or not isinstance(val, (int, float)):
+            raise ValueError("max_age/min_age must be non-negative")
+        int_val = int(val)
+        if int_val < 0:
+            raise ValueError("max_age/min_age must be non-negative")
+        resolve_kwargs["min_age"] = int_val
+
+    if resolve_kwargs.get("min_age") is not None and resolve_kwargs.get("max_age") is not None:
+        if resolve_kwargs["min_age"] > resolve_kwargs["max_age"]:
+            raise ValueError("min_age must be <= max_age")
+
+    if "age_bucket" in arguments and arguments["age_bucket"] is not None:
+        bucket = str(arguments["age_bucket"]).strip()
+        allowed_buckets = {"fresh", "recent", "aging", "old", "historical", "unknown"}
+        if bucket not in allowed_buckets:
+            raise ValueError(f"{tool_name} age_bucket must be one of {sorted(allowed_buckets)}")
+        resolve_kwargs["age_bucket"] = bucket
+
+    if "currentness" in arguments and arguments["currentness"] is not None:
+        curr = str(arguments["currentness"]).strip()
+        allowed_currentness = {"current", "superseded", "stale", "retired", "conflicted", "unknown"}
+        if curr not in allowed_currentness:
+            raise ValueError(f"{tool_name} currentness must be one of {sorted(allowed_currentness)}")
+        resolve_kwargs["currentness"] = curr
+
+    if "time_confidence" in arguments and arguments["time_confidence"] is not None:
+        conf = str(arguments["time_confidence"]).strip()
+        allowed_confidence = {"high", "medium", "low", "anomalous", "unknown"}
+        if conf not in allowed_confidence:
+            raise ValueError(f"{tool_name} time_confidence must be one of {sorted(allowed_confidence)}")
+        resolve_kwargs["time_confidence"] = conf
+
+    return _tool_result(service.brain_memory_resolve(**resolve_kwargs))
 
 
 def _dispatch_knowledge_search_tool(tool_name: str, arguments: dict, service: KnowledgeSearchService) -> dict:

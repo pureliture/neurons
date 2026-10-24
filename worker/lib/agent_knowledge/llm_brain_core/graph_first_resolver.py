@@ -42,6 +42,17 @@ class _ResolveRequest(BaseModel):
     as_of: str = Field(default="", max_length=64)
     limit: int = Field(default=5, ge=1, le=20)
     cursor: str | None = Field(default=None, max_length=2048)
+    include_historical: bool = Field(default=False)
+    max_age: int | None = Field(default=None, ge=0)
+    min_age: int | None = Field(default=None, ge=0)
+    age_bucket: Literal["fresh", "recent", "aging", "old", "historical", "unknown"] | None = Field(default=None)
+    currentness: Literal["current", "superseded", "stale", "retired", "conflicted", "unknown"] | None = Field(default=None)
+    time_confidence: Literal["high", "medium", "low", "anomalous", "unknown"] | None = Field(default=None)
+
+    @field_validator("include_historical", mode="before")
+    @classmethod
+    def _coerce_include_historical(cls, value: Any) -> bool:
+        return bool(value) if value is not None else False
 
     @field_validator("project")
     @classmethod
@@ -74,9 +85,12 @@ class _ResolveRequest(BaseModel):
         return parsed.isoformat()
 
     @model_validator(mode="after")
-    def _query_mode_requires_query(self) -> "_ResolveRequest":
+    def _validate_request(self) -> "_ResolveRequest":
         if self.mode == "query" and not self.query.strip():
             raise ValueError("query mode requires a non-empty query")
+        if self.min_age is not None and self.max_age is not None:
+            if self.min_age > self.max_age:
+                raise ValueError("min_age must be <= max_age")
         return self
 
 
@@ -137,6 +151,12 @@ class GraphFirstResolver:
         as_of: str = "",
         limit: int = 5,
         cursor: str | None = None,
+        include_historical: bool = False,
+        max_age: int | None = None,
+        min_age: int | None = None,
+        age_bucket: Literal["fresh", "recent", "aging", "old", "historical", "unknown"] | None = None,
+        currentness: Literal["current", "superseded", "stale", "retired", "conflicted", "unknown"] | None = None,
+        time_confidence: Literal["high", "medium", "low", "anomalous", "unknown"] | None = None,
     ) -> dict[str, Any]:
         request = _ResolveRequest(
             project=project,
@@ -146,6 +166,12 @@ class GraphFirstResolver:
             as_of=as_of,
             limit=limit,
             cursor=cursor,
+            include_historical=include_historical,
+            max_age=max_age,
+            min_age=min_age,
+            age_bucket=age_bucket,
+            currentness=currentness,
+            time_confidence=time_confidence,
         )
         if self._store is None:
             return self._error_payload(request, error_code="authority_store_unavailable")
@@ -655,10 +681,18 @@ class GraphFirstResolver:
         _detect_cross_card_conflicts(deduped, request.as_of)
         if any(c.get("authority_source") == "postgres" for c in deduped):
             metadata = {**metadata, "authority_source": "postgres"}
-        fingerprint = _fingerprint(request, [] if keyset else deduped)
+
+        lag_ms = metadata.get("projection_lag_ms") if metadata else None
+        proj_lag_sec = int(lag_ms / 1000) if lag_ms is not None else None
+        filtered = [
+            c for c in deduped
+            if _card_matches_filters(c, request, as_of=request.as_of, projection_lag_seconds=proj_lag_sec)
+        ]
+
+        fingerprint = _fingerprint(request, [] if keyset else filtered)
         cursor = self._decode_cursor(request.cursor, fingerprint)
         offset = 0 if keyset else cursor.offset
-        page = deduped[offset : offset + request.limit]
+        page = filtered[offset : offset + request.limit]
         evidence: dict[str, Any] | None = None
         if request.response_mode == "with_evidence":
             try:
@@ -667,30 +701,30 @@ class GraphFirstResolver:
                 # Evidence is an authority-bearing extension. Do not return the
                 # cards as a successful evidence response when its PG check fails.
                 return self._error_payload(request, error_code="evidence_unavailable")
-        payload = self._final_payload(request, page, metadata, offset, len(deduped), fingerprint, error_code, keyset, evidence)
+        payload = self._final_payload(request, page, metadata, offset, len(filtered), fingerprint, error_code, keyset, evidence)
         # 선택적 evidence 확장을 먼저 줄여 기본 결정/요약을 보존한다.
         while tool_result_bytes(payload) > _MAX_BYTES and _drop_last_evidence_edge(evidence, page):
-            payload = self._final_payload(request, page, metadata, offset, len(deduped), fingerprint, error_code, keyset, evidence)
+            payload = self._final_payload(request, page, metadata, offset, len(filtered), fingerprint, error_code, keyset, evidence)
         if request.mode == "context":
             # Fit inside the wire budget without destroying the meaning of the
             # context: bound readable text first, then drop the lowest-priority
             # cards. Emptying section text leaves an agent with ids and hashes but
             # no work subject, decision, status or next action.
             while tool_result_bytes(payload) > _MAX_BYTES and _trim_context_text(page):
-                payload = self._final_payload(request, page, metadata, offset, len(deduped), fingerprint, error_code, keyset, evidence)
+                payload = self._final_payload(request, page, metadata, offset, len(filtered), fingerprint, error_code, keyset, evidence)
             while tool_result_bytes(payload) > _MAX_BYTES and _drop_context_card(page):
-                payload = self._final_payload(request, page, metadata, offset, len(deduped), fingerprint, error_code, keyset, evidence)
+                payload = self._final_payload(request, page, metadata, offset, len(filtered), fingerprint, error_code, keyset, evidence)
             # Last resort: keep the page bounded and let the cursor carry the
             # remainder instead of failing the entire default context call.
             while tool_result_bytes(payload) > _MAX_BYTES and len(page) > 1:
                 page.pop()
-                payload = self._final_payload(request, page, metadata, offset, len(deduped), fingerprint, error_code, keyset, evidence)
+                payload = self._final_payload(request, page, metadata, offset, len(filtered), fingerprint, error_code, keyset, evidence)
         else:
             while tool_result_bytes(payload) > _MAX_BYTES and len(page) > 1:
                 page.pop()
-                payload = self._final_payload(request, page, metadata, offset, len(deduped), fingerprint, error_code, keyset, evidence)
+                payload = self._final_payload(request, page, metadata, offset, len(filtered), fingerprint, error_code, keyset, evidence)
             while tool_result_bytes(payload) > _MAX_BYTES and page and _shrink_card(page[0]):
-                payload = self._final_payload(request, page, metadata, offset, len(deduped), fingerprint, error_code, keyset, evidence)
+                payload = self._final_payload(request, page, metadata, offset, len(filtered), fingerprint, error_code, keyset, evidence)
         if tool_result_bytes(payload) > _MAX_BYTES:
             return self._error_payload(request, error_code="response_budget_exceeded")
         ensure_public_safe(payload, "GraphFirstResolver response")
@@ -1170,6 +1204,74 @@ def _card_temporal_block(
         task_state=str(typed.get("task_state") or "") if typed.get("task_state") else None,
         time_confidence=card.get("time_confidence"),
     )
+
+
+def _card_matches_filters(
+    card: Mapping[str, Any],
+    request: _ResolveRequest,
+    *,
+    as_of: str = "",
+    projection_lag_seconds: float | int | None = None,
+) -> bool:
+    """Evaluate candidate card against request temporal filters and historical lane exclusion."""
+    temporal = _card_temporal_block(card, as_of=as_of, projection_lag_seconds=projection_lag_seconds)
+
+    card_curr = str(temporal.get("currentness") or card.get("currentness") or "current").strip().lower()
+    has_conflict = bool(card.get("temporal_conflict")) or bool(temporal.get("temporal_conflict")) or (card_curr == "conflicted")
+
+    as_of_dt = _parse_temporal_instant(as_of) or datetime.now(timezone.utc)
+    v_to_val = card.get("valid_to") or temporal.get("valid_to")
+    v_to_dt = _parse_temporal_instant(v_to_val) if v_to_val else None
+    is_expired = (v_to_dt is not None and v_to_dt <= as_of_dt)
+
+    # 1. Historical lane exclusion (FR-AGE-020, 021, 023, Section 7.2, AC-AGE-002)
+    # A card is in the historical lane if card_currentness in ("superseded", "retired", "stale") or valid_to <= as_of_dt.
+    # EXCEPTION 1: If temporal_conflict is True or currentness == "conflicted", NEVER exclude (FR-AGE-028, AC-AGE-004).
+    # INVARIANT: If currentness == "current" and not expired, even if age_bucket in ("old", "historical"),
+    # it is in CURRENT lane and must NOT be excluded by default (FR-AGE-015, AC-AGE-001, AC-AGE-008).
+    is_historical_lane = (card_curr in ("superseded", "retired", "stale")) or is_expired
+    if not request.include_historical:
+        if is_historical_lane and not has_conflict:
+            caller_explicit_historical = (
+                request.currentness is not None
+                and request.currentness.strip().lower() in ("superseded", "retired", "stale")
+            )
+            if not caller_explicit_historical:
+                return False
+
+    # 2. currentness filter
+    if request.currentness is not None:
+        if card_curr != request.currentness.strip().lower():
+            return False
+
+    # 3. age_bucket filter (FR-AGE-053)
+    if request.age_bucket is not None:
+        age_info = temporal.get("age") or {}
+        age_label = str(age_info.get("label") or "unknown").strip().lower()
+        if age_label != request.age_bucket.strip().lower():
+            return False
+
+    # 4. time_confidence filter (FR-AGE-053)
+    if request.time_confidence is not None:
+        time_conf = str(temporal.get("time_confidence") or card.get("time_confidence") or "unknown").strip().lower()
+        if time_conf != request.time_confidence.strip().lower():
+            return False
+
+    # 5. max_age filter (FR-AGE-054)
+    if request.max_age is not None:
+        age_info = temporal.get("age") or {}
+        age_seconds = age_info.get("seconds")
+        if age_seconds is None or age_seconds < 0 or age_seconds > request.max_age:
+            return False
+
+    # 6. min_age filter (FR-AGE-054)
+    if request.min_age is not None:
+        age_info = temporal.get("age") or {}
+        age_seconds = age_info.get("seconds")
+        if age_seconds is None or age_seconds < request.min_age:
+            return False
+
+    return True
 
 
 def _context_item(card: Mapping[str, Any]) -> dict[str, Any]:
