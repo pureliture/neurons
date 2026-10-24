@@ -7,7 +7,7 @@ so the default worker suite never mutates an ambient database.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import os
@@ -90,6 +90,150 @@ def test_schema_is_readable_without_claiming_execution():
     assert "CREATE TABLE IF NOT EXISTS graph_projection_outbox" in schema
     assert "cas_skipped" in schema
     assert "FOR UPDATE SKIP LOCKED" not in schema
+    assert "freshness_state VARCHAR(32) NOT NULL DEFAULT 'unchecked'" in schema
+    assert "freshness_checked_at TIMESTAMPTZ" in schema
+    assert "freshness_next_check_after TIMESTAMPTZ" in schema
+    assert "source_hash VARCHAR(71)" in schema
+    assert "observed_at TIMESTAMPTZ" in schema
+    assert "idx_memory_cards_freshness" in schema
+    assert "'retired'" in schema
+
+
+def test_memory_card_freshness_field_defaults():
+    """Verify default values for freshness & temporal fields on MemoryCard."""
+    card = _card("card-defaults")
+    assert card.freshness_state == "unchecked"
+    assert card.freshness_checked_at is None
+    assert card.freshness_next_check_after is None
+    assert card.source_hash is None
+    assert card.observed_at is None
+    assert card.currentness == "current"
+
+
+def test_memory_card_freshness_explicit_fields():
+    """Verify explicit values for freshness & temporal fields on MemoryCard."""
+    now = datetime.now(timezone.utc)
+    card = MemoryCard(
+        memory_id="card-explicit",
+        project="test-project",
+        card_type="decision",
+        title="Title",
+        summary="Summary",
+        freshness_state="verified_current",
+        freshness_checked_at=now,
+        freshness_next_check_after=now + timedelta(days=7),
+        source_hash="sha256:" + "b" * 64,
+        observed_at=now - timedelta(days=1),
+        currentness="retired",
+    )
+    assert card.freshness_state == "verified_current"
+    assert card.freshness_checked_at == now
+    assert card.freshness_next_check_after == now + timedelta(days=7)
+    assert card.source_hash == "sha256:" + "b" * 64
+    assert card.observed_at == now - timedelta(days=1)
+    assert card.currentness == "retired"
+
+
+def test_memory_card_serialization_roundtrip_mapping_and_tuple():
+    """Verify _card_values and _card_from_row preserve all 25 columns without loss."""
+    from agent_knowledge.postgres_store.pgvector_store import (
+        _CARD_COLUMNS,
+        _card_values,
+        _card_from_row,
+    )
+
+    now = datetime.now(timezone.utc)
+    card = MemoryCard(
+        memory_id="card-roundtrip",
+        project="test-project",
+        card_type="decision",
+        title="Title",
+        summary="Summary",
+        typed_payload={"key": "val"},
+        lifecycle_state="candidate",
+        authorization_status="disabled",
+        currentness="retired",
+        confidence=0.95,
+        valid_from=now,
+        valid_to=now + timedelta(days=30),
+        embedding_model=DEFAULT_EMBEDDING_PROFILE_ID,
+        embedding_revision=1,
+        embedding_state="pending",
+        embedding=None,
+        content_hash=_hash("card-roundtrip"),
+        source_ref=[{"source_id": "src_1"}],
+        created_at=now,
+        updated_at=now,
+        freshness_state="check_due",
+        freshness_checked_at=now - timedelta(days=2),
+        freshness_next_check_after=now - timedelta(hours=1),
+        source_hash="sha256:" + "c" * 64,
+        observed_at=now - timedelta(days=5),
+    )
+
+    # 1. 튜플 직렬화 검증 (25개 컬럼 확인)
+    values = _card_values(card)
+    columns_list = [c.strip() for c in _CARD_COLUMNS.split(",")]
+    assert len(values) == 25
+    assert len(columns_list) == 25
+    assert values[20] == "check_due"
+    assert values[21] == card.freshness_checked_at
+    assert values[22] == card.freshness_next_check_after
+    assert values[23] == "sha256:" + "c" * 64
+    assert values[24] == card.observed_at
+
+    # 2. 튜플로부터 역직렬화 왕복 검증
+    restored_from_tuple = _card_from_row(values)
+    assert restored_from_tuple.memory_id == card.memory_id
+    assert restored_from_tuple.currentness == "retired"
+    assert restored_from_tuple.freshness_state == "check_due"
+    assert restored_from_tuple.freshness_checked_at == card.freshness_checked_at
+    assert restored_from_tuple.freshness_next_check_after == card.freshness_next_check_after
+    assert restored_from_tuple.source_hash == card.source_hash
+    assert restored_from_tuple.observed_at == card.observed_at
+
+    # 3. 딕셔너리/Mapping으로부터 역직렬화 검증
+    row_dict = dict(zip(columns_list, values))
+    restored_from_dict = _card_from_row(row_dict)
+    assert restored_from_dict.memory_id == card.memory_id
+    assert restored_from_dict.freshness_state == "check_due"
+    assert restored_from_dict.source_hash == card.source_hash
+    assert restored_from_dict.observed_at == card.observed_at
+
+
+def test_memory_card_backward_compatibility_with_legacy_20_column_row():
+    """Legacy rows without freshness columns must cleanly fallback without IndexError."""
+    from agent_knowledge.postgres_store.pgvector_store import _card_values, _card_from_row
+
+    card = _card("legacy-card")
+    values_20 = _card_values(card)[:20]  # 이전 20개 컬럼 튜플 시뮬레이션
+
+    restored = _card_from_row(values_20)
+    assert restored.memory_id == "legacy-card"
+    assert restored.freshness_state == "unchecked"
+    assert restored.freshness_checked_at is None
+    assert restored.freshness_next_check_after is None
+    assert restored.source_hash is None
+    assert restored.observed_at is None
+
+
+def test_memory_card_validation_guards():
+    """Verify _validate_card checks freshness_state and allows currentness='retired'."""
+    card = _card("valid-retired")
+    card.currentness = "retired"
+    card.freshness_state = "verified_current"
+    PgVectorStore._validate_card(card)  # Should not raise
+
+    # Invalid freshness_state rejected
+    card.freshness_state = "invalid_state"
+    with pytest.raises(ValueError, match="Invalid freshness_state"):
+        PgVectorStore._validate_card(card)
+
+    # Invalid currentness rejected
+    card.freshness_state = "unchecked"
+    card.currentness = "obsolete"
+    with pytest.raises(ValueError, match="Invalid currentness"):
+        PgVectorStore._validate_card(card)
 
 
 def test_candidate_upsert_sql_has_authority_collision_guard():
@@ -672,3 +816,37 @@ def test_live_graph_join_and_vector_search_enforce_authority_filters(isolated_pg
         with store.transaction() as conn:
             conn.execute("DELETE FROM graph_projection_outbox WHERE source_id = ANY(%s)", ([c.memory_id for c in cards],))
             conn.execute("DELETE FROM memory_cards WHERE memory_id = ANY(%s)", ([c.memory_id for c in cards],))
+
+
+@live_pg
+def test_live_card_freshness_roundtrip_persistence():
+    """M1 live acceptance: card with freshness metadata commits and is retrieved with full fidelity."""
+    store = PgVectorStore(dsn=PG_DSN)
+    store.execute_ddl()
+    suffix = uuid.uuid4().hex[:12]
+    memory_id = f"m1_freshness_{suffix}"
+    now = datetime.now(timezone.utc)
+    card = _card(memory_id)
+    card.currentness = "retired"
+    card.freshness_state = "verified_current"
+    card.freshness_checked_at = now
+    card.freshness_next_check_after = now + timedelta(days=7)
+    card.source_hash = _hash("src-" + suffix)
+    card.observed_at = now - timedelta(days=2)
+
+    try:
+        store.upsert_card(card)
+        stored = store.get_card(memory_id)
+        assert stored is not None
+        assert stored.memory_id == memory_id
+        assert stored.currentness == "retired"
+        assert stored.freshness_state == "verified_current"
+        assert stored.freshness_checked_at is not None
+        assert stored.freshness_next_check_after is not None
+        assert stored.source_hash == card.source_hash
+        assert stored.observed_at is not None
+    finally:
+        with store.transaction() as conn:
+            conn.execute("DELETE FROM embedding_outbox WHERE target_id = %s", (memory_id,))
+            conn.execute("DELETE FROM graph_projection_outbox WHERE source_id = %s", (memory_id,))
+            conn.execute("DELETE FROM memory_cards WHERE memory_id = %s", (memory_id,))

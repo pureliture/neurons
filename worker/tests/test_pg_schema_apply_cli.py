@@ -41,6 +41,31 @@ def test_plan_mode_lists_review_bundle_objects(capsys):
     assert "steward_bundle_decisions" in report["tables"]
     assert "idx_steward_bundle_decisions_scope" in report["indexes"]
     assert "steward_card_decisions.result_card" in report["columns"]
+    assert "memory_cards.freshness_state" in report["columns"]
+    assert "memory_cards.freshness_checked_at" in report["columns"]
+    assert "memory_cards.freshness_next_check_after" in report["columns"]
+    assert "memory_cards.source_hash" in report["columns"]
+    assert "memory_cards.observed_at" in report["columns"]
+    assert "idx_memory_cards_freshness" in report["indexes"]
+
+
+def test_schema_manifest_captures_freshness_ddl():
+    """FR-AGE-040~045: Verify schema_manifest regex captures freshness columns & index."""
+    from agent_knowledge.postgres_store.pgvector_store import PgVectorStore
+    from agent_knowledge.postgres_store.schema_apply_cli import schema_manifest
+
+    sql = PgVectorStore.schema_sql()
+    manifest = schema_manifest(sql)
+
+    expected_columns = {
+        "memory_cards.freshness_state",
+        "memory_cards.freshness_checked_at",
+        "memory_cards.freshness_next_check_after",
+        "memory_cards.source_hash",
+        "memory_cards.observed_at",
+    }
+    assert expected_columns.issubset(set(manifest["columns"]))
+    assert "idx_memory_cards_freshness" in manifest["indexes"]
 
 
 def test_production_execute_requires_approval_before_connecting(capsys):

@@ -78,6 +78,11 @@ class MemoryCard:
     source_ref: list[dict[str, Any]] = field(default_factory=list)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    freshness_state: str = "unchecked"
+    freshness_checked_at: datetime | None = None
+    freshness_next_check_after: datetime | None = None
+    source_hash: str | None = None
+    observed_at: datetime | None = None
 
 
 @dataclass
@@ -700,12 +705,8 @@ class PgVectorStore:
         with self._scope(conn=conn) as db:
             with db.cursor() as cur:
                 cur.execute(
-                    """
-                    SELECT memory_id, project, card_type, title, summary,
-                           typed_payload, lifecycle_state, authorization_status,
-                           currentness, confidence, valid_from, valid_to,
-                           embedding_model, embedding_revision, embedding_state,
-                           embedding, content_hash, source_ref, created_at, updated_at
+                    f"""
+                    SELECT {_CARD_COLUMNS}
                       FROM memory_cards
                      WHERE memory_id = %s
                     """,
@@ -2087,8 +2088,13 @@ class PgVectorStore:
             raise ValueError(f"Invalid lifecycle_state: {card.lifecycle_state}")
         if card.authorization_status not in {"active", "disabled"}:
             raise ValueError(f"Invalid authorization_status: {card.authorization_status}")
-        if card.currentness not in {"current", "superseded", "stale", "conflicted", "unknown"}:
+        if card.currentness not in {"current", "superseded", "stale", "conflicted", "unknown", "retired"}:
             raise ValueError(f"Invalid currentness: {card.currentness}")
+        if card.freshness_state not in {
+            "verified_current", "verified_changed", "unchecked",
+            "check_due", "unverifiable", "unknown",
+        }:
+            raise ValueError(f"Invalid freshness_state: {card.freshness_state}")
         if not 0.0 <= float(card.confidence) <= 1.0:
             raise ValueError("confidence must be between 0.0 and 1.0")
 
@@ -2159,20 +2165,23 @@ _CARD_COLUMNS = (
     "memory_id, project, card_type, title, summary, typed_payload, "
     "lifecycle_state, authorization_status, currentness, confidence, valid_from, valid_to, "
     "embedding_model, embedding_revision, embedding_state, embedding, content_hash, source_ref, "
-    "created_at, updated_at"
+    "created_at, updated_at, "
+    "freshness_state, freshness_checked_at, freshness_next_check_after, source_hash, observed_at"
 )
 _CARD_INSERT_SQL = f"""
     INSERT INTO memory_cards ({_CARD_COLUMNS})
     VALUES (
         %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s,
-        %s, %s, %s, %s, %s, %s::halfvec, %s, %s::jsonb, %s, %s
+        %s, %s, %s, %s, %s, %s::halfvec, %s, %s::jsonb, %s, %s,
+        %s, %s, %s, %s, %s
     )
 """
 _CARD_UPSERT_SQL = f"""
     INSERT INTO memory_cards ({_CARD_COLUMNS})
     VALUES (
         %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s,
-        %s, %s, %s, %s, %s, %s::halfvec, %s, %s::jsonb, %s, %s
+        %s, %s, %s, %s, %s, %s::halfvec, %s, %s::jsonb, %s, %s,
+        %s, %s, %s, %s, %s
     )
     ON CONFLICT (memory_id) DO UPDATE SET
         project = EXCLUDED.project,
@@ -2192,7 +2201,12 @@ _CARD_UPSERT_SQL = f"""
         embedding = EXCLUDED.embedding,
         content_hash = EXCLUDED.content_hash,
         source_ref = EXCLUDED.source_ref,
-        updated_at = EXCLUDED.updated_at
+        updated_at = EXCLUDED.updated_at,
+        freshness_state = EXCLUDED.freshness_state,
+        freshness_checked_at = EXCLUDED.freshness_checked_at,
+        freshness_next_check_after = EXCLUDED.freshness_next_check_after,
+        source_hash = EXCLUDED.source_hash,
+        observed_at = EXCLUDED.observed_at
     WHERE memory_cards.lifecycle_state NOT IN ('accepted', 'human_accepted', 'auto_accepted')
 """
 
@@ -2276,6 +2290,11 @@ def _card_values(card: MemoryCard) -> tuple[Any, ...]:
         _json_text(card.source_ref),
         card.created_at,
         card.updated_at,
+        card.freshness_state or "unchecked",
+        card.freshness_checked_at,
+        card.freshness_next_check_after,
+        card.source_hash,
+        card.observed_at,
     )
 
 
@@ -2332,13 +2351,23 @@ def _parse_vector(value: Any) -> list[float] | None:
     return [float(item) for item in value]
 
 
-def _row_value(row: Any, key: str, index: int) -> Any:
+def _row_value(row: Any, key: str, index: int, default: Any = None) -> Any:
     if isinstance(row, Mapping):
-        return row[key]
-    return row[index]
+        return row.get(key, default)
+    if hasattr(row, "__len__") and index >= len(row):
+        return default
+    try:
+        return row[index]
+    except (IndexError, TypeError):
+        return default
 
 
 def _card_from_row(row: Any) -> MemoryCard:
+    freshness_val = _row_value(row, "freshness_state", 20, default="unchecked")
+    freshness_state = str(freshness_val) if freshness_val else "unchecked"
+    raw_source_hash = _row_value(row, "source_hash", 23, default=None)
+    source_hash = str(raw_source_hash) if raw_source_hash is not None else None
+
     return MemoryCard(
         memory_id=str(_row_value(row, "memory_id", 0)),
         project=str(_row_value(row, "project", 1)),
@@ -2360,6 +2389,11 @@ def _card_from_row(row: Any) -> MemoryCard:
         source_ref=_json_value(_row_value(row, "source_ref", 17)),
         created_at=_as_aware_datetime(_row_value(row, "created_at", 18)),
         updated_at=_as_aware_datetime(_row_value(row, "updated_at", 19)),
+        freshness_state=freshness_state,
+        freshness_checked_at=_as_optional_datetime(_row_value(row, "freshness_checked_at", 21)),
+        freshness_next_check_after=_as_optional_datetime(_row_value(row, "freshness_next_check_after", 22)),
+        source_hash=source_hash,
+        observed_at=_as_optional_datetime(_row_value(row, "observed_at", 24)),
     )
 
 

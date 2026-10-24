@@ -41,6 +41,13 @@ CREATE TABLE IF NOT EXISTS memory_cards (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
+    -- Freshness & Temporal Metadata (FR-AGE-040~045)
+    freshness_state VARCHAR(32) NOT NULL DEFAULT 'unchecked',
+    freshness_checked_at TIMESTAMPTZ,
+    freshness_next_check_after TIMESTAMPTZ,
+    source_hash VARCHAR(71),
+    observed_at TIMESTAMPTZ,
+
     -- Constraints
     CONSTRAINT chk_memory_cards_temporal CHECK (valid_to IS NULL OR valid_to >= valid_from),
     CONSTRAINT chk_memory_cards_confidence CHECK (confidence >= 0.0 AND confidence <= 1.0),
@@ -49,7 +56,7 @@ CREATE TABLE IF NOT EXISTS memory_cards (
         'auto_accepted', 'needs_review', 'accepted', 'rejected'
     )),
     CONSTRAINT chk_memory_cards_auth CHECK (authorization_status IN ('active', 'disabled')),
-    CONSTRAINT chk_memory_cards_currentness CHECK (currentness IN ('current', 'superseded', 'stale', 'conflicted', 'unknown')),
+    CONSTRAINT chk_memory_cards_currentness CHECK (currentness IN ('current', 'superseded', 'stale', 'conflicted', 'unknown', 'retired')),
     CONSTRAINT chk_memory_cards_emb_state CHECK (embedding_state IN ('pending', 'ready', 'stale', 'failed'))
 );
 
@@ -59,6 +66,19 @@ ALTER TABLE memory_cards ADD COLUMN IF NOT EXISTS steward_envelope JSONB;
 CREATE INDEX IF NOT EXISTS idx_steward_review_queue
     ON memory_cards(project, created_at DESC, memory_id)
     WHERE steward_envelope IS NOT NULL AND lifecycle_state IN ('candidate', 'needs_review', 'suggested_accept');
+
+-- Freshness and temporal metadata columns (FR-AGE-040~045)
+-- Repeatable and additive for existing databases created before freshness schema.
+ALTER TABLE memory_cards ADD COLUMN IF NOT EXISTS freshness_state VARCHAR(32) NOT NULL DEFAULT 'unchecked';
+ALTER TABLE memory_cards ADD COLUMN IF NOT EXISTS freshness_checked_at TIMESTAMPTZ;
+ALTER TABLE memory_cards ADD COLUMN IF NOT EXISTS freshness_next_check_after TIMESTAMPTZ;
+ALTER TABLE memory_cards ADD COLUMN IF NOT EXISTS source_hash VARCHAR(71);
+ALTER TABLE memory_cards ADD COLUMN IF NOT EXISTS observed_at TIMESTAMPTZ;
+
+-- Ensure currentness check constraint permits 'retired' state on pre-existing tables.
+ALTER TABLE memory_cards DROP CONSTRAINT IF EXISTS chk_memory_cards_currentness;
+ALTER TABLE memory_cards ADD CONSTRAINT chk_memory_cards_currentness
+    CHECK (currentness IN ('current', 'superseded', 'stale', 'conflicted', 'unknown', 'retired'));
 
 CREATE TABLE IF NOT EXISTS steward_card_decisions (
     decision_id TEXT PRIMARY KEY,
@@ -118,6 +138,9 @@ CREATE INDEX IF NOT EXISTS idx_memory_cards_embedding
     ON memory_cards 
     USING hnsw (embedding halfvec_cosine_ops)
     WITH (m = 16, ef_construction = 64);
+
+CREATE INDEX IF NOT EXISTS idx_memory_cards_freshness 
+    ON memory_cards(project, freshness_state, freshness_next_check_after);
 
 
 -- ==============================================================================
