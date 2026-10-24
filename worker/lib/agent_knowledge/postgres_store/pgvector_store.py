@@ -1429,7 +1429,8 @@ class PgVectorStore:
                 cur.execute(
                     f"""SELECT memory_id, project, card_type, title, summary,
                                typed_payload, currentness, content_hash, source_ref,
-                               lifecycle_state, authorization_status, created_at
+                               lifecycle_state, authorization_status, created_at,
+                               valid_from, valid_to
                           FROM memory_cards WHERE {' AND '.join(clauses)}
                          ORDER BY memory_id LIMIT %s""",
                     [*params, limit],
@@ -1631,7 +1632,8 @@ class PgVectorStore:
                     SELECT memory_id, card_type, title, summary, typed_payload,
                            currentness, confidence, content_hash,
                            {score_expression} AS similarity_score,
-                           1.0 - distance AS semantic_score
+                           1.0 - distance AS semantic_score,
+                           valid_from, valid_to
                       FROM candidates
                      ORDER BY similarity_score DESC, memory_id
                      LIMIT %s
@@ -1651,6 +1653,10 @@ class PgVectorStore:
                 "content_hash": str(_row_value(row, "content_hash", 7)),
                 "similarity_score": round(float(_row_value(row, "similarity_score", 8)), 6),
                 "semantic_score": round(float(_row_value(row, "semantic_score", 9)), 6),
+                # as_of 창은 SQL이 이미 적용했지만, resolver가 카드 단위로 과거/현재
+                # 레인을 다시 판정하므로 유효기간을 함께 돌려줘야 한다.
+                "valid_from": _row_value(row, "valid_from", 10),
+                "valid_to": _row_value(row, "valid_to", 11),
             }
             for row in rows
         ]
