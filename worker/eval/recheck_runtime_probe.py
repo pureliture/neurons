@@ -157,6 +157,14 @@ class Probe:
                 "tool_documents_enqueued": tool_result["enqueued"], "source_hash": sha256_text(source.read_text())}
 
     def load(self, task):
+        if task.get("result_ref"):
+            decision = self.store.get_steward_decision(task["result_ref"])
+            if (not decision or decision["action"] != "correct_fact"
+                    or decision["result_target"]["memory_id"] != task["memory_id"]
+                    or decision["result_card"]["project"] != task["project"]):
+                raise ValueError("durable correction receipt mismatch")
+            return RecheckSnapshot.from_data(task, {"committed_result_ref": task["result_ref"],
+                "judge_profile": task["request"]["judge_profile"]})
         if (self.state / "source-unavailable").exists():
             raise ConnectionError("synthetic source outage")
         if (self.state / "configuration-missing").exists():
@@ -198,6 +206,8 @@ class Probe:
     def judge(self, task, snapshot):
         with (self.state / "judgment-calls.jsonl").open("a") as stream:
             stream.write(json.dumps({"at": now(), "input_hash": snapshot.fingerprint, "profile": "structured-policy-probe.v1"}) + "\n")
+        if "committed_result_ref" in snapshot.data:
+            return {"action": "recover_commit", "profile": "structured-policy-probe.v1"}
         return {**snapshot.data["source_validation"], "profile": "structured-policy-probe.v1"}
 
     def crash_once(self, marker):
@@ -208,6 +218,8 @@ class Probe:
 
     def apply(self, task, snapshot, judgment):
         self.crash_once("crash-before-apply")
+        if judgment["action"] == "recover_commit":
+            return RecheckOutcome("resolved", "authority_commit_recovered", snapshot.data["committed_result_ref"])
         if judgment["action"] != "apply":
             return RecheckOutcome("waiting", judgment["reason_code"])
         request = dict(task["request"]["correction"], evidence_refs=snapshot.data["evidence_refs"],
@@ -216,6 +228,7 @@ class Probe:
             result = self.service(PgVectorStore(connection=db)).brain_object_correct(**request)
             if result["correction_status"] not in {"committed", "committed_readback_gap"}:
                 return RecheckOutcome("waiting", result["reason_code"])
+            self.queue.checkpoint_result(task, result["decision_id"], connection=db)
         self.write("last-correction.json", result)
         self.crash_once("crash-after-commit")
         if not result["read_after_write_verified"]:

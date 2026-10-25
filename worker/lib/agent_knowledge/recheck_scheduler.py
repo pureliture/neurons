@@ -156,15 +156,20 @@ class PgRecheckQueue:
         _delay(delay_seconds)
         with self.store.transaction() as db, db.cursor(row_factory=dict_row) as cur:
             self._fence(cur, task)
+            cur.execute("SELECT result_ref FROM lbrain_recheck_tasks WHERE task_id=%s", (task["task_id"],))
+            recorded = cur.fetchone()["result_ref"]
+            if recorded and outcome.result_ref and recorded != outcome.result_ref:
+                raise ValueError("recheck result reference conflict")
+            result_ref = outcome.result_ref or recorded
             cur.execute("""UPDATE lbrain_recheck_tasks SET state=%s,reason_code=%s,result_ref=%s,
                 last_input_hash=%s,last_check_at=clock_timestamp(),
                 next_check_at=clock_timestamp()+(%s * interval '1 second'),
                 worker_id=NULL,lease_token=NULL,lease_until=NULL,updated_at=clock_timestamp()
-                WHERE task_id=%s""", (outcome.state, outcome.reason_code, outcome.result_ref,
+                WHERE task_id=%s""", (outcome.state, outcome.reason_code, result_ref,
                                      fingerprint, delay_seconds, task["task_id"]))
             cur.execute("""UPDATE lbrain_recheck_attempts SET state=%s,reason_code=%s,input_hash=%s,
                 result_ref=%s,finished_at=clock_timestamp() WHERE task_id=%s AND generation=%s""",
-                (outcome.state, outcome.reason_code, fingerprint, outcome.result_ref,
+                (outcome.state, outcome.reason_code, fingerprint, result_ref,
                  task["task_id"], task["generation"]))
 
     @staticmethod
@@ -182,6 +187,21 @@ class PgRecheckQueue:
         with self.store.transaction() as db, db.cursor(row_factory=dict_row) as cur:
             self._fence(cur, task)
             yield db
+
+    def checkpoint_result(self, task: Mapping[str, Any], result_ref: str, *, connection: Any) -> None:
+        """authority를 쓰는 동일 transaction에 복구용 결정 참조를 남긴다.
+
+        호출자는 독립 connection이 아닌 owned_transaction의 connection을 전달한다.
+        authority commit과 참조가 함께 성공해야 근거 변경 후에도 완료를 복구할 수 있다.
+        """
+        _text(result_ref, 180)
+        with connection.cursor(row_factory=dict_row) as cur:
+            self._fence(cur, task)
+            cur.execute("""UPDATE lbrain_recheck_tasks SET result_ref=%s,updated_at=clock_timestamp()
+                WHERE task_id=%s AND (result_ref='' OR result_ref=%s) RETURNING task_id""",
+                (result_ref, task["task_id"], result_ref))
+            if cur.fetchone() is None:
+                raise ValueError("recheck result reference conflict")
 
     def heartbeat(self, *, project: str, worker_id: str) -> None:
         _text(project, 64)

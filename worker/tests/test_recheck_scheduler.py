@@ -101,6 +101,35 @@ def test_owned_transaction_prevents_competing_claim_while_authority_is_applied(q
             assert pool.submit(claim, queue, "competing-worker").result(timeout=3) is None
 
 
+def test_authority_receipt_is_atomic_survives_reclaim_and_is_fenced(queue):
+    register(queue)
+    task = claim(queue)
+    with pytest.raises(RuntimeError, match="rollback"):
+        with queue.owned_transaction(task) as db:
+            db.execute("UPDATE memory_cards SET summary='교정 값' WHERE memory_id='recheck-original'")
+            queue.checkpoint_result(task, "decision:committed", connection=db)
+            raise RuntimeError("rollback")
+    assert queue.get(task["task_id"])["result_ref"] == ""
+    assert queue.store.get_card("recheck-original").summary == "기존 상태"
+    with queue.owned_transaction(task) as db:
+        db.execute("UPDATE memory_cards SET summary='교정 값' WHERE memory_id='recheck-original'")
+        queue.checkpoint_result(task, "decision:committed", connection=db)
+    queue.finish(task, RecheckOutcome("waiting", "post_commit_error"), fingerprint=None)
+    assert queue.get(task["task_id"])["result_ref"] == "decision:committed"
+    make_due(queue, task)
+    task = claim(queue)
+    expire(queue, task)
+    replacement = claim(queue, "replacement")
+    assert replacement["result_ref"] == "decision:committed"
+    assert queue.store.get_card("recheck-original").summary == "교정 값"
+    with queue.store.transaction() as db:
+        with pytest.raises(LeaseLost):
+            queue.checkpoint_result(task, "decision:wrong", connection=db)
+    with pytest.raises(ValueError, match="reference conflict"):
+        with queue.owned_transaction(replacement) as db:
+            queue.checkpoint_result(replacement, "decision:other", connection=db)
+
+
 def test_waiting_rechecks_reuse_judgment_and_changed_evidence_triggers_new_judgment(queue):
     task = register(queue)
     data = {"revision": "old", "result": "conflicting"}
