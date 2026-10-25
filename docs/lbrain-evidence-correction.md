@@ -2,6 +2,10 @@
 
 `brain_object_correct`는 작업 중 확인한 명시적 source와 accepted/current MemoryCard의 값이 다를 때 successor를 만든다. 서버의 source/field 정책을 통과한 교정에는 건별 사람 승인이 필요하지 않다.
 
+현재 구현은 초기 adapter에 한정하며 전체 요구의 완료 상태가 아니다. 지연 세션 수집과의 합류 및 재현된 summary/payload 불일치 등은 [설계 감사](validation/2026-10-25-lbrain-correction-reconciliation-audit.md)에 기록했다. 이 문제를 해결하기 전 전체 기능이 준비됐다고 판단하지 않는다.
+
+자동 재검토의 PG 영속 예약·lease 회수·판단 cache·독립 감시 코어와 실험용 연결기를 추가했다. 별도 Ubuntu 프로세스에서 장애 복구와 구조화된 지연 근거의 자동 교정을 [실증](validation/2026-10-25-lbrain-recheck-runtime.md)했다. 운영 수집 연결·범용 모델 판단·충돌 B 읽기 정책은 아직 완료하지 않았다.
+
 ## 지원 범위
 
 초기 `registered_json` adapter는 source registry에서 정책에 지정된 JSON 필드를 직접 읽는다. 정책에는 project/repository, 원본 카드 계보, 대상 field, 허용 source의 device/root/path hash, JSON pointer, 값 대응표, 표시 template과 최대 관측 나이가 들어간다. 요청자가 새 값이나 임의 필드·source locator를 지정할 수 없다.

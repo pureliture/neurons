@@ -2,6 +2,8 @@
 
 검증일: 2026-10-25. FR13의 초기 `registered_json` 범위에 대해 구현, 설치 artifact, Ubuntu 격리 배포 MCP, 실제 LLM 작업 흐름을 검증했다. 아래 PASS는 이 범위의 결과다. main merge, 운영 서비스 교체, 실제 사용자 memory 정책 활성화는 수행하지 않았다.
 
+후속 조사에서 LLM 변경안·수집 전 관측·지연 세션 합류가 빠졌고, summary 교정 시 payload 불일치 등 추가 문제가 확인됐다. **이 보고서의 좁은 canary PASS를 전체 교정 기능의 완료로 해석하지 않는다. 전체 기능은 재설계가 필요하다.** 최신 판정과 36개 추가 시나리오는 [합류 설계 감사](2026-10-25-lbrain-correction-reconciliation-audit.md)를 따른다.
+
 ## 구현 범위
 
 `brain_object_correct`는 서버에 등록된 source/field 정책으로 사실을 독립 추출한다. 요청자는 새 값이나 승인자를 전달하지 않는다. project/repository, 원본 카드 계보, source revision/hash, 최신 관측, freshness와 필드 대응이 통과하면 PostgreSQL에서 successor 승인, 이전 카드 supersession, `correct_fact` 감사, edge와 projection outbox를 원자 commit한다. cache를 무효화하고 public read route로 재조회한다.

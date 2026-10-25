@@ -42,7 +42,8 @@
 - next gate: merge and deploy the source image, merge the matching ops receipt contract, reapply the canonical Jenkins configuration, then run only the bounded `PRECHECK_ONLY` dry-run. CouchDB execute remains blocked until fresh plan, snapshot/restore, approval, and postcheck evidence are present.
 
 ## M9 근거 기반 사실 교정
-- 상태: 구현 및 Ubuntu 격리 배포 proof PASS. main 반영·운영 활성화는 미수행이다. 초기 adapter 범위와 실제 증거는 [검증 보고서](../../validation/2026-10-25-lbrain-evidence-correction.md)에 기록한다.
+- 자동 재검토 부분 증거: PG 예약·lease·판단 cache·독립 감시 코어를 추가하고 [Ubuntu 격리 runtime 실증](../../validation/2026-10-25-lbrain-recheck-runtime.md)을 완료했다. 프로세스 종료·DB 복구·지연된 구조화 근거 수집·중복 없는 교정과 만료 cache 갱신을 확인했다. 실제 의미 판단 모델·정규 intake 연결·B 읽기 정책은 미완료다.
+- 상태: 재설계 필요. 초기 adapter의 좁은 Ubuntu canary는 PASS했으나 전체 기능의 완료 판정을 철회한다. LLM 변경안, 수집 전 근거, 지연 세션과의 합류 및 추가 결함은 [합류 설계 감사](../../validation/2026-10-25-lbrain-correction-reconciliation-audit.md)를 따른다. main 반영·운영 활성화는 미수행이다.
 - 근거 스펙: `requirements.md` FR13, `design.md` `brain_object_correct`.
 - 목표: agent가 작업 중 authoritative evidence로 accepted/current 사실의 불일치를 확인하면, 적격한 교정을 건별 사람 승인 없이 반영한다.
 - 적격 경로: source 정책, 정확한 target/project/repository, expected revision/hash, freshness·integrity·field 대응을 검증한다. 멱등 successor, `correct_fact` 감사, `supersedes`를 원자 기록하고 재조회한다.
