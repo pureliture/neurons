@@ -23,6 +23,7 @@ from .session_memory.memory_promotion import commit_supersession
 
 POLICY_SCHEMA = "evidence_correction_policy.v1"
 POLICY_VERSION = "evidence_correction.v1"
+_PRIMARY_FACT_FIELDS = {"status": "typed_payload.status_value", "evidence": "typed_payload.result_status"}
 _FIELDS = {
     "status": {"summary", "typed_payload.status_value"},
     "evidence": {"summary", "typed_payload.result_status"},
@@ -217,9 +218,9 @@ class EvidenceCorrectionService:
             self._check_target(old, rule, target_object_id, expected_content_hash)
             catalog = LedgerSourceRefCatalog(self.ledger, initialize_schema=False)
             value, proofs = resolve_value(rule=rule, catalog=catalog, evidence_refs=evidence_refs)
-            field = rule["field_path"]
-            prior_value = _field(old, field)
-            if prior_value == (rule["summary_template"].replace("{value}", value) if field == "summary" else value):
+            field = _semantic_field(old, rule["field_path"])
+            _render_fact(old, rule, value)
+            if _field(old, field) == value:
                 raise CorrectionError("no_factual_mismatch")
             candidate_id = "mem_correction_" + short_hash([decision_id, request_hash], length=40)
             candidate = self.store.get_steward_card(candidate_id)
@@ -355,20 +356,29 @@ def _candidate(old, rule, value, proofs, memory_id, request_hash, decision_id):
         card.pop(key, None)
     card.pop("card_hash", None)
     field = rule["field_path"]
-    summary = rule["summary_template"].replace("{value}", value)
-    if field != "summary":
-        card["typed_payload"][field.split(".", 1)[1]] = value
+    summary, render_text, render_spans = _render_fact(old, rule, value)
+    fact_field = _semantic_field(card, field)
+    card["typed_payload"][fact_field.split(".", 1)[1]] = value
     card.update(memory_id=memory_id, candidate_id=memory_id,
-                summary=summary, render_text=summary, lifecycle_state="candidate",
+                summary=summary, render_text=render_text, lifecycle_state="candidate",
                 approval_state="suggested", judgment_state="none", status="candidate",
-                currentness="current", authorization_status="disabled", freshness="current",
+                currentness="current", authorization_status="disabled", freshness=old.get("freshness", "unknown"),
                 supersedes=[old["memory_id"]], superseded_by=[], valid_to=None,
                 steward_proposal_kind="evidence_correction", steward_target_memory_id=old["memory_id"],
                 idempotency_key=request_hash, created_at=utc_now_iso(), updated_at=utc_now_iso())
     observed = min(_timestamp(proof["observed_at"]) for proof in proofs)
-    card.update(observed_at=observed.isoformat(), freshness_state="verified_current",
+    # 단일 사실의 검증으로 복사한 나머지 사실까지 최신으로 인증하지 않는다.
+    card.update(freshness_state="unchecked",
                 freshness_checked_at=utc_now_iso(), source_hash=hash_payload(proofs),
                 freshness_next_check_after=(observed + timedelta(seconds=rule["max_age_seconds"])).isoformat())
+    card["verification_scope"] = {"whole_card": False, "fields": [fact_field], "render_spans": render_spans}
+    field_verifications = copy.deepcopy(old.get("field_verifications") or {})
+    field_verifications[fact_field] = {
+        "state": "verified_current", "observed_at": observed.isoformat(),
+        "next_check_after": card["freshness_next_check_after"],
+        "value_hash": hash_payload(value), "source_hash": card["source_hash"],
+    }
+    card["field_verifications"] = field_verifications
     if card["card_type"] == "status":
         card["typed_payload"]["observed_at"] = observed.isoformat()
     card["evidence_correction"] = {
@@ -416,6 +426,28 @@ def _validate_request(arguments):
 
 def _field(card, field):
     return card.get("summary") if field == "summary" else card.get("typed_payload", {}).get(field.split(".", 1)[1])
+
+
+def _semantic_field(card, field):
+    return _PRIMARY_FACT_FIELDS[card["card_type"]] if field == "summary" else field
+
+
+def _render_fact(old, rule, value):
+    """지정 사실의 정확한 표시 구간만 교체하고 다른 사실은 보존한다."""
+    previous = _field(old, _semantic_field(old, rule["field_path"]))
+    if not isinstance(previous, str) or not previous:
+        raise CorrectionError("target_render_scope_unverifiable")
+    old_fragment = rule["summary_template"].replace("{value}", previous)
+    new_fragment = rule["summary_template"].replace("{value}", value)
+    rendered, spans = {}, []
+    for name in ("summary", "render_text"):
+        text = old.get(name)
+        if not isinstance(text, str) or text.count(old_fragment) != 1:
+            raise CorrectionError("target_render_scope_unverifiable")
+        start = text.index(old_fragment)
+        rendered[name] = text[:start] + new_fragment + text[start + len(old_fragment):]
+        spans.append({"field": name, "start": start, "end": start + len(new_fragment)})
+    return rendered["summary"], rendered["render_text"], spans
 
 
 def _locator(value):

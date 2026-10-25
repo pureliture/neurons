@@ -292,6 +292,10 @@ class ToolEvidenceSummaryRecord:
     evidence_id_hash: str = ""
     redaction_version: str = REDACTION_VERSION
     source_status: str = "source_locator_private_spool_only"
+    source_event_id_hash: str = ""
+    source_content_hash: str = ""
+    observation_id_hash: str = ""
+    source_event_index: int | None = None
 
     def __post_init__(self) -> None:
         command_summary = redact_and_bound_evidence_text(self.command_summary, MAX_TOOL_EVIDENCE_COMMAND_CHARS)
@@ -302,20 +306,29 @@ class ToolEvidenceSummaryRecord:
         object.__setattr__(self, "redacted_summary", redacted_summary)
         content_hash = _sha256(redacted_summary)
         object.__setattr__(self, "content_hash", content_hash)
-        evidence_id_hash = _sha256(
-            "|".join(
-                [
-                    TOOL_EVIDENCE_SUMMARY_RECORD_TYPE,
-                    self.session_id_hash,
-                    str(self.evidence_index),
-                    self.category,
-                    self.outcome,
-                    command_summary,
-                    content_hash,
-                ]
-            )
-        )
+        identity_parts = [
+            TOOL_EVIDENCE_SUMMARY_RECORD_TYPE, self.session_id_hash, str(self.evidence_index),
+            self.category, self.outcome, command_summary, content_hash,
+        ]
+        if self.source_event_id_hash:
+            identity_parts = [TOOL_EVIDENCE_SUMMARY_RECORD_TYPE, self.project, self.session_id_hash,
+                self.source_event_id_hash, self.source_content_hash, self.category,
+                self.outcome, command_summary, content_hash, self.redaction_version]
+        evidence_id_hash = _sha256("|".join(identity_parts))
         object.__setattr__(self, "evidence_id_hash", evidence_id_hash)
+        for field_name in ("source_event_id_hash", "source_content_hash"):
+            supplied = getattr(self, field_name)
+            if supplied and not re.fullmatch(r"sha256:[0-9a-f]{64}", supplied):
+                raise ValueError("tool observation anchor must be a SHA-256 digest")
+        if bool(self.source_event_id_hash) != bool(self.source_content_hash):
+            raise ValueError("tool observation event and content hashes must be supplied together")
+        if self.source_event_index is not None and (type(self.source_event_index) is not int or self.source_event_index < 0):
+            raise ValueError("tool observation index must be nonnegative")
+        # 표현·분류·chunk 위치가 변해도 native event의 관측 identity는 보존한다.
+        # anchor가 없는 옛/다른 provider 기록을 내용 유사성으로 합치지 않는다.
+        observation = (_sha256(f"tool_observation.v1:{self.session_id_hash}:{self.source_event_id_hash}")
+                       if self.source_event_id_hash else "")
+        object.__setattr__(self, "observation_id_hash", observation)
 
     def title(self) -> str:
         return f"{self.provider} tool evidence {self.category} {self.outcome}"

@@ -176,7 +176,8 @@ class Probe:
             row = rows[0]
             evidence = ToolEvidenceSummaryRecord(**{key: row[key] for key in (
                 "session_id_hash", "provider", "project", "category", "outcome", "tool_name",
-                "command_summary", "redacted_summary", "observed_at", "evidence_index", "redaction_version", "source_status")})
+                "command_summary", "redacted_summary", "observed_at", "evidence_index", "redaction_version", "source_status",
+                "source_event_id_hash", "source_content_hash", "source_event_index")})
             if evidence.evidence_id_hash != row["evidence_id_hash"] or evidence.content_hash != row["content_hash"]:
                 raise ValueError("synthetic tool evidence hash mismatch")
             cursor_path = self.state / "source-cursor.json"

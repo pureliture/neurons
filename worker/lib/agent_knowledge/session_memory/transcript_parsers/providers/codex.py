@@ -167,15 +167,18 @@ def _extract_codex_tool_evidence_from_fd(
     patch_success_by_call: dict[str, bool] = {}
     pending_calls: deque[dict] = deque()
     raw_items: list[dict] = []
+    source_event_count = 0
 
     def raw_item(entry: dict, output: str) -> dict:
         payload = entry["payload"]
         call_id = str(payload.get("call_id") or "")
+        anchor = _codex_observation_anchor(payload, output, entry.get("source_event_index"))
         tool_name = str(payload.get("name") or payload.get("type") or "unknown")
         observed_at = str(entry["record"].get("timestamp") or payload.get("timestamp") or "")
         if payload.get("type") == "custom_tool_call" and tool_name == "apply_patch":
             succeeded = patch_success_by_call.get(call_id, "Success" in output or not output)
             return {
+                **anchor,
                 "tool_name": "apply_patch",
                 "command": "",
                 "output": output,
@@ -190,6 +193,7 @@ def _extract_codex_tool_evidence_from_fd(
         if isinstance(command, list):
             command = " ".join(str(part) for part in command)
         return {
+            **anchor,
             "tool_name": tool_name,
             "command": str(command),
             "output": output,
@@ -214,7 +218,7 @@ def _extract_codex_tool_evidence_from_fd(
             patch_success_by_call.pop(call_id, None)
 
     def consume(record: dict) -> None:
-        nonlocal session_id
+        nonlocal session_id, source_event_count
         payload = record.get("payload")
         if not isinstance(payload, dict):
             return
@@ -223,7 +227,8 @@ def _extract_codex_tool_evidence_from_fd(
             session_id = str(payload.get("id") or "")
             return
         if payload_type in {"function_call", "custom_tool_call"}:
-            pending_calls.append({"record": record, "payload": payload})
+            pending_calls.append({"record": record, "payload": payload, "source_event_index": source_event_count})
+            source_event_count += 1
             if len(pending_calls) > admission.max_pending_tool_calls:
                 raise _source_admission_error()
             flush_resolved()
@@ -420,15 +425,16 @@ def extract_codex_tool_evidence(
         raise ValueError("source_parse_failed: missing session_id")
 
     raw_items: list[dict] = []
-    for entry in calls:
+    for source_event_index, entry in enumerate(calls):
         payload = entry["payload"]
         call_id = str(payload.get("call_id") or "")
         tool_name = str(payload.get("name") or payload.get("type") or "unknown")
         out = outputs_by_call.get(call_id, "")
+        anchor = _codex_observation_anchor(payload, out, source_event_index)
         observed_at = str(entry["record"].get("timestamp") or payload.get("timestamp") or "")
         if payload.get("type") == "custom_tool_call" and tool_name == "apply_patch":
             succeeded = patch_success_by_call.get(call_id, "Success" in out or not out)
-            raw_items.append({"tool_name": "apply_patch", "command": "", "output": out, "is_error": not succeeded, "observed_at": observed_at})
+            raw_items.append({**anchor, "tool_name": "apply_patch", "command": "", "output": out, "is_error": not succeeded, "observed_at": observed_at})
             continue
         try:
             args = json.loads(payload.get("arguments") or "{}")
@@ -437,6 +443,17 @@ def extract_codex_tool_evidence(
         cmd = args.get("cmd") or args.get("command") or args.get("input") or ""
         if isinstance(cmd, list):
             cmd = " ".join(str(part) for part in cmd)
-        raw_items.append({"tool_name": tool_name, "command": str(cmd), "output": out, "is_error": False, "observed_at": observed_at})
+        raw_items.append({**anchor, "tool_name": tool_name, "command": str(cmd), "output": out, "is_error": False, "observed_at": observed_at})
 
     return _build_evidence_records(raw_items, session_hash=_sha256(f"codex:{session_id}"), provider="codex", project=project)
+
+
+def _codex_observation_anchor(payload: dict, output: str, index: int | None) -> dict:
+    call_id = str(payload.get("call_id") or "")
+    if not call_id:
+        return {}
+    body = {"type": payload.get("type"), "name": payload.get("name"),
+        "arguments": payload.get("arguments", payload.get("input")), "output": output}
+    return {"source_event_id_hash": _sha256("codex:" + call_id),
+        "source_content_hash": _sha256(json.dumps(body, sort_keys=True, ensure_ascii=False)),
+        "source_event_index": index}

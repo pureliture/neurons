@@ -1562,6 +1562,10 @@ class Ledger(
                     evidence_index INTEGER NOT NULL DEFAULT 0,
                     redaction_version TEXT NOT NULL DEFAULT 'redaction.v2',
                     source_status TEXT NOT NULL DEFAULT 'source_locator_private_spool_only',
+                    source_event_id_hash TEXT NOT NULL DEFAULT '',
+                    source_content_hash TEXT NOT NULL DEFAULT '',
+                    observation_id_hash TEXT NOT NULL DEFAULT '',
+                    source_event_index INTEGER,
                     knowledge_id TEXT DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'prepared',
                     created_at TEXT NOT NULL,
@@ -1760,6 +1764,11 @@ class Ledger(
             )
             _migrate_backend_neutral_index_schema(connection)
             _ensure_column(connection, "knowledge_items", "session_id_hash", "TEXT DEFAULT ''")
+            for observation_column in ("source_event_id_hash", "source_content_hash", "observation_id_hash"):
+                _ensure_column(connection, "tool_evidence_summaries", observation_column, "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(connection, "tool_evidence_summaries", "source_event_index", "INTEGER")
+            connection.execute("""CREATE INDEX IF NOT EXISTS idx_tool_evidence_observation
+                ON tool_evidence_summaries(project, observation_id_hash)""")
             _ensure_column(connection, "knowledge_items", "evidence_status", "TEXT DEFAULT 'historical'")
             _ensure_column(connection, "knowledge_items", "coverage_status", "TEXT DEFAULT ''")
             _ensure_column(connection, "knowledge_items", "coverage_gap_count", "INTEGER DEFAULT 0")
@@ -2618,8 +2627,9 @@ class Ledger(
                     evidence_id_hash, session_id_hash, provider, project,
                     category, outcome, tool_name, command_summary, redacted_summary,
                     content_hash, observed_at, evidence_index, redaction_version,
-                    source_status, knowledge_id, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    source_status, source_event_id_hash, source_content_hash, observation_id_hash,
+                    source_event_index, knowledge_id, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(evidence_id_hash) DO UPDATE SET
                     session_id_hash=excluded.session_id_hash,
                     provider=excluded.provider,
@@ -2634,6 +2644,10 @@ class Ledger(
                     evidence_index=excluded.evidence_index,
                     redaction_version=excluded.redaction_version,
                     source_status=excluded.source_status,
+                    source_event_id_hash=excluded.source_event_id_hash,
+                    source_content_hash=excluded.source_content_hash,
+                    observation_id_hash=excluded.observation_id_hash,
+                    source_event_index=excluded.source_event_index,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -2651,6 +2665,10 @@ class Ledger(
                     data.get("evidence_index", 0),
                     data.get("redaction_version", "redaction.v2"),
                     data.get("source_status", "source_locator_private_spool_only"),
+                    data.get("source_event_id_hash", ""),
+                    data.get("source_content_hash", ""),
+                    data.get("observation_id_hash", ""),
+                    data.get("source_event_index"),
                     "",
                     "prepared",
                     now,

@@ -302,6 +302,9 @@ def _build_evidence_records(
                 observed_at=str(item.get("observed_at") or ""),
                 evidence_index=len(records),
                 source_status="source_locator_private_spool_only",
+                source_event_id_hash=str(item.get("source_event_id_hash") or ""),
+                source_content_hash=str(item.get("source_content_hash") or ""),
+                source_event_index=item.get("source_event_index"),
             )
         )
     return records

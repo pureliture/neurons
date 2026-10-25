@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_knowledge.evidence_correction import (
-    CorrectionError, POLICY_SCHEMA, resolve_value, validate_policies,
+    CorrectionError, POLICY_SCHEMA, _candidate, _render_fact, resolve_value, validate_policies,
 )
 from agent_knowledge.knowledge_search_service import DisabledRetiredIndexBridgeClient, KnowledgeSearchService
 from agent_knowledge.ledger import Ledger
@@ -71,6 +71,56 @@ def test_source_adapter_derives_value_from_data_instead_of_caller_claim():
     assert value == "ready"
     assert proofs[0]["content_hash"] == sha256_text(record.redacted_content)
     assert "ready" not in json.dumps(proofs)
+
+
+@pytest.mark.parametrize("field", ["summary", "typed_payload.status_value"])
+@pytest.mark.parametrize("extra_fact", ["", "; 배포는 아직 하지 않았다."])
+def test_one_fact_correction_keeps_rendering_consistent_without_certifying_other_facts(field, extra_fact, monkeypatch):
+    from agent_knowledge.session_memory.memory_miner import build_memory_card_candidate_from_source_span
+    old = build_memory_card_candidate_from_source_span({
+        "card_type": "status", "project": PROJECT, "provider": "codex", "scope": "project",
+        "title": "기능 상태", "redacted_summary": "기능 상태: missing",
+        "typed_payload": {"status_value": "missing", "observed_at": utc_now_iso(),
+                          "expires_at": "", "current_authority": "original-authority"},
+        "source_ref": {"source_id": "source-old"}, "span_ref": {"span_id": "span-old"},
+        "content_hash": sha256_text("old status"), "confidence": 0.6, "confidence_basis": "기존 관측",
+    }, refresh_watermark="synthetic-unit")
+    old["freshness_state"] = "verified_current"
+    old["observed_at"] = "2025-01-01T00:00:00+00:00"
+    old["summary"] += extra_fact
+    old["render_text"] += extra_fact
+    old["field_verifications"] = {"typed_payload.current_authority": {
+        "state": "unchecked", "observed_at": "2025-01-01T00:00:00+00:00", "source_hash": sha256_text("old authority")}}
+    record = source()
+    rule = policy(record, memory_id=old["memory_id"], field_path=field)
+    value, proofs = resolve(rule, [record])
+    instants = iter(f"2026-01-01T00:00:0{i}+00:00" for i in range(6))
+    monkeypatch.setattr("agent_knowledge.evidence_correction.utc_now_iso", lambda: next(instants))
+    changed = _candidate(old, rule, value, proofs, "corrected", sha256_text("request"), "decision")
+    retried = _candidate(old, rule, value, proofs, "corrected", sha256_text("request"), "decision")
+    assert retried["content_hash"] == changed["content_hash"]
+    assert retried["freshness_checked_at"] != changed["freshness_checked_at"]
+    assert changed["typed_payload"]["status_value"] == "ready"
+    assert changed["summary"] == changed["render_text"] == "기능 상태: ready" + extra_fact
+    assert old["typed_payload"]["status_value"] == "missing"
+    assert changed["typed_payload"]["current_authority"] == "original-authority"
+    assert changed["confidence"] == old["confidence"]
+    assert changed["freshness_state"] == "unchecked"
+    assert changed["observed_at"] == old["observed_at"]
+    assert changed["freshness"] == old["freshness"]
+    assert changed["verification_scope"]["whole_card"] is False
+    assert changed["field_verifications"]["typed_payload.current_authority"] == old["field_verifications"]["typed_payload.current_authority"]
+    assert changed["field_verifications"]["typed_payload.status_value"]["state"] == "verified_current"
+
+
+@pytest.mark.parametrize("summary", ["다른 사실만 기록되어 있다.", "기능 상태: missing; 기능 상태: missing"])
+def test_unverifiable_render_scope_does_not_overwrite_other_facts(summary):
+    old = {"card_type": "status", "typed_payload": {"status_value": "missing"},
+        "summary": summary, "render_text": summary}
+    before = copy.deepcopy(old)
+    with pytest.raises(CorrectionError, match="target_render_scope_unverifiable"):
+        _render_fact(old, policy(source()), "ready")
+    assert old == before
 
 
 @pytest.mark.parametrize("change,reason", [
@@ -169,13 +219,14 @@ def test_correction_cli_missing_policy_fails_before_writable_ledger_open(tmp_pat
 
 
 @pytest.fixture
-def correction(tmp_path, isolated_pg_store):
+def correction(tmp_path, isolated_pg_store, request):
     ledger = Ledger(tmp_path / "ledger.sqlite")
     store = isolated_pg_store
     steward = BrainStewardService(ledger, pgvector_store=store, allow_restricted=True)
+    extra_fact = getattr(request, "param", {}).get("extra_fact", "")
     span = {
         "card_type": "status", "project": PROJECT, "provider": "codex", "scope": "project",
-        "title": "교정 기능 상태", "redacted_summary": "기능 상태: missing",
+        "title": "교정 기능 상태", "redacted_summary": "기능 상태: missing" + extra_fact,
         "typed_payload": {"status_value": "missing", "observed_at": utc_now_iso(),
                           "expires_at": "", "current_authority": "structured-facts"},
         "source_ref": {"source_id": "source-old"}, "span_ref": {"span_id": "span-old"},
@@ -196,11 +247,33 @@ def correction(tmp_path, isolated_pg_store):
                    target_object_id=memory_card_to_knowledge_object(old).object_id,
                    expected_content_hash=old["content_hash"], policy_id=rule["policy_id"],
                    idempotency_key="correct-status-1", evidence_refs=refs(record))
-    return SimpleNamespace(ledger=ledger, store=store, service=service, old=old, record=record, request=request, rule=rule)
+    return SimpleNamespace(ledger=ledger, store=store, service=service, old=old, record=record, request=request, rule=rule, extra_fact=extra_fact)
 
 
 def authority_snapshot(fixture):
     return fixture.store.list_steward_cards(project=PROJECT, accepted_only=True, limit=100)
+
+
+@pytest.mark.parametrize("correction", [{}, {"extra_fact": "; 배포는 아직 하지 않았다."}], indirect=True)
+def test_pg_summary_correction_does_not_mark_unverified_fields_current(correction):
+    f = correction
+    rule = dict(f.rule, field_path="summary")
+    f.service.evidence_correction_policies = validate_policies({"schema_version": POLICY_SCHEMA, "rules": [rule]})
+    result = f.service.brain_object_correct(**f.request)
+    assert result["correction_status"] == "committed"
+    new = f.store.get_steward_card(result["successor_memory_id"])
+    assert new["summary"] == "기능 상태: ready" + f.extra_fact
+    assert new["typed_payload"]["status_value"] == "ready"
+    assert new["typed_payload"]["current_authority"] == f.old["typed_payload"]["current_authority"]
+    assert new["freshness_state"] == "unchecked"
+    assert new["verification_scope"]["whole_card"] is False
+    with f.store._scope() as db:
+        row = db.execute("SELECT freshness_state FROM memory_cards WHERE memory_id=%s", (new["memory_id"],)).fetchone()
+    assert row["freshness_state"] == "unchecked"
+    from agent_knowledge.postgres_store.freshness_revalidate_cli import plan, apply
+    report = plan(f.store, interval_days=30, limit=100)
+    assert report["field_scoped_active_cards"] == 1
+    assert apply(f.store, [(new["memory_id"], "verified_current", sha256_text("unrelated-chunk"), utc_now_iso(), utc_now_iso())]) == 0
 
 
 def call(fixture, request=None):

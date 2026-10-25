@@ -742,9 +742,9 @@ class PgVectorStore:
                 if action == 'correct_fact':
                     from ..public_safe_util import hash_payload
                     cur.execute("""UPDATE memory_cards SET observed_at=%s::timestamptz,
-                        freshness_state='verified_current', freshness_checked_at=%s::timestamptz,
+                        freshness_state=%s, freshness_checked_at=%s::timestamptz,
                         freshness_next_check_after=%s::timestamptz, source_hash=%s WHERE memory_id=%s""",
-                        (changed_card['observed_at'], changed_card['freshness_checked_at'],
+                        (changed_card.get('observed_at'), changed_card['freshness_state'], changed_card['freshness_checked_at'],
                          changed_card['freshness_next_check_after'], changed_card['source_hash'], changed_card['memory_id']))
                     self.insert_edge(MemoryEdge(
                         src_id=changed_card['memory_id'], rel_type='supersedes',
