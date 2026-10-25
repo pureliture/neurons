@@ -417,7 +417,7 @@ LBrain은 object를 바로 authoritative로 만들지 않고 proposal/review lif
 - 대상은 실제 LBrain 조회 결과를 만든 canonical object와 결속해야 한다. correction 후 같은 read/recall route가 successor를 반환해야 하며, 지원되는 write-through/read-back adapter가 없으면 권위 상태를 바꾸지 않고 검토로 넘긴다.
 - 교정은 확인 가능한 사실 필드에 한정한다. preference, user intent, 평가·해석, 근거 없는 요약 문장은 자동 교정 대상이 아니다.
 - 근거는 해당 필드의 source-of-truth 정책에 맞아야 한다. repo code/file 근거는 정확한 repository, immutable commit/revision, path/locator, content hash에 결속한다. 명시적 structured data 근거는 authoritative system/source, record identity, revision, content hash에 결속한다. test 결과는 해당 commit과 실행한 assertion 범위만 입증한다.
-- 자동 교정 allowlist는 source adapter가 내용을 독립적으로 재조회할 수 있고, field-to-source mapping으로 주장의 값을 기계적으로 검증할 수 있는 사실에 한정한다. 단순 citation/hash나 LLM 설명만으로 semantic entailment를 입증하지 않는다. 지원되지 않는 source/field 조합은 검토 경로로 넘긴다.
+- source adapter가 내용을 독립적으로 재검증할 수 있는 사실을 대상으로 한다. 구조화된 값은 코드로 검증하고, 표현이 다른 주장과 근거의 의미 대응은 합의한 판단 모델과 검증된 적용 정책으로 확인한다. 단순 citation/hash나 요청 LLM의 설명만으로 적격성을 입증하지 않는다. 검증할 수 없는 source/field 조합은 명시적 보류와 재검토로 남긴다.
 - 초기 `registered_json` adapter는 서버 정책의 정확한 source locator hash와 JSON pointer에서 값을 직접 추출한다. 호출자가 작성한 target/value claim을 원천 근거로 취급하지 않는다. 등록된 전체 redacted source bytes와 hash를 검증할 수 없는 원문, content-addressed revision이 아닌 source ref, 관측 freshness window를 넘긴 source는 자동 교정하지 않는다.
 - 근거 유형은 주장 대상에 맞아야 한다. 코드·설정 파일만으로 deployed/live runtime 상태를 입증하지 않으며, runtime 사실에는 해당 runtime의 검증된 live evidence가 필요하다.
 - MCP는 agent가 전달한 설명이나 citation 문자열만 신뢰하지 않는다. 등록된 evidence ref를 source policy에 따라 재조회하고 hash를 독립 계산해 target, project, scope, revision, freshness, 무결성을 확인한다. source adapter가 근거를 재검증할 수 없으면 자동 교정을 거절한다.
@@ -425,6 +425,15 @@ LBrain은 object를 바로 authoritative로 만들지 않고 proposal/review lif
 - 기존 object를 in-place overwrite/delete하지 않는다. successor와 `supersedes` 관계, 검증한 evidence refs, source revision/hash, correction decision/audit를 보존하고 read-after-write를 수행한다.
 - source authority가 불명확하거나, 근거가 stale/malformed/incomplete이거나, 복수의 authoritative evidence가 충돌하거나, target이 동시 변경되었으면 authority write를 하지 않는다. 사유와 missing evidence를 반환하고 기존 proposal/review 경로로 넘긴다.
 - raw source body, secret, private path, raw external identifier는 correction 응답이나 public ledger projection에 노출하지 않는다.
+
+합의된 확장 계약:
+
+- 한 요청에서 복수 사실을 독립 처리하며 기존 값·변경안·불일치 설명·근거를 제출할 수 있다. exact target과 설명·범위에 의한 기존 대상 검색을 모두 지원한다. 대상 부재와 검색 실패·잘림·모호함을 구분하며 새 기억 생성으로 우회하지 않는다.
+- 같은 항목에서 독립 검증된 값이 요청값과 다르면 검증값을 적용하고 요청값·실제 반영값을 구분한다. 범위 밖 사실이나 환경을 갱신하지 않는다.
+- 교정과 정규 수집은 공통 관측·주장·사실 resolution을 사용한다. 같은 관측의 지연 수집은 기존 결정에 합류하고, 별개의 새 관측은 같은 기준으로 기존 사실을 갱신할 수 있다. 도착 시각만으로 현재 값을 역전하지 않는다.
+- 현재 값을 확인했으면 과거 변경 경위와 경위 미확인 필드를 요구하지 않는다. 근거는 교정 이력을 보관하는 동안 함께 보호하며 기간 경과만으로 삭제하지 않는다.
+- 우열을 가릴 수 없는 충돌의 최종 읽기 정책 B는 여전히 미결정이다. 자동 재검토·복구·지연 근거 해소·독립 감시의 필요한 증거를 확보한 뒤 결정한다. 그 밖의 확정된 구현은 계속 진행한다.
+- 전체 완료는 [달성 추적](correction-acceptance.md)의 요구·시나리오별 구현과 실제 검증을 모두 충족해야 한다. 초기 JSON adapter의 성공이나 개별 canary만으로 완료 처리하지 않는다.
 
 ### FR5. Authority Lane Separation
 

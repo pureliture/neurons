@@ -669,7 +669,7 @@ Freshness results:
 
 ### Evidence-backed factual correction
 
-`brain_object_correct`는 작업 중 발견한 사실 불일치를 교정한다. 호출자는 공개 조회가 반환한 `memory_id` 또는 정확한 `object_id`, expected content hash, 서버가 미리 설정한 `policy_id`, evidence refs를 전달한다. 새 값은 호출자가 제출하지 않으며, 서버가 정책에 지정된 source 필드를 재조회해 계산한다.
+`brain_object_correct`는 작업 중 발견한 사실 불일치를 교정한다. 초기 `registered_json` 경로의 호출자는 공개 조회가 반환한 `memory_id` 또는 정확한 `object_id`, expected content hash, 서버가 미리 설정한 `policy_id`, evidence refs를 전달한다. 이 초기 경로는 새 값을 입력받지 않고 서버가 정책 source 필드를 재조회해 계산한다. 최종 확장 경로는 FR13의 합의 계약에 따라 복수 사실·변경안·설명 기반 기존 대상 검색·수집 전 근거를 지원해야 한다. 초기 입력 schema를 전체 요구의 제한으로 해석하지 않으며 [달성 추적](correction-acceptance.md)에 구현·검증 상태를 구분한다.
 
 초기 adapter는 `registered_json`이다. 서버 정책은 project/repository, 원본 MemoryCard 계보, 허용 필드, source의 device/root/path hash, JSON pointer, 값 대응표와 표시 template, freshness window를 정확히 지정한다. 모든 필수 source가 같은 값을 입증해야 한다. source는 `full_sync`/project 정책을 만족하고, 등록된 전체 redacted bytes의 재계산 hash와 content-addressed source ref가 일치해야 한다. source registry의 최신 관측 revision만 사용한다. 임의 citation, LLM이 작성한 claim 문장, preference·intent·평가, code 의미 해석 및 runtime 상태 추론은 이 adapter의 근거가 될 수 없다. 지원되지 않는 source/field는 review 경로로 넘긴다.
 
@@ -960,6 +960,8 @@ cache_invalidated: true
 Default permission is denied. The first implementation may adapt to existing `memory_candidate_approve`, `memory_candidate_reject`, `memory_supersede_commit`, and `memory_stale_commit` restricted gates, but the public response remains object-shaped.
 
 ### `brain_object_correct`
+
+아래 schema는 초기 `registered_json` 경로의 호환 계약이다. 합의한 batch·변경안·일반 수집 합류 경로의 완료 증거는 아니다.
 
 source로 검증된 객관적 사실 필드의 교정 action이다. 임의 `approved_by` 입력을 받지 않는다.
 
