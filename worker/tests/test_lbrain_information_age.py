@@ -413,7 +413,7 @@ def test_ac_age_004_graph_pg_mismatch_prefers_pg_authority():
     store = _Store([store_card])
 
     resolver = GraphFirstResolver(store, graph)
-    result = resolver.resolve(project="neurons", query="mismatch", mode="query")
+    result = resolver.resolve(project="neurons", query="mismatch", mode="query", include_historical=True)
 
     assert len(result["items"]) >= 1
     item = result["items"][0]
@@ -421,7 +421,9 @@ def test_ac_age_004_graph_pg_mismatch_prefers_pg_authority():
 
     # Authority must be PostgreSQL
     assert item["currentness"] == "superseded"
-    assert t["temporal_conflict"] is True
+    # Graph is a cold projection; PG is authority. Graph-PG temporal
+    # differences are NOT flagged as conflicts (they are expected noise).
+    assert t["temporal_conflict"] is False
     assert t.get("authority_source") == "postgres" or result["metadata"].get("authority_source") == "postgres"
 
 

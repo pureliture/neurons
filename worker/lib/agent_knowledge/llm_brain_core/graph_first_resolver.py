@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Annotated, Any, Callable, Literal, Mapping
 
@@ -25,7 +26,11 @@ from .temporal_envelope import build_temporal_envelope
 # 전송 안전 상한이다. 응답 내용을 3KB로 줄이던 제품 상한은 필수 temporal 22필드를
 # 잘라내므로 폐기했다. 응답 크기는 limit/next_cursor 페이지로 조절하고, 이 값은
 # 클라이언트가 감당할 수 없는 비정상적으로 큰 응답만 막는다.
-_MAX_BYTES = 10 * 1024 * 1024
+# Wire budget for a single tool result. Kept below the client-side inline limit
+# (Hermes ~50 KB, Codex stricter) so the existing trimming ladder (drop cards,
+# shrink text) activates before a client would fail to parse the payload.
+# Override via NEURON_LBRAIN_MAX_BYTES for environments that need a different cap.
+_MAX_BYTES = int(os.environ.get("NEURON_LBRAIN_MAX_BYTES", "32768"))
 _CARD_LIMIT = 100
 _EVIDENCE_ROOT_LIMIT = 20
 _EVIDENCE_MAX_DEPTH = 5
@@ -41,7 +46,7 @@ class _ResolveRequest(BaseModel):
     project: str = Field(min_length=1, max_length=64)
     query: str = Field(default="", max_length=2000)
     mode: Literal["list", "context", "query"] = "query"
-    response_mode: Literal["slim", "with_evidence"] = "slim"
+    response_mode: Literal["slim", "minimal", "with_evidence"] = "slim"
     as_of: str = Field(default="", max_length=64)
     limit: int = Field(default=5, ge=1, le=20)
     cursor: str | None = Field(default=None, max_length=2048)
@@ -156,7 +161,7 @@ class GraphFirstResolver:
         project: str,
         query: str = "",
         mode: str = "query",
-        response_mode: str = "slim",
+        response_mode: Literal["slim", "minimal", "with_evidence"] = "slim",
         as_of: str = "",
         limit: int = 5,
         cursor: str | None = None,
@@ -503,10 +508,13 @@ class GraphFirstResolver:
                             has_temporal_conflict = True
 
                 if has_temporal_conflict:
-                    # Do NOT drop the card. Adopt PostgreSQL Card values as authority.
+                    # Graph is a cold projection (derived index), not the authority.
+                    # PG is the authority. Graph-PG temporal differences are expected
+                    # during cold projection and should NOT be flagged as conflicts
+                    # (they produce noise, not signal). Only PG-level conflicts
+                    # (currentness=="conflicted") are flagged.
                     card["authority_source"] = "postgres"
-                    card["temporal_conflict"] = True
-                elif card.get("currentness") == "conflicted":
+                if card.get("currentness") == "conflicted":
                     card["temporal_conflict"] = True
 
                 result.append(card)
@@ -805,6 +813,7 @@ class GraphFirstResolver:
         lag_ms = metadata.get("projection_lag_ms") if metadata else None
         proj_lag_sec = int(lag_ms / 1000) if lag_ms is not None else None
 
+        minimal = request.response_mode == "minimal"
         for card in cards:
             context_mode = request.mode == "context"
             item = _context_item(card) if context_mode else _item(card)
@@ -812,7 +821,7 @@ class GraphFirstResolver:
             # Temporal envelope (FR-AGE): only on the non-context (slim) item,
             # so the compact context lane stays minimal.
             if not context_mode:
-                item["temporal"] = (
+                full_temporal = (
                     card.get("_temporal")
                     if isinstance(card, Mapping) and card.get("_temporal") is not None
                     else _card_temporal_block(
@@ -821,18 +830,29 @@ class GraphFirstResolver:
                         projection_lag_seconds=proj_lag_sec,
                     )
                 )
+                item["temporal"] = (
+                    _minimal_temporal_block(full_temporal) if minimal else full_temporal
+                )
+            # Minimal mode: drop diagnostic/heavy fields to keep the payload small.
+            if minimal and not context_mode:
+                for heavy in ("typed_payload", "content_hash", "created_at", "authority_source"):
+                    item.pop(heavy, None)
             items.append(item)
             raw_typed = card.get("typed_payload")
             typed: dict[str, Any] = dict(raw_typed) if isinstance(raw_typed, Mapping) else {}
             card_type = str(card.get("card_type") or "")
             if card_type == "decision":
                 decision_entry = {**section_identity, "decision": _safe(typed.get("decision") or card.get("summary") or card.get("title"), 65536)}
-                rationale = _safe(typed.get("rationale"), 65536)
-                if rationale:
-                    decision_entry["rationale"] = rationale
+                if not minimal or context_mode:
+                    rationale = _safe(typed.get("rationale"), 65536)
+                    if rationale:
+                        decision_entry["rationale"] = rationale
                 decisions.append(decision_entry)
             elif card_type == "preference":
-                preferences.append({**section_identity, "rule": _safe(typed.get("rule") or typed.get("preference") or card.get("summary") or card.get("title"), 65536), "scope": _safe(typed.get("scope") or "general", 256)})
+                pref_entry = {**section_identity, "rule": _safe(typed.get("rule") or typed.get("preference") or card.get("summary") or card.get("title"), 65536)}
+                if not minimal or context_mode:
+                    pref_entry["scope"] = _safe(typed.get("scope") or "general", 256)
+                preferences.append(pref_entry)
             elif card_type in {"task", "work", "work_unit"}:
                 # Subject, state and next step are three different facts. Reading only
                 # `task_state` hides what the work is and what to do next whenever the
@@ -843,12 +863,13 @@ class GraphFirstResolver:
                 # Repeating the subject as its own state only costs wire budget.
                 if state and state != subject:
                     task_entry["task_state"] = state
-                next_action = _safe(typed.get("next_action"), 65536)
-                if next_action:
-                    task_entry["next_action"] = next_action
-                blocker = _safe(typed.get("blocker"), 65536)
-                if blocker:
-                    task_entry["blocker"] = blocker
+                if not minimal or context_mode:
+                    next_action = _safe(typed.get("next_action"), 65536)
+                    if next_action:
+                        task_entry["next_action"] = next_action
+                    blocker = _safe(typed.get("blocker"), 65536)
+                    if blocker:
+                        task_entry["blocker"] = blocker
                 tasks.append(task_entry)
             elif card_type == "status":
                 subject = _safe(_status_subject(card, typed), 65536)
@@ -859,9 +880,10 @@ class GraphFirstResolver:
                 state = _safe(typed.get("status_value") or typed.get("status"), 256)
                 if state and state != subject and state.strip().lower() in _STATUS_STATE_TOKENS:
                     status_entry["status_state"] = state
-                observed_at = _safe(typed.get("observed_at"), 256)
-                if observed_at:
-                    status_entry["observed_at"] = observed_at
+                if not minimal or context_mode:
+                    observed_at = _safe(typed.get("observed_at"), 256)
+                    if observed_at:
+                        status_entry["observed_at"] = observed_at
                 statuses.append(status_entry)
             content_hash = str(card.get("content_hash") or "")
             if content_hash:
@@ -1245,6 +1267,43 @@ def _card_temporal_block(
         task_state=str(typed.get("task_state") or "") if typed.get("task_state") else None,
         time_confidence=card.get("time_confidence"),
     )
+
+
+_MINIMAL_TEMPORAL_FIELDS = frozenset(
+    {
+        "currentness",
+        "freshness",
+        "age",
+        "recommended_action",
+        "temporal_conflict",
+        "as_of",
+        "valid_from",
+        "valid_to",
+        "superseded_by",
+        "summary",
+    }
+)
+_MINIMAL_AGE_SUBFIELDS = frozenset({"label", "confidence"})
+_MINIMAL_FRESHNESS_SUBFIELDS = frozenset({"state"})
+
+
+def _minimal_temporal_block(block: Any) -> dict[str, Any]:
+    if not isinstance(block, Mapping):
+        return {}
+    out: dict[str, Any] = {}
+    for key in _MINIMAL_TEMPORAL_FIELDS:
+        if key not in block:
+            continue
+        val = block[key]
+        if key == "age" and isinstance(val, Mapping):
+            out[key] = {k: val[k] for k in _MINIMAL_AGE_SUBFIELDS if k in val}
+        elif key == "freshness" and isinstance(val, Mapping):
+            out[key] = {k: val[k] for k in _MINIMAL_FRESHNESS_SUBFIELDS if k in val}
+        else:
+            out[key] = val
+    if block.get("authority_source") and block.get("temporal_conflict"):
+        out["authority_source"] = block["authority_source"]
+    return out
 
 
 def _card_matches_filters(
