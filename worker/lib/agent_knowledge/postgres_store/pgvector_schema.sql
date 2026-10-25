@@ -303,6 +303,7 @@ CREATE TABLE IF NOT EXISTS graph_projection_outbox (
     worker_id VARCHAR(64),
     retry_count INT NOT NULL DEFAULT 0,
     last_error TEXT,
+    lease_generation BIGINT NOT NULL DEFAULT 0 CHECK (lease_generation >= 0),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT chk_graph_projection_outbox_status CHECK (
@@ -316,6 +317,9 @@ CREATE TABLE IF NOT EXISTS graph_projection_outbox (
 CREATE INDEX IF NOT EXISTS idx_graph_projection_outbox_queue
     ON graph_projection_outbox(status, created_at)
     WHERE status IN ('queued', 'failed');
+
+ALTER TABLE graph_projection_outbox ADD COLUMN IF NOT EXISTS lease_generation
+    BIGINT NOT NULL DEFAULT 0 CHECK (lease_generation >= 0);
 
 -- 기존 memory를 대상으로 하는 재검토 예약. 등록 자체는 authority를 바꾸지 않는다.
 CREATE TABLE IF NOT EXISTS lbrain_recheck_tasks (
@@ -452,3 +456,6 @@ CREATE TABLE IF NOT EXISTS lbrain_fact_batches (
     result JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+-- graph/embedding 반영 전에도 관련된 현재 fact만 indexed lexical 후보로 회수한다.
+CREATE INDEX IF NOT EXISTS idx_memory_cards_fact_text ON memory_cards USING GIN
+    (to_tsvector('simple', coalesce(title,'') || ' ' || coalesce(summary,'')));

@@ -151,6 +151,7 @@ class GraphOutboxJob:
     last_error: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    lease_generation: int = 0
 
 
 class PgVectorStore:
@@ -1450,6 +1451,41 @@ class PgVectorStore:
             row = cur.fetchone()
             return int(_row_value(row, "generation", 0)) if row else 0
 
+    def search_current_fact_cards(self, *, project, query, limit=100):
+        """공통 fact head의 관련 후보를 index로 찾는다. 전체 PG 카드를 Python으로 읽지 않는다."""
+        if not project or type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("bounded fact search required")
+        from ..llm_brain_core.terms import query_terms
+        terms = query_terms(query)
+        if not terms:
+            return []
+        threshold = max(1, (len(terms) + 1) // 2)
+        with self._scope() as db, db.cursor() as cur:
+            cur.execute("""SELECT DISTINCT c.memory_id,c.content_hash,coverage.hits
+                FROM memory_cards c JOIN lbrain_fact_scopes f ON f.memory_id=c.memory_id
+                CROSS JOIN LATERAL (SELECT count(DISTINCT term) AS hits FROM unnest(%s::text[]) AS q(term)
+                    WHERE term=ANY(regexp_split_to_array(regexp_replace(
+                        lower(coalesce(c.title,'') || ' ' || coalesce(c.summary,'')),
+                        '[^a-z0-9가-힣_-]+',' ','g'),'\\s+'))) AS coverage
+                WHERE f.project=%s AND c.project=%s AND c.currentness='current'
+                    AND c.authorization_status='active'
+                    AND to_tsvector('simple',coalesce(c.title,'') || ' ' || coalesce(c.summary,''))
+                        @@websearch_to_tsquery('simple',%s) AND coverage.hits>=%s
+                ORDER BY coverage.hits DESC,c.memory_id LIMIT %s""",
+                (terms, project, project, " OR ".join(terms), threshold, limit + 1))
+            rows = cur.fetchall()
+            keys = [str(_row_value(row, "memory_id", 0)) for row in rows[:limit]]
+            cards = PgVectorStore(connection=db).list_authorized_cards(project=project, memory_ids=keys,
+                limit=limit, steward_only=True)
+            by_id = {card["memory_id"]: card for card in cards}
+            result = []
+            for row in rows[:limit]:
+                memory_id, revision = _row_value(row, "memory_id", 0), _row_value(row, "content_hash", 1)
+                card = by_id.get(memory_id)
+                if card and card["content_hash"] == revision:
+                    result.append({**card, "_fact_retrieval": True, "_fact_candidates_truncated": len(rows) > limit})
+            return result
+
     def list_authorized_cards(
         self, *, project: str, memory_ids: list[str] | None = None,
         as_of: datetime | date | str | None = None, limit: int = 100,
@@ -2010,6 +2046,7 @@ class PgVectorStore:
                     )
                     UPDATE graph_projection_outbox AS job
                        SET status = 'processing',
+                           lease_generation = job.lease_generation + 1,
                            worker_id = %s,
                            claimed_at = NOW(),
                            lease_until = NOW() + (%s * INTERVAL '1 second'),
@@ -2020,7 +2057,7 @@ class PgVectorStore:
                               job.source_revision, job.content_hash, job.episode_payload,
                               job.status, job.claimed_at, job.lease_until,
                               job.worker_id, job.retry_count, job.last_error,
-                              job.created_at, job.updated_at
+                              job.created_at, job.updated_at, job.lease_generation
                     """,
                     (
                         OUTBOX_RETRY_LIMIT,
@@ -2037,8 +2074,11 @@ class PgVectorStore:
         self,
         projection_id: int,
         worker_id: str,
+        lease_generation: int | None = None,
     ) -> None:
         """Mark a graph projection job completed after successful projection."""
+        if type(lease_generation) is not int or lease_generation < 1:
+            raise ValueError("graph projection lease generation required")
         with self._scope(write=True) as db:
             with db.cursor() as cur:
                 cur.execute(
@@ -2049,8 +2089,9 @@ class PgVectorStore:
                      WHERE projection_id = %s
                        AND worker_id = %s
                        AND status = 'processing'
+                       AND lease_generation = %s AND lease_until > clock_timestamp()
                     """,
-                    (int(projection_id), str(worker_id)),
+                    (int(projection_id), str(worker_id), lease_generation),
                 )
                 if cur.rowcount == 0:
                     raise ValueError(f"graph projection job {projection_id} not owned or not processing")
@@ -2062,12 +2103,15 @@ class PgVectorStore:
         max_retries: int = OUTBOX_RETRY_LIMIT,
         *,
         worker_id: str | None = None,
+        lease_generation: int | None = None,
     ) -> None:
         """Record graph projection failure, schedule retry, or move to dead letter."""
         if max_retries < 1:
             raise ValueError("max_retries must be positive")
         if not worker_id:
             raise ValueError("outbox failure requires worker_id")
+        if type(lease_generation) is not int or lease_generation < 1:
+            raise ValueError("graph projection lease generation required")
         with self._scope(write=True) as db:
             with db.cursor() as cur:
                 params: list[Any] = [
@@ -2076,6 +2120,7 @@ class PgVectorStore:
                     int(max_retries),
                     int(projection_id),
                     str(worker_id),
+                    lease_generation,
                 ]
                 cur.execute(
                     """
@@ -2094,6 +2139,7 @@ class PgVectorStore:
                      WHERE projection_id = %s
                        AND worker_id = %s
                        AND status = 'processing'
+                       AND lease_generation = %s AND lease_until > clock_timestamp()
                     """,
                     params,
                 )
@@ -2118,7 +2164,7 @@ class PgVectorStore:
                     SELECT projection_id, source_type, source_id, source_revision,
                            content_hash, episode_payload, status, claimed_at,
                            lease_until, worker_id, retry_count, last_error,
-                           created_at, updated_at
+                           created_at, updated_at, lease_generation
                       FROM graph_projection_outbox
                     """
                     + where
@@ -2555,6 +2601,7 @@ def _graph_outbox_from_row(row: Any) -> GraphOutboxJob:
         source_revision=str(_row_value(row, "source_revision", 3)),
         content_hash=str(_row_value(row, "content_hash", 4)),
         episode_payload=payload,
+        lease_generation=int(_row_value(row, "lease_generation", 14) or 0),
         status=str(_row_value(row, "status", 6)),
         claimed_at=_as_optional_datetime(_row_value(row, "claimed_at", 7)),
         lease_until=_as_optional_datetime(_row_value(row, "lease_until", 8)),

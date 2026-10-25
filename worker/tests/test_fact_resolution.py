@@ -19,11 +19,12 @@ from agent_knowledge.session_memory.brain_steward import BrainStewardService
 
 
 @pytest.fixture
-def facts(tmp_path, isolated_pg_store):
+def facts(tmp_path, isolated_pg_store, request):
     store = isolated_pg_store
     ledger = Ledger(tmp_path / "ledger.sqlite")
     steward = BrainStewardService(ledger, pgvector_store=store, allow_restricted=True)
-    scope = FactScope("fact-test", "neurons", "main", "test", "correction", "status")
+    project = request.param if isinstance(getattr(request, "param", None), str) else "fact-test"
+    scope = FactScope(project, "neurons", "main", "test", "correction", "status")
     span = {"card_type": "status", "project": scope.project, "provider": "codex", "scope": "project",
         "title": "교정 상태", "redacted_summary": "기능 상태: missing; 배포는 별도 확인이 필요하다.",
         "typed_payload": {"status_value": "missing", "observed_at": utc_now_iso(),

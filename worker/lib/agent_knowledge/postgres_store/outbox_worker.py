@@ -260,6 +260,7 @@ class GraphProjectionWorker:
                 self.store.mark_graph_projection_completed(
                     projection_id=job.projection_id,
                     worker_id=self.worker_id,
+                    lease_generation=job.lease_generation,
                 )
             except Exception as e:
                 self.last_batch_failed += 1
@@ -275,6 +276,7 @@ class GraphProjectionWorker:
                         error_message=type(e).__name__,
                         max_retries=self.max_retries,
                         worker_id=self.worker_id,
+                        lease_generation=job.lease_generation,
                     )
                 except ValueError as lease_error:
                     logger.warning(

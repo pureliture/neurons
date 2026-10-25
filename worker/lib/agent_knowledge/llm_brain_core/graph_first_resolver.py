@@ -330,7 +330,7 @@ class GraphFirstResolver:
             fallback_cards, error_code, fallback_used, fallback_join = self._fallback_cards(request)
             if fallback_cards is not None:
                 cards = _dedupe_cards([*graph_cards, *fallback_cards])
-                retrieval_path = "graph_neo4j" if graph_cards else "pgvector_fallback"
+                retrieval_path = "graph_neo4j" if graph_cards else _fallback_path(cards)
                 return self._serialize(
                     request,
                     cards,
@@ -364,10 +364,10 @@ class GraphFirstResolver:
             )
         if (
             not graph_cards
-            and join_status == "verified"
             and not request.as_of
-            and self._embed_query is not None
-            and callable(getattr(self._store, "search_session_chunks", None))
+            and (callable(getattr_static(self._store, "search_current_fact_cards", None))
+                 or (join_status == "verified" and self._embed_query is not None
+                     and callable(getattr(self._store, "search_session_chunks", None))))
         ):
             fallback_cards, _, fallback_used, fallback_join = self._fallback_cards(request)
             if fallback_cards:
@@ -375,7 +375,7 @@ class GraphFirstResolver:
                     request,
                     fallback_cards,
                     metadata=self._metadata(
-                        retrieval_path="pgvector_fallback",
+                        retrieval_path=_fallback_path(fallback_cards),
                         graph_status="available",
                         authority_join_status=fallback_join,
                         fallback_used=fallback_used,
@@ -549,7 +549,7 @@ class GraphFirstResolver:
             request,
             cards,
             metadata=self._metadata(
-                retrieval_path="pgvector_fallback",
+                retrieval_path=_fallback_path(cards),
                 graph_status=graph_status,
                 authority_join_status=join_status,
                 fallback_used=fallback_used,
@@ -558,12 +558,23 @@ class GraphFirstResolver:
         )
 
     def _fallback_cards(self, request: _ResolveRequest) -> tuple[list[dict[str, Any]] | None, str | None, bool, str]:
+        fact_cards = []
+        if not request.as_of and callable(getattr_static(self._store, "search_current_fact_cards", None)):
+            try:
+                fact_cards = self._store.search_current_fact_cards(project=request.project, query=request.query,
+                    limit=_CARD_LIMIT)
+            except Exception:
+                return None, "fact_authority_unavailable", False, "unavailable"
+        def fact_only(reason):
+            if fact_cards:
+                return [{**card, "_embedding_gap": reason} for card in fact_cards], None, True, "verified"
+            return None, "embedding_unavailable" if reason == "unavailable" else "authority_store_unavailable", False, "unavailable"
         if self._embed_query is None:
-            return None, "embedding_unavailable", False, "unavailable"
+            return fact_only("unavailable")
         try:
             vector = self._embed_query(request.query)
         except Exception:
-            return None, "embedding_unavailable", False, "unavailable"
+            return fact_only("unavailable")
         try:
             ranked = self._store.hybrid_search(
                 project=request.project,
@@ -574,6 +585,8 @@ class GraphFirstResolver:
                 steward_only=True,
             )
         except Exception:
+            if fact_cards:
+                return fact_only("search_failed")
             return None, "authority_store_unavailable", True, "unavailable"
         # Reuse brain.query's lexical coverage and finite semantic threshold.
         # SQL's blended ranking score is not the raw cosine similarity.
@@ -587,9 +600,9 @@ class GraphFirstResolver:
         ]
         rank_keys = [
             (str(card.get("memory_id") or ""), str(card.get("content_hash") or ""))
-            for card in ranked
+            for card in [*fact_cards, *ranked]
         ]
-        rank_keys = list(dict.fromkeys(key for key in rank_keys if key[0] and key[1]))
+        rank_keys = list(dict.fromkeys(key for key in rank_keys if key[0] and key[1]))[:_CARD_LIMIT]
         try:
             authorized = self._store.list_authorized_cards(
                 project=request.project,
@@ -603,12 +616,15 @@ class GraphFirstResolver:
         by_id = {str(card.get("memory_id") or ""): dict(card) for card in authorized}
         # A vector hit is only a ranking hint. Recheck its hash after the
         # authority round trip so a concurrent replacement cannot leak stale data.
+        fact_ids = {card["memory_id"] for card in fact_cards}
+        fact_truncated = any(card.get("_fact_candidates_truncated") for card in fact_cards)
         cards = [
-            by_id[memory_id]
+            {**by_id[memory_id], **({"_fact_retrieval": True, "_fact_candidates_truncated": fact_truncated}
+                if memory_id in fact_ids else {})}
             for memory_id, content_hash in rank_keys
             if memory_id in by_id and str(by_id[memory_id].get("content_hash") or "") == content_hash
         ]
-        join_status = "verified" if len(cards) == len(ranked) else "mismatch"
+        join_status = "verified" if len(cards) == len(rank_keys) else "mismatch"
         if not cards and callable(getattr(self._store, "search_session_chunks", None)):
             chunk_cards = self._session_chunk_cards(request, vector)
             if chunk_cards:
@@ -719,6 +735,13 @@ class GraphFirstResolver:
                 type(metadata.get("fact_generation")) is not int
                 or metadata["fact_generation"] < request.min_fact_generation):
             return self._error_payload(request, error_code="fact_generation_unavailable")
+        if any(card.get("_fact_retrieval") for card in deduped):
+            metadata = {**metadata, "fact_fallback_used": True}
+        if any(card.get("_fact_candidates_truncated") for card in deduped):
+            metadata = {**metadata, "fact_candidates_truncated": True}
+        gaps = sorted({card["_embedding_gap"] for card in deduped if card.get("_embedding_gap")})
+        if gaps:
+            metadata = {**metadata, "embedding_search_status": gaps[0]}
         _detect_cross_card_conflicts(deduped, request.as_of)
         if any(c.get("authority_source") == "postgres" for c in deduped):
             metadata = {**metadata, "authority_source": "postgres"}
@@ -1765,6 +1788,10 @@ def _lag(value: Any) -> int | None:
         return max(0, int(value))
     except (TypeError, ValueError):
         return None
+
+
+def _fallback_path(cards):
+    return "pg_fact_fallback" if any(card.get("_fact_retrieval") for card in cards) else "pgvector_fallback"
 
 
 def _fingerprint(request: _ResolveRequest, cards: list[dict[str, Any]], *, fact_generation=None) -> str:

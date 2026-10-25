@@ -460,7 +460,7 @@ def _graph_job(episode_payload):
         return episode_payload.get(name, default) if isinstance(episode_payload, dict) else default
 
     return GraphOutboxJob(
-        projection_id=1,
+        projection_id=1, lease_generation=1,
         source_type="memory_card",
         source_id=_field("memory_id") or _field("authority_memory_id") or _field("source_id"),
         source_revision=_field("content_hash"),
@@ -553,7 +553,7 @@ def test_graph_projection_worker_does_not_complete_unpersisted_episode(outcome):
             self.failed = 0
 
         def claim_graph_projection_leases(self, **_kwargs):
-            return [SimpleNamespace(projection_id=1, episode_payload=_card_outbox_payload())]
+            return [SimpleNamespace(projection_id=1, lease_generation=1, episode_payload=_card_outbox_payload())]
 
         def mark_graph_projection_completed(self, **_kwargs):
             self.completed += 1
