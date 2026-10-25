@@ -5,7 +5,7 @@ import re
 
 from ...redaction import redact_text_v2
 from ..transcript_model import ToolEvidenceSummaryRecord
-from .common import _sha256
+from .common import TOOL_EVIDENCE_EXTRACTOR_VERSION, _sha256
 
 _FILE_VIEW_VERBS = {"nl", "sed", "cat", "head", "tail", "less", "more", "bat", "tac"}
 
@@ -305,6 +305,7 @@ def _build_evidence_records(
                 source_event_id_hash=str(item.get("source_event_id_hash") or ""),
                 source_content_hash=str(item.get("source_content_hash") or ""),
                 source_event_index=item.get("source_event_index"),
+                extractor_version=TOOL_EVIDENCE_EXTRACTOR_VERSION,
             )
         )
     return records

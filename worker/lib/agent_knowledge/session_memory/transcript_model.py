@@ -296,6 +296,7 @@ class ToolEvidenceSummaryRecord:
     source_content_hash: str = ""
     observation_id_hash: str = ""
     source_event_index: int | None = None
+    extractor_version: str = "unknown"
 
     def __post_init__(self) -> None:
         command_summary = redact_and_bound_evidence_text(self.command_summary, MAX_TOOL_EVIDENCE_COMMAND_CHARS)
@@ -313,7 +314,9 @@ class ToolEvidenceSummaryRecord:
         if self.source_event_id_hash:
             identity_parts = [TOOL_EVIDENCE_SUMMARY_RECORD_TYPE, self.project, self.session_id_hash,
                 self.source_event_id_hash, self.source_content_hash, self.category,
-                self.outcome, command_summary, content_hash, self.redaction_version]
+                self.outcome, command_summary, content_hash, self.redaction_version, self.extractor_version]
+        elif self.extractor_version != "unknown":
+            identity_parts.extend([self.project, self.extractor_version, self.redaction_version])
         evidence_id_hash = _sha256("|".join(identity_parts))
         object.__setattr__(self, "evidence_id_hash", evidence_id_hash)
         for field_name in ("source_event_id_hash", "source_content_hash"):
@@ -324,6 +327,8 @@ class ToolEvidenceSummaryRecord:
             raise ValueError("tool observation event and content hashes must be supplied together")
         if self.source_event_index is not None and (type(self.source_event_index) is not int or self.source_event_index < 0):
             raise ValueError("tool observation index must be nonnegative")
+        if not isinstance(self.extractor_version, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", self.extractor_version):
+            raise ValueError("tool evidence extractor version required")
         # 표현·분류·chunk 위치가 변해도 native event의 관측 identity는 보존한다.
         # anchor가 없는 옛/다른 provider 기록을 내용 유사성으로 합치지 않는다.
         observation = (_sha256(f"tool_observation.v1:{self.session_id_hash}:{self.source_event_id_hash}")

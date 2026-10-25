@@ -1566,6 +1566,7 @@ class Ledger(
                     source_content_hash TEXT NOT NULL DEFAULT '',
                     observation_id_hash TEXT NOT NULL DEFAULT '',
                     source_event_index INTEGER,
+                    extractor_version TEXT NOT NULL DEFAULT 'unknown',
                     knowledge_id TEXT DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'prepared',
                     created_at TEXT NOT NULL,
@@ -1767,6 +1768,7 @@ class Ledger(
             for observation_column in ("source_event_id_hash", "source_content_hash", "observation_id_hash"):
                 _ensure_column(connection, "tool_evidence_summaries", observation_column, "TEXT NOT NULL DEFAULT ''")
             _ensure_column(connection, "tool_evidence_summaries", "source_event_index", "INTEGER")
+            _ensure_column(connection, "tool_evidence_summaries", "extractor_version", "TEXT NOT NULL DEFAULT 'unknown'")
             connection.execute("""CREATE INDEX IF NOT EXISTS idx_tool_evidence_observation
                 ON tool_evidence_summaries(project, observation_id_hash)""")
             _ensure_column(connection, "knowledge_items", "evidence_status", "TEXT DEFAULT 'historical'")
@@ -2628,8 +2630,8 @@ class Ledger(
                     category, outcome, tool_name, command_summary, redacted_summary,
                     content_hash, observed_at, evidence_index, redaction_version,
                     source_status, source_event_id_hash, source_content_hash, observation_id_hash,
-                    source_event_index, knowledge_id, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    source_event_index, extractor_version, knowledge_id, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(evidence_id_hash) DO UPDATE SET
                     session_id_hash=excluded.session_id_hash,
                     provider=excluded.provider,
@@ -2648,6 +2650,7 @@ class Ledger(
                     source_content_hash=excluded.source_content_hash,
                     observation_id_hash=excluded.observation_id_hash,
                     source_event_index=excluded.source_event_index,
+                    extractor_version=excluded.extractor_version,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -2669,6 +2672,7 @@ class Ledger(
                     data.get("source_content_hash", ""),
                     data.get("observation_id_hash", ""),
                     data.get("source_event_index"),
+                    data.get("extractor_version", "unknown"),
                     "",
                     "prepared",
                     now,

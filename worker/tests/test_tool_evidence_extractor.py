@@ -300,3 +300,18 @@ def test_project_reinterpretation_preserves_each_record_without_inventing_anothe
     ledger.upsert_tool_evidence_summary(record=another_project)
     assert len(ledger.list_tool_evidence_summaries(project=PROJECT, provider="codex")) == 1
     assert len(ledger.list_tool_evidence_summaries(project="other-project", provider="codex")) == 1
+
+
+def test_extractor_upgrade_creates_an_interpretation_version_not_another_observation(tmp_path):
+    from dataclasses import replace
+    from agent_knowledge.ledger import Ledger
+    original = _extract(tmp_path)[0]
+    assert original.extractor_version.endswith(".v2")
+    revised = replace(original, extractor_version="synthetic-extractor.v3")
+    assert revised.observation_id_hash == original.observation_id_hash
+    assert revised.evidence_id_hash != original.evidence_id_hash
+    ledger = Ledger(tmp_path / "versions.sqlite")
+    for record in (original, revised):
+        saved = ledger.upsert_tool_evidence_summary(record=record)
+        assert saved["extractor_version"] == record.extractor_version
+    assert len(ledger.list_tool_evidence_summaries(project=PROJECT, provider="codex")) == 2

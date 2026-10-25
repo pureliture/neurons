@@ -15,7 +15,7 @@ from ..transcript_model import (
 )
 
 PARSER_VERSION = "provider-transcript-parser.v1"
-TOOL_EVIDENCE_EXTRACTOR_VERSION = "codex-tool-evidence-extractor.v1"
+TOOL_EVIDENCE_EXTRACTOR_VERSION = "codex-tool-evidence-extractor.v2"
 GROK_PARSER_VERSION = "grok-updates-jsonl-parser.v1"
 MAX_LOCATOR_ADMISSION_BYTES = 256 * 1024 * 1024
 

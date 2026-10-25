@@ -6,7 +6,7 @@
 
 - 초기 `summary` 교정도 같은 사실의 typed payload를 함께 갱신한다. 지정된 사실의 정확한 표시 구간만 summary/render에서 바꾸며, 같은 카드의 다른 사실은 보존한다. 표시 구간을 유일하게 확인할 수 없으면 변경하지 않는다.
 - 단일 필드 검증으로 카드 전체를 최신으로 인증하지 않는다. 검증한 필드와 표시 구간을 별도로 기록하고, 다른 사실의 관측 시각·confidence·freshness를 올리지 않는다. 일반 freshness 재검증도 부분 검증을 전체 검증으로 승격하지 못한다. 처리 시각 차이가 멱등 candidate hash를 바꾸지 않는 것도 확인한다.
-- Codex native call ID와 session에 기반한 관측 anchor를, 분류·요약·내용 version에 따른 evidence ID와 분리했다. 필터링 순서나 chunk 관련 위치가 바뀌어도 같은 호출의 관측 identity는 유지한다. 실제 다른 호출이 같은 결과를 내면 독립 관측으로 유지한다. 같은 관측의 수정된 source와 해석은 별도 version으로 남긴다. SQLite·PostgreSQL ledger에 추가 column으로 보존하며 기존 anchor 없는 기록을 문장 유사성으로 합치지 않는다.
+- Codex native call ID와 session에 기반한 관측 anchor를, 분류·요약·내용 version에 따른 evidence ID와 분리했다. 필터링 순서나 chunk 관련 위치가 바뀌어도 같은 호출의 관측 identity는 유지한다. 실제 다른 호출이 같은 결과를 내면 독립 관측으로 유지한다. 같은 관측의 수정된 source와 해석은 별도 version으로 남긴다. extractor를 v2로 올리고 version도 ID와 ledger에 보존한다. 과거에 version을 저장하지 않은 기록은 임의로 v1/v2로 인증하지 않고 `unknown`으로 유지한다. SQLite·PostgreSQL ledger에 추가 column으로 보존하며 기존 anchor 없는 기록을 문장 유사성으로 합치지 않는다.
 - Git 근거 adapter는 server에 설정된 repository에서 immutable commit과 regular blob을 직접 읽어 SHA-256을 확인한다. traversal·symlink·과도한 크기·hash 불일치를 거부한다. 현재 branch/head를 확인하고, 같은 source를 쓰기 전 다시 확인할 수 있다. 오래된 source와 실제 후속 변경은 시각 대신 commit ancestry로 비교한다. clock이 거꾸로 가는 경우와 갈라진 branch도 실제 로컬 Git으로 검사했다. 이 adapter의 Ubuntu 배포·교정 연결은 아직 수행하지 않았다.
 - OpenRouter Decisions의 typed 연결과 검증을 제품 module로 구현했다. timeout·인증·quota·rate limit·잘못된 JSON·확률·model 치환을 명시적 실패로 처리한다. 자동 fallback과 authority write는 없다. 근거 관련성·직접 지지·명시적 반증을 독립 명제로 묻고, 질문·정책·source revision·model을 fingerprint에 결속한다. 적용 임계값에는 검증한 profile을 별도로 제공해야 한다.
 
@@ -39,6 +39,6 @@ native anchor는 source 인증 자체가 아니다. 여전히 기존 source admi
 - `uv run pytest -q tests/test_evidence_correction.py`: 별도 실제 PG에서 **40 passed**. 표시 구간 보존까지 포함한 검사다.
 - `uv run pytest -q tests/test_evidence_correction.py::test_pg_summary_correction_does_not_mark_unverified_fields_current tests/test_pg_freshness_revalidate_cli.py`: canonical 전용 DB에서 **10 passed**. 부분 검증 대상의 전체 freshness 승격 거부와 제외 건수 보고도 확인했다.
 - `uv run pytest -q tests/test_pg_parity.py`: 별도 ledger 전용 DB에서 **9 passed**. native 관측의 두 source version 보존도 포함한다.
-- worker 전체 검사: **5243 passed, 624 skipped, 4 warnings**. 환경 선택형 skip은 실증으로 세지 않는다. opt-in PG 검사는 위와 같이 별도 실행했다.
+- worker 전체 검사: **5244 passed, 624 skipped, 4 warnings**. 환경 선택형 skip은 실증으로 세지 않는다. opt-in PG 검사는 위와 같이 별도 실행했다. extractor version 보존의 최종 PG 회귀도 별도로 실행했다.
 - Java `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`: **BUILD SUCCESSFUL**.
 - `git diff --check`: 통과.
