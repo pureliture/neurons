@@ -589,6 +589,7 @@ def build_tool_evidence_bundle_document(
     evidence_index_end: int,
     record_content_hashes: Iterable[str],
     body: str,
+    observation_refs: Iterable[Mapping] = (),
     observed_at_start: str = "",
     observed_at_end: str = "",
     source_locator_hash: str = "",
@@ -629,6 +630,15 @@ def build_tool_evidence_bundle_document(
             "body": body,
         }
     )
+    references = list(observation_refs)
+    if references:
+        from ..session_memory.observation_refs import validate, coverage_hash
+        references = validate(references, body=body, session_id_hash=session_id_hash,
+            provider=doc["provider"], project=doc["project"])
+        if len(references) != len(member_hashes) or [item["record_content_hash"] for item in references] != member_hashes:
+            raise ValueError("observation reference coverage mismatch")
+        doc["observation_refs"] = references
+        doc["coverage_hash"] = coverage_hash(member_hashes, references)
     return _finalize(doc)
 
 

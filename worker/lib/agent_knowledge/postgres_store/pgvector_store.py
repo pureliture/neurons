@@ -1021,6 +1021,51 @@ class PgVectorStore:
             raise ValueError("PG ready chunk identity is not unique")
         return _chunk_from_row(rows[0])
 
+    def put_chunk_source_provenance(self, *, chunk_id, source_hash, canonical_body, observation_refs,
+                                    session_id_hash, provider, project, conn=None):
+        """본문을 복제하지 않고 source version별 관측 참조를 불변 저장한다.
+
+        저장은 admission/현재성 인증이 아니다. 사용 시 Couch active revision과 대조해야 한다.
+        span 좌표는 representation이 아닌 canonical session source의 문자 위치다.
+        """
+        from ..public_safe_util import hash_payload, require_sha256
+        from ..session_memory.observation_refs import validate, digest
+        require_sha256(source_hash, "source revision")
+        references = validate(observation_refs, body=canonical_body, session_id_hash=session_id_hash,
+            provider=provider, project=project)
+        with self._scope(conn=conn, write=conn is None and self.connection is None) as db:
+            row = db.execute("SELECT session_id_hash,provider,project,content_hash FROM session_memory_chunks WHERE chunk_id=%s",
+                (chunk_id,)).fetchone()
+            if not row or tuple(_row_value(row, name, i) for i, name in enumerate(("session_id_hash", "provider", "project"))) != (
+                    session_id_hash, provider, project):
+                raise ValueError("chunk provenance scope mismatch")
+            payload = {"chunk_id": chunk_id, "source_hash": source_hash, "source_content_hash": digest(canonical_body),
+                "representation_content_hash": _row_value(row, "content_hash", 3), "observation_refs": references}
+            proof = hash_payload(payload)
+            db.execute("""INSERT INTO session_memory_chunk_sources
+                (chunk_id,source_hash,source_content_hash,representation_content_hash,observation_refs,provenance_hash)
+                VALUES (%s,%s,%s,%s,%s::jsonb,%s) ON CONFLICT(chunk_id,source_hash) DO NOTHING""",
+                (chunk_id, source_hash, payload["source_content_hash"], payload["representation_content_hash"],
+                    _json_text(references), proof))
+            stored = db.execute("SELECT provenance_hash FROM session_memory_chunk_sources WHERE chunk_id=%s AND source_hash=%s",
+                (chunk_id, source_hash)).fetchone()
+            if not stored or _row_value(stored, "provenance_hash", 0) != proof:
+                raise ValueError("immutable chunk provenance conflict")
+            return {**payload, "provenance_hash": proof, "coordinate_space": "canonical_session_source"}
+
+    def get_chunk_source_provenance(self, *, project, chunk_ids, conn=None):
+        if not project or not isinstance(chunk_ids, list) or not 1 <= len(chunk_ids) <= 100:
+            raise ValueError("bounded project chunk identities required")
+        with self._scope(conn=conn) as db:
+            with db.cursor() as cur:
+                cur.execute("""SELECT p.chunk_id,p.source_hash,p.source_content_hash,p.representation_content_hash,
+                    p.observation_refs,p.provenance_hash,c.session_id_hash,c.provider,c.project
+                    FROM session_memory_chunk_sources p JOIN session_memory_chunks c ON c.chunk_id=p.chunk_id
+                    WHERE c.project=%s AND c.chunk_id=ANY(%s) ORDER BY p.chunk_id,p.source_hash""", (project, chunk_ids))
+                names = [col.name for col in cur.description]
+                return [{**(dict(row) if isinstance(row, Mapping) else dict(zip(names, row))),
+                    "coordinate_space": "canonical_session_source"} for row in cur.fetchall()]
+
     def search_session_chunks(
         self,
         query_vector: list[float],

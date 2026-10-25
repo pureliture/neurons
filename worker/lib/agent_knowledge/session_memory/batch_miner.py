@@ -49,7 +49,7 @@ def _batch_source_key(chunk: Mapping[str, Any], *, scope: str) -> str:
     return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _batch_response_schema(source_keys: Sequence[str]) -> dict[str, Any]:
+def _batch_response_schema(source_keys: Sequence[str], *, native_evidence=False) -> dict[str, Any]:
     """Generation aid for explicitly capable providers, never the trust gate."""
     from . import memory_card as contract
 
@@ -75,10 +75,14 @@ def _batch_response_schema(source_keys: Sequence[str]) -> dict[str, Any]:
                 properties[field] = {"type": ["string", "boolean"]}
             else:
                 properties[field] = {"type": "string"}
-        variants.append({"type": "object", "properties": {
+        candidate_properties = {
             "card_type": {"type": "string", "enum": [card_type]},
             "title": {"type": "string"}, "statement": {"type": "string"},
-            "typed_payload": {"type": "object", "properties": properties, "required": list(fields), "additionalProperties": False}},
+            "typed_payload": {"type": "object", "properties": properties, "required": list(fields), "additionalProperties": False}}
+        if native_evidence:
+            candidate_properties["evidence_id_hashes"] = {"type": "array", "maxItems": 20,
+                "items": {"type": "string", "pattern": r"^sha256:[0-9a-f]{64}$"}}
+        variants.append({"type": "object", "properties": candidate_properties,
             "required": ["card_type", "title", "statement", "typed_payload"], "additionalProperties": False})
     return {"type": "array", "minItems": len(source_keys), "maxItems": len(source_keys),
             "items": {"type": "object", "properties": {
@@ -287,9 +291,9 @@ def plan_batches(
 def _chunk_text_length(chunk: Mapping[str, Any]) -> int:
     if not isinstance(chunk, Mapping):
         return 0
-    metadata = chunk.get("metadata") if isinstance(chunk.get("metadata"), Mapping) else {}
-    body = str(chunk.get("redacted_text") or chunk.get("content") or "")
-    return len(body)
+    from .llm_brain_miner import _chunk_body, _observation_prompt
+    body = _chunk_body(chunk)
+    return len(body) + len(_observation_prompt(chunk, body))
 
 
 class BatchedEnvelopeMiner:
@@ -393,15 +397,23 @@ class BatchedEnvelopeMiner:
         # One request asks for exactly as many items as there are chunks, in
         # the same order, so the reply can be mapped back deterministically.
         blocks = []
+        visible_ids = []
         source_keys = [_batch_source_key(chunk, scope=self._scope) for chunk in batch]
         if len(set(source_keys)) != len(source_keys):
             raise BatchExtractionError("batch input contains duplicate source identities")
         max_chunk_chars = max(4000, int(self._max_call_chars or DEFAULT_MAX_CALL_CHARS))
+        from .llm_brain_miner import _bounded_chunk_prompt, _chunk_observations, _chunk_body
         for index, chunk in enumerate(batch):
-            body = str(chunk.get("redacted_text") or chunk.get("content") or "")
-            if len(body) > max_chunk_chars:
+            body = _chunk_body(chunk)
+            if _chunk_observations(chunk):
+                body, ids = _bounded_chunk_prompt(chunk, max_chars=max_chunk_chars, include_ids=True)
+            elif len(body) > max_chunk_chars:
                 half = max_chunk_chars // 2
                 body = body[:half] + "\n...[truncated]...\n" + body[-half:]
+                ids = set()
+            else:
+                ids = set()
+            visible_ids.append(ids)
             blocks.append(f"### SESSION {index}\nSOURCE_KEY: {source_keys[index]}\n{body}")
         user_content = (
             f"Below are {len(batch)} redacted work sessions. Return a JSON array of "
@@ -429,6 +441,8 @@ class BatchedEnvelopeMiner:
             "title, statement, and typed_payload. Prefer card_type 'task' or 'status' when a session "
             "describes active implementation progress, completed milestones, or current work state. "
             "Preserve the meaning of that session only. "
+            "When AVAILABLE_EVIDENCE_REFS exists, optionally include evidence_id_hashes with up to 20 listed IDs "
+            "whose source spans support this candidate; use [] for conversation-only claims. Never invent IDs. "
             "typed_payload fields: " + _TYPED_PAYLOAD_SCHEMAS + ". " + _typed_payload_value_guide() + " "
             "Do not return raw source locators or source content hashes. "
             "EXAMPLE:\n" + json.dumps(example, separators=(",", ":"))
@@ -438,10 +452,17 @@ class BatchedEnvelopeMiner:
             {"role": "user", "content": user_content},
         ]
         structured = getattr(self._completion_fn, "complete_batch", None)
-        raw = structured(messages, _batch_response_schema(source_keys)) if callable(structured) else self._completion_fn(messages)
+        raw = structured(messages, _batch_response_schema(source_keys,
+            native_evidence=any(_chunk_observations(chunk) for chunk in batch))) if callable(structured) else self._completion_fn(messages)
         # Even provider-constrained output is checked for exact source/order,
         # payload validity and privacy. Never repair missing or shifted slots.
-        return _parse_batch_items(raw, source_keys)
+        items = _parse_batch_items(raw, source_keys)
+        for item, allowed in zip(items, visible_ids):
+            if item is not None and "evidence_id_hashes" in item:
+                selected = item["evidence_id_hashes"]
+                if (not isinstance(selected, list) or any(not isinstance(key, str) or key not in allowed for key in selected)):
+                    raise BatchExtractionError("candidate native evidence reference was not shown")
+        return items
 
     def _candidate_for(
         self,
@@ -456,8 +477,13 @@ class BatchedEnvelopeMiner:
         from .llm_brain_miner import _chunk_source_provenance
         from .memory_miner import build_memory_card_candidate_from_source_span
 
-        source_span = _chunk_source_provenance(chunk, scope=self._scope, span_index=span_index)
-        body = str(chunk.get("redacted_text") or chunk.get("content") or "")
+        from .llm_brain_miner import _chunk_body
+        try:
+            source_span = _chunk_source_provenance(chunk, scope=self._scope, span_index=span_index,
+                evidence_id_hashes=item.get("evidence_id_hashes"))
+        except (ValueError, KeyError, TypeError):
+            raise BatchExtractionError("candidate native evidence reference is not grounded") from None
+        body = _chunk_body(chunk)
         if not (body and source_span["project"] and source_span["content_hash"]):
             raise BatchExtractionError("batch source is invalid")
         try:

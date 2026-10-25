@@ -806,6 +806,7 @@ def test_real_core_apply_and_duplicate_new_plan_are_idempotent(lane, capsys):
         def __init__(self):
             super().__init__()
             self.rows = {}
+            self.provenance = {}
         def get_chunk(self, chunk_id, conn=None):
             return deepcopy(self.rows.get(chunk_id))
         @contextmanager
@@ -822,6 +823,12 @@ def test_real_core_apply_and_duplicate_new_plan_are_idempotent(lane, capsys):
             assert insert_only is True and row.chunk_id not in self.rows
             self.writes += 1
             self.rows[row.chunk_id] = deepcopy(row)
+        def put_chunk_source_provenance(self, **kwargs):
+            assert kwargs["conn"] is self
+            assert kwargs["chunk_id"] in self.rows
+            key = (kwargs["chunk_id"], kwargs["source_hash"])
+            payload = {k: deepcopy(v) for k, v in kwargs.items() if k != "conn"}
+            assert self.provenance.setdefault(key, payload) == payload
     boundary.sql = SyntheticSQL()
     assert invoke(lane, capsys)[0] == 0
     approve(lane)
@@ -829,6 +836,7 @@ def test_real_core_apply_and_duplicate_new_plan_are_idempotent(lane, capsys):
     receipt = deepcopy(boundary.source.get(dm.projection_state_doc_id(boundary.sid)))
     assert receipt["backend_receipts"]["postgres_pgvector"]["receipt_version"] == 2
     assert boundary.sql.writes == 1
+    assert len(boundary.sql.provenance) == 1
     # An old absent-target plan cannot authorize a repeated apply after target mutation.
     assert invoke(lane, capsys, ["--apply"])[0] == 1
     argv[argv.index("--manifest") + 1] = str(path / "second-manifest.json")

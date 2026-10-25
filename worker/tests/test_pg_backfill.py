@@ -195,6 +195,7 @@ def test_live_projector_creates_ready_chunk():
         projector.close()
         with store.transaction() as conn:
             with conn.cursor() as cur:
+                cur.execute("DELETE FROM session_memory_chunk_sources WHERE chunk_id = %s", (chunk_id,))
                 cur.execute(
                     "DELETE FROM session_memory_chunks WHERE chunk_id = %s",
                     (chunk_id,),
@@ -239,6 +240,7 @@ def test_live_repeat_same_revision_preserves_ready_vector():
         projector.close()
         with store.transaction() as conn:
             with conn.cursor() as cur:
+                cur.execute("DELETE FROM session_memory_chunk_sources WHERE chunk_id = %s", (chunk_id_1,))
                 cur.execute(
                     "DELETE FROM session_memory_chunks WHERE chunk_id = %s",
                     (chunk_id_1,),
@@ -310,6 +312,7 @@ def test_live_reuses_ready_chunk_with_legacy_id_without_embedding():
         projector.close()
         with store.transaction() as conn:
             with conn.cursor() as cur:
+                cur.execute("DELETE FROM session_memory_chunk_sources WHERE chunk_id IN (SELECT chunk_id FROM session_memory_chunks WHERE project=%s)", (doc["project"],))
                 cur.execute(
                     "DELETE FROM session_memory_chunks WHERE project = %s",
                     (doc["project"],),
@@ -351,6 +354,7 @@ def test_live_changed_source_hash_reuses_ready_content_vector():
         projector.close()
         with store.transaction() as conn:
             with conn.cursor() as cur:
+                cur.execute("DELETE FROM session_memory_chunk_sources WHERE chunk_id = %s", (chunk_id_v1,))
                 cur.execute(
                     "DELETE FROM session_memory_chunks WHERE chunk_id = %s",
                     (chunk_id_v1,),
@@ -392,6 +396,7 @@ def test_live_different_projects_produce_different_ids():
         projector.close()
         with store.transaction() as conn:
             with conn.cursor() as cur:
+                cur.execute("DELETE FROM session_memory_chunk_sources WHERE chunk_id IN (%s,%s)", (chunk_id_a, chunk_id_b))
                 cur.execute(
                     "DELETE FROM session_memory_chunks WHERE chunk_id IN (%s, %s)",
                     (chunk_id_a, chunk_id_b),

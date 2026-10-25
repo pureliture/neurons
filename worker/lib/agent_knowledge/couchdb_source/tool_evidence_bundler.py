@@ -38,15 +38,29 @@ from ..session_memory.transcript_model import (
 from ..session_memory.transcript_packer import chunk_tool_evidence_records
 
 
-def _bundle_body(records: list[ToolEvidenceSummaryRecord]) -> str:
-    lines: list[str] = []
+def _bundle_material(records: list[ToolEvidenceSummaryRecord]) -> tuple[str, list[dict]]:
+    from ..session_memory.observation_refs import from_record
+    blocks, positions = [], []
+    offset = 0
     for record in records:
-        lines.append(f"### {record.evidence_index} {record.category}/{record.outcome}")
-        lines.append(f"- tool: {record.tool_name}")
-        lines.append(f"- command: {record.command_summary}")
-        lines.append(f"- result: {record.redacted_summary}")
-        lines.append("")
-    return "\n".join(lines).rstrip() + "\n"
+        prefix = (f"### {record.evidence_index} {record.category}/{record.outcome}\n"
+            f"- tool: {record.tool_name}\n- command: {record.command_summary}\n- result: ")
+        start = offset + len(prefix)
+        positions.append((record, start, start + len(record.redacted_summary.rstrip())))
+        block = prefix + record.redacted_summary + "\n\n"
+        blocks.append(block)
+        offset += len(block)
+    body = "".join(blocks).rstrip() + "\n"
+    refs = []
+    if any(record.observation_id_hash or record.extractor_version != "unknown" for record in records):
+        for record, start, end in positions:
+            start, end = min(start, len(body.rstrip("\n"))), min(end, len(body.rstrip("\n")))
+            refs.append(from_record(record, body=body, start=start, end=end))
+    return body, refs
+
+
+def _bundle_body(records: list[ToolEvidenceSummaryRecord]) -> str:
+    return _bundle_material(records)[0]
 
 
 def build_tool_evidence_bundle_documents(
@@ -65,6 +79,8 @@ def build_tool_evidence_bundle_documents(
     session_ids = {record.session_id_hash for record in ordered}
     if len(session_ids) != 1:
         raise ValueError("tool evidence bundling is per-session; mixed session_id_hash given")
+    if len({(record.project, record.provider) for record in ordered}) != 1:
+        raise ValueError("tool evidence bundling requires one project/provider scope")
 
     sized_parts = chunk_tool_evidence_records(ordered, max_chars=max_chars)
     # A bundle is the smallest temporal relevance unit downstream.  Never put
@@ -89,6 +105,7 @@ def build_tool_evidence_bundle_documents(
     part_count = len(parts)
     docs: list[dict] = []
     for part_index, part in enumerate(parts, start=1):
+        body, observation_refs = _bundle_material(part)
         interval = normalize_observed_interval(
             str(part[0].observed_at or ""),
             str(part[0].observed_at or ""),
@@ -104,7 +121,8 @@ def build_tool_evidence_bundle_documents(
                 evidence_index_start=min(record.evidence_index for record in part),
                 evidence_index_end=max(record.evidence_index for record in part),
                 record_content_hashes=[record.content_hash for record in part],
-                body=_bundle_body(part),
+                body=body,
+                observation_refs=observation_refs,
                 observed_at_start=observed_at_start,
                 observed_at_end=observed_at_end,
             )

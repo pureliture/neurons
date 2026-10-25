@@ -459,3 +459,15 @@ CREATE TABLE IF NOT EXISTS lbrain_fact_batches (
 -- graph/embedding 반영 전에도 관련된 현재 fact만 indexed lexical 후보로 회수한다.
 CREATE INDEX IF NOT EXISTS idx_memory_cards_fact_text ON memory_cards USING GIN
     (to_tsvector('simple', coalesce(title,'') || ' ' || coalesce(summary,'')));
+
+-- source 본문은 CouchDB에 둔다. 같은 표현/벡터를 재사용해도 원천 version과 관측 참조는 보존한다.
+CREATE TABLE IF NOT EXISTS session_memory_chunk_sources (
+    chunk_id VARCHAR(64) NOT NULL REFERENCES session_memory_chunks(chunk_id),
+    source_hash VARCHAR(71) NOT NULL,
+    source_content_hash VARCHAR(71) NOT NULL,
+    representation_content_hash VARCHAR(71) NOT NULL,
+    observation_refs JSONB NOT NULL,
+    provenance_hash VARCHAR(71) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY(chunk_id,source_hash)
+);
