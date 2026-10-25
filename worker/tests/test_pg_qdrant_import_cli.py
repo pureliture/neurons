@@ -910,10 +910,11 @@ def actual_sql():
     try:
         # Session-local table shadows public; no persistent schema/data mutation.
         ddl = PgVectorStore.schema_sql()
-        table = ddl[ddl.index("CREATE TABLE IF NOT EXISTS session_memory_chunks ("):]
-        table = table[:table.index(";") + 1]
-        table = table.replace("CREATE TABLE IF NOT EXISTS", "CREATE TEMP TABLE", 1)
-        conn.execute(table)
+        for name in ("session_memory_chunks", "session_memory_chunk_sources"):
+            table = ddl[ddl.index(f"CREATE TABLE IF NOT EXISTS {name} ("):]
+            table = table[:table.index(";") + 1]
+            table = table.replace("CREATE TABLE IF NOT EXISTS", "CREATE TEMP TABLE", 1)
+            conn.execute(table)
         conn.commit()
         yield PgVectorStore(connection=conn), conn, dsn
     finally:
@@ -953,7 +954,7 @@ def test_actual_sql_readonly_batch_conflicts_and_equal_idempotence(lane, capsys,
     assert boundary.source.get(dm.projection_state_doc_id(boundary.sid)) == receipt
     conn.rollback()
     # Fresh absent canonical target: divergent vectors must reject before INSERT/CAS.
-    conn.execute("TRUNCATE session_memory_chunks")
+    conn.execute("TRUNCATE session_memory_chunk_sources, session_memory_chunks")
     conn.commit()
     boundary.source.delete(dm.projection_state_doc_id(boundary.sid))
     boundary.points[1]["vector"][0] = 1.001

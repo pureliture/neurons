@@ -57,3 +57,13 @@ native 관측 참조는 queue의 `trigger`에 남긴다. 이 참조는 검토를
 - 후속 변경의 worker 전체 `uv run pytest -q`: **5259 passed, 655 skipped, 4 warnings in 57.74s**. `git diff --check` 통과. Java source는 변경하지 않았다.
 
 정확한 서버 정책에 아직 연결되지 않은 신규 중복, 다른 writer의 승인, 일반 의미 target 검색, native 근거 자체의 현재 사실 검증, 철회/파생물/retention/실제 모델과 최종 운영 identity는 남아 있다.
+
+## PG contract CI의 추가 회귀 검사
+
+후속 PR CI에서 기존 session-memory fixture의 정리/고의 손실 주입과 session-local SQL fixture가 새 provenance FK를 고려하지 못한 실패를 확인했다. 테스트 소유 session의 연결을 먼저 정리하고, 물리적 행 순서 검사는 source 연결을 보존한 heap tuple 갱신으로 바꿨다. 임시 SQL은 chunk와 provenance 테이블을 함께 shadow하여 public FK를 잘못 참조하지 않게 했다. 제품 FK와 retention 제약은 완화하지 않았다.
+
+Ubuntu에서 CI와 동일한 25개 검사 모듈을 `ATLAS_QRET_SYNTHETIC_SQL=1`과 작업 전용 PG로 다시 실행했다. 첫 실행의 제품/SQL 검사는 통과했으나 이전 source 디렉터리에 남은 macOS 보조 파일 때문에 source 검사 한 건이 실패했다. 현재 bundle에 보조 파일이 없음을 확인하고, 기존 디렉터리를 보존한 채 새 디렉터리에 풀어 전체를 재실행했다.
+
+- 최종 전체 실행: **781 passed, 1 warning in 157.50s**. skip/xfail은 추가하지 않았다.
+- 새 디렉터리에 푼 source bundle SHA-256: `89f72c77ea2bf02a7d5d90ae2b2d1ff8becf83fba0dac6557c6b19e1b4897b87`.
+- 검증 image/source 주입 방식의 한계는 위와 같다. 이 결과는 최종 배포 image identity나 운영 DB 변경의 증거가 아니다.
