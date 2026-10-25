@@ -177,3 +177,24 @@ def test_real_graph_reverse_duplicate_and_expired_same_worker_lease(coordinator,
         project=c.f.scope.project, mode="query", query="기능 상태")
     assert [item["typed_payload"]["status_value"] for item in result["items"]] == ["ready"]
     assert result["items"][0]["id"] == head
+
+
+@pytest.mark.parametrize("facts", ["fact-old-query-" + uuid.uuid4().hex[:12]], indirect=True)
+def test_old_fact_query_does_not_return_superseded_session_claim(coordinator, facts, graph_adapter):
+    from agent_knowledge.postgres_store.pgvector_store import SessionChunk
+    from agent_knowledge.public_safe_util import sha256_text
+    c = coordinator
+    projector = GraphProjectionWorker(c.f.store, graph_adapter=graph_adapter, worker_id="old-query")
+    assert projector.run_once() == 1
+    task_id = c.service.submit(c.request)["changes"][0]["task_id"]
+    assert c.service.worker(project=c.f.scope.project, worker_id="correct").run_once(task_id=task_id)["state"] == "resolved"
+    projector.run_once()
+    head = c.service.result(task_id)["resolution"]["current"]["memory_id"]
+    body = "기능 상태: missing"
+    c.f.store.insert_chunk(SessionChunk(chunk_id="old_session_claim", project=c.f.scope.project,
+        session_id_hash=sha256_text(c.f.scope.project), content_markdown=body, content_hash=sha256_text(body),
+        embedding=make_dummy_vector(42), embedding_state="ready"))
+    result = GraphFirstResolver(store=c.f.store, graph_adapter=graph_adapter,
+        embed_query=lambda query: make_dummy_vector(42)).resolve(project=c.f.scope.project, mode="query", query="missing")
+    assert [item["id"] for item in result["items"]] == [head], result
+    assert result["items"][0]["typed_payload"]["status_value"] == "ready"

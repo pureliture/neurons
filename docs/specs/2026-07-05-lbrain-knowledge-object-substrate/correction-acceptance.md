@@ -57,7 +57,7 @@
 | C32 | A→B 후 A의 오래된 재시도 | PG 코어에서 A의 불변 결과와 이후 현재 B를 구분하고 재변경하지 않음. 범용 의미 경로는 남음 |
 | C33 | 복구·재구축·backfill 재생 | 미검증 |
 | C34 | 교정 전 사실에 의존한 파생물 | 미검증 |
-| C35 | 외부 cache·기존 prompt와 새 조회의 경계 | 초기 service cache 무효화 확인. 전체 consumer 미검증 |
+| C35 | 외부 cache·기존 prompt와 새 조회의 경계 | cache 무효화, generation/cursor, 같은 fact의 옛 표현 질의를 현재 head로 연결하는 실제 PG/Neo4j 검사 확인. 미식별 세션·외부 cache·기존 prompt 자체는 남음 |
 | C36 | 대상 부재·모호함·검색 실패·잘림 | exact target과 정확한 title/summary 검색에서 부재·복수 거부 구현. 일반 의미 검색과 잘림 검증은 남음 |
 
 ## 완료 판정 규칙

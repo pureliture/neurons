@@ -1452,7 +1452,10 @@ class PgVectorStore:
             return int(_row_value(row, "generation", 0)) if row else 0
 
     def search_current_fact_cards(self, *, project, query, limit=100):
-        """공통 fact head의 관련 후보를 index로 찾는다. 전체 PG 카드를 Python으로 읽지 않는다."""
+        """검증된 같은 fact의 옛 표현도 검색하되 현재 head만 반환한다.
+
+        과거 본문은 검색 alias이며 현재 값이 아니다. 모든 PG 카드를 Python으로 읽지 않는다.
+        """
         if not project or type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("bounded fact search required")
         from ..llm_brain_core.terms import query_terms
@@ -1461,18 +1464,20 @@ class PgVectorStore:
             return []
         threshold = max(1, (len(terms) + 1) // 2)
         with self._scope() as db, db.cursor() as cur:
-            cur.execute("""SELECT DISTINCT c.memory_id,c.content_hash,coverage.hits
+            cur.execute("""SELECT c.memory_id,c.content_hash,max(coverage.hits) AS hits
                 FROM memory_cards c JOIN lbrain_fact_scopes f ON f.memory_id=c.memory_id
+                JOIN lbrain_fact_members m ON m.fact_key=f.fact_key
+                JOIN memory_cards alias ON alias.memory_id=m.memory_id
                 CROSS JOIN LATERAL (SELECT count(DISTINCT term) AS hits FROM unnest(%s::text[]) AS q(term)
                     WHERE term=ANY(regexp_split_to_array(regexp_replace(
-                        lower(coalesce(c.title,'') || ' ' || coalesce(c.summary,'')),
+                        lower(coalesce(alias.title,'') || ' ' || coalesce(alias.summary,'')),
                         '[^a-z0-9가-힣_-]+',' ','g'),'\\s+'))) AS coverage
-                WHERE f.project=%s AND c.project=%s AND c.currentness='current'
+                WHERE f.project=%s AND c.project=%s AND alias.project=%s AND c.currentness='current'
                     AND c.authorization_status='active'
-                    AND to_tsvector('simple',coalesce(c.title,'') || ' ' || coalesce(c.summary,''))
+                    AND to_tsvector('simple',coalesce(alias.title,'') || ' ' || coalesce(alias.summary,''))
                         @@websearch_to_tsquery('simple',%s) AND coverage.hits>=%s
-                ORDER BY coverage.hits DESC,c.memory_id LIMIT %s""",
-                (terms, project, project, " OR ".join(terms), threshold, limit + 1))
+                GROUP BY c.memory_id,c.content_hash ORDER BY hits DESC,c.memory_id LIMIT %s""",
+                (terms, project, project, project, " OR ".join(terms), threshold, limit + 1))
             rows = cur.fetchall()
             keys = [str(_row_value(row, "memory_id", 0)) for row in rows[:limit]]
             cards = PgVectorStore(connection=db).list_authorized_cards(project=project, memory_ids=keys,

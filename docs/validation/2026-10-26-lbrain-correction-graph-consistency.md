@@ -33,6 +33,16 @@ Git 근거를 독립 검증해 PG의 현재 값을 교정한 뒤, graph에는 �
 
 검증용 의존성 image에 source를 읽기 전용 주입한 실행이다. 최종 배포 image identity의 증거로 승격하지 않는다. graph 검색의 embedder/reranker는 명시적 결정적 대역이고 외부 LLM 호출은 금지했다. 실제 embedding provider·의미 판단 성능은 남아 있다.
 
+## 교정 전 표현으로 다시 검색하는 경우
+
+추가 실제 PG/Neo4j 검사에서 현재 fact는 `ready`인데 옛 값 `missing`을 검색하면, 옛 session chunk가 current status처럼 반환되는 경로를 재현했다. 같은 fact로 검증되어 연결된 과거 카드의 표현을 검색 alias로 사용하도록 수정했다. alias 본문이나 옛 값을 반환하지 않고 현재 head를 반환하며, 서로 다른 alias가 같은 head를 가리키면 집계해 중복 후보나 잘림 오판을 막는다.
+
+새 `test_old_fact_query_does_not_return_superseded_session_claim`은 과거 주장이 들어 있는 실제 PG chunk와 옛 Neo4j episode가 모두 남아 있는 상태에서, 옛 표현의 질의가 현재 head만 반환함을 확인한다. 임의의 미식별 세션 문장 전체에 공통 fact 연결이 생겼다는 의미는 아니다.
+
+- 추가 수정 후 결합 검사: **126 passed, 1 skipped, 1 warning in 48.72s**. 외부 종료 제어 검사 하나는 위의 별도 실증을 유지한다.
+- worker 전체: **5244 passed, 650 skipped, 4 warnings in 54.74s**.
+- 추가 source bundle SHA-256: `a53665d71ba35d9211f3b487c5cb8db652dcc34fbfb910295cf1bc94512da162`.
+
 ## 남은 범위와 적용 경계
 
 - session chunk의 관측/사실 provenance와 공통 resolution 연결이 필요하다. 관련 fact로 식별하지 못한 과거 세션 문장이 현재 상태로 노출되지 않는지 별도 검사해야 한다. 모든 세션을 일괄 숨기는 것으로 대체하지 않는다.
