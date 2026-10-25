@@ -316,3 +316,57 @@ CREATE TABLE IF NOT EXISTS graph_projection_outbox (
 CREATE INDEX IF NOT EXISTS idx_graph_projection_outbox_queue
     ON graph_projection_outbox(status, created_at)
     WHERE status IN ('queued', 'failed');
+
+-- 기존 memory를 대상으로 하는 재검토 예약. 등록 자체는 authority를 바꾸지 않는다.
+CREATE TABLE IF NOT EXISTS lbrain_recheck_tasks (
+    task_id VARCHAR(64) PRIMARY KEY,
+    project VARCHAR(64) NOT NULL,
+    memory_id VARCHAR(64) NOT NULL REFERENCES memory_cards(memory_id),
+    request_hash VARCHAR(71) NOT NULL,
+    request JSONB NOT NULL,
+    state VARCHAR(16) NOT NULL DEFAULT 'queued'
+        CHECK (state IN ('queued','waiting','leased','resolved','blocked')),
+    next_check_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    lease_token VARCHAR(32),
+    lease_until TIMESTAMPTZ,
+    worker_id VARCHAR(128),
+    generation BIGINT NOT NULL DEFAULT 0 CHECK (generation>=0),
+    attempt_count BIGINT NOT NULL DEFAULT 0 CHECK (attempt_count>=0),
+    last_input_hash VARCHAR(71),
+    last_check_at TIMESTAMPTZ,
+    result_ref VARCHAR(180) NOT NULL DEFAULT '',
+    reason_code VARCHAR(64) NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK ((state='leased') = (lease_token IS NOT NULL AND lease_until IS NOT NULL AND worker_id IS NOT NULL)),
+    CHECK (state<>'resolved' OR result_ref<>'')
+);
+CREATE INDEX IF NOT EXISTS idx_lbrain_recheck_due
+    ON lbrain_recheck_tasks(project,next_check_at) WHERE state IN ('queued','waiting','blocked','leased');
+
+CREATE TABLE IF NOT EXISTS lbrain_recheck_attempts (
+    task_id VARCHAR(64) NOT NULL REFERENCES lbrain_recheck_tasks(task_id),
+    generation BIGINT NOT NULL,
+    worker_id VARCHAR(128) NOT NULL,
+    state VARCHAR(16) NOT NULL DEFAULT 'running'
+        CHECK (state IN ('running','waiting','resolved','blocked','lease_expired')),
+    input_hash VARCHAR(71),
+    result_ref VARCHAR(180) NOT NULL DEFAULT '',
+    reason_code VARCHAR(64) NOT NULL DEFAULT '',
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    finished_at TIMESTAMPTZ,
+    PRIMARY KEY(task_id,generation)
+);
+CREATE TABLE IF NOT EXISTS lbrain_recheck_judgments (
+    task_id VARCHAR(64) NOT NULL REFERENCES lbrain_recheck_tasks(task_id),
+    input_hash VARCHAR(71) NOT NULL,
+    judgment JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY(task_id,input_hash)
+);
+CREATE TABLE IF NOT EXISTS lbrain_recheck_heartbeats (
+    project VARCHAR(64) NOT NULL,
+    worker_id VARCHAR(128) NOT NULL,
+    last_seen_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY(project,worker_id)
+);
