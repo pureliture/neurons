@@ -347,6 +347,9 @@ CREATE TABLE IF NOT EXISTS lbrain_recheck_tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_lbrain_recheck_due
     ON lbrain_recheck_tasks(project,next_check_at) WHERE state IN ('queued','waiting','blocked','leased');
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lbrain_recheck_candidate_route
+    ON lbrain_recheck_tasks(project,(request->>'candidate_route_key'))
+    WHERE request ? 'candidate_route_key';
 
 CREATE TABLE IF NOT EXISTS lbrain_recheck_attempts (
     task_id VARCHAR(64) NOT NULL REFERENCES lbrain_recheck_tasks(task_id),

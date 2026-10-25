@@ -19,11 +19,12 @@ from test_active_source_revision_tool_evidence_bundler import _seed_unpinned_sou
 
 
 def record(**overrides):
-    return ToolEvidenceSummaryRecord(session_id_hash=_session_id_hash(), provider="codex", project=PROJECT,
+    values = dict(session_id_hash=_session_id_hash(), provider="codex", project=PROJECT,
         category="test_result", outcome="pass", tool_name="exec_command", command_summary="uv run pytest -q",
         redacted_summary="3 passed", observed_at="2026-10-26T01:00:00Z",
         source_event_id_hash=dm.sha256_hash("native-call"), source_content_hash=dm.sha256_hash("native-output"),
-        extractor_version="codex-tool-evidence-extractor.v2", **overrides)
+        extractor_version="codex-tool-evidence-extractor.v2")
+    return ToolEvidenceSummaryRecord(**{**values, **overrides})
 
 
 def native_chunk(records=None):

@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | G01 | 복수 사실별 변경안·근거 제출, exact target 또는 설명으로 기존 target 검색 | v2 batch·기존 값/불일치/제안/근거와 정확한 title/summary 검색 구현. 직접 검증 값과 제안 값이 달라도 결과를 구분한다. 일반 의미 검색은 남음 |
 | G02 | 코드 검증과 실제 판단 모델 연결, 별도 평가에서 오교정과 정상 교정 모두 검사 | typed Decisions 연결 구현. 독립 명제 질문의 조정 12건·독립 확인 16건을 실행. 독립 세부 분류 13/16, 후보 정책 정상 허용 1/4·잘못된 허용 0/12로 적용 기준 미통과. 실제 교정 작업자 연결 필요 |
-| G03 | 같은 관측의 교정·수집·재수집이 합류 | 공통 fact/관측/해석/판단 코어와 Git JSON 교정·수집·관리 대상 autopilot 합류 구현. native ID의 Couch bundle→materialization→PG 재사용→실제 intake 전달 검증. native-to-fact authority 연결은 남음 |
+| G03 | 같은 관측의 교정·수집·재수집이 합류 | 공통 fact/관측/해석/판단 코어와 Git JSON 교정·수집·관리 대상 autopilot 합류 구현. native ID의 Couch→PG→정규 intake→관리 대상 fact queue 연결 검증. native는 trigger로 보존하고 현재 값은 독립 Git 검증. 일반 native 근거 자체의 의미 검증과 동일 관측 합류는 남음 |
 | G04 | 과거 지연 입력의 역전 방지와 실제 후속 변경의 반영 | 실제 Git+PG에서 지연된 ancestor의 history 연결, 코어에서 새로운 현재 관측의 rollback 확인. 일반 세션 전체 경로는 남음 |
 | G05 | 동일 사실의 단일 current, 복수 필드·중복 카드·동시 writer 처리 | 공통 head·다른 필드의 lineage 재검증·연결된 중복 카드의 현재 표시·동시 key 처리 구현. 연결된 authority의 기존 steward 우회 거부. 아직 식별하지 않은 신규 중복과 모든 일반 writer는 남음 |
 | G06 | 근거 내용·버전·관측 시각과 모든 교정 이력 보존 | Git redacted source receipt·관측·assertion·resolution/event와 canonical 이력 보존. retention 참조 보호와 GC 경합 검사 필요 |
@@ -23,8 +23,8 @@
 
 | 사례 | 범위 | 전체 연결 검증 |
 | --- | --- | --- |
-| C01 | 교정 뒤 같은 관측 수집 | Git 데이터와 관리 대상 autopilot 합류 부분 확인. 일반 native 세션 연결은 남음 |
-| C02 | 수집 뒤 같은 관측 교정 | Git 동일 관측에서 두 번째 authority 변경 없이 근거 연결 확인. 일반 경로는 남음 |
+| C01 | 교정 뒤 같은 관측 수집 | 실제 Couch native trigger→정규 intake→기존 fact queue에서 별도 accepted 없이 현재 Git 값을 유지. native 자체를 같은 verified 관측으로 admission하는 일반 경로는 남음 |
+| C02 | 수집 뒤 같은 관측 교정 | native trigger의 정규 intake가 독립 Git 현재 값으로 교정한 뒤 같은 Git 근거의 교정이 추가 authority 없이 합류. 일반 native 근거의 동일 관측 합류는 남음 |
 | C03 | 같은 관측의 다른 miner 해석 | PG 코어의 해석 version별 보존과 실제 Couch/PG에서 extractor 변경 시 같은 벡터에 별도 source 연결·새 처리 키 확인. 기존 fact 영향 재검토는 남음 |
 | C04 | provider/import/chunk가 다른 재수집 | 미검증 |
 | C05 | 같은 값을 지지하는 독립 관측 | PG 코어에서 복수 관측을 보존하고 중복 authority를 만들지 않음. 일반 source 연결은 남음 |

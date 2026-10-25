@@ -1106,6 +1106,7 @@ class KnowledgeSearchService:
             pgvector_store=self.pgvector_store,
             allow_restricted=self.allow_restricted_steward,
             allow_auto_accept=self.allow_steward_auto_accept,
+            fact_coordinator=self.fact_correction_coordinator,
         )
 
     def append_object_review_proposal(self, proposal: dict) -> dict:

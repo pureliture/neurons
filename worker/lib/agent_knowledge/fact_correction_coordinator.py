@@ -199,8 +199,27 @@ class FactCorrectionCoordinator:
             return None
         results = []
         for rule in rules:
+            trigger = {"kind": "miner_candidate", "source_refs": candidate.get("source_refs", []),
+                "span_refs": candidate.get("span_refs", []), "content_hash": candidate.get("content_hash", "")}
+            ensure_public_safe(trigger, "FactIntakeTrigger")
+            proposed_value = candidate["typed_payload"][rule.field_path.split(".", 1)[1]]
+            route_key = hash_payload(["intake", rule.version, candidate["memory_id"]])
+            input_hash = hash_payload([trigger, proposed_value])
             with self.store.transaction() as db, db.cursor(row_factory=dict_row) as cur:
                 self.store._lock_steward_authority_on(db)
+                # target이 successor로 바뀌어도 동일 후보의 기존 내구성 작업을
+                # 찾아야 한다. 현재 target ID로 다시 queue ID를 만들면 재시도가
+                # 매번 새로운 작업이 되어 버린다.
+                cur.execute("""SELECT task_id,state,request FROM lbrain_recheck_tasks
+                    WHERE project=%s AND request->>'candidate_route_key'=%s""", (rule.scope.project, route_key))
+                previous = cur.fetchone()
+                if previous:
+                    if previous["request"].get("candidate_input_hash") != input_hash:
+                        raise FactResolutionError("candidate_route_conflict")
+                    results.append({"policy_id": rule.policy_id,
+                        "status": "resolved" if previous["state"] == "resolved" else "queued",
+                        "task_id": previous["task_id"], "duplicate": True})
+                    continue
                 cur.execute("""SELECT steward_envelope FROM memory_cards WHERE project=%s AND title=%s
                     AND authorization_status='active' AND currentness='current' LIMIT 2""",
                     (rule.scope.project, rule.target_title))
@@ -213,12 +232,16 @@ class FactCorrectionCoordinator:
                     "fact_key": rule.scope.key,
                     "policy_version": rule.version, "lane": "intake", "initial_memory_id": card["memory_id"],
                     "candidate_memory_id": candidate["memory_id"],
-                    "change": {"proposed_value": candidate["typed_payload"][rule.field_path.split(".", 1)[1]],
+                    "candidate_route_key": route_key, "candidate_input_hash": input_hash,
+                    "change": {"proposed_value": proposed_value,
                         "evidence": {"mode": "server_current"}}}
+                # native 참조는 재검토를 촉발한 입력이다. 그 주장이 최신 사실이라는
+                # 증거나 독립 Git 검증과 동일 관측이라는 주장으로 승격하지 않는다.
+                request["trigger"] = trigger
                 from .postgres_store.pgvector_store import PgVectorStore
                 queue = PgRecheckQueue(PgVectorStore(connection=db))
                 task = queue.register(project=rule.scope.project, memory_id=card["memory_id"], request=request,
-                    request_key=hash_payload(["intake", rule.policy_id, candidate["memory_id"], refresh_watermark]))
+                    request_key=route_key)
                 results.append({"policy_id": rule.policy_id, "status": "queued", "task_id": task["task_id"]})
         return {"managed": True, "results": results}
 

@@ -90,6 +90,7 @@ class CandidateIntakeReport:
     error_code: str = ""
     remaining_chunks: int = 0
     auto_accepted_count: int = 0
+    fact_resolution_queued_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -110,6 +111,8 @@ class CandidateIntakeReport:
         }
         if self.auto_accepted_count > 0:
             payload["auto_accepted_count"] = self.auto_accepted_count
+        if self.fact_resolution_queued_count > 0:
+            payload["fact_resolution_queued_count"] = self.fact_resolution_queued_count
         return payload
 
 
@@ -412,6 +415,7 @@ def _run_candidate_intake(
     proposed = 0
     duplicates = 0
     auto_accepted = 0
+    fact_queued = 0
     seen_ids: set[str] = set()
     processed_sources: set[str] = set()
 
@@ -462,8 +466,16 @@ def _run_candidate_intake(
                         or accept_outcome.get("committed") is True
                     ):
                         auto_accepted += 1
+                    if isinstance(accept_outcome, Mapping):
+                        managed = accept_outcome.get("fact_resolution") or {}
+                        fact_queued += sum(item.get("status") == "queued" for item in managed.get("results", []))
                 except Exception:
-                    pass
+                    # queue/authority 실패를 삼키고 source 완료 checkpoint를
+                    # 전진시키면 다음 정규 실행에서 해당 후보가 영구 누락된다.
+                    return CandidateIntakeReport(project=settings.project, status="auto_accept_failed",
+                        dry_run=False, enabled=True, examined_chunks=len(bounded), proposed_count=proposed,
+                        error_code="auto_accept_or_resolution_failed", auto_accepted_count=auto_accepted,
+                        fact_resolution_queued_count=fact_queued), state
 
     # Repeat state is keyed on the chunk's own content hash, so one project has
     # many revisions and no chunk is ever skipped by a project-level key.
@@ -491,6 +503,7 @@ def _run_candidate_intake(
         skipped_count=skipped,
         remaining_chunks=len(fresh_all) - len(fresh),
         auto_accepted_count=auto_accepted,
+        fact_resolution_queued_count=fact_queued,
     )
     return report, state
 
@@ -531,6 +544,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--native-source-policy-file", default="",
         help="PG intake: explicit Couch native observation policy JSON; unavailable provenance fails closed")
+    parser.add_argument("--fact-correction-policy-file", default="",
+        help="route server-managed existing facts through the common durable resolution queue")
     parser.add_argument(
         "--batch-candidates",
         type=int,
@@ -795,11 +810,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     if pgvector_store is None:
         print(json.dumps({"error_code": "postgresql_required"}, sort_keys=True))
         return 3
+    fact_coordinator = None
+    if args.fact_correction_policy_file:
+        from ..fact_correction_coordinator import FactCorrectionCoordinator, load_configuration
+        try:
+            reader, policies = load_configuration(args.fact_correction_policy_file)
+            fact_coordinator = FactCorrectionCoordinator(store=pgvector_store, git_reader=reader, policies=policies)
+        except Exception:
+            print(json.dumps({"error_code": "fact_configuration_invalid"}, sort_keys=True))
+            return 2
     steward = BrainStewardService(
         ledger,
         pgvector_store=pgvector_store,
         allow_restricted=auto_accept_work_items,
         allow_auto_accept=auto_accept_work_items,
+        fact_coordinator=fact_coordinator,
     )
 
     if len(project_chunks) > 1 or settings.project in ("all", "*"):

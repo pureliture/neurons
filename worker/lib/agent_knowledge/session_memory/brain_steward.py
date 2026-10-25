@@ -203,6 +203,7 @@ class BrainStewardService:
         pgvector_store=None,
         allow_restricted: bool = False,
         allow_auto_accept: bool = False,
+        fact_coordinator=None,
     ) -> None:
         self.ledger = ledger
         # Steward card creation, decisions and reads require PostgreSQL.
@@ -213,6 +214,7 @@ class BrainStewardService:
         # auto_accept 는 review_commit 허용만으로는 열리지 않는다(별도 flag, 기본 False).
         self.allow_review_commit = bool(allow_restricted)
         self.allow_auto_accept = bool(allow_auto_accept)
+        self.fact_coordinator = fact_coordinator
         # backward-compat alias.
         self.allow_restricted = self.allow_review_commit
 
@@ -602,6 +604,14 @@ class BrainStewardService:
                     "accepted_card": decided,
                 }
             )
+        if self.fact_coordinator is not None:
+            managed = self.fact_coordinator.submit_candidate(candidate, refresh_watermark=decision_id)
+            if managed is not None:
+                return self._safe_restricted_result({
+                    "schema_version": "llm_brain_auto_acceptance_commit.v1",
+                    "promotion_path": "fact_resolution", "canonical_write_performed": False,
+                    "blocked_reason": "managed_fact_resolution", "fact_resolution": managed,
+                })
         block_reason = classify_candidate_block_reason(candidate)
         if block_reason:
             return {

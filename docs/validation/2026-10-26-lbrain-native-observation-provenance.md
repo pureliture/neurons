@@ -38,4 +38,22 @@ Ubuntu의 작업 전용 CouchDB 3.4와 PostgreSQL, 작업 전용 검증 컨테�
 - worker 전체 `uv run pytest -q`: **5258 passed, 653 skipped, 4 warnings in 55.08s**. 환경 선택형 skip은 실증으로 계산하지 않는다.
 - Java `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`: **BUILD SUCCESSFUL**. `git diff --check`: 통과.
 
-실제 embedding provider 호출 대신 명시적 synthetic embedder를 사용했다. 이는 source identity와 벡터 재사용 증거이며 embedding provider 자체의 동작 증거가 아니다. 운영 스케줄러 설치, source 철회/재해석의 기존 fact 영향 재검토, native-to-fact 공통 authority 연결과 전체 goal 완료는 남아 있다.
+실제 embedding provider 호출 대신 명시적 synthetic embedder를 사용했다. 이는 source identity와 벡터 재사용 증거이며 embedding provider 자체의 동작 증거가 아니다. 이 첫 검사만으로 운영 스케줄러, 기존 fact의 영향 재검토나 전체 goal의 완료를 입증하지 않는다. 후속 연결 범위는 아래에 구분한다.
+
+## 정규 intake의 공통 fact queue 연결
+
+후속 변경에서 `BrainStewardService.candidate_autopilot_accept`와 실제 `pg-memory-propose --fact-correction-policy-file`에 공통 coordinator를 연결했다. MCP service도 구성된 동일 coordinator를 steward에 전달한다. 서버 정책의 정확한 project/title/field에 대응하는 기존 사실만 대상으로 한다. 관리 대상 후보는 disabled proposal로 보존하고, 별도 accepted/current 기억으로 승격하지 않는다.
+
+native 관측 참조는 queue의 `trigger`에 남긴다. 이 참조는 검토를 촉발한 입력이며, 독립적인 현재 사실의 증거나 Git 관측과 같은 관측이라는 뜻이 아니다. 실제 적용 값은 서버가 현재 Git JSON source에서 별도로 확인한다. 제안 값이 오래됐거나 틀렸어도 그 값으로 현재 기억을 역전시키지 않는다. 이 경로는 일반 자연어 근거의 의미상 지지를 검증하는 경로가 아니다.
+
+동일 후보·동일 정책 version은 target의 successor가 바뀌어도 기존 queue 작업을 반환한다. JSON route key의 unique index와 authority lock으로 보호한다. 자동 승인 또는 queue 등록이 실패하면 intake가 source 완료 checkpoint를 기록하지 않는다. 정상적으로 queue에 들어간 경우에만 checkpoint를 전진시키고 이후 처리는 내구성 worker가 맡는다. 보류 후보 전체를 자동으로 재평가하는 운영 정책이 이 연결만으로 완성되는 것은 아니다.
+
+- 실제 Couch HTTP/PG/Git + 정규 intake + steward + 공통 queue/authority 검사: **115 passed, 1 warning in 47.40s**. `test_native_fact_intake.py`, `test_fact_resolution.py`, `test_observation_provenance.py`, `test_brain_steward.py`, `test_candidate_intake_cli.py`를 Ubuntu에서 실행했다.
+- 두 순서인 교정→지연 native 수집과 native 수집→교정을 확인했다. 최초 승인 포함 canonical 결정은 두 건이며 현재 값은 `ready` 하나다. 지연 후보의 제안 `missing`은 별도로 보존한다. 같은 Git 관측 assertion은 한 건이며 native 후보는 disabled 상태다.
+- 완료 뒤 같은 후보를 다시 자동 승인 요청해도 기존 resolved task를 반환하고 새 queue 작업이나 accepted 중복을 만들지 않는다. source checkpoint 재실행은 추가 miner 호출도 만들지 않는다.
+- 이 검사에서 miner는 명시적 응답 대역이며 실제 OpenRouter 모델의 의미 판단 증거가 아니다. native source와 Git 사실을 동일 관측으로 병합한 것도 아니다.
+- source bundle SHA-256: `0b414933de0e016a9005370b7596a68e76f579335e480caf5533bf3033de7bff`. 의존성 image와 source 주입 방식의 한계는 위와 같다.
+- Ubuntu에서 추가로 드러난 기존 steward 검사 기대값을 실제 계약과 맞췄다. `brain_id`와 이미 제공하던 review 분류 필드를 정확히 검사하며, project 일치와 current 충돌 상대도 확인한다. 제품 필드를 삭제하거나 검사를 skip하지 않았다.
+- 후속 변경의 worker 전체 `uv run pytest -q`: **5259 passed, 655 skipped, 4 warnings in 57.74s**. `git diff --check` 통과. Java source는 변경하지 않았다.
+
+정확한 서버 정책에 아직 연결되지 않은 신규 중복, 다른 writer의 승인, 일반 의미 target 검색, native 근거 자체의 현재 사실 검증, 철회/파생물/retention/실제 모델과 최종 운영 identity는 남아 있다.
