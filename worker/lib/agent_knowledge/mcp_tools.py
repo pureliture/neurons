@@ -246,9 +246,9 @@ def list_public_agent_tools() -> list[dict]:
                     },
                     "response_mode": {
                         "type": "string",
-                        "enum": ["slim", "with_evidence"],
-                        "default": "slim",
-                        "description": "직렬화 모드: slim (~1.2KB 기본 압축) 또는 with_evidence (증거 해시 및 DAG 포함)",
+                        "enum": ["slim", "minimal", "with_evidence"],
+                        "default": "minimal",
+                        "description": "직렬화 모드: minimal (핵심 필드만, 소형, 기본), slim (22필드 temporal), with_evidence (증거 해시 및 DAG 포함)",
                     },
                     "limit": {
                         "type": "integer",
