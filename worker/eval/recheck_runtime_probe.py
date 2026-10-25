@@ -185,20 +185,20 @@ class Probe:
             records = catalog.list_for_path(**{key: binding[key] for key in ("root_id", "device_id_hash", "relative_path_hash")})
             latest = max(records, key=lambda record: datetime.fromisoformat(record.last_seen_at))
             refs.append({"source_ref_id": latest.source_ref_id, "source_content_hash": latest.content_hash})
+        # 내용 hash가 같아도 시간 경과·권한 변경으로 유효성이 달라진다.
+        # 이 검사는 코드로 매번 수행하고 결과를 cache 입력에 포함한다.
+        try:
+            value, _ = resolve_value(rule=rule, catalog=catalog, evidence_refs=refs)
+            validation = {"action": "apply", "reason_code": "source_verified", "verified_value": value}
+        except CorrectionError as exc:
+            validation = {"action": "wait", "reason_code": exc.reason}
         return RecheckSnapshot.from_data(task, {"policy_hash": hash_payload(rule), "evidence_refs": refs,
-            "judge_profile": task["request"]["judge_profile"]})
+            "source_validation": validation, "judge_profile": task["request"]["judge_profile"]})
 
     def judge(self, task, snapshot):
         with (self.state / "judgment-calls.jsonl").open("a") as stream:
             stream.write(json.dumps({"at": now(), "input_hash": snapshot.fingerprint, "profile": "structured-policy-probe.v1"}) + "\n")
-        rule = load_policies(str(self.state / "policy.json"))[0]
-        try:
-            value, _ = resolve_value(rule=rule, catalog=LedgerSourceRefCatalog(self.ledger, initialize_schema=False),
-                                     evidence_refs=snapshot.data["evidence_refs"])
-        except CorrectionError as exc:
-            return {"action": "wait", "reason_code": exc.reason, "profile": "structured-policy-probe.v1"}
-        return {"action": "apply", "reason_code": "source_verified", "verified_value": value,
-                "profile": "structured-policy-probe.v1"}
+        return {**snapshot.data["source_validation"], "profile": "structured-policy-probe.v1"}
 
     def crash_once(self, marker):
         path = self.state / marker
