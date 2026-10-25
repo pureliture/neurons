@@ -233,7 +233,7 @@ def test_mcp_dispatch_passes_valid_filters():
         project="neurons",
         query="",
         mode="list",
-        response_mode="slim",
+        response_mode="minimal",
         as_of="",
         limit=5,
         cursor=None,

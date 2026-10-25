@@ -1116,7 +1116,7 @@ def _dispatch_brain_resolve_tool(tool_name: str, arguments: dict, service: Knowl
         "project": project,
         "query": arguments.get("query", ""),
         "mode": arguments.get("mode", "context"),
-        "response_mode": arguments.get("response_mode", "slim"),
+        "response_mode": arguments.get("response_mode", "minimal"),
         "as_of": arguments.get("as_of", ""),
         "limit": _bounded_limit(arguments.get("limit"), default=5, maximum=20),
         "cursor": arguments.get("cursor"),
@@ -1144,6 +1144,16 @@ def _dispatch_brain_resolve_tool(tool_name: str, arguments: dict, service: Knowl
     if resolve_kwargs.get("min_age") is not None and resolve_kwargs.get("max_age") is not None:
         if resolve_kwargs["min_age"] > resolve_kwargs["max_age"]:
             raise ValueError("min_age must be <= max_age")
+
+    # Default max_age for query mode: exclude very old cards unless explicitly
+    # requested. Graph is a cold projection; old cards add noise to default
+    # queries. Callers can override with explicit max_age or as_of.
+    if (
+        resolve_kwargs.get("mode") == "query"
+        and "max_age" not in arguments
+        and not arguments.get("as_of")
+    ):
+        resolve_kwargs["max_age"] = 90 * 86400  # 90 days
 
     if "age_bucket" in arguments and arguments["age_bucket"] is not None:
         bucket = str(arguments["age_bucket"]).strip()

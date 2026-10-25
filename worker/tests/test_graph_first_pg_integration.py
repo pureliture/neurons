@@ -124,6 +124,7 @@ def test_public_query_graph_authority_join_and_explicit_pg_fallback(tmp_path, gr
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": {"name": "brain.resolve", "arguments": {
                 "project": project, "query": "결정", "mode": "query",
+                "response_mode": "slim",
                 **({"as_of": "2026-01-15"} if historical else {}),
             }},
         }, service)
@@ -196,7 +197,7 @@ def test_public_list_keyset_crosses_100_rows_with_actual_mcp_wire_budget(tmp_pat
             response = handle_jsonrpc_message({
                 "jsonrpc": "2.0", "id": 3, "method": "tools/call",
                 "params": {"name": "brain.resolve", "arguments": {
-                    "project": project, "mode": "list", "limit": 20,
+                    "project": project, "mode": "list", "limit": 20, "response_mode": "slim",
                     **({"cursor": cursor} if cursor else {}),
                 }},
             }, service)
