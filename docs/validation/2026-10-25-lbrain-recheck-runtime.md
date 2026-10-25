@@ -4,13 +4,15 @@
 
 **구조화된 테스트 근거에 대한 자동 재검토·장애 복구·지연 수집 후 교정을 Ubuntu 격리 환경에서 확인했다.** PostgreSQL과 실제 별도 프로세스를 사용했다. 모델 호출, 범용 자연어 판단, 운영 수집 연결 또는 충돌 처리 B 전체의 완료 판정은 아니다. B는 계속 미결정이다.
 
-초기 source는 `f04bfdba7fcafc168094c16acdcb61b2df690285`, 유효성 캐시 보완판은 `78e971e9975e24eb14164eb14ab2acd8929c3410`이다. 사용자 memory를 변경하지 않았고 main 반영·운영 활성화는 수행하지 않았다.
+초기 source는 `f04bfdba7fcafc168094c16acdcb61b2df690285`, 유효성 캐시 보완판은 `78e971e9975e24eb14164eb14ab2acd8929c3410`, 결정 참조의 원자 보존까지 포함한 최종 source는 `cc96b336273d7bbc72449d590657aaf0d95e1514`이다. 사용자 memory를 변경하지 않았고 main 반영·운영 활성화는 수행하지 않았다.
 
 ## 구현한 범위
 
 `recheck_scheduler.py`는 작업·다음 예약·실행 소유권·시도 이력·판단 cache·heartbeat를 PostgreSQL에 보존한다. due 작업은 `FOR UPDATE SKIP LOCKED`로 하나의 작업자가 가져가며, 만료된 실행은 세대를 올려 회수한다. 이전 실행은 lease token·세대·DB 시각 검사를 통과하지 못하면 판단 저장·완료 처리·authority 트랜잭션에 들어갈 수 없다.
 
 설정 누락은 `blocked`와 다음 예약을 함께 남긴다. 원인이 없어지면 추가 요청 없이 재시도한다. 독립 감시는 heartbeat·예약 초과·만료 lease·DB 조회 실패를 확인한다. 외부 알림 전송은 구현하거나 시험하지 않았다.
+
+교정이 저장된 뒤 완료 기록 전에 중단되는 경우를 위해, 동일 authority 트랜잭션에 `checkpoint_result`로 결정 참조를 보존한다. 후처리 오류·lease 재회수도 이 참조를 지우지 못한다. 재시작은 저장된 결정과 요청 대상을 확인해 완료를 복구한다. 이때 오래된 근거로 새 교정을 실행하거나 나중 current를 이전 값으로 되돌리지 않는다. adapter는 반드시 authority 반영과 참조 저장에 같은 connection을 사용해야 한다.
 
 `eval/recheck_runtime_probe.py`는 기존 native Codex parser, durable ingress, tool-evidence ledger, JSON source 정책, canonical 교정 트랜잭션을 연결한 **실험용 연결기**다. 실제 pytest를 실행하고 그 결과로 synthetic Codex JSONL을 만든다. 설치된 provider hook의 실제 사용자 세션을 수집한 시험은 아니다. parser 결과를 근거 저장소에 연결하는 부분도 운영 intake에 설치하지 않았다.
 
@@ -32,6 +34,7 @@
 | 교정 commit 직후 작업 완료 기록 전 종료 | canonical 저장 직후 exit 91을 주입했다. 재시작 후 같은 결정으로 재생해 `correct_fact` 1건과 current 1건을 유지했다. |
 | 동일 MCP 조회 | 실제 HTTP MCP `tools/list`와 `brain.resolve(mode=context)`를 호출했다. `missing → pass`를 확인했다. graph 경로는 unavailable이므로 Neo4j 검증으로 해석하지 않는다. |
 | 같은 bytes의 만료·재관측 | 보완판의 별도 Ubuntu 프로세스에서 conflict → stale → 같은 bytes 재관측 후 conflict를 확인했다. 그 뒤 실제 테스트 수집·commit 직후 종료·재시작을 거쳐 결정 1건으로 완료했다. |
+| commit 뒤 장시간 중단·근거 조회 불가 | 최종 source의 별도 Ubuntu 프로세스에서 교정 commit 직후 종료하고, 근거 유효 기간 6초보다 긴 7초를 기다렸다. 실제 validator가 `source_stale`을 반환함을 확인하고 원천 읽기 실패도 주입했다. 재시작은 저장된 결정 참조로 `resolved/authority_commit_recovered`가 됐으며 교정 결정은 1건이었다. |
 
 첫 runtime의 저장된 이력은 총 27,453회다. 이 중 conflict 대기 27,427회, 원천 오류 대기 3회, stale 대기 10회, 설정 blocked 9회, lease 만료 3회, resolved 1회였다. 중간 대기 시간에도 1초 시험 주기로 실행된 결과이며, 이 횟수는 사례의 다양성이나 모델 정확도를 뜻하지 않는다. 운영 주기·backoff·비용 정책은 별도로 정해야 한다.
 
@@ -43,12 +46,13 @@
 - 보완판 runtime image: `sha256:6a72a637d50a43ab1b2c0f1e356e138bcd68e3399facf19695d7359ad719b4a7`.
 - 보완판 eval script: `sha256:f13364a4a8e6c72502c62d8eb3338bcc6f1c1bf5a68677581bd3d8f39f73a9ec`.
 - 설치된 package 파일 270개와 build source를 대조해 불일치 0개였다. SQL schema도 포함한다. 실제 실행은 설치된 package를 사용했으며 runtime `PYTHONPATH` 우회는 없었다.
+- 최종 복구 보완판 image: `sha256:a1ef259384102c6f025dadd779291794b189b9a143a4fb181b0556e102dae8a1`, package manifest: `sha256:09a20c991d08efddb4453906e09d59f378c8c75588a2c35952fac2f6f23ebeab`, eval script: `sha256:4995917c4c7569929fc48173e47d51d5e46d895443a1ebf2e939268791617d80`. 이 판도 설치 파일 270개 불일치 0개와 local source identity 일치를 확인했다.
 
 ## 자동 검사
 
-- `cd worker && uv run pytest -q tests/test_recheck_scheduler.py`: 별도 격리 PostgreSQL에서 **14 passed in 84.39s**. opt-in DB 검사가 실제 실행된 결과다.
+- 최종 `cd worker && uv run pytest -q tests/test_recheck_scheduler.py tests/test_recheck_runtime_probe.py`: **16 passed, 1 warning in 93.19s**. 별도 실제 PostgreSQL 검사 15개와 source catalog 검사 1개다. 결정·참조의 동시 rollback, 후처리 오류 후 참조 보존, lease 회수 및 덮어쓰기 거부도 포함한다. 초기 PG 검사 14개 역시 실제 실행했다.
 - `cd worker && uv run pytest -q tests/test_recheck_runtime_probe.py`: **1 passed**. 실제 source catalog와 freshness validator로 만료·같은 bytes 재관측·철회의 cache 무효화를 확인했다.
-- 보완 후 `cd worker && uv run pytest -q`: **5202 passed, 620 skipped, 4 warnings in 49.96s**. 환경 선택형 skip을 runtime 증거로 세지 않는다.
+- 최종 `cd worker && uv run pytest -q`: **5202 passed, 621 skipped, 4 warnings in 50.38s**. 환경 선택형 skip을 runtime 증거로 세지 않는다. 위 opt-in DB 검사는 별도로 실행했다.
 - 같은 core 변경에 대한 Java `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`: **BUILD SUCCESSFUL**. 이후 변경은 Python eval/test뿐이다.
 - `git diff --check`: 통과.
 
@@ -56,9 +60,9 @@ Docker 이미지의 Python·pip 실행은 해당 이미지의 명시적 runtime/
 
 ## 보존·정리
 
-실험·preflight·유효성 보완 시험의 세 DB에서 canonical current를 기존 `stale_mark`/`stale_commit` 경로로 제외했다. 각 DB의 교정 결정 1건과 재검토 이력은 보존했다. 첫 시험은 실제 MCP 재조회에서도 current 항목 0개였다. 세 DB 모두 non-synthetic 카드 0개였다.
+실험·preflight·유효성 보완·결정 참조 복구 시험의 네 DB에서 canonical current를 기존 `stale_mark`/`stale_commit` 경로로 제외했다. 각 DB의 교정 결정 1건과 재검토 이력은 보존했다. 첫 시험은 실제 MCP 재조회에서도 current 항목 0개였다. 네 DB 모두 non-synthetic 카드 0개였다.
 
-각 DB dump를 별도의 임시 DB에 실제 복원해 current 0개·교정 결정 1개·재검토 작업 1개·non-synthetic 0개를 확인했다. 근거·시도·감시·수집 상태와 HTTP receipt는 private storage에 보존했다. 실험 소유 container와 volume을 제거하고 임시 bearer 설정 및 터널을 정리했다. 기존 운영 서비스는 변경하지 않았다.
+각 DB dump를 별도의 임시 DB에 실제 복원해 current 0개·교정 결정 1개·재검토 작업 1개·non-synthetic 0개를 확인했다. 최종 복구 시험의 완료 상태와 결정 참조도 복원 후 확인했다. 근거·시도·감시·수집 상태와 HTTP receipt는 private storage에 보존했다. 실험 소유 container와 volume을 제거하고 임시 bearer 설정 및 터널을 정리했다. 기존 운영 서비스는 변경하지 않았다.
 
 ## 남은 gate
 
