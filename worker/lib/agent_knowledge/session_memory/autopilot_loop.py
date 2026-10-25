@@ -32,6 +32,7 @@ def run_autopilot_cycle(
     projection_client: Any | None = None,
     timestamp: str | None = None,
     pgvector_store: Any | None = None,
+    fact_coordinator: Any | None = None,
 ) -> dict:
     if pgvector_store is None:
         raise ValueError("PostgreSQL steward store is required for autopilot")
@@ -42,9 +43,19 @@ def run_autopilot_cycle(
     needs_review: list[dict] = []
     superseded: list[dict] = []
     projected_count = 0
+    fact_resolutions = []
 
     for candidate in candidates:
         decision_id = f"auto:{refresh_watermark}:{candidate.get('memory_id', '')}"
+        if fact_coordinator is not None:
+            managed = fact_coordinator.submit_candidate(candidate, refresh_watermark=refresh_watermark)
+            if managed is not None:
+                review = mark_candidate_needs_review(candidate, reason="managed_fact_resolution",
+                    decision_id=decision_id, conflict_state="none", timestamp=timestamp)
+                stored = pgvector_store.put_steward_proposal(review["review_card"])
+                needs_review.append(stored)
+                fact_resolutions.append(managed)
+                continue
         block_reason = classify_candidate_block_reason(candidate)
         if block_reason:
             review = mark_candidate_needs_review(
@@ -100,7 +111,7 @@ def run_autopilot_cycle(
             accepted.append(committed["accepted_card"])
             projected_count += _project_cards(service, projection_client, [committed["accepted_card"]])
 
-    return {
+    result = {
         "schema_version": "llm_brain_autopilot_cycle.v1",
         "refresh_watermark": refresh_watermark,
         "accepted": accepted,
@@ -108,6 +119,9 @@ def run_autopilot_cycle(
         "superseded": superseded,
         "projected_count": projected_count,
     }
+    if fact_coordinator is not None:
+        result["fact_resolutions"] = fact_resolutions
+    return result
 
 
 def _autopilot_projection_approval(job: Mapping[str, Any]) -> dict:

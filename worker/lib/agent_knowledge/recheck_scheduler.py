@@ -89,15 +89,18 @@ class PgRecheckQueue:
                 (task_id, project, memory_id, request_hash, Jsonb(dict(request)), delay_seconds))
             return cur.fetchone()
 
-    def claim(self, *, project: str, worker_id: str, lease_seconds: float = 60) -> dict | None:
+    def claim(self, *, project: str, worker_id: str, lease_seconds: float = 60, task_id: str | None = None) -> dict | None:
         _text(project, 64)
         _text(worker_id, 128)
         _delay(lease_seconds, minimum=0.1)
+        if task_id is not None:
+            _text(task_id, 64)
         with self.store.transaction() as db, db.cursor(row_factory=dict_row) as cur:
             cur.execute("""SELECT * FROM lbrain_recheck_tasks
                 WHERE project=%s AND ((state IN ('queued','waiting','blocked') AND next_check_at<=clock_timestamp())
                 OR (state='leased' AND lease_until<=clock_timestamp()))
-                ORDER BY next_check_at,task_id FOR UPDATE SKIP LOCKED LIMIT 1""", (project,))
+                AND (%s::text IS NULL OR task_id=%s)
+                ORDER BY next_check_at,task_id FOR UPDATE SKIP LOCKED LIMIT 1""", (project, task_id, task_id))
             previous = cur.fetchone()
             if not previous:
                 return None
@@ -248,9 +251,10 @@ class RecheckWorker:
         self.load, self.judge, self.apply = load, judge, apply
         self.lease_seconds, self.retry_seconds, self.max_retry_seconds = lease_seconds, retry_seconds, max_retry_seconds
 
-    def run_once(self) -> dict:
+    def run_once(self, *, task_id: str | None = None) -> dict:
         self.queue.heartbeat(project=self.project, worker_id=self.worker_id)
-        task = self.queue.claim(project=self.project, worker_id=self.worker_id, lease_seconds=self.lease_seconds)
+        task = self.queue.claim(project=self.project, worker_id=self.worker_id, lease_seconds=self.lease_seconds,
+            **({"task_id": task_id} if task_id is not None else {}))
         if task is None:
             return {"claimed": False}
         fingerprint = None

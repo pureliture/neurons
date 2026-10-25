@@ -273,6 +273,11 @@ def list_public_agent_tools() -> list[dict]:
                         "default": False,
                         "description": "과거/폐기 레인 항목 포함 여부 (기본값: False)",
                     },
+                    "min_fact_generation": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "이 fact generation보다 오래된 현재 조회는 명시적 오류로 반환한다.",
+                    },
                     "max_age": {
                         "type": "integer",
                         "minimum": 0,
@@ -1095,11 +1100,12 @@ def list_tools(surface: str = "all") -> list[dict]:
 
 
 def _evidence_correction_tool() -> dict:
-    return {
+    tool = {
         "name": BRAIN_OBJECT_CORRECT_TOOL_NAME,
         "description": (
-            "서버 정책에 지정된 source의 JSON 필드에서 값을 직접 읽어 accepted/current MemoryCard를 교정한다. "
-            "호출자가 새 값을 전달하지 않으며, 서버가 project·object revision·source revision·field policy를 확인한다. "
+            "검증된 source에서 값을 읽어 기존 accepted/current MemoryCard를 교정한다. "
+            "v2 batch에는 기존 값·불일치 설명·제안 값·근거 revision을 함께 전달한다. 서버가 독립 검증한 값을 적용한다. "
+            "지연·충돌·장애 항목은 내구성 queue에서 자동 재검토한다. legacy 단건 입력도 유지한다. "
             "적격한 사실 교정은 per-correction human approval 없이 successor로 기록한다."
         ),
         "inputSchema": {
@@ -1139,6 +1145,12 @@ def _evidence_correction_tool() -> dict:
             "additionalProperties": False,
         },
     }
+    from .fact_correction_coordinator import FactBatch
+    batch_schema = FactBatch.model_json_schema()
+    definitions = batch_schema.pop("$defs", {})
+    legacy = tool["inputSchema"]
+    tool["inputSchema"] = {"type": "object", "oneOf": [legacy, batch_schema], "$defs": definitions}
+    return tool
 
 
 def _build_tool_registry(surface: str = "all") -> dict[str, dict]:

@@ -2,6 +2,8 @@
 
 전체 목표는 활성 상태다. 이 문서는 부분 구현의 증거이며 최종 완료 보고서가 아니다. [달성 추적](../specs/2026-07-05-lbrain-knowledge-object-substrate/correction-acceptance.md)의 G01~G10과 C01~C36을 계속 충족해야 한다.
 
+이 문서의 미구현 목록은 당시 상태다. 이후 공통 resolution·Git 데이터 교정·batch·MCP HTTP 연결의 부분 구현은 [2026-10-26 기록](2026-10-26-lbrain-common-fact-resolution.md)을 따른다.
+
 ## 구현한 변경
 
 - 초기 `summary` 교정도 같은 사실의 typed payload를 함께 갱신한다. 지정된 사실의 정확한 표시 구간만 summary/render에서 바꾸며, 같은 카드의 다른 사실은 보존한다. 표시 구간을 유일하게 확인할 수 없으면 변경하지 않는다.

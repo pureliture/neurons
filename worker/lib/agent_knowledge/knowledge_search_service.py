@@ -973,6 +973,7 @@ class KnowledgeSearchService:
         allow_production_object_authority_writes: bool = False,
         allow_evidence_backed_object_corrections: bool = False,
         evidence_correction_policies: tuple[dict, ...] = (),
+        fact_correction_coordinator=None,
         runtime_build_identity_reader: Callable[[], Mapping[str, Any]] | None = None,
         allow_permission_sensitive_audit_probe: bool = False,
         permission_audit_token_reviewer: Callable[[str], Mapping[str, Any]] | None = None,
@@ -993,6 +994,7 @@ class KnowledgeSearchService:
         self.allow_local_test_object_authority_writes = bool(allow_local_test_object_authority_writes)
         self.allow_production_object_authority_writes = bool(allow_production_object_authority_writes)
         self.allow_evidence_backed_object_corrections = bool(allow_evidence_backed_object_corrections)
+        self.fact_correction_coordinator = fact_correction_coordinator
         self.evidence_correction_policies = (
             validate_policies({"schema_version": POLICY_SCHEMA, "rules": list(evidence_correction_policies)})
             if evidence_correction_policies else ()
@@ -1035,6 +1037,32 @@ class KnowledgeSearchService:
         self._brain_card_cache.invalidate()
 
     def brain_object_correct(self, **arguments: Any) -> dict:
+        if arguments.get("schema_version") == "brain_object_correction.v2":
+            from .fact_correction_coordinator import FactBatch
+            from .fact_resolution import FactResolutionError
+            batch = FactBatch.model_validate(arguments)
+            if not self.allow_evidence_backed_object_corrections or self.fact_correction_coordinator is None:
+                return {"schema_version": "brain_object_correction.v2", "authority_write_performed": False,
+                    "reason_code": "fact_correction_not_configured", "changes": []}
+            try:
+                receipt = self.fact_correction_coordinator.submit(batch.model_dump())
+                for change in receipt["changes"]:
+                    if change.get("task_id"):
+                        previous_task = self.fact_correction_coordinator.queue.get(change["task_id"])
+                        worker = self.fact_correction_coordinator.worker(project=batch.project,
+                            worker_id="rpc_" + change["task_id"][-40:])
+                        run = worker.run_once(task_id=change["task_id"])
+                        change["outcome"] = self.fact_correction_coordinator.result(change["task_id"])
+                        change["authority_write_performed"] = bool(not previous_task["result_ref"]
+                            and run.get("state") == "resolved" and change["outcome"].get("resolution", {}).get("authority_write_performed"))
+                self.invalidate_brain_card_cache()
+                receipt["authority_write_performed"] = any(
+                    item.get("authority_write_performed", False) for item in receipt["changes"])
+                ensure_public_safe(receipt, "FactBatchResult")
+                return receipt
+            except FactResolutionError as exc:
+                return {"schema_version": "brain_object_correction.v2", "authority_write_performed": False,
+                    "reason_code": exc.reason_code, "retryable": exc.retryable, "changes": []}
         return EvidenceCorrectionService(
             ledger=self.ledger, store=self.pgvector_store,
             enabled=self.allow_evidence_backed_object_corrections,

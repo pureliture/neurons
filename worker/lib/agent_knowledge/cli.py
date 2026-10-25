@@ -279,11 +279,14 @@ def _build_recall_service(
     오류 메시지는 raw 예외를 에코하지 않고 type name만 노출한다(private path 비노출).
     """
     from .evidence_correction import load_policies
+    from .fact_correction_coordinator import load_configuration as load_fact_configuration
 
     try:
         correction_policies = load_policies(getattr(args, "evidence_correction_policy_file", ""))
+        fact_policy_file = getattr(args, "fact_correction_policy_file", "")
+        fact_configuration = load_fact_configuration(fact_policy_file) if fact_policy_file else None
         correction_enabled = bool(getattr(args, "allow_evidence_backed_object_corrections", False))
-        if correction_enabled and not correction_policies:
+        if correction_enabled and not correction_policies and not fact_configuration:
             raise ValueError("correction policy required")
     except (OSError, ValueError, TypeError) as exc:
         raise _ServiceWiringError(2, "invalid evidence correction policy configuration") from exc
@@ -402,6 +405,17 @@ def _build_recall_service(
         store_append = store_client.append_denied_once
     from .mcp_server import KnowledgeSearchService
 
+    fact_coordinator = None
+    if correction_enabled and fact_configuration:
+        if pgvector_store is None:
+            raise _ServiceWiringError(2, "fact correction requires canonical PostgreSQL")
+        from .fact_correction_coordinator import FactCorrectionCoordinator
+        try:
+            fact_coordinator = FactCorrectionCoordinator(store=pgvector_store,
+                git_reader=fact_configuration[0], policies=fact_configuration[1])
+        except (ValueError, TypeError):
+            raise _ServiceWiringError(2, "invalid fact correction source configuration") from None
+
     return KnowledgeSearchService(
         ledger=ledger,
         retired_index_bridge=retired_index_bridge,
@@ -419,6 +433,7 @@ def _build_recall_service(
         ),
         allow_evidence_backed_object_corrections=correction_enabled,
         evidence_correction_policies=correction_policies,
+        fact_correction_coordinator=fact_coordinator,
         allow_permission_sensitive_audit_probe=audit_probe_enabled,
         permission_audit_token_reviewer=token_reviewer,
         permission_audit_store_append=store_append,
@@ -437,6 +452,7 @@ def _add_recall_service_arguments(parser) -> None:
     parser.add_argument("--graph-required", action="store_true")
     parser.add_argument("--allow-evidence-backed-object-corrections", action="store_true")
     parser.add_argument("--evidence-correction-policy-file", default="")
+    parser.add_argument("--fact-correction-policy-file", default="")
     parser.add_argument(
         "--allow-steward-proposals",
         action="store_true",

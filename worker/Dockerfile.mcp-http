@@ -5,6 +5,10 @@
 # host/port/tailnet/graph 플래그는 compose command가 주입한다(이미지 CMD는 안전 기본값).
 FROM python:3.13-slim
 
+# Git source adapter는 server가 등록한 immutable blob과 commit ancestry를 읽는다.
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 ARG NEURONS_SOURCE_COMMIT
 RUN printf '%s' "${NEURONS_SOURCE_COMMIT}" | grep -Eq '^[0-9a-f]{40}$'
 LABEL org.opencontainers.image.revision=${NEURONS_SOURCE_COMMIT}

@@ -360,7 +360,8 @@ def build_app(
     if surface not in {"agent", "admin", "correction"}:
         raise ValueError("mcp-http surface must be agent or admin or correction")
     if surface == "correction":
-        if not service.allow_evidence_backed_object_corrections or not service.evidence_correction_policies:
+        if not service.allow_evidence_backed_object_corrections or not (
+                service.evidence_correction_policies or getattr(service, "fact_correction_coordinator", None) is not None):
             raise ValueError("mcp-http correction surface requires an enabled policy")
         if (not isinstance(correction_token, str) or len(correction_token) < 32
                 or correction_token == CORRECTION_AUTH_IDENTITY or correction_token == admin_token

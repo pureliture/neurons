@@ -370,3 +370,85 @@ CREATE TABLE IF NOT EXISTS lbrain_recheck_heartbeats (
     last_seen_at TIMESTAMPTZ NOT NULL,
     PRIMARY KEY(project,worker_id)
 );
+
+-- 관측·해석·현재 사실을 분리한다. source 본문은 기존 immutable source store에 둔다.
+CREATE TABLE IF NOT EXISTS lbrain_fact_scopes (
+    fact_key VARCHAR(64) PRIMARY KEY,
+    project VARCHAR(64) NOT NULL,
+    scope JSONB NOT NULL,
+    memory_id VARCHAR(64) NOT NULL REFERENCES memory_cards(memory_id),
+    field_path VARCHAR(128) NOT NULL,
+    value JSONB NOT NULL,
+    value_hash VARCHAR(71) NOT NULL,
+    generation BIGINT NOT NULL DEFAULT 0,
+    head_assertion_id VARCHAR(64),
+    state VARCHAR(24) NOT NULL DEFAULT 'current' CHECK (state IN ('current','pending','disputed')),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_lbrain_facts_project ON lbrain_fact_scopes(project, fact_key);
+CREATE TABLE IF NOT EXISTS lbrain_fact_members (
+    memory_id VARCHAR(64) NOT NULL REFERENCES memory_cards(memory_id),
+    field_path VARCHAR(128) NOT NULL,
+    fact_key VARCHAR(64) NOT NULL REFERENCES lbrain_fact_scopes(fact_key),
+    render_template TEXT NOT NULL,
+    PRIMARY KEY(memory_id,field_path)
+);
+CREATE INDEX IF NOT EXISTS idx_lbrain_fact_members_key ON lbrain_fact_members(fact_key);
+CREATE TABLE IF NOT EXISTS lbrain_fact_observations (
+    version_id VARCHAR(71) PRIMARY KEY,
+    observation_id VARCHAR(71) NOT NULL,
+    project VARCHAR(64) NOT NULL,
+    source_id VARCHAR(71) NOT NULL,
+    source_revision VARCHAR(180) NOT NULL,
+    interpretation_version VARCHAR(128) NOT NULL,
+    observation JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_lbrain_fact_observation_origin
+    ON lbrain_fact_observations(project,observation_id);
+CREATE TABLE IF NOT EXISTS lbrain_fact_assertions (
+    assertion_id VARCHAR(64) PRIMARY KEY,
+    fact_key VARCHAR(64) NOT NULL REFERENCES lbrain_fact_scopes(fact_key),
+    observation_version VARCHAR(71) NOT NULL REFERENCES lbrain_fact_observations(version_id),
+    value JSONB NOT NULL,
+    value_hash VARCHAR(71) NOT NULL,
+    state VARCHAR(24) NOT NULL CHECK (state IN ('support','history','pending','revoked')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(fact_key,observation_version,value_hash)
+);
+CREATE TABLE IF NOT EXISTS lbrain_fact_resolutions (
+    resolution_id VARCHAR(64) PRIMARY KEY,
+    fact_key VARCHAR(64) NOT NULL REFERENCES lbrain_fact_scopes(fact_key),
+    request_hash VARCHAR(71) NOT NULL,
+    terminal BOOLEAN NOT NULL DEFAULT FALSE,
+    result JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS lbrain_fact_resolution_events (
+    event_id VARCHAR(64) PRIMARY KEY,
+    resolution_id VARCHAR(64) NOT NULL REFERENCES lbrain_fact_resolutions(resolution_id),
+    assertion_id VARCHAR(64) NOT NULL REFERENCES lbrain_fact_assertions(assertion_id),
+    result JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS lbrain_fact_project_versions (
+    project VARCHAR(64) PRIMARY KEY,
+    generation BIGINT NOT NULL DEFAULT 0
+);
+
+-- 명시적으로 허용된 source adapter의 redacted 근거만 보존한다.
+CREATE TABLE IF NOT EXISTS lbrain_fact_source_receipts (
+    source_ref_id VARCHAR(180) PRIMARY KEY,
+    content_hash VARCHAR(71) NOT NULL,
+    redacted_content TEXT NOT NULL,
+    proof JSONB NOT NULL,
+    state VARCHAR(16) NOT NULL DEFAULT 'active' CHECK (state IN ('active','revoked')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS lbrain_fact_batches (
+    batch_id VARCHAR(64) PRIMARY KEY,
+    project VARCHAR(64) NOT NULL,
+    request_hash VARCHAR(71) NOT NULL,
+    result JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

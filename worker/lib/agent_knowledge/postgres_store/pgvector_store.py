@@ -637,7 +637,8 @@ class PgVectorStore:
                 return _json_value(_row_value(row, 'result', 0))
 
     def steward_decision(self, *, decision_id: str, memory_id: str, action: str, actor: str,
-                         content_hash: str, target_memory_id: str = "", transform: Any) -> dict[str, Any]:
+                         content_hash: str, target_memory_id: str = "", transform: Any,
+                         fact_resolution_id: str | None = None) -> dict[str, Any]:
         """Lock, validate and change steward rows, audit and outboxes in one PG transaction."""
         if not decision_id or not actor or action not in {'approve', 'auto_accept', 'reject', 'supersede', 'stale', 'correct_fact'}:
             raise ValueError("steward decision identity required")
@@ -673,6 +674,13 @@ class PgVectorStore:
                     raise ValueError("unknown steward card or target")
                 if _row_value(rows[memory_id], 'content_hash', 2) != content_hash:
                     raise ValueError("steward card content hash changed")
+                cur.execute("SELECT 1 FROM lbrain_fact_members WHERE memory_id=ANY(%s) LIMIT 1", (ids,))
+                if cur.fetchone():
+                    cur.execute("SELECT current_setting('neurons.fact_resolution_id',true) AS resolution_id")
+                    owned = _row_value(cur.fetchone(), "resolution_id", 0)
+                    if (action != "correct_fact" or not fact_resolution_id or owned != fact_resolution_id
+                            or not re.fullmatch(r"factres_[a-f0-9]{40}", fact_resolution_id)):
+                        raise ValueError("managed_fact_resolution_required")
                 card = _json_value(_row_value(rows[memory_id], 'steward_envelope', 1))
                 target = _json_value(_row_value(rows[target_memory_id], 'steward_envelope', 1)) if target_memory_id else None
                 if action in {'supersede', 'correct_fact'}:
@@ -1431,6 +1439,16 @@ class PgVectorStore:
                 )
                 if cur.rowcount != 1:
                     raise ValueError("outbox job not found or lease owner mismatch")
+
+    def resolve_fact_views(self, *, project, cards, as_of=None):
+        from ..fact_resolution import FactResolutionService
+        return FactResolutionService(self).read_view(project=project, cards=cards, as_of=as_of)
+
+    def fact_project_generation(self, project):
+        with self._scope() as db, db.cursor() as cur:
+            cur.execute("SELECT generation FROM lbrain_fact_project_versions WHERE project=%s", (project,))
+            row = cur.fetchone()
+            return int(_row_value(row, "generation", 0)) if row else 0
 
     def list_authorized_cards(
         self, *, project: str, memory_ids: list[str] | None = None,

@@ -82,10 +82,20 @@ class GitSourceReader:
 
     def read(self, *, repository: str, revision: str, relative_path: str,
              expected_content_hash: str) -> VerifiedGitSource:
+        require_sha256(expected_content_hash, "expected source content hash")
+        return self._read(repository=repository, revision=revision, relative_path=relative_path,
+            expected_content_hash=expected_content_hash)
+
+    def read_current(self, *, repository: str, relative_path: str) -> VerifiedGitSource:
+        """server 정책이 지정한 현재 source를 독립적으로 읽는다."""
+        policy = self._policy(repository)
+        return self._read(repository=repository, revision=self._head(policy), relative_path=relative_path,
+            expected_content_hash=None)
+
+    def _read(self, *, repository, revision, relative_path, expected_content_hash):
         policy = self._policy(repository)
         _revision(revision)
         _relative_path(relative_path)
-        require_sha256(expected_content_hash, "expected source content hash")
         head = self._head(policy)
         branch = self._branch_identity(policy)
         resolved = self._git(policy, ["rev-parse", "--verify", revision + "^{commit}"]).strip().decode()
@@ -115,8 +125,9 @@ class GitSourceReader:
             raise SourceUnavailable("source_encoding_unsupported") from None
         if "\0" in text:
             raise SourceUnavailable("source_encoding_unsupported")
-        if sha256_text(text) != expected_content_hash:
+        if expected_content_hash is not None and sha256_text(text) != expected_content_hash:
             raise SourceUnavailable("source_hash_mismatch")
+        expected_content_hash = sha256_text(text)
         redacted = redact_public_ingress_text(text)
         ensure_public_safe(redacted, "VerifiedGitSource")
         if self._head(policy) != head or self._branch_identity(policy) != branch:

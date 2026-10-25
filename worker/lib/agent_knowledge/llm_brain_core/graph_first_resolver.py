@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import os
+from inspect import getattr_static
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Annotated, Any, Callable, Literal, Mapping
 
@@ -50,6 +51,7 @@ class _ResolveRequest(BaseModel):
     as_of: str = Field(default="", max_length=64)
     limit: int = Field(default=5, ge=1, le=20)
     cursor: str | None = Field(default=None, max_length=2048)
+    min_fact_generation: int | None = Field(default=None, ge=0)
     include_historical: bool = Field(default=False)
     max_age: int | None = Field(default=None, ge=0)
     min_age: int | None = Field(default=None, ge=0)
@@ -165,6 +167,7 @@ class GraphFirstResolver:
         as_of: str = "",
         limit: int = 5,
         cursor: str | None = None,
+        min_fact_generation: int | None = None,
         include_historical: bool = False,
         max_age: int | None = None,
         min_age: int | None = None,
@@ -180,6 +183,7 @@ class GraphFirstResolver:
             as_of=as_of,
             limit=limit,
             cursor=cursor,
+            min_fact_generation=min_fact_generation,
             include_historical=include_historical,
             max_age=max_age,
             min_age=min_age,
@@ -196,7 +200,13 @@ class GraphFirstResolver:
         return self._resolve_query(request)
 
     def _resolve_authority_only(self, request: _ResolveRequest) -> dict[str, Any]:
-        cursor = self._decode_cursor(request.cursor, _fingerprint(request, []))
+        generation = None
+        if not request.as_of and callable(getattr_static(self._store, "fact_project_generation", None)):
+            try:
+                generation = self._store.fact_project_generation(request.project)
+            except Exception:
+                return self._error_payload(request, error_code="fact_resolution_unavailable")
+        cursor = self._decode_cursor(request.cursor, _fingerprint(request, [], fact_generation=generation))
         if request.cursor and cursor.after_id is None:
             raise ValueError("invalid list cursor")
         try:
@@ -697,6 +707,18 @@ class GraphFirstResolver:
                 continue
             seen.add(memory_id)
             deduped.append(_copy_card(card))
+        if callable(getattr_static(self._store, "resolve_fact_views", None)):
+            try:
+                resolved = self._store.resolve_fact_views(project=request.project, cards=deduped,
+                    as_of=request.as_of or None)
+                deduped = resolved["cards"]
+                metadata = {**metadata, **resolved["metadata"]}
+            except Exception:
+                return self._error_payload(request, error_code="fact_resolution_unavailable")
+        if request.min_fact_generation is not None and (
+                type(metadata.get("fact_generation")) is not int
+                or metadata["fact_generation"] < request.min_fact_generation):
+            return self._error_payload(request, error_code="fact_generation_unavailable")
         _detect_cross_card_conflicts(deduped, request.as_of)
         if any(c.get("authority_source") == "postgres" for c in deduped):
             metadata = {**metadata, "authority_source": "postgres"}
@@ -731,7 +753,8 @@ class GraphFirstResolver:
 
         filtered.sort(key=_is_card_anomalous)
 
-        fingerprint = _fingerprint(request, [] if keyset else filtered)
+        fingerprint = _fingerprint(request, [] if keyset else filtered,
+            fact_generation=metadata.get("fact_generation"))
         cursor = self._decode_cursor(request.cursor, fingerprint)
         offset = 0 if keyset else cursor.offset
         page = filtered[offset : offset + request.limit]
@@ -817,7 +840,9 @@ class GraphFirstResolver:
         for card in cards:
             context_mode = request.mode == "context"
             item = _context_item(card) if context_mode else _item(card)
-            section_identity = {"id": item["id"]} if context_mode else {k: v for k, v in item.items() if k != "typed_payload"}
+            section_identity = ({"id": item["id"], **({"disputed_fields": item["disputed_fields"]}
+                if item.get("disputed_fields") else {})} if context_mode
+                else {k: v for k, v in item.items() if k != "typed_payload"})
             # Temporal envelope (FR-AGE): only on the non-context (slim) item,
             # so the compact context lane stays minimal.
             if not context_mode:
@@ -954,7 +979,8 @@ class GraphFirstResolver:
         )
         if not isinstance(result, Mapping):
             raise ValueError("invalid evidence result")
-        expected_roots = {str(card.get("memory_id") or card.get("id")): card.get("content_hash") for card in page}
+        expected_roots = {str(card.get("memory_id") or card.get("id")):
+            card.get("canonical_content_hash", card.get("content_hash")) for card in page}
         if result.get("root_hashes") != expected_roots:
             raise ValueError("authority changed while reading evidence")
         edges = result.get("edges")
@@ -1209,6 +1235,9 @@ def _item(card: Mapping[str, Any], *, include_created_at: bool = True) -> dict[s
     raw_typed = card.get("typed_payload")
     if isinstance(raw_typed, Mapping):
         item["typed_payload"] = _safe_typed_value(raw_typed)
+    if card.get("fact_views"):
+        item["fact_views"] = _safe_typed_value(card["fact_views"])
+        item["canonical_content_hash"] = _safe(card.get("canonical_content_hash"), 80)
     if card.get("authority_source"):
         item["authority_source"] = _safe(card.get("authority_source"), 64)
     if card.get("temporal_conflict"):
@@ -1406,6 +1435,9 @@ def _context_item(card: Mapping[str, Any]) -> dict[str, Any]:
         item["authority_source"] = _safe(card.get("authority_source"), 64)
     if card.get("temporal_conflict"):
         item["temporal_conflict"] = True
+    disputed_fields = [view["field_path"] for view in card.get("fact_views", []) if view.get("state") == "disputed"]
+    if disputed_fields:
+        item["disputed_fields"] = disputed_fields
     return item
 
 
@@ -1735,8 +1767,10 @@ def _lag(value: Any) -> int | None:
         return None
 
 
-def _fingerprint(request: _ResolveRequest, cards: list[dict[str, Any]]) -> str:
+def _fingerprint(request: _ResolveRequest, cards: list[dict[str, Any]], *, fact_generation=None) -> str:
     material = {"request": request.model_dump(exclude={"cursor"}), "candidates": [[str(card.get("memory_id") or card.get("id") or ""), str(card.get("content_hash") or "")] for card in cards]}
+    if fact_generation is not None:
+        material["fact_generation"] = fact_generation
     return base64.urlsafe_b64encode(hashlib.sha256(_json(material).encode("utf-8")).digest()).decode("ascii").rstrip("=")
 
 

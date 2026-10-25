@@ -1,0 +1,470 @@
+"""교정·수집에 공통으로 사용하는 기존 사실의 resolution 코어.
+
+admission은 server source adapter가 담당한다. 이 코어는 검증된 관측을
+영속화하고, 실제 source 재검증과 PG authority 변경을 하나의 처리로 묶는다.
+"""
+from __future__ import annotations
+
+import copy
+from dataclasses import asdict, dataclass
+from datetime import datetime
+import re
+from typing import Any, Callable, Mapping
+
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
+from psycopg.errors import DeadlockDetected, LockNotAvailable, SerializationFailure
+
+from .public_safe_util import ensure_public_safe, hash_payload, require_sha256
+
+
+class FactResolutionError(ValueError):
+    def __init__(self, reason_code: str, *, retryable: bool = False):
+        self.reason_code = reason_code
+        self.retryable = retryable
+        super().__init__(reason_code)
+
+
+@dataclass(frozen=True)
+class FactScope:
+    project: str
+    repository: str
+    branch: str
+    environment: str
+    subject: str
+    predicate: str
+
+    def __post_init__(self):
+        for name, value in asdict(self).items():
+            _text(value, 64 if name == "project" else 512)
+        ensure_public_safe(asdict(self), "FactScope")
+
+    @property
+    def key(self):
+        return "fact_" + hash_payload(asdict(self))[7:47]
+
+    @property
+    def context_hash(self):
+        return hash_payload({key: value for key, value in asdict(self).items() if key not in {"subject", "predicate"}})
+
+
+@dataclass(frozen=True)
+class VerifiedObservation:
+    """RPC 입력이 아니다. server admission 뒤 생성하는 source witness다."""
+
+    observation_id: str
+    project: str
+    source_id: str
+    source_revision: str
+    content_hash: str
+    context_hash: str
+    interpretation_version: str
+    proof: Mapping[str, Any]
+    current_verified: bool
+    observed_at: str = ""
+
+    def __post_init__(self):
+        for value in (self.observation_id, self.source_id, self.content_hash, self.context_hash):
+            require_sha256(value, "observation digest")
+        _text(self.project, 64); _text(self.source_revision, 180); _text(self.interpretation_version, 128)
+        if type(self.current_verified) is not bool or not isinstance(self.proof, Mapping):
+            raise ValueError("server observation witness required")
+        if self.observed_at:
+            stamp = datetime.fromisoformat(self.observed_at.replace("Z", "+00:00"))
+            if stamp.tzinfo is None or stamp.utcoffset() is None:
+                raise ValueError("timezone-aware observation required")
+        object.__setattr__(self, "proof", copy.deepcopy(dict(self.proof)))
+        ensure_public_safe(asdict(self), "VerifiedObservation")
+        if len(str(self.proof).encode()) > 32768:
+            raise ValueError("bounded source proof required")
+
+    @property
+    def version_id(self):
+        return hash_payload({key: value for key, value in asdict(self).items()
+            if key not in {"current_verified", "observed_at"}})
+
+
+class FactResolutionService:
+    def __init__(self, store):
+        self.store = store
+
+    def reconcile(self, **arguments):
+        try:
+            return self._reconcile(**arguments)
+        except (DeadlockDetected, LockNotAvailable, SerializationFailure):
+            # 짧은 authority lock 한도를 늘리지 않는다. 내구성 queue가 같은 요청을 재시도한다.
+            raise FactResolutionError("authority_busy", retryable=True) from None
+
+    def _reconcile(self, *, scope: FactScope, memory_id: str, field_path: str, render_template: str,
+                  expected_content_hash: str, value: str, observation: VerifiedObservation,
+                  request_key: str, request_hash: str, requested_value: str | None,
+                  is_current: Callable[[VerifiedObservation], bool],
+                  compare: Callable[[VerifiedObservation, VerifiedObservation], str],
+                  commit: Callable[..., Mapping[str, Any]]) -> dict:
+        """source 재검증 후 canonical commit과 resolution을 같은 PG tx에 보존한다.
+
+        commit은 제공한 connection의 PgVectorStore로 steward_decision을 호출하고
+        card/target/decision_id를 반환해야 한다. 외부 별도 connection 쓰기는 금지다.
+        """
+        _text(memory_id, 64); _text(request_key, 180); _text(value, 2048)
+        _field(field_path); _template(render_template)
+        require_sha256(expected_content_hash, "expected revision")
+        require_sha256(request_hash, "request hash")
+        if observation.project != scope.project or observation.context_hash != scope.context_hash:
+            raise FactResolutionError("observation_scope_mismatch")
+        ensure_public_safe(value, "assertion value")
+        if requested_value is not None:
+            _text(requested_value, 2048); ensure_public_safe(requested_value, "requested value")
+        resolution_id = "factres_" + hash_payload([scope.key, request_key])[7:47]
+        with self.store.transaction() as db, db.cursor(row_factory=dict_row) as cur:
+            self.store._lock_steward_authority_on(db)
+            cur.execute("SELECT * FROM lbrain_fact_resolutions WHERE resolution_id=%s FOR UPDATE", (resolution_id,))
+            previous = cur.fetchone()
+            if previous:
+                if previous["request_hash"] != request_hash:
+                    raise FactResolutionError("request_key_conflict")
+                if previous["terminal"]:
+                    result = copy.deepcopy(previous["result"])
+                    result.update(duplicate=True, authority_write_performed=False, current=self._head(cur, scope.key))
+                    return result
+            card = self.store.get_steward_card(memory_id, conn=db)
+            if not card or card["project"] != scope.project or card.get("authorization_status") != "active":
+                raise FactResolutionError("target_not_current")
+            original_memory_id = memory_id
+            superseded_same_value = False
+            if card.get("currentness") == "superseded":
+                cur.execute("""SELECT f.* FROM lbrain_fact_members m JOIN lbrain_fact_scopes f
+                    ON f.fact_key=m.fact_key WHERE m.memory_id=%s AND m.field_path=%s""", (memory_id, field_path))
+                linked = cur.fetchone()
+                if expected_content_hash != card["content_hash"]:
+                    raise FactResolutionError("target_revision_conflict")
+                if linked and linked["fact_key"] == scope.key and linked["value_hash"] == hash_payload(value):
+                    superseded_same_value = True
+                else:
+                    # 다른 필드만 먼저 교정된 요청은 원래 지정 필드가 모든 후속 revision에서
+                    # 그대로였는지 확인한 뒤 현재 card로 이어간다. 지정 필드가 바뀌었으면 CAS 실패다.
+                    card = self._unchanged_successor(card, field_path, connection=db)
+                    memory_id = card["memory_id"]
+                    expected_content_hash = self.project_cards([card], connection=db)[0]["content_hash"]
+            elif card.get("currentness") != "current":
+                raise FactResolutionError("target_not_current")
+            projected = self.project_cards([card], connection=db)[0]
+            if not superseded_same_value and expected_content_hash != projected["content_hash"]:
+                raise FactResolutionError("target_revision_conflict")
+            prior_value = _value(card, field_path)
+            if not isinstance(prior_value, str):
+                raise FactResolutionError("target_field_unsupported")
+            cur.execute("""INSERT INTO lbrain_fact_scopes
+                (fact_key,project,scope,memory_id,field_path,value,value_hash)
+                VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(fact_key) DO NOTHING""",
+                (scope.key, scope.project, Jsonb(asdict(scope)), memory_id, field_path, Jsonb(prior_value), hash_payload(prior_value)))
+            head = self._head(cur, scope.key, locked=True)
+            if head["scope"] != asdict(scope):
+                raise FactResolutionError("fact_scope_conflict")
+            self._bind(cur, memory_id, field_path, scope.key, render_template)
+            if memory_id != original_memory_id:
+                self._bind(cur, original_memory_id, field_path, scope.key, render_template)
+            self._observation(cur, observation)
+            assertion_id = "assert_" + hash_payload([scope.key, observation.version_id, hash_payload(value)])[7:47]
+            cur.execute("""INSERT INTO lbrain_fact_assertions
+                (assertion_id,fact_key,observation_version,value,value_hash,state)
+                VALUES (%s,%s,%s,%s,%s,'pending') ON CONFLICT(assertion_id) DO NOTHING""",
+                (assertion_id, scope.key, observation.version_id, Jsonb(value), hash_payload(value)))
+            cur.execute("SELECT state FROM lbrain_fact_assertions WHERE assertion_id=%s", (assertion_id,))
+            assertion_state = cur.fetchone()["state"]
+            old_observation = self._head_observation(cur, head)
+            current = (assertion_state not in {"history", "revoked"}
+                       and observation.current_verified and is_current(observation))
+            competing, incomplete = self._competing_current(cur, scope.key, hash_payload(value), is_current) if current else (False, False)
+            # source가 재검증 사이에 바뀌면 해당 관측으로 새 authority를 만들지 않는다.
+            if current and not is_current(observation):
+                current = False
+            relation = "unknown"
+            if old_observation and old_observation.source_id == observation.source_id:
+                relation = compare(old_observation, observation)
+                if relation not in {"same", "incoming_before", "incoming_after", "incomparable", "unknown"}:
+                    raise FactResolutionError("invalid_source_order")
+            if incomplete:
+                action = "pending_evidence"
+            elif current and competing:
+                action = "disputed"
+            elif head["value_hash"] == hash_payload(value):
+                action = "attach_evidence" if current else "retain_history"
+            elif not current:
+                action = "retain_history" if relation == "incoming_before" else "pending_evidence"
+            else:
+                # 실제 현재 source가 옛 hash로 돌아온 경우도 새 관측이면 갱신한다.
+                action = "replace_current"
+            result = {"schema_version": "fact_resolution.v1", "resolution_id": resolution_id,
+                "fact_key": scope.key, "action": action, "requested_value": requested_value,
+                "applied_value": head["value"], "authority_write_performed": False,
+                "observation_id": observation.observation_id, "observation_version": observation.version_id,
+                "assertion_id": assertion_id, "duplicate": False, "generation": head["generation"]}
+            if action == "replace_current":
+                base = self.store.get_steward_card(head["memory_id"], conn=db)
+                if not base or base.get("currentness") != "current":
+                    raise FactResolutionError("fact_head_not_current")
+                raw_revision = base["content_hash"]
+                base = self.project_cards([base], connection=db)[0]
+                base.pop("fact_views", None)
+                base.pop("canonical_content_hash", None)
+                base["content_hash"] = raw_revision
+                db.execute("SELECT set_config('neurons.fact_resolution_id',%s,true)", (resolution_id,))
+                changed = dict(commit(connection=db, current=base, value=value,
+                    observation=observation, resolution_id=resolution_id))
+                if not is_current(observation):
+                    raise FactResolutionError("source_changed_during_commit")
+                successor = changed.get("card")
+                if (not isinstance(successor, Mapping) or successor.get("project") != scope.project
+                        or successor.get("currentness") != "current" or _value(successor, head["field_path"]) != value):
+                    raise FactResolutionError("canonical_commit_unverified")
+                stored = self.store.get_steward_card(successor["memory_id"], conn=db)
+                if not stored or stored["content_hash"] != successor["content_hash"] or stored.get("authorization_status") != "active":
+                    raise FactResolutionError("canonical_commit_unverified")
+                # 같은 card의 변경하지 않은 사실 binding도 successor에 연결한다.
+                cur.execute("""SELECT field_path,fact_key,render_template FROM lbrain_fact_members
+                    WHERE memory_id=%s""", (head["memory_id"],))
+                members = cur.fetchall()
+                for member in members:
+                    self._bind(cur, successor["memory_id"], member["field_path"], member["fact_key"], member["render_template"])
+                    if member["fact_key"] != scope.key:
+                        cur.execute("""UPDATE lbrain_fact_scopes SET memory_id=%s,updated_at=clock_timestamp()
+                            WHERE fact_key=%s AND memory_id=%s AND value_hash=%s""",
+                            (successor["memory_id"], member["fact_key"], head["memory_id"], hash_payload(_value(successor, member["field_path"]))))
+                cur.execute("""UPDATE lbrain_fact_scopes SET memory_id=%s,value=%s,value_hash=%s,
+                    generation=generation+1,head_assertion_id=%s,state='current',updated_at=clock_timestamp()
+                    WHERE fact_key=%s""", (successor["memory_id"], Jsonb(value), hash_payload(value), assertion_id, scope.key))
+                cur.execute("""UPDATE lbrain_fact_assertions SET state='history'
+                    WHERE fact_key=%s AND value_hash<>%s AND state IN ('support','pending')""", (scope.key, hash_payload(value)))
+                result.update(applied_value=value, authority_write_performed=True,
+                    decision_id=changed["decision_id"], successor_memory_id=successor["memory_id"])
+            elif action == "attach_evidence" and current:
+                cur.execute("""UPDATE lbrain_fact_scopes SET head_assertion_id=%s,state='current',
+                    updated_at=clock_timestamp() WHERE fact_key=%s""", (assertion_id, scope.key))
+            elif action in {"disputed", "pending_evidence"}:
+                cur.execute("UPDATE lbrain_fact_scopes SET state=%s WHERE fact_key=%s",
+                    ("disputed" if action == "disputed" else "pending", scope.key))
+            assertion_state = {"attach_evidence": "support", "replace_current": "support", "retain_history": "history"}.get(action, "pending")
+            cur.execute("UPDATE lbrain_fact_assertions SET state=%s WHERE assertion_id=%s", (assertion_state, assertion_id))
+            cur.execute("""INSERT INTO lbrain_fact_project_versions(project,generation) VALUES (%s,1)
+                ON CONFLICT(project) DO UPDATE SET generation=lbrain_fact_project_versions.generation+1 RETURNING generation""", (scope.project,))
+            project_generation = cur.fetchone()["generation"]
+            current_head = self._head(cur, scope.key)
+            result.update(current=current_head, generation=current_head["generation"], project_generation=project_generation)
+            terminal = action in {"replace_current", "attach_evidence", "retain_history"}
+            ensure_public_safe(result, "FactResolutionResult")
+            cur.execute("""INSERT INTO lbrain_fact_resolutions(resolution_id,fact_key,request_hash,terminal,result)
+                VALUES (%s,%s,%s,%s,%s) ON CONFLICT(resolution_id) DO UPDATE SET
+                terminal=excluded.terminal,result=excluded.result,updated_at=clock_timestamp()""",
+                (resolution_id, scope.key, request_hash, terminal, Jsonb(result)))
+            event_id = "factevt_" + hash_payload([resolution_id, assertion_id, action, current_head["generation"]])[7:47]
+            cur.execute("""INSERT INTO lbrain_fact_resolution_events(event_id,resolution_id,assertion_id,result)
+                VALUES (%s,%s,%s,%s) ON CONFLICT(event_id) DO NOTHING""", (event_id, resolution_id, assertion_id, Jsonb(result)))
+            return result
+
+    def project_cards(self, cards: list[Mapping], *, connection=None) -> list[dict]:
+        """여러 card의 동일 사실을 PG의 단일 현재 값으로 표시한다."""
+        if not cards:
+            return []
+        from .evidence_correction import _render_fact
+        with self.store._scope(conn=connection) as db, db.cursor(row_factory=dict_row) as cur:
+            cur.execute("""SELECT m.*,f.value,f.generation,f.state,f.memory_id AS head_memory_id,
+                    c.steward_envelope->>'render_text' AS original_render_text
+                FROM lbrain_fact_members m JOIN lbrain_fact_scopes f ON f.fact_key=m.fact_key
+                JOIN memory_cards c ON c.memory_id=m.memory_id
+                WHERE m.memory_id=ANY(%s) ORDER BY m.memory_id,m.field_path""", ([c["memory_id"] for c in cards],))
+            by_memory = {}
+            for row in cur.fetchall():
+                by_memory.setdefault(row["memory_id"], []).append(row)
+        result = []
+        for original in cards:
+            card = copy.deepcopy(dict(original))
+            views = []
+            for member in by_memory.get(card["memory_id"], []):
+                if _value(card, member["field_path"]) != member["value"]:
+                    if "render_text" not in card:
+                        card["render_text"] = member["original_render_text"]
+                    summary, rendered, _ = _render_fact(card, {"field_path": member["field_path"],
+                        "summary_template": member["render_template"]}, member["value"])
+                    card["summary"], card["render_text"] = summary, rendered
+                    card["typed_payload"][member["field_path"].split(".", 1)[1]] = member["value"]
+                    # 표시를 갱신해도 원래 card의 다른 사실까지 새로 검증된 것은 아니다.
+                    card["freshness_state"] = "unchecked"
+                    card.setdefault("field_verifications", {}).pop(member["field_path"], None)
+                views.append({"fact_key": member["fact_key"], "field_path": member["field_path"],
+                    "generation": member["generation"], "state": member["state"], "head_memory_id": member["head_memory_id"]})
+            if views:
+                card["canonical_content_hash"] = card["content_hash"]
+                card["fact_views"] = views
+                card["content_hash"] = hash_payload({"canonical_content_hash": card["canonical_content_hash"], "fact_views": views})
+            result.append(card)
+        return result
+
+    def read_view(self, *, project, cards, as_of=None):
+        """현재 조회만 공통 fact 값으로 표시한다. 과거 시점 재구성은 범위 밖이다."""
+        if as_of:
+            return {"cards": cards, "metadata": {"fact_resolution": "historical_unmodified"}}
+        with self.store._scope() as db:
+            # 카드의 검색/graph hash는 원본으로 검증한 뒤, bounded 조회 대상만 표시한다.
+            # 읽기는 writer를 전역 차단하지 않고 하나의 MVCC snapshot을 사용한다.
+            # 주입된 connection의 transaction/isolation은 호출자가 소유한다.
+            if self.store.connection is None:
+                db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            ids = [card["memory_id"] for card in cards if not card["memory_id"].startswith("chunk:")]
+            with db.cursor(row_factory=dict_row) as cur:
+                cur.execute("SELECT memory_id,content_hash,currentness FROM memory_cards WHERE project=%s AND memory_id=ANY(%s)",
+                    (project, ids))
+                canonical = {row["memory_id"]: row for row in cur.fetchall()}
+            for card in cards:
+                if card["memory_id"] in ids:
+                    row = canonical.get(card["memory_id"])
+                    if (not row or row["content_hash"] != card["content_hash"]
+                            or row["currentness"] != card.get("currentness")):
+                        raise FactResolutionError("authority_changed_during_read")
+            projected = self.project_cards(cards, connection=db)
+            with db.cursor(row_factory=dict_row) as cur:
+                cur.execute("SELECT generation FROM lbrain_fact_project_versions WHERE project=%s", (project,))
+                row = cur.fetchone()
+            generation = row["generation"] if row else 0
+            return {"cards": projected, "metadata": {"fact_resolution": "postgres_current",
+                "fact_generation": generation}}
+
+    def _observation(self, cur, observation):
+        value = asdict(observation)
+        cur.execute("SELECT observation FROM lbrain_fact_observations WHERE version_id=%s", (observation.version_id,))
+        previous = cur.fetchone()
+        if previous and previous["observation"] != value:
+            raise FactResolutionError("observation_version_conflict")
+        cur.execute("""INSERT INTO lbrain_fact_observations
+            (version_id,observation_id,project,source_id,source_revision,interpretation_version,observation)
+            VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(version_id) DO NOTHING""",
+            (observation.version_id, observation.observation_id, observation.project, observation.source_id,
+             observation.source_revision, observation.interpretation_version, Jsonb(value)))
+
+    @staticmethod
+    def _bind(cur, memory_id, field_path, fact_key, template):
+        cur.execute("SELECT fact_key,render_template FROM lbrain_fact_members WHERE memory_id=%s AND field_path=%s", (memory_id, field_path))
+        previous = cur.fetchone()
+        if previous and (previous["fact_key"] != fact_key or previous["render_template"] != template):
+            raise FactResolutionError("fact_binding_conflict")
+        cur.execute("""INSERT INTO lbrain_fact_members(memory_id,field_path,fact_key,render_template)
+            VALUES (%s,%s,%s,%s) ON CONFLICT(memory_id,field_path) DO NOTHING""", (memory_id, field_path, fact_key, template))
+
+    @staticmethod
+    def _head(cur, fact_key, locked=False):
+        cur.execute("SELECT * FROM lbrain_fact_scopes WHERE fact_key=%s" + (" FOR UPDATE" if locked else ""), (fact_key,))
+        row = cur.fetchone()
+        return {key: value for key, value in row.items() if key != "updated_at"} if row else None
+
+    @staticmethod
+    def _head_observation(cur, head):
+        if not head["head_assertion_id"]:
+            return None
+        cur.execute("""SELECT o.observation FROM lbrain_fact_assertions a JOIN lbrain_fact_observations o
+            ON o.version_id=a.observation_version WHERE a.assertion_id=%s""", (head["head_assertion_id"],))
+        row = cur.fetchone()
+        return VerifiedObservation(**row["observation"]) if row else None
+
+    def _unchanged_successor(self, card, field_path, *, connection):
+        prior = _value(card, field_path)
+        visited = {card["memory_id"]}
+        for _ in range(32):
+            following = card.get("superseded_by") or []
+            if len(following) != 1 or following[0] in visited:
+                break
+            successor = self.store.get_steward_card(following[0], conn=connection)
+            if (not successor or successor["project"] != card["project"]
+                    or successor.get("authorization_status") != "active"
+                    or card["memory_id"] not in successor.get("supersedes", [])
+                    or _value(successor, field_path) != prior):
+                break
+            visited.add(successor["memory_id"])
+            if successor.get("currentness") == "current":
+                return successor
+            card = successor
+        raise FactResolutionError("target_revision_conflict")
+
+    @staticmethod
+    def _competing_current(cur, fact_key, value_hash, is_current):
+        cur.execute("""SELECT DISTINCT ON (o.source_id,o.source_revision,o.interpretation_version,a.value_hash)
+            o.observation FROM lbrain_fact_assertions a JOIN lbrain_fact_observations o
+            ON o.version_id=a.observation_version
+            WHERE a.fact_key=%s AND a.value_hash<>%s AND a.state IN ('support','pending')
+              AND o.observation->>'current_verified'='true'
+            ORDER BY o.source_id,o.source_revision,o.interpretation_version,a.value_hash,o.created_at DESC
+            LIMIT 257""", (fact_key, value_hash))
+        rows = cur.fetchall()
+        if len(rows) > 256:
+            return False, True
+        return any(is_current(VerifiedObservation(**row["observation"])) for row in rows), False
+
+
+class StewardFactCommit:
+    """공통 resolution이 기존 canonical authority를 같은 PG transaction에서 갱신한다."""
+
+    def __init__(self, *, field_path: str, render_template: str, policy_id: str, max_age_seconds: int = 300):
+        _field(field_path)
+        _template(render_template)
+        _text(policy_id, 180)
+        if type(max_age_seconds) is not int or not 1 <= max_age_seconds <= 86400:
+            raise ValueError("bounded source lifetime required")
+        self.field_path = field_path
+        self.render_template = render_template
+        self.policy_id = policy_id
+        self.max_age_seconds = max_age_seconds
+
+    def __call__(self, *, connection, current, value, observation, resolution_id):
+        from .evidence_correction import _candidate
+        from .postgres_store.pgvector_store import PgVectorStore
+        from .session_memory.memory_card import validate_memory_card_envelope
+        from .session_memory.memory_promotion import commit_supersession
+
+        store = PgVectorStore(connection=connection)
+        rule = {"policy_id": self.policy_id, "memory_id": current["memory_id"],
+            "field_path": self.field_path, "summary_template": self.render_template,
+            "max_age_seconds": self.max_age_seconds}
+        proof = dict(observation.proof)
+        proof.update(content_hash=observation.content_hash, observed_at=observation.observed_at)
+        if not proof.get("source_ref_id") or not observation.observed_at:
+            raise FactResolutionError("source_receipt_required")
+        request_hash = hash_payload([resolution_id, observation.version_id, value, current["content_hash"]])
+        candidate_id = "mem_fact_" + request_hash[7:47]
+        decision_id = "factdec_" + request_hash[7:47]
+        candidate = _candidate(current, rule, value, [proof], candidate_id, request_hash, decision_id)
+        store.put_steward_proposal(candidate)
+
+        def transform(proposal, target):
+            if (not target or target["content_hash"] != current["content_hash"]
+                    or target.get("currentness") != "current" or target.get("authorization_status") != "active"):
+                raise FactResolutionError("target_revision_conflict")
+            accepted = copy.deepcopy(proposal)
+            accepted.update(lifecycle_state="auto_accepted", approval_state="auto_accepted",
+                judgment_state="auto_status", status="accepted", auto_policy_ready=True,
+                authorization_status="active", currentness="current", freshness="current")
+            validate_memory_card_envelope(accepted)
+            return accepted, commit_supersession(target, superseded_by=accepted["memory_id"])
+
+        result = store.steward_decision(decision_id=decision_id, memory_id=candidate_id,
+            action="correct_fact", actor="fact_resolution.v1", content_hash=candidate["content_hash"],
+            target_memory_id=current["memory_id"], transform=transform, fact_resolution_id=resolution_id)
+        return {**result, "decision_id": decision_id}
+
+
+def _value(card, field):
+    return card.get("typed_payload", {}).get(field.split(".", 1)[1])
+
+
+def _field(value):
+    if not isinstance(value, str) or not re.fullmatch(r"typed_payload\.[A-Za-z][A-Za-z0-9_]{0,95}", value):
+        raise ValueError("explicit factual payload field required")
+
+
+def _text(value, limit):
+    if not isinstance(value, str) or not value.strip() or value != value.strip() or len(value) > limit:
+        raise ValueError("bounded canonical text required")
+
+
+def _template(value):
+    _text(value, 1024)
+    if value.count("{value}") != 1 or any(c in value.replace("{value}", "") for c in "{}"):
+        raise ValueError("single fact render template required")

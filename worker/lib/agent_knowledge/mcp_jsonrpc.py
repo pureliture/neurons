@@ -115,7 +115,8 @@ CORRECTION_AUTH_IDENTITY = "lbrain_evidence_corrector"
 def _evidence_correction_surface_enabled(service: KnowledgeSearchService) -> bool:
     return bool(
         getattr(service, "allow_evidence_backed_object_corrections", False)
-        and getattr(service, "evidence_correction_policies", ())
+        and (getattr(service, "evidence_correction_policies", ())
+             or getattr(service, "fact_correction_coordinator", None) is not None)
     )
 
 
@@ -920,6 +921,10 @@ def _dispatch_brain_object_correct_tool(
     arguments: dict,
     service: KnowledgeSearchService,
 ) -> dict:
+    if arguments.get("schema_version") == "brain_object_correction.v2":
+        from .fact_correction_coordinator import FactBatch
+        batch = FactBatch.model_validate(arguments)
+        return _tool_result(service.brain_object_correct(**batch.model_dump()))
     required = {
         "project",
         "repository",
@@ -1128,6 +1133,12 @@ def _dispatch_brain_resolve_tool(tool_name: str, arguments: dict, service: Knowl
         if not isinstance(inc, bool):
             raise ValueError(f"{tool_name} include_historical must be a boolean")
         resolve_kwargs["include_historical"] = inc
+
+    if "min_fact_generation" in arguments:
+        generation = arguments["min_fact_generation"]
+        if type(generation) is not int or generation < 0:
+            raise ValueError("min_fact_generation must be a non-negative integer")
+        resolve_kwargs["min_fact_generation"] = generation
 
     if "max_age" in arguments and arguments["max_age"] is not None:
         val = arguments["max_age"]
