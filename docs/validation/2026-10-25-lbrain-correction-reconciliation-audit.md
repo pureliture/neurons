@@ -179,6 +179,8 @@ source 선택은 `resolve_value`에서 `last_seen_at`을 기준으로 한다. �
 
 코드로 확정할 수 있는 조건을 먼저 처리하고, 남은 의미 판단에 OpenRouter 판단 모델을 사용한다. 모델 후보와 역할 분담은 사용자 지시로 정해졌다. 초기 기본 모델은 `perplexity/pplx-decider-flash-v1.2`, 비교 검증 후보는 `respan/span-02`로 선택한다. 자동 적용 기준은 실제 사례 검증 후 정한다.
 
+이후 기존 워크스페이스 문서로 인증 위치를 확인해 선택 모델을 실제 호출했다. 인증과 호출은 성공했지만 작은 합성 사례 12건에서 세부 분류는 6건만 예상과 일치했고 근거 부족·무관을 반증으로 혼동했다. [호출·소규모 분류 결과](2026-10-25-lbrain-openrouter-pilot.md)를 기록하며, 모델 적용 기준이나 충돌 B를 통과 처리하지 않는다.
+
 - [`respan/span-02`](https://openrouter.ai/respan/span-02/providers)
 - [`perplexity/pplx-decider-flash-v1.2`](https://openrouter.ai/perplexity/pplx-decider-flash-v1.2/providers)
 

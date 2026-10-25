@@ -66,7 +66,7 @@ Docker 이미지의 Python·pip 실행은 해당 이미지의 명시적 runtime/
 
 ## 남은 gate
 
-1. `perplexity/pplx-decider-flash-v1.2` 실제 호출·의미 판단 평가. 현재 실증의 모델 호출은 **0회**다. 기존 설정에서 사용할 수 있는 OpenRouter 키를 찾지 못해 인증 위치에 대한 사용자 응답을 기다린다. 키 값을 문서에 기록하지 않는다.
+1. `perplexity/pplx-decider-flash-v1.2` 의미 판단 평가와 실제 작업자 연결. 이 구조화 runtime 시험의 모델 호출은 **0회**다. 이후 워크스페이스 문서에서 기존 키를 찾아 인증 및 별도 실제 호출 13건을 확인했으며, 작은 합성 분류 12건은 예상 분류와 6건 일치했다. 인증 대기는 해소됐지만 모델 적용 기준은 미통과다. [별도 모델 호출 결과](2026-10-25-lbrain-openrouter-pilot.md)를 따른다.
 2. 정규 session intake/miner와 재검토 등록·변경 발견의 연결. 실험 연결기의 성공만으로 운영 연결을 완료 처리하지 않는다.
 3. 충돌 B를 선택할 경우 확정값을 어떻게 제외하고 반환할지에 대한 context/list/query 공통 읽기 정책. 이번 실증의 pending 중 MCP에는 기존 값이 남으며, conflict masking은 구현하지 않았다.
 4. 같은 관측의 교정·지연 세션 합류, 역순 입력, 실제 후속 변경, graph·embedding 지연과 역순 projection, 근거 retention 참조 보호 등 [설계 감사](2026-10-25-lbrain-correction-reconciliation-audit.md)의 미검증 항목.
