@@ -9,7 +9,13 @@ from agent_knowledge.fact_correction_coordinator import FactCorrectionCoordinato
 from agent_knowledge.llm_brain_core.graph_first_resolver import GraphFirstResolver
 from agent_knowledge.public_safe_util import sha256_text
 from test_correction_sources import git
-from test_fact_resolution import facts, coordinator, counts
+from test_fact_resolution import counts
+import test_fact_resolution
+import test_observation_provenance
+
+actual_couch_source=test_observation_provenance.actual_couch_source
+facts=test_fact_resolution.facts
+coordinator=test_fact_resolution.coordinator
 
 
 pytestmark = pytest.mark.skipif(not (os.environ.get("LBRAIN_TEST_LIVE_CORRECTION") == "1"
@@ -158,3 +164,20 @@ def test_live_model_concurrent_opposing_sources_on_one_card(coordinator):
         (("ready", "이 파일의 현재 기능 상태 기록은 ready다."), ("failed", "이 파일의 현재 기능 상태 기록은 failed다.")),
         "repository_content", os.environ["LBRAIN_TEST_SEMANTIC_PROFILE"], os.environ["LBRAIN_TEST_SEMANTIC_PROFILE_HASH"])
     test_concurrent_opposing_current_files_do_not_choose_by_lock_order(c)
+
+
+def test_live_source_observe_http_correction_then_native_cli_restart_join(coordinator,actual_couch_source,tmp_path):
+    from dataclasses import asdict
+    from test_source_observation import test_actual_http_observe_correct_then_cli_worker_discovers_late_session
+    c=coordinator
+    text='이 등록 파일의 현재 기능 상태 기록은 ready다. 운영 배포 상태에 관한 주장은 포함하지 않는다.'
+    (c.root/'facts.json').write_text(text)
+    git(c.root,'add','facts.json');git(c.root,'commit','-m','실제 관측 참조와 지연 세션 합류용 원천')
+    c.rule=GitSemanticFactPolicy('status',c.rule.scope,c.rule.target_title,c.rule.field_path,c.rule.render_template,
+        'facts.json','등록 branch 파일에 명시된 현재 기능 상태 기록',
+        (('ready','이 파일의 현재 기능 상태 기록은 ready다.'),('failed','이 파일의 현재 기능 상태 기록은 failed다.')),
+        'repository_content',os.environ['LBRAIN_TEST_SEMANTIC_PROFILE'],os.environ['LBRAIN_TEST_SEMANTIC_PROFILE_HASH'])
+    c.service=FactCorrectionCoordinator(store=c.f.store,git_reader=c.service.git_reader,policies=[c.rule])
+    test_actual_http_observe_correct_then_cli_worker_discovers_late_session(c,actual_couch_source,tmp_path,
+        policy_descriptor={**asdict(c.rule),'adapter':'git_semantic.v1'},
+        additional_env={'OPENROUTER_API_KEY':os.environ['OPENROUTER_API_KEY']})

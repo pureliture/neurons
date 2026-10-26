@@ -16,6 +16,7 @@ from agent_knowledge.correction_relation_policy import RelationSupportPolicy
 from agent_knowledge.correction_sources import GitSourcePolicy, GitSourceReader
 from agent_knowledge.fact_resolution import FactScope
 from agent_knowledge.public_safe_util import hash_payload, sha256_text
+from agent_knowledge.redaction import redact_public_ingress_text
 from agent_knowledge import correction_semantic as semantic
 
 
@@ -28,10 +29,17 @@ def save_new(path, data):
 
 
 def freeze(fixture):
+    # 병렬 모델 요청 전에 전체 source의 적격성을 확인한다. 일부 응답을 받은
+    # 뒤 원문 redaction 문제로 결과 전체를 잃는 실행을 방지한다.
+    for case in fixture['cases']:
+        semantic.validate_claims(case['claims'])
+        if redact_public_ingress_text(case['content'])!=case['content']:
+            raise ValueError('evaluation source changed by redaction')
     development = []
     for name in ("correction_judgment_cases.json", "correction_judgment_v3_holdout.json",
                  "correction_relation_v4_holdout.json", "correction_relation_support_holdout.json",
-                 "correction_semantic_holdout.json", "correction_semantic_v2_holdout.json"):
+                 "correction_semantic_holdout.json", "correction_semantic_v2_holdout.json",
+                 "correction_semantic_v3_holdout.json", "correction_semantic_v4_holdout.json"):
         data = json.loads(Path(__file__).with_name(name).read_text())
         development.extend(hash_payload(case) for case in data["cases"])
     cases = fixture["cases"]
@@ -57,7 +65,13 @@ def evaluate_case(case, *, client, policy):
         scope = FactScope("semantic-eval", "fixture-repo", "refs/heads/fixture", "test", case["id"], "source_fact")
         source = GitSourceReader({scope.repository: GitSourcePolicy(scope.repository, root, branch_ref=scope.branch)})
         reader = GitRepositoryReader(source, scope=scope, relative_path="source.txt")
-        observed = reader.read()
+        try:
+            observed = reader.read()
+        except CapabilityUnavailable as exc:
+            # 일부 case가 읽기 전에 실패해도 다른 case의 실제 응답을 버리지 않는다.
+            # 이 row가 포함된 report는 profile 검증을 통과할 수 없다.
+            return {"case":case,"case_hash":hash_payload(case),"selection":None,
+                "source_revalidated":False,"reason_code":exc.reason_code}
         requirement = EvidenceRequirement(ObservedCapability(case["required_capability"]), scope.context_hash, reader.resource_hash)
         if case.get("mismatch") == "context":
             requirement = replace(requirement, context_hash=hash_payload([scope.context_hash, "other-environment"]))
@@ -82,7 +96,7 @@ def evaluate_case(case, *, client, policy):
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--phase", choices=("freeze", "run"), required=True)
-    parser.add_argument("--fixture", type=Path, default=Path(__file__).with_name("correction_semantic_v3_holdout.json"))
+    parser.add_argument("--fixture", type=Path, default=Path(__file__).with_name("correction_semantic_v5_holdout.json"))
     parser.add_argument("--plan", type=Path)
     parser.add_argument("--key-file", type=Path)
     parser.add_argument("--output", type=Path, required=True)

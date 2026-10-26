@@ -28,6 +28,7 @@ BRAIN_PERMISSION_SENSITIVE_AUDIT_PROBE_TOOL_NAME = PERMISSION_AUDIT_TOOL_NAME
 BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME = "brain_object_proposal_create"
 BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME = "brain_object_decision_commit"
 BRAIN_OBJECT_CORRECT_TOOL_NAME = "brain_object_correct"
+BRAIN_SOURCE_OBSERVE_TOOL_NAME = "brain_source_observe"
 BRAIN_REVIEW_PROPOSALS_TOOL_NAME = "brain_review_proposals"
 
 # Brain Steward — agent-facing, proposal-only memory management surface.
@@ -138,6 +139,7 @@ _DISPATCH_OWNER_BY_TOOL_NAME = {
     BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME: "jsonrpc_brain",
     BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME: "jsonrpc_brain",
     BRAIN_OBJECT_CORRECT_TOOL_NAME: "jsonrpc_brain",
+    BRAIN_SOURCE_OBSERVE_TOOL_NAME: "jsonrpc_brain",
     BRAIN_REVIEW_PROPOSALS_TOOL_NAME: "jsonrpc_brain",
     MEMORY_AUTHORITY_PACK_READ_TOOL_NAME: "brain_steward",
     MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME: "brain_steward",
@@ -1089,14 +1091,21 @@ def list_tools(surface: str = "all") -> list[dict]:
     if surface in ("agent", "public"):
         return list_public_agent_tools()
     if surface == "stdio":
-        return list_public_agent_tools() + [_evidence_correction_tool()]
+        return list_public_agent_tools() + [_evidence_correction_tool(), _source_observe_tool()]
     if surface == "correction":
-        return [tool for tool in list_public_agent_tools() if tool["name"] == BRAIN_RESOLVE_TOOL_NAME] + [_evidence_correction_tool()]
+        return [tool for tool in list_public_agent_tools() if tool["name"] == BRAIN_RESOLVE_TOOL_NAME] + [_evidence_correction_tool(), _source_observe_tool()]
     if surface == "admin":
         return list_admin_tools()
     if surface == "all":
-        return list_public_agent_tools() + list_admin_tools() + [_evidence_correction_tool()]
+        return list_public_agent_tools() + list_admin_tools() + [_evidence_correction_tool(), _source_observe_tool()]
     raise ValueError(f"unknown surface: {surface}")
+
+
+def _source_observe_tool() -> dict:
+    from .source_observation import SourceObservationRequest
+    return {"name": BRAIN_SOURCE_OBSERVE_TOOL_NAME,
+        "description": "등록 source를 독립 검증해 불변 관측 참조를 발급한다. 기존 기억을 승인/교정하지 않는다. 반환 evidence를 교정에 전달하거나 이후 native 세션 수집에서 같은 관측에 합류할 수 있다.",
+        "inputSchema": SourceObservationRequest.model_json_schema()}
 
 
 def _evidence_correction_tool() -> dict:

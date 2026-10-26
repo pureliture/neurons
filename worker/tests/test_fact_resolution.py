@@ -466,9 +466,10 @@ def test_duplicate_card_fact_reads_same_value_and_retains_unrelated_text(facts):
 
 
 def test_real_cli_http_configuration_source_read_and_current_query(coordinator, tmp_path,
-        policy_descriptor=None, additional_env=None):
+        policy_descriptor=None, additional_env=None, return_read=False):
     """실제 CLI subprocess·HTTP·Git·PG 경로를 통과한다. graph/모델 대역은 넣지 않는다."""
     import asyncio
+    import copy
     from dataclasses import asdict
     import json
     import os
@@ -505,8 +506,14 @@ def test_real_cli_http_configuration_source_read_and_current_query(coordinator, 
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     tools = await session.list_tools()
-                    assert {tool.name for tool in tools.tools} == {"brain.resolve", "brain_object_correct"}
-                    changed = await session.call_tool("brain_object_correct", c.request)
+                    assert {tool.name for tool in tools.tools} == {"brain.resolve", "brain_object_correct", "brain_source_observe"}
+                    observed = await session.call_tool("brain_source_observe", {
+                        "project": c.rule.scope.project,"repository": c.rule.scope.repository,
+                        "policy_id":c.rule.policy_id,"idempotency_key":"http-source-read"})
+                    assert not observed.isError and observed.structuredContent['canonical_write_performed'] is False
+                    request=copy.deepcopy(c.request)
+                    request['changes'][0]['evidence']=observed.structuredContent['evidence']
+                    changed = await session.call_tool("brain_object_correct", request)
                     assert not changed.isError
                     receipt = changed.structuredContent["changes"][0]["outcome"]["resolution"]
                     assert receipt["applied_value"] == "ready"
@@ -514,6 +521,7 @@ def test_real_cli_http_configuration_source_read_and_current_query(coordinator, 
                         "mode": "list", "response_mode": "slim", "min_fact_generation": 1})
                     assert not current.isError
                     assert current.structuredContent["items"][0]["typed_payload"]["status_value"] == "ready"
+                    return observed.structuredContent
     with (tmp_path / "http-process.log").open("wb") as log:
         process = subprocess.Popen(argv, env=env, stdout=subprocess.DEVNULL, stderr=log, start_new_session=True)
         try:
@@ -531,7 +539,7 @@ def test_real_cli_http_configuration_source_read_and_current_query(coordinator, 
                     pytest.fail("isolated correction HTTP readiness timed out")
                 time.sleep(.05)
             assert httpx.post(base + "/mcp", timeout=2).status_code == 401
-            asyncio.run(roundtrip())
+            read_receipt=asyncio.run(roundtrip())
         finally:
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGTERM)
@@ -540,6 +548,8 @@ def test_real_cli_http_configuration_source_read_and_current_query(coordinator, 
                 except subprocess.TimeoutExpired:
                     os.killpg(process.pid, signal.SIGKILL); process.wait(timeout=5)
     assert counts(c.f)["steward_card_decisions"] == 2
+    if return_read:
+        return read_receipt
 
 
 def test_legacy_authority_writer_cannot_bypass_managed_fact_resolution(facts):

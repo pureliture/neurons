@@ -1036,6 +1036,17 @@ class KnowledgeSearchService:
 
         self._brain_card_cache.invalidate()
 
+    def brain_source_observe(self, **arguments: Any) -> dict:
+        from .source_observation import SourceObservationService
+        from .fact_resolution import FactResolutionError
+        from .recheck_scheduler import RecheckBlocked
+        if not self.allow_evidence_backed_object_corrections or self.fact_correction_coordinator is None:
+            return {"canonical_write_performed": False, "reason_code": "fact_correction_not_configured"}
+        try:
+            return SourceObservationService(self.fact_correction_coordinator).observe(**arguments)
+        except (FactResolutionError, RecheckBlocked) as exc:
+            return {"canonical_write_performed": False, "reason_code": exc.reason_code}
+
     def brain_object_correct(self, **arguments: Any) -> dict:
         if arguments.get("schema_version") == "brain_object_correction.v2":
             from .fact_correction_coordinator import FactBatch

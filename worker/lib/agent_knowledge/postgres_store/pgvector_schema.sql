@@ -935,6 +935,128 @@ CREATE TABLE IF NOT EXISTS lbrain_fact_batches (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 -- graph/embedding 반영 전에도 관련된 현재 fact만 indexed lexical 후보로 회수한다.
+-- 서버의 독립 source 관측을 먼저 보존하고 교정/지연 native 수집이 공유한다.
+CREATE TABLE IF NOT EXISTS lbrain_fact_source_reads (
+    observation_ref VARCHAR(64) PRIMARY KEY,
+    project VARCHAR(64) NOT NULL,
+    request_key VARCHAR(180) NOT NULL,
+    request_hash VARCHAR(71) NOT NULL,
+    policy_id VARCHAR(128) NOT NULL,
+    policy_version VARCHAR(71) NOT NULL,
+    fact_key VARCHAR(64) NOT NULL,
+    target_memory_id VARCHAR(64) NOT NULL REFERENCES memory_cards(memory_id),
+    observation_version VARCHAR(71) NOT NULL REFERENCES lbrain_fact_observations(version_id),
+    result JSONB NOT NULL,
+    result_hash VARCHAR(71) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    UNIQUE(project,request_key)
+);
+CREATE OR REPLACE FUNCTION lbrain_preserve_source_read() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$ BEGIN
+    RAISE EXCEPTION 'source_observation_read_immutable' USING ERRCODE='23514';
+END; $$;
+DROP TRIGGER IF EXISTS lbrain_preserve_source_read ON lbrain_fact_source_reads;
+CREATE TRIGGER lbrain_preserve_source_read BEFORE UPDATE ON lbrain_fact_source_reads
+    FOR EACH ROW EXECUTE FUNCTION lbrain_preserve_source_read();
+CREATE TABLE IF NOT EXISTS lbrain_fact_source_read_tasks (
+    task_id VARCHAR(64) PRIMARY KEY REFERENCES lbrain_recheck_tasks(task_id) DEFERRABLE INITIALLY DEFERRED,
+    observation_ref VARCHAR(64) NOT NULL REFERENCES lbrain_fact_source_reads(observation_ref)
+);
+CREATE OR REPLACE FUNCTION lbrain_check_source_read_binding() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$ BEGIN
+    IF NOT EXISTS(SELECT 1 FROM lbrain_fact_observations o
+        JOIN memory_cards c ON c.memory_id=NEW.target_memory_id AND c.project=NEW.project
+        JOIN lbrain_fact_admission_rules r ON r.project=NEW.project AND r.policy_id=NEW.policy_id
+            AND r.fact_key=NEW.fact_key AND r.policy_version=NEW.policy_version
+        WHERE o.version_id=NEW.observation_version AND o.project=NEW.project
+            AND o.observation#>>'{proof,policy_version}'=NEW.policy_version
+            AND NEW.result->>'observation_ref'=NEW.observation_ref
+            AND NEW.result->>'project'=NEW.project AND NEW.result->>'fact_key'=NEW.fact_key
+            AND NEW.result->>'policy_id'=NEW.policy_id
+            AND NEW.result->>'observation_id'=o.observation_id
+            AND NEW.result->>'observation_version'=NEW.observation_version
+            AND NEW.result->'canonical_write_performed'='false'::jsonb
+            AND NEW.result#>>'{evidence,revision}'=o.source_revision
+            AND NEW.result#>>'{evidence,content_hash}'=o.observation->>'content_hash'
+            AND NEW.result#>>'{evidence,observation_ref}'=NEW.observation_ref) THEN
+        RAISE EXCEPTION 'source_read_binding_mismatch' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END; $$;
+DROP TRIGGER IF EXISTS lbrain_check_source_read_binding ON lbrain_fact_source_reads;
+CREATE TRIGGER lbrain_check_source_read_binding BEFORE INSERT ON lbrain_fact_source_reads
+    FOR EACH ROW EXECUTE FUNCTION lbrain_check_source_read_binding();
+CREATE OR REPLACE FUNCTION lbrain_check_source_read_task() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$ BEGIN
+    IF TG_OP='UPDATE' OR NOT EXISTS(SELECT 1 FROM lbrain_fact_source_reads r
+        JOIN lbrain_recheck_tasks t ON t.task_id=NEW.task_id AND t.project=r.project
+        WHERE r.observation_ref=NEW.observation_ref AND t.request->>'fact_key'=r.fact_key
+            AND t.request->>'policy_version'=r.policy_version
+            AND t.request#>'{change,evidence}'=r.result->'evidence') THEN
+        RAISE EXCEPTION 'source_read_task_binding_mismatch' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END; $$;
+DROP TRIGGER IF EXISTS lbrain_check_source_read_task ON lbrain_fact_source_read_tasks;
+CREATE TRIGGER lbrain_check_source_read_task BEFORE INSERT OR UPDATE ON lbrain_fact_source_read_tasks
+    FOR EACH ROW EXECUTE FUNCTION lbrain_check_source_read_task();
+CREATE TABLE IF NOT EXISTS lbrain_fact_native_read_links (
+    task_id VARCHAR(64) PRIMARY KEY REFERENCES lbrain_recheck_tasks(task_id) DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY(task_id) REFERENCES lbrain_fact_source_read_tasks(task_id),
+    observation_ref VARCHAR(64) NOT NULL REFERENCES lbrain_fact_source_reads(observation_ref),
+    native_observation_id VARCHAR(71) NOT NULL,
+    native_receipt_hash VARCHAR(71) NOT NULL,
+    native_source_ref_id VARCHAR(64) NOT NULL REFERENCES lbrain_fact_source_receipts(source_ref_id),
+    native_proof JSONB NOT NULL,
+    resolution_id VARCHAR(64) NOT NULL REFERENCES lbrain_fact_resolutions(resolution_id) DEFERRABLE INITIALLY DEFERRED,
+    join_only BOOLEAN NOT NULL,
+    authority_write_performed BOOLEAN NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+CREATE OR REPLACE FUNCTION lbrain_check_native_read_binding() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$ BEGIN
+    IF NEW.join_only AND NEW.authority_write_performed OR NOT EXISTS(
+        SELECT 1 FROM lbrain_fact_source_read_tasks b
+        JOIN lbrain_fact_source_reads r ON r.observation_ref=b.observation_ref
+        JOIN lbrain_recheck_tasks t ON t.task_id=b.task_id AND t.project=r.project
+        JOIN lbrain_fact_resolutions x ON x.resolution_id=NEW.resolution_id AND x.fact_key=r.fact_key AND x.terminal
+        JOIN lbrain_fact_source_receipts s ON s.source_ref_id=NEW.native_source_ref_id AND s.owner_project=r.project
+        WHERE b.task_id=NEW.task_id AND b.observation_ref=NEW.observation_ref
+            AND t.request#>>'{native_source_read,observation_id}'=NEW.native_observation_id
+            AND t.request#>>'{native_source_read,receipt_hash}'=NEW.native_receipt_hash
+            AND s.proof->>'receipt_hash'=NEW.native_receipt_hash
+            AND s.proof->>'adapter'='native_source_read_reference.v1') THEN
+        RAISE EXCEPTION 'native_read_binding_mismatch' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END; $$;
+DROP TRIGGER IF EXISTS lbrain_check_native_read_binding ON lbrain_fact_native_read_links;
+CREATE CONSTRAINT TRIGGER lbrain_check_native_read_binding AFTER INSERT ON lbrain_fact_native_read_links
+    DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION lbrain_check_native_read_binding();
+CREATE OR REPLACE FUNCTION lbrain_preserve_native_read_link() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$ BEGIN
+    IF TG_OP='UPDATE' OR EXISTS(SELECT 1 FROM lbrain_fact_resolutions WHERE resolution_id=OLD.resolution_id) THEN
+        RAISE EXCEPTION 'native_read_link_retention_required' USING ERRCODE='23514';
+    END IF;
+    RETURN OLD;
+END; $$;
+DROP TRIGGER IF EXISTS lbrain_preserve_native_read_link ON lbrain_fact_native_read_links;
+CREATE TRIGGER lbrain_preserve_native_read_link BEFORE UPDATE OR DELETE ON lbrain_fact_native_read_links
+    FOR EACH ROW EXECUTE FUNCTION lbrain_preserve_native_read_link();
+CREATE UNIQUE INDEX IF NOT EXISTS idx_lbrain_native_read_route
+    ON lbrain_recheck_tasks(project,(request->>'native_route_key')) WHERE request ? 'native_route_key';
+CREATE TABLE IF NOT EXISTS lbrain_native_source_cursors (
+    project VARCHAR(64) NOT NULL,
+    source_key VARCHAR(71) NOT NULL,
+    sequence TEXT NOT NULL DEFAULT '0',
+    generation BIGINT NOT NULL DEFAULT 0,
+    checked_at TIMESTAMPTZ,
+    attempted_at TIMESTAMPTZ,
+    reason_code VARCHAR(64) NOT NULL DEFAULT '',
+    PRIMARY KEY(project,source_key)
+);
+ALTER TABLE lbrain_native_source_cursors ADD COLUMN IF NOT EXISTS attempted_at TIMESTAMPTZ;
+ALTER TABLE lbrain_native_source_cursors ADD COLUMN IF NOT EXISTS reason_code VARCHAR(64) NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_memory_cards_fact_text ON memory_cards USING GIN
     (to_tsvector('simple', coalesce(title,'') || ' ' || coalesce(summary,'')));
 

@@ -189,7 +189,8 @@ class FactSourceLifecycle:
                     (changed["project"],))
         return head
 
-    def health(self, *, project, heartbeat_grace=120, overdue_grace=120, pending_age_seconds=86400):
+    def health(self, *, project, heartbeat_grace=120, overdue_grace=120, pending_age_seconds=86400,
+               native_source_key=None):
         from .recheck_scheduler import inspect_recheck_health
         from .fact_verification import FactVerificationService
         from .postgres_store.pgvector_store import PgVectorStore
@@ -206,9 +207,18 @@ class FactSourceLifecycle:
             reviews = inspect_recheck_health(PgRecheckQueue(PgVectorStore(connection=db)), project=project,
                 heartbeat_grace=heartbeat_grace, overdue_grace=overdue_grace, pending_age_seconds=pending_age_seconds)
             verifications = FactVerificationService.health_on(db, project=project, overdue_grace=overdue_grace)
+            cur.execute("""SELECT count(*) AS configured,
+                count(*) FILTER (WHERE checked_at IS NULL OR reason_code<>'' OR
+                    checked_at<clock_timestamp()-(%s * interval '1 second')) AS unhealthy
+                FROM lbrain_native_source_cursors WHERE project=%s
+                    AND (%s::text IS NULL OR source_key=%s)""",
+                (heartbeat_grace,project,native_source_key,native_source_key))
+            native_sources=cur.fetchone()
+            native_sources['missing_required']=bool(native_source_key and not native_sources['configured'])
         return {"pending_events": events, "pending_targets": targets, "reviews": reviews,
-            "verifications": verifications,
-            "attention_required": bool(events or targets or reviews["attention_required"] or verifications["attention_required"])}
+            "verifications": verifications,"native_sources":native_sources,
+            "attention_required": bool(events or targets or reviews["attention_required"] or verifications["attention_required"]
+                or native_sources["unhealthy"] or native_sources['missing_required'])}
 
 
 def main(argv=None):
@@ -227,6 +237,8 @@ def main(argv=None):
     parser.add_argument("--expected-hash")
     parser.add_argument("--request-key")
     parser.add_argument("--config")
+    parser.add_argument("--native-source-policy-file",
+        help="지연 native 관찰 참조를 자동 수집할 때 사용하는 기존 Couch source 정책")
     parser.add_argument("--worker-id", default="fact-source-lifecycle")
     parser.add_argument("--iterations", type=int, default=1)
     parser.add_argument("--poll-seconds", type=float, default=1)
@@ -250,9 +262,19 @@ def main(argv=None):
         store = PgVectorStore(dsn=make_conninfo(dsn, connect_timeout=5 if deadline<=0 else min(deadline,5)))
         service = FactSourceLifecycle(store)
         coordinator = None
+        native_bridge = None
+        catalog = None
+        native_source_key = None
+        if args.mode in {'worker','monitor'} and args.native_source_policy_file:
+            from .session_memory.candidate_intake_cli import _build_observation_catalog
+            catalog=_build_observation_catalog(args.native_source_policy_file)
+            native_source_key=hash_payload([catalog.store.base_url,catalog.store.db])
         if args.mode == "worker":
             reader, rules = load_configuration(args.config)
-            coordinator = FactCorrectionCoordinator(store=store, git_reader=reader, policies=rules)
+            coordinator = FactCorrectionCoordinator(store=store, git_reader=reader, policies=rules,native_catalog=catalog)
+            if catalog is not None:
+                from .source_observation import NativeSourceObservationBridge
+                native_bridge=NativeSourceObservationBridge(coordinator,catalog)
             review_worker = coordinator.worker(project=args.project, worker_id=args.worker_id,
                 retry_seconds=args.retry_seconds)
             if args.lease_seconds is not None:
@@ -265,10 +287,13 @@ def main(argv=None):
                     expected_content_hash=args.expected_hash, request_key=args.request_key)
             elif args.mode == "monitor":
                 result = service.health(project=args.project, heartbeat_grace=args.heartbeat_grace,
-                    overdue_grace=args.overdue_grace, pending_age_seconds=args.pending_age_seconds)
+                    overdue_grace=args.overdue_grace, pending_age_seconds=args.pending_age_seconds,
+                    native_source_key=native_source_key)
             else:
+                coordinator.queue.heartbeat(project=args.project,worker_id=args.worker_id)
                 result = {"dispatch": service.dispatch_once(project=args.project, retry_seconds=args.retry_seconds),
                     "verification": FactVerificationService(store).dispatch_once(project=args.project, retry_seconds=args.retry_seconds),
+                    "native_discovery":native_bridge.dispatch_once(project=args.project) if native_bridge else {"status":"unconfigured"},
                     "review": review_worker.run_once()}
             print(json.dumps(result, ensure_ascii=False), flush=True)
             if index+1 < args.iterations:

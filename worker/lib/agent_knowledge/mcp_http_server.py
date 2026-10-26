@@ -36,7 +36,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from .knowledge_search_service import KnowledgeSearchService
-from .mcp_jsonrpc import ADMIN_AUTH_IDENTITY, CORRECTION_AUTH_IDENTITY, dispatch_tool_call
+from .mcp_jsonrpc import ADMIN_AUTH_IDENTITY, CORRECTION_AUTH_IDENTITY, dispatch_tool_call, _visible_tools
 from .mcp_tools import list_tools
 
 DEFAULT_PORT = 8765
@@ -241,7 +241,7 @@ def _redacted_traceback(exc: BaseException) -> str:
     return " > ".join(parts)
 
 
-def _to_sdk_tools(surface: str = "agent") -> list[mcp_types.Tool]:
+def _to_sdk_tools(surface: str = "agent", service=None) -> list[mcp_types.Tool]:
     # list_tools() 리터럴의 inputSchema는 이미 MCP JSON Schema 형식이라 직매핑(변형 없음).
     return [
         mcp_types.Tool(
@@ -249,7 +249,7 @@ def _to_sdk_tools(surface: str = "agent") -> list[mcp_types.Tool]:
             description=tool["description"],
             inputSchema=tool["inputSchema"],
         )
-        for tool in list_tools(surface=surface)
+        for tool in (_visible_tools(surface,service) if service is not None else list_tools(surface=surface))
     ]
 
 
@@ -397,7 +397,7 @@ def build_app(
 
     @server.list_tools()
     async def _handle_list_tools() -> list[mcp_types.Tool]:
-        return _to_sdk_tools(surface=surface)
+        return _to_sdk_tools(surface=surface,service=service)
 
     @server.call_tool(validate_input=False)
     async def _handle_call_tool(

@@ -30,6 +30,7 @@ def runtime_identity():
         "transport_hash": sha256_text(Path(transport.__file__).read_text()),
         "policy_hash": sha256_text(Path(policies.__file__).read_text()),
         "coordinator_hash": sha256_text(Path(__file__).with_name("fact_correction_coordinator.py").read_text()),
+        "source_observation_hash": sha256_text(Path(__file__).with_name("source_observation.py").read_text()),
         "selection_hash": sha256_text(Path(__file__).read_text())}
 
 

@@ -35,6 +35,7 @@ from .mcp_tools import (
     BRAIN_MEMORY_SEARCH_TOOL_NAME,
     BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME,
     BRAIN_OBJECT_CORRECT_TOOL_NAME,
+    BRAIN_SOURCE_OBSERVE_TOOL_NAME,
     BRAIN_ARTIFACT_PREFERENCE_EVALUATE_TOOL_NAME,
     BRAIN_OBJECT_EXPLAIN_TOOL_NAME,
     BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME,
@@ -57,14 +58,13 @@ from .mcp_tools import (
     MEMORY_SUPERSEDE_COMMIT_TOOL_NAME,
     MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME,
     STEWARD_RESTRICTED_TOOL_NAMES,
-    ADMIN_TOOL_NAMES,
     PUBLIC_AGENT_TOOL_NAMES,
     TOOL_NAME,
     ToolContract,
     list_tools,
     tool_contract_registry,
 )
-from .public_safe_util import public_safe_text, sha256_text, short_hash
+from .public_safe_util import public_safe_text, short_hash
 from .production_authority_permission import (
     ALLOWED_PRODUCTION_DECISION_TYPES,
     ALLOWED_PRODUCTION_PROPOSAL_TYPES,
@@ -124,11 +124,15 @@ def _stdio_tool_names(service: KnowledgeSearchService) -> frozenset[str]:
     names = set(PUBLIC_AGENT_TOOL_NAMES)
     if _evidence_correction_surface_enabled(service):
         names.add(BRAIN_OBJECT_CORRECT_TOOL_NAME)
+        if getattr(service, "fact_correction_coordinator", None) is not None:
+            names.add(BRAIN_SOURCE_OBSERVE_TOOL_NAME)
     return frozenset(names)
 
 
 def _visible_tools(surface: str, service: KnowledgeSearchService) -> list[dict]:
     tools = list_tools(surface=surface)
+    if getattr(service, "fact_correction_coordinator", None) is None or not _evidence_correction_surface_enabled(service):
+        tools = [tool for tool in tools if tool.get("name") != BRAIN_SOURCE_OBSERVE_TOOL_NAME]
     if surface in {"admin", "stdio", "correction"} and not _evidence_correction_surface_enabled(service):
         return [tool for tool in tools if tool.get("name") != BRAIN_OBJECT_CORRECT_TOOL_NAME]
     return tools
@@ -261,9 +265,9 @@ def dispatch_tool_call(
     if surface == "correction":
         if auth_token != CORRECTION_AUTH_IDENTITY:
             raise PermissionError("unauthorized: correction identity required")
-        if tool_name not in {BRAIN_RESOLVE_TOOL_NAME, BRAIN_OBJECT_CORRECT_TOOL_NAME}:
+        if tool_name not in {BRAIN_RESOLVE_TOOL_NAME, BRAIN_OBJECT_CORRECT_TOOL_NAME, BRAIN_SOURCE_OBSERVE_TOOL_NAME}:
             raise ValueError(f"unknown tool: {tool_name}")
-    if surface == "admin" and tool_name == BRAIN_OBJECT_CORRECT_TOOL_NAME:
+    if surface == "admin" and tool_name in {BRAIN_OBJECT_CORRECT_TOOL_NAME, BRAIN_SOURCE_OBSERVE_TOOL_NAME}:
         raise ValueError(f"unknown tool: {tool_name}")
 
     if surface == "admin" and auth_token != ADMIN_AUTH_IDENTITY:
@@ -345,6 +349,7 @@ def _tool_dispatch_registry() -> dict[str, ToolDispatch]:
         (BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME, _dispatch_brain_object_proposal_create_tool),
         (BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME, _dispatch_brain_object_decision_commit_tool),
         (BRAIN_OBJECT_CORRECT_TOOL_NAME, _dispatch_brain_object_correct_tool),
+        (BRAIN_SOURCE_OBSERVE_TOOL_NAME, _dispatch_brain_source_observe_tool),
         (BRAIN_REVIEW_PROPOSALS_TOOL_NAME, _dispatch_brain_review_proposals_tool),
         (BRAIN_QUERY_TOOL_NAME, _dispatch_brain_query_tool),
         (BRAIN_RESOLVE_TOOL_NAME, _dispatch_brain_resolve_tool),
@@ -914,6 +919,12 @@ def _dispatch_brain_object_decision_commit_tool(tool_name: str, arguments: dict,
     _attach_authority_decision_lineage(arguments, decision, tool_name=tool_name)
     result = service.commit_object_authority_decision(decision)
     return _tool_result(result)
+
+
+def _dispatch_brain_source_observe_tool(tool_name, arguments, service):
+    from .source_observation import SourceObservationRequest
+    request = SourceObservationRequest.model_validate(arguments)
+    return _tool_result(service.brain_source_observe(**request.model_dump()))
 
 
 def _dispatch_brain_object_correct_tool(

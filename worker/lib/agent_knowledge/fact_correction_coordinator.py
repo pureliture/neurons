@@ -25,6 +25,10 @@ class FactEvidence(BaseModel):
     content_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
+class ReferencedFactEvidence(FactEvidence):
+    observation_ref: str = Field(pattern=r"^obsread_[0-9a-f]{48}$")
+
+
 class FactChange(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     change_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_:-]+$")
@@ -35,7 +39,7 @@ class FactChange(BaseModel):
     old_value: str = Field(min_length=1, max_length=2048)
     proposed_value: str = Field(min_length=1, max_length=2048)
     discrepancy: str = Field(min_length=1, max_length=2048)
-    evidence: FactEvidence
+    evidence: FactEvidence | ReferencedFactEvidence
 
     @model_validator(mode="after")
     def target(self):
@@ -143,7 +147,7 @@ class GitSemanticFactPolicy:
 
 class FactCorrectionCoordinator:
     def __init__(self, *, store, git_reader: GitSourceReader, policies: list[GitJsonFactPolicy | GitSemanticFactPolicy],
-                 relation_client=None):
+                 relation_client=None, native_catalog=None):
         self.store, self.git_reader = store, git_reader
         self.policies = {rule.policy_id: rule for rule in policies}
         if not policies or len(self.policies) != len(policies):
@@ -155,6 +159,7 @@ class FactCorrectionCoordinator:
         self.queue = PgRecheckQueue(store)
         self.resolver = FactResolutionService(store)
         self.relation_client = relation_client
+        self.native_catalog = native_catalog
 
     def submit(self, arguments, *, lane="correction"):
         if lane not in {"correction", "intake"}:
@@ -181,6 +186,12 @@ class FactCorrectionCoordinator:
                     continue
                 try:
                     target = self._target(cur, rule, change)
+                    if isinstance(change.evidence, ReferencedFactEvidence):
+                        from .source_observation import SourceObservationService
+                        try:
+                            SourceObservationService(self).validate_reference(rule, change.evidence, connection=db)
+                        except RecheckBlocked as exc:
+                            raise FactResolutionError(exc.reason_code) from None
                     self._register_rule(cur, rule, target)
                     job = {"schema_version": "fact_source_job.v1", "policy_id": rule.policy_id,
                         "fact_key": rule.scope.key,
@@ -189,6 +200,9 @@ class FactCorrectionCoordinator:
                     job["stale_target"] = target.get("_stale_target", False)
                     task = queue.register(project=batch.project, memory_id=target.get("_queue_memory_id", target["memory_id"]), request=job,
                         request_key=hash_payload([batch_id, change.change_id]))
+                    if isinstance(change.evidence, ReferencedFactEvidence):
+                        from .source_observation import SourceObservationService
+                        SourceObservationService(self).bind_task(db, task["task_id"], change.evidence)
                     results.append({"change_id": change.change_id, "status": "queued", "task_id": task["task_id"]})
                 except FactResolutionError as exc:
                     results.append({"change_id": change.change_id, "status": "rejected", "reason_code": exc.reason_code})
@@ -372,12 +386,22 @@ class FactCorrectionCoordinator:
         return {"managed": True, "results": results}
 
     def _load(self, task):
+        native = None
+        if task["request"].get("native_source_read"):
+            from .source_observation import NativeSourceObservationBridge
+            native = NativeSourceObservationBridge(self, self.native_catalog).read_native(task)
         if task["result_ref"]:
             with self.store._scope() as db, db.cursor(row_factory=dict_row) as cur:
                 cur.execute("SELECT terminal,result FROM lbrain_fact_resolutions WHERE resolution_id=%s", (task["result_ref"],))
                 row = cur.fetchone()
                 if row and row["terminal"]:
                     return RecheckSnapshot.from_data(task, {"recovered_result": task["result_ref"]})
+        if native:
+            from .source_observation import SourceObservationService
+            previous = SourceObservationService(self).previous_resolution(
+                task["request"]["change"]["evidence"]["observation_ref"])
+            if previous:
+                return RecheckSnapshot.from_data(task, {"native_source_read": native, "recovered_result": previous})
         request = task["request"]
         rule = self.policies.get(request["policy_id"])
         if not rule or rule.version != request["policy_version"]:
@@ -390,7 +414,11 @@ class FactCorrectionCoordinator:
             if request["lane"] == "intake" and descriptor == {"mode": "server_current"}:
                 source = self.git_reader.read_current(repository=rule.scope.repository, relative_path=rule.relative_path)
             else:
-                evidence = FactEvidence.model_validate(descriptor)
+                kind = ReferencedFactEvidence if "observation_ref" in descriptor else FactEvidence
+                evidence = kind.model_validate(descriptor)
+                if isinstance(evidence, ReferencedFactEvidence):
+                    from .source_observation import SourceObservationService
+                    SourceObservationService(self).validate_reference(rule, evidence)
                 source = self.git_reader.read(repository=rule.scope.repository, revision=evidence.revision,
                     relative_path=rule.relative_path, expected_content_hash=evidence.content_hash)
             if isinstance(rule, GitSemanticFactPolicy) and not source.current_verified:
@@ -451,6 +479,8 @@ class FactCorrectionCoordinator:
         data = {"value": value, "observation": asdict(observation)}
         if semantic_binding:
             data["semantic_source_binding"] = semantic_binding
+        if native:
+            data["native_source_read"] = native
         return RecheckSnapshot.from_data(task, data)
 
     def _save_receipt(self, rule, source):
@@ -616,6 +646,13 @@ class FactCorrectionCoordinator:
 
     def _apply(self, task, snapshot, judgment):
         if "recovered_result" in snapshot.data:
+            if snapshot.data.get("native_source_read"):
+                from .source_observation import NativeSourceObservationBridge
+                with self.queue.owned_transaction(task) as db:
+                    NativeSourceObservationBridge(self, self.native_catalog).attach_on(
+                        db, task, snapshot.data["native_source_read"], snapshot.data["recovered_result"],
+                        join_only=True, authority_write_performed=False)
+                    self.queue.checkpoint_result(task, snapshot.data["recovered_result"], connection=db)
             return RecheckOutcome("resolved", "fact_result_recovered", snapshot.data["recovered_result"])
         from .postgres_store.pgvector_store import PgVectorStore
         rule = self.policies[task["request"]["policy_id"]]
@@ -671,6 +708,11 @@ class FactCorrectionCoordinator:
                 raise RecheckBlocked(exc.reason_code) from None
             if result["action"] in {"disputed", "pending_evidence"}:
                 return RecheckOutcome("waiting", result["action"])
+            if snapshot.data.get("native_source_read"):
+                from .source_observation import NativeSourceObservationBridge
+                NativeSourceObservationBridge(self, self.native_catalog).attach_on(
+                    db, task, snapshot.data["native_source_read"], result["resolution_id"],
+                    join_only=False, authority_write_performed=result["authority_write_performed"])
             self.queue.checkpoint_result(task, result["resolution_id"], connection=db)
             return RecheckOutcome("resolved", result["action"], result["resolution_id"])
 
@@ -691,9 +733,18 @@ class FactCorrectionCoordinator:
                     receipt = row["result"]
                     receipt["decision_time_current"] = receipt.pop("current", None)
                     receipt["current"] = self.resolver._head(cur, receipt["fact_key"])
+                    if task["request"].get("native_source_read"):
+                        cur.execute("""SELECT join_only,authority_write_performed,observation_ref
+                            FROM lbrain_fact_native_read_links WHERE task_id=%s""", (task_id,))
+                        joined = cur.fetchone()
+                        if joined:
+                            receipt["native_source_read"] = joined
+                            receipt["authority_write_performed"] = joined["authority_write_performed"]
                     result["resolution"] = receipt
+                    cur.execute("SELECT generation FROM lbrain_fact_project_versions WHERE project=%s", (task["project"],))
+                    latest = cur.fetchone()
                     result["consistency_token"] = {"project": task["project"],
-                        "min_fact_generation": receipt["project_generation"]}
+                        "min_fact_generation": max(receipt["project_generation"], latest["generation"] if latest else 0)}
         return result
 
 
