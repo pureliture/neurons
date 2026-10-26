@@ -56,10 +56,13 @@ class ObservedFactRead:
     def __post_init__(self):
         EvidenceRequirement(self.capability, self.context_hash, self.resource_hash)
         if {"postgres_fact_head.v1": ObservedCapability.CANONICAL_STATE,
-                "neo4j_episode_read.v1": ObservedCapability.GRAPH_STATE}.get(self.adapter) != self.capability:
+                "neo4j_episode_read.v1": ObservedCapability.GRAPH_STATE,
+                "git_repository_content.v1": ObservedCapability.REPOSITORY_CONTENT}.get(self.adapter) != self.capability:
             raise ValueError("reader adapter capability mismatch")
         require_sha256(self.revision_hash, "source read revision")
-        if not isinstance(self.value, str) or not self.value.strip() or len(self.value) > 2048:
+        limit = 8192 if self.capability == ObservedCapability.REPOSITORY_CONTENT else 2048
+        if (not isinstance(self.value, str) or not self.value.strip() or len(self.value) > limit
+                or (self.capability == ObservedCapability.REPOSITORY_CONTENT and len(self.value.encode()) > limit)):
             raise ValueError("bounded observed fact value required")
         ensure_public_safe(asdict(self), "ObservedFactRead")
 
@@ -134,6 +137,39 @@ class Neo4jFactReader(PgFactReader):
         return ObservedFactRead(ObservedCapability.GRAPH_STATE, self.scope.context_hash, self.resource_hash,
             hash_payload([observed.episode_id, observed.content_hash, row["generation"]]), value,
             "neo4j_episode_read.v1")
+
+
+class GitRepositoryReader:
+    """명시한 고정 branch의 전체 committed 파일만 읽는다. dirty worktree가 아니다."""
+
+    def __init__(self, git_reader, *, scope: FactScope, relative_path):
+        from .correction_sources import _relative_path
+        _relative_path(relative_path)
+        configured = git_reader.policies.get(scope.repository) if isinstance(scope, FactScope) else None
+        if not configured or configured.branch_ref != scope.branch or scope.branch == "HEAD":
+            raise ValueError("explicit fixed source branch required")
+        self.git_reader, self.scope, self.relative_path = git_reader, scope, relative_path
+        self.resource_hash = hash_payload([scope.key, hash_payload(relative_path)])
+
+    def read(self):
+        from .correction_sources import SourceUnavailable
+        try:
+            source = self.git_reader.read_current(repository=self.scope.repository, relative_path=self.relative_path)
+        except SourceUnavailable as exc:
+            raise CapabilityUnavailable(exc.reason_code) from None
+        if not source.current_verified or source.content_hash != source.redacted_content_hash:
+            raise CapabilityUnavailable("repository_content_not_independently_readable")
+        if len(source.redacted_text.encode()) > 8192:
+            # 나머지 부분에 있는 조건을 버리고 전체 파일의 의미로 오인하지 않는다.
+            raise CapabilityUnavailable("repository_content_requires_bounded_full_source")
+        proof = source.public_proof()
+        proof.pop("observed_at")
+        return ObservedFactRead(ObservedCapability.REPOSITORY_CONTENT, self.scope.context_hash, self.resource_hash,
+            hash_payload(proof), source.redacted_text, "git_repository_content.v1")
+
+    def assert_still_current(self, observed):
+        if not isinstance(observed, ObservedFactRead) or self.read() != observed:
+            raise CapabilityUnavailable("source_read_changed")
 
 
 class CapabilityCheckedRelation:

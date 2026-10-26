@@ -8,7 +8,7 @@ import pytest
 
 from agent_knowledge.correction_capabilities import (
     CapabilityCheckedRelation, CapabilityUnavailable, EvidenceRequirement, ObservedCapability,
-    ObservedFactRead, PgFactReader, Neo4jFactReader,
+    ObservedFactRead, PgFactReader, Neo4jFactReader, GitRepositoryReader,
 )
 from agent_knowledge.correction_relation import CorrectionRelationClient, DEFAULT_CORRECTION_MODEL
 from agent_knowledge.public_safe_util import hash_payload
@@ -63,6 +63,52 @@ def test_source_change_during_model_call_discards_high_supported_result():
     with pytest.raises(CapabilityUnavailable, match="source_read_changed"):
         CapabilityCheckedRelation(reader=reader, requirement=requirement, client=client).evaluate(
             scope_description="현재 상태", hypothesis="값은 ready다", policy_version="fixture")
+
+
+def test_real_git_content_is_not_dirty_worktree_or_runtime_state(tmp_path):
+    from agent_knowledge.correction_sources import GitSourcePolicy, GitSourceReader
+    from agent_knowledge.fact_resolution import FactScope
+    from test_correction_sources import git
+    root = tmp_path / "fixture-repo"
+    root.mkdir()
+    git(root, "init", "-b", "fixture")
+    path = root / "policy.md"
+    path.write_text("인증 실패는 재시도하지 않는다.")
+    git(root, "add", "policy.md"); git(root, "commit", "-m", "문서 명세")
+    scope = FactScope("fixture", "fixture-repo", "refs/heads/fixture", "test", "retry", "documented_policy")
+    source = GitSourceReader({scope.repository: GitSourcePolicy(scope.repository, root, branch_ref=scope.branch)})
+    reader = GitRepositoryReader(source, scope=scope, relative_path="policy.md")
+    first = reader.read()
+    git(root, "checkout", "-b", "other-branch")
+    path.write_text("다른 branch의 문서 내용이다.")
+    git(root, "add", "policy.md"); git(root, "commit", "-m", "다른 branch의 명세")
+    assert reader.read() == first  # checkout은 바뀌어도 등록한 branch의 관측이다.
+    git(root, "checkout", "fixture")
+    path.write_text("인증 실패도 재시도한다.")  # 아직 commit하지 않은 내용은 다른 source다.
+    assert reader.read() == first and first.value == "인증 실패는 재시도하지 않는다."
+    assert not first.satisfies(EvidenceRequirement(ObservedCapability.GRAPH_STATE, first.context_hash, first.resource_hash))
+    git(root, "add", "policy.md"); git(root, "commit", "-m", "후속 문서 변경")
+    with pytest.raises(CapabilityUnavailable, match="source_read_changed"):
+        reader.assert_still_current(first)
+    assert reader.read().value == "인증 실패도 재시도한다."
+    head_source = GitSourceReader({scope.repository: GitSourcePolicy(scope.repository, root, branch_ref="HEAD")})
+    with pytest.raises(ValueError, match="fixed source branch"):
+        GitRepositoryReader(head_source, scope=replace(scope, branch="HEAD"), relative_path="policy.md")
+    path.write_text("x" * 8193)
+    git(root, "add", "policy.md"); git(root, "commit", "-m", "전체 문서 한도 검사")
+    with pytest.raises(CapabilityUnavailable, match="bounded_full_source"):
+        reader.read()
+
+
+def test_auto_fact_policy_does_not_track_dynamic_head_across_branches():
+    from agent_knowledge.fact_correction_coordinator import GitJsonFactPolicy
+    from agent_knowledge.fact_resolution import FactScope
+    scope = FactScope("fixture", "fixture-repo", "HEAD", "test", "status", "value")
+    with pytest.raises(ValueError, match="explicit fixed branch"):
+        GitJsonFactPolicy("fixture", scope, "상태", "typed_payload.status_value", "상태: {value}", "facts.json", "/status")
+    fixed = GitJsonFactPolicy("fixture", replace(scope, branch="refs/heads/main"), "상태",
+        "typed_payload.status_value", "상태: {value}", "facts.json", "/status")
+    assert fixed.scope.branch == "refs/heads/main"
 
 
 @pytest.mark.skipif(not NEO4J_URI, reason="작업 전용 Neo4j 실제 reader 검증이 필요하다")

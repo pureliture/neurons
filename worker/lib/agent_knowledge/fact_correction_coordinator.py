@@ -76,6 +76,10 @@ class GitJsonFactPolicy:
     def __post_init__(self):
         if not self.policy_id or not self.target_title or not self.json_pointer.startswith("/"):
             raise ValueError("explicit fact identity and source field mapping required")
+        if not self.scope.branch.startswith("refs/heads/"):
+            # HEAD는 checkout 변경에 따라 다른 branch를 가리킨다. 같은 fact key에
+            # 서로 다른 branch의 값을 덮어쓰지 않도록 자동 교정 정책은 고정한다.
+            raise ValueError("automatic correction requires an explicit fixed branch")
         # 기존 commit primitive의 필드·표시 범위 제약을 그대로 적용한다.
         StewardFactCommit(field_path=self.field_path, render_template=self.render_template,
             policy_id=self.policy_id, max_age_seconds=self.max_age_seconds)

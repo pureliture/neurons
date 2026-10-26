@@ -37,7 +37,7 @@
 | C12 | 다른 key의 동일 사실·동일 값 | 실제 PG 동시 key에서 단일 successor 확인. 일반 admission 경로는 남음 |
 | C13 | 같은 카드의 다른 필드 동시 교정 | 같은 원래 revision의 두 필드를 순차 교정해 보존 확인. 다른 필드의 실제 동시 실행은 남음 |
 | C14 | 다른 카드 ID에 중복된 사실 | 연결된 두 카드의 현재 값 표시와 다른 문장 보존 확인. 미식별 중복·query/graph 경로는 남음 |
-| C15 | 유사 문장의 다른 환경·branch | 미검증 |
+| C15 | 유사 문장의 다른 환경·branch | 고정 branch의 실제 Git reader가 checkout/dirty 변경을 혼동하지 않고 후속 commit을 재검증함을 확인. 자동 교정의 동적 HEAD 거부와 source context/resource mismatch 선차단 구현. 일반 target 의미 식별·모든 source의 환경/branch 검증은 남음 |
 | C16 | 여러 사실 중 한 사실만 교정 | 정확한 표시 구간 patch와 v2 batch 구현. 다른 사실 보존·모호한 구간 거부 확인. 의미 기반 span 결정은 남음 |
 | C17 | summary·typed payload·표시문 일관성 | 초기 adapter에서 수정. summary와 typed payload의 동시 갱신 및 전체 freshness 비승격을 실제 PG에서 확인. 일반 복수 사실 경로는 미검증 |
 | C18 | 오래된 cursor·target lineage | fact generation에 cursor 결속, 같은 값의 stale target 합류와 변경하지 않은 필드의 lineage 확인. 일반 의미 target의 전체 연결은 남음 |

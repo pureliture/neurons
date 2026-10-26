@@ -46,3 +46,17 @@ Ubuntu의 작업 전용 PG·Graphiti/Neo4j에서 실제 canonical 값 변경, pe
 일반 source admission, 검증된 하이브리드 profile, common coordinator/authority 연결과 새 독립 전체 검증은 여전히 남아 있다. raw 모델 평가의 잘못된 허용 한 건을 이 부분 검증으로 삭제하거나 통과로 변경하지 않는다.
 
 후속 source capability 변경까지 포함한 worker 전체 `uv run pytest -q`는 **5292 passed, 656 skipped, 4 warnings in 54.54s**다. `git diff --check`도 통과했다. 선택형 skip과 단위 통과를 실제 모델의 의미 성능으로 계산하지 않는다.
+
+## Git committed source와 branch의 후속 경계
+
+`GitRepositoryReader`는 서버가 등록한 고정 branch의 전체 committed 파일을 읽어 repository content capability만 발급한다. 실제 운영 가동이나 graph 상태는 입증하지 않는다. 현재 구현은 전체 UTF-8 본문 8192 bytes 이내만 허용하며, 더 큰 파일을 잘라서 전체 의미를 인증하지 않는다. 원문과 redacted 본문 hash가 다르거나 source가 재검증 중 바뀌면 거부한다.
+
+dirty worktree 내용은 이 reader의 source가 아니다. 실제 Git 검사에서 checkout을 다른 branch로 바꾸거나 uncommitted 파일을 수정해도 등록 branch의 관측은 유지됐고, 등록 branch에 후속 commit을 저장한 뒤에는 옛 관측이 거부됐다. dirty file과 아직 서버에 수집되지 않은 native 근거의 일반 admission은 여전히 남아 있다.
+
+자동 교정의 `GitJsonFactPolicy`도 `refs/heads/...`의 구체적인 branch를 요구한다. `HEAD`는 checkout 변경에 따라 다른 branch를 가리킬 수 있으므로 같은 fact key에 다른 branch의 값을 넣지 못하게 한다. generic `GitSourceReader`의 기존 HEAD 읽기 지원은 유지한다. 자동 교정 정책에서 HEAD를 쓰던 설정은 구체적인 branch를 명시해 다시 검증해야 한다.
+
+- Ubuntu 실제 Git/PG/Neo4j source 및 공통 resolution 관련 검사: **42 passed, 1 warning in 30.16s**.
+- 해당 source bundle SHA-256: `932e507da9dc01e66158694be8921836c7862aad2e966411a2526257c77b644f`. 새 디렉터리의 read-only source 주입 방식이며 최종 배포 image 증거가 아니다.
+- 후속 worker 전체: **5294 passed, 656 skipped, 4 warnings in 55.43s**. `git diff --check` 통과.
+
+source 범위 검사와 branch 고정은 의미 모델의 오허용을 일반적으로 해결했다는 증거가 아니다. 미통과한 모델 profile의 자동 활성화는 계속 차단하고 전체 goal을 진행 상태로 유지한다.
