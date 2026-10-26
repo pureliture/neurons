@@ -191,6 +191,7 @@ class FactSourceLifecycle:
 
     def health(self, *, project, heartbeat_grace=120, overdue_grace=120):
         from .recheck_scheduler import inspect_recheck_health
+        from .fact_verification import FactVerificationService
         from .postgres_store.pgvector_store import PgVectorStore
         with self.store._scope() as db, db.cursor(row_factory=dict_row) as cur:
             if self.store.connection is None:
@@ -204,8 +205,10 @@ class FactSourceLifecycle:
             targets = cur.fetchone()["n"]
             reviews = inspect_recheck_health(PgRecheckQueue(PgVectorStore(connection=db)), project=project,
                 heartbeat_grace=heartbeat_grace, overdue_grace=overdue_grace)
+            verifications = FactVerificationService.health_on(db, project=project, overdue_grace=overdue_grace)
         return {"pending_events": events, "pending_targets": targets, "reviews": reviews,
-            "attention_required": bool(events or targets or reviews["attention_required"])}
+            "verifications": verifications,
+            "attention_required": bool(events or targets or reviews["attention_required"] or verifications["attention_required"])}
 
 
 def main(argv=None):
@@ -214,6 +217,7 @@ def main(argv=None):
     import time
     from psycopg.conninfo import conninfo_to_dict, make_conninfo
     from .fact_correction_coordinator import FactCorrectionCoordinator, load_configuration
+    from .fact_verification import FactVerificationService
     from .postgres_store.pgvector_store import PgVectorStore
     parser = argparse.ArgumentParser(description="근거 철회·영향 재검토 worker와 독립 감시")
     parser.add_argument("mode", choices=("revoke", "worker", "monitor"))
@@ -260,6 +264,7 @@ def main(argv=None):
                     overdue_grace=args.overdue_grace)
             else:
                 result = {"dispatch": service.dispatch_once(project=args.project, retry_seconds=args.retry_seconds),
+                    "verification": FactVerificationService(store).dispatch_once(project=args.project, retry_seconds=args.retry_seconds),
                     "review": review_worker.run_once()}
             print(json.dumps(result, ensure_ascii=False), flush=True)
             if index+1 < args.iterations:

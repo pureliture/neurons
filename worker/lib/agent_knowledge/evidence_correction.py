@@ -350,7 +350,7 @@ class EvidenceCorrectionService:
         return result
 
 
-def _candidate(old, rule, value, proofs, memory_id, request_hash, decision_id):
+def _candidate(old, rule, value, proofs, memory_id, request_hash, decision_id, *, verified_at=None):
     card = copy.deepcopy(old)
     for key in ("approved_by", "approved_at", "operator_approval_ref", "rejected_by", "rejected_at"):
         card.pop(key, None)
@@ -366,21 +366,30 @@ def _candidate(old, rule, value, proofs, memory_id, request_hash, decision_id):
                 supersedes=[old["memory_id"]], superseded_by=[], valid_to=None,
                 steward_proposal_kind="evidence_correction", steward_target_memory_id=old["memory_id"],
                 idempotency_key=request_hash, created_at=utc_now_iso(), updated_at=utc_now_iso())
-    observed = min(_timestamp(proof["observed_at"]) for proof in proofs)
+    if verified_at is None and any(not proof.get("observed_at") for proof in proofs):
+        raise CorrectionError("source_observation_time_invalid")
+    observed = min((_timestamp(proof["observed_at"]) for proof in proofs if proof.get("observed_at")), default=None)
+    if observed is None and verified_at is None:
+        raise CorrectionError("source_observation_time_invalid")
+    verified = verified_at if verified_at is not None else observed
     # 단일 사실의 검증으로 복사한 나머지 사실까지 최신으로 인증하지 않는다.
     card.update(freshness_state="unchecked",
-                freshness_checked_at=utc_now_iso(), source_hash=hash_payload(proofs),
-                freshness_next_check_after=(observed + timedelta(seconds=rule["max_age_seconds"])).isoformat())
+                freshness_checked_at=verified.isoformat() if verified_at is not None else utc_now_iso(), source_hash=hash_payload(proofs),
+                freshness_next_check_after=(verified + timedelta(seconds=rule["max_age_seconds"])).isoformat())
     card["verification_scope"] = {"whole_card": False, "fields": [fact_field], "render_spans": render_spans}
     field_verifications = copy.deepcopy(old.get("field_verifications") or {})
     field_verifications[fact_field] = {
-        "state": "verified_current", "observed_at": observed.isoformat(),
+        "state": "verified_current", "observed_at": observed.isoformat() if observed else "",
         "next_check_after": card["freshness_next_check_after"],
         "value_hash": hash_payload(value), "source_hash": card["source_hash"],
     }
+    if verified_at is not None:
+        field_verifications[fact_field]["verified_at"] = verified.isoformat()
     card["field_verifications"] = field_verifications
     if card["card_type"] == "status":
-        card["typed_payload"]["observed_at"] = observed.isoformat()
+        card["typed_payload"]["observed_at"] = observed.isoformat() if observed else ""
+    if observed is None:
+        card.pop("observed_at", None)
     card["evidence_correction"] = {
         "request_hash": request_hash, "policy_id_hash": hash_payload(rule["policy_id"]),
         "policy_hash": hash_payload(rule), "decision_id": decision_id, "authority_basis": "evidence_policy",

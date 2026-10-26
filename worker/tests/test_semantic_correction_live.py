@@ -118,3 +118,22 @@ def test_live_source_revocation_worker_restart_and_model_repair(coordinator, tmp
     test_real_lifecycle_process_restart_and_independent_monitor_recover_same_review(c, tmp_path,
         policy_descriptor={**asdict(c.rule), "adapter": "git_semantic.v1"},
         additional_env={"OPENROUTER_API_KEY": os.environ["OPENROUTER_API_KEY"]}, lease_seconds=10)
+
+
+def test_live_model_expiry_recheck_and_stopped_worker_recovery(coordinator, tmp_path):
+    from dataclasses import asdict
+    from test_fact_verification import test_expiry_worker_stop_monitor_and_automatic_restart_reverify_and_update
+    c = coordinator
+    text = "이 파일은 기능 상태를 ready로 기록한다."
+    (c.root / "facts.json").write_text(text)
+    git(c.root, "add", "facts.json"); git(c.root, "commit", "-m", "기한 검증의 의미 근거")
+    c.rule = GitSemanticFactPolicy("status", c.rule.scope, c.rule.target_title, c.rule.field_path,
+        c.rule.render_template, "facts.json", "등록 branch 파일의 기능 상태 기록",
+        (("ready", "이 파일의 기능 상태 기록은 ready다."), ("failed", "이 파일의 기능 상태 기록은 failed다.")),
+        "repository_content", os.environ["LBRAIN_TEST_SEMANTIC_PROFILE"], os.environ["LBRAIN_TEST_SEMANTIC_PROFILE_HASH"],
+        max_age_seconds=1)
+    c.service = FactCorrectionCoordinator(store=c.f.store, git_reader=c.service.git_reader, policies=[c.rule])
+    c.request["changes"][0]["evidence"] = {"revision": git(c.root, "rev-parse", "HEAD"), "content_hash": sha256_text(text)}
+    test_expiry_worker_stop_monitor_and_automatic_restart_reverify_and_update(c, tmp_path,
+        policy_descriptor={**asdict(c.rule), "adapter": "git_semantic.v1"},
+        additional_env={"OPENROUTER_API_KEY": os.environ["OPENROUTER_API_KEY"]}, lease_seconds=10)

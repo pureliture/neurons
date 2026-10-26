@@ -12,7 +12,7 @@
 | G04 | 과거 지연 입력의 역전 방지와 실제 후속 변경의 반영 | 실제 Git+PG에서 지연 ancestor와 실제 ref A→B→A를 구분하고 불변 관측의 현재 재검증 확인. 일반 세션 전체 경로는 남음 |
 | G05 | 동일 사실의 단일 current, 복수 필드·중복 카드·동시 writer 처리 | 공통 head·다른 필드의 lineage 재검증·연결된 중복 카드의 현재 표시·동시 key 처리 구현. 알려진 대상의 직접 DML·같은 식별자의 새 current·최초 queue 대기·옛 snapshot 우회를 DB에서 차단. 아직 식별하지 않은 의미상 중복과 일반 writer의 전체 자동 합류는 남음 |
 | G06 | 근거 내용·버전·관측 시각과 모든 교정 이력 보존 | receipt 본문/hash/proof·관측 불변성과 필수 FK 참조, 교정 참조가 추가되는 실제 GC 잠금 경합의 삭제 거부 확인. 모든 source·모델 산출물·retention/GC CLI의 전체 보존 검증은 남음 |
-| G07 | 예약·장애·설정 차단·저장 직후 종료·만료 후 복구와 독립 감지 | 실제 모델 경로의 저장 후 응답 유실 복구와 source 철회→CLI worker 종료→독립 monitor 감지→재시작 후 동일 작업 자동 해결 확인. 상주 supervisor·외부 통지·장기 운영 자동 실행/감시는 남음 |
+| G07 | 예약·장애·설정 차단·저장 직후 종료·만료 후 복구와 독립 감지 | 실제 모델 경로의 응답 유실 복구·source 철회·검증 기한 경과→CLI worker 종료→독립 monitor 감지→재시작 후 자동 해결 확인. 원래 관측을 보존한 서버 검증 영수증·기한 예약과 기존 head의 예약 누락 감지 구현. 상주 supervisor·외부 통지·장기 운영 자동 실행/감시는 남음 |
 | G08 | context/list/query와 graph·embedding 지연·역순 작업에서도 올바른 조회 | 최종 fact view·generation·cursor와 실제 query를 연결. 실제 Neo4j에서 projection 전 누락을 수정하고 종료/복구·역순/중복·만료 generation을 확인. 실제 embedding provider·미식별 session chunk·장기 수렴은 남음 |
 | G09 | 철회·parser 정정·권한 변경과 파생 기억 영향 처리 | 사용한 receipt의 철회→내구성 영향 target→자동 재검토, 즉시 조회 제외와 독립 유효 근거 유지 구현. parser·정책·접근 권한 자동 전파와 파생 기억 재계산은 남음 |
 | G10 | 실제 작업 근거로 전체 흐름 검증, artifact identity·백업 복원·정리 | 기존 좁은 실증에 Git+PG+실제 CLI/HTTP 검사를 추가. 최종 배포 identity·LLM 실제 전체 작업·보존/정리는 남음 |
@@ -32,7 +32,7 @@
 | C07 | 한 세션의 여러 실제 상태 변화 | 미검증 |
 | C08 | 실제 후속 제거·rollback | 실제 Git ref A→B→A와 같은 불변 관측의 현재 재검증, 오래된 terminal 요청 무변경 확인. 일반 source/운영 흐름은 남음 |
 | C09 | 과거 원인을 몰라도 검증된 현재 값 교정 | 직접 Git 데이터와 파일 내용의 실제 의미 모델 경로에서 현재 값 교정 확인. 일반 native/운영 근거 경로는 남음 |
-| C10 | clock skew·관측 시각 누락 | 미검증 |
+| C10 | clock skew·관측 시각 누락 | PG 코어에서 원래 과거/미래/누락 시각 보존과 DB 검증 시각·기한 분리, replay 비연장 확인. 실제 Git/모델에서 같은 고정본의 기한 자동 재확인·중단/감지/복구 확인. 전체 native/provider와 PG 서버 clock 변화 검증은 남음 |
 | C11 | 같은 revision의 상충 동시 교정 | 미검증 |
 | C12 | 다른 key의 동일 사실·동일 값 | 실제 PG 동시 key에서 단일 successor 확인. 일반 admission 경로는 남음 |
 | C13 | 같은 카드의 다른 필드 동시 교정 | 같은 원래 revision의 두 필드를 순차 교정해 보존 확인. 다른 필드의 실제 동시 실행은 남음 |
@@ -81,3 +81,5 @@ native 관측의 source 보존과 실제 Couch/PG intake 증거는 [관측 출�
 Git 내용의 의미 기반 값 선택·새 독립 실제 모델 평가·실제 worker/MCP HTTP 증거는 [의미 admission 검사](../../validation/2026-10-26-lbrain-semantic-admission.md)를 따른다. 이 결과는 전체 source 종류와 모든 달성 기준의 완료를 뜻하지 않는다.
 
 기존 교정 근거의 FK 보존·철회 전파·조회 범위와 자동 복구의 부분 증거는 [근거 lifecycle 검사](../../validation/2026-10-26-lbrain-source-lifecycle.md)를 따른다.
+
+원래 관측 시각·서버 검증 시각의 분리와 실제 기한 자동 재검토는 [검증 기한 검사](../../validation/2026-10-26-lbrain-fact-verification-expiry.md)를 따른다.

@@ -270,6 +270,10 @@ class FactResolutionService:
                     ("disputed" if action == "disputed" else "pending", scope.key))
             assertion_state = {"attach_evidence": "support", "replace_current": "support", "retain_history": "history"}.get(action, "pending")
             cur.execute("UPDATE lbrain_fact_assertions SET state=%s WHERE assertion_id=%s", (assertion_state, assertion_id))
+            if current and action in {"replace_current", "attach_evidence"}:
+                from .fact_verification import FactVerificationService
+                result["verification"] = FactVerificationService.record_on(cur, scope=scope,
+                    resolution_id=resolution_id, assertion_id=assertion_id, observation=observation, commit=commit)
             cur.execute("""INSERT INTO lbrain_fact_project_versions(project,generation) VALUES (%s,1)
                 ON CONFLICT(project) DO UPDATE SET generation=lbrain_fact_project_versions.generation+1 RETURNING generation""", (scope.project,))
             project_generation = cur.fetchone()["generation"]
@@ -299,7 +303,9 @@ class FactResolutionService:
                         JOIN lbrain_fact_observation_sources s ON s.observation_version=a.observation_version
                         JOIN lbrain_fact_source_receipts r ON r.source_ref_id=s.source_ref_id
                         WHERE a.assertion_id=f.head_assertion_id AND r.state='active') AS head_source_active,
-                    proof.current_evidence
+                    proof.current_evidence,verification.checked_at,verification.expires_at,
+                    verification.observed_at AS verified_observed_at,verification.source_proof,
+                    verification.source_content_hash,verification.expires_at<=clock_timestamp() AS verification_due
                 FROM lbrain_fact_members m JOIN lbrain_fact_scopes f ON f.fact_key=m.fact_key
                 JOIN memory_cards c ON c.memory_id=m.memory_id
                 LEFT JOIN LATERAL (SELECT jsonb_agg(p.evidence ORDER BY p.assertion_id) AS current_evidence FROM (
@@ -313,6 +319,15 @@ class FactResolutionService:
                     WHERE a.fact_key=f.fact_key AND a.value_hash=f.value_hash AND r.state='active'
                         AND a.state IN ('support','pending') AND (a.state='support' OR a.assertion_id=f.head_assertion_id)
                     ORDER BY a.assertion_id LIMIT 17) p) proof ON TRUE
+                LEFT JOIN LATERAL (SELECT v.checked_at,v.expires_at,o.observation->>'observed_at' AS observed_at,
+                        o.observation->'proof' AS source_proof,o.observation->>'content_hash' AS source_content_hash
+                    FROM lbrain_fact_verifications v JOIN lbrain_fact_assertions a ON a.assertion_id=v.assertion_id
+                    JOIN lbrain_fact_observations o ON o.version_id=a.observation_version
+                    JOIN lbrain_fact_observation_sources s ON s.observation_version=o.version_id
+                    JOIN lbrain_fact_source_receipts r ON r.source_ref_id=s.source_ref_id
+                    WHERE v.fact_key=f.fact_key AND a.value_hash=f.value_hash AND r.state='active'
+                        AND a.state IN ('support','pending') AND (a.state='support' OR a.assertion_id=f.head_assertion_id)
+                    ORDER BY v.checked_at DESC,v.resolution_id LIMIT 1) verification ON TRUE
                 WHERE m.memory_id=ANY(%s) ORDER BY m.memory_id,m.field_path""", ([c["memory_id"] for c in cards],))
             by_memory = {}
             for row in cur.fetchall():
@@ -349,11 +364,27 @@ class FactResolutionService:
                     if not member["head_source_active"] or stale_verification:
                         card["freshness_state"] = "unchecked"
                         card.setdefault("field_verifications", {}).pop(member["field_path"], None)
+                    if member["checked_at"]:
+                        checked_at, expires_at = member["checked_at"].isoformat(), member["expires_at"].isoformat()
+                        view["verification"] = {"checked_at": checked_at, "expires_at": expires_at}
+                        view["verification_state"] = "recheck_due" if member["verification_due"] else "verified_current"
+                        proof = member["source_proof"]
+                        proof.update(content_hash=member["source_content_hash"], observed_at=member["verified_observed_at"])
+                        card.setdefault("field_verifications", {})[member["field_path"]] = {
+                            "state": view["verification_state"], "observed_at": member["verified_observed_at"],
+                            "verified_at": checked_at, "next_check_after": expires_at,
+                            "value_hash": hash_payload(member["value"]), "source_hash": hash_payload([proof])}
+                    else:
+                        view["verification_state"] = "unchecked"
+                        card.setdefault("field_verifications", {}).pop(member["field_path"], None)
                 views.append(view)
             if views:
                 card["canonical_content_hash"] = card["content_hash"]
                 card["fact_views"] = views
-                card["content_hash"] = hash_payload({"canonical_content_hash": card["canonical_content_hash"], "fact_views": views})
+                # 기한의 경과 자체는 target revision 변경이 아니다. 새 검증
+                # receipt/source/current 변화는 hash와 project generation에 반영한다.
+                stable_views = [{k: v for k, v in view.items() if k != "verification_state"} for view in views]
+                card["content_hash"] = hash_payload({"canonical_content_hash": card["canonical_content_hash"], "fact_views": stable_views})
             result.append(card)
         return result
 
@@ -466,6 +497,20 @@ class FactResolutionService:
                 (fact_key, row["value_hash"], row["head_assertion_id"]))
             if cur.fetchone() is None:
                 result["state"] = "invalidated"
+            cur.execute("""SELECT v.checked_at,v.expires_at,v.expires_at<=clock_timestamp() AS due
+                FROM lbrain_fact_verifications v JOIN lbrain_fact_assertions a ON a.assertion_id=v.assertion_id
+                JOIN lbrain_fact_observation_sources s ON s.observation_version=a.observation_version
+                JOIN lbrain_fact_source_receipts r ON r.source_ref_id=s.source_ref_id
+                WHERE v.fact_key=%s AND a.value_hash=%s AND r.state='active'
+                    AND a.state IN ('support','pending') AND (a.state='support' OR a.assertion_id=%s)
+                ORDER BY v.checked_at DESC,v.resolution_id LIMIT 1""",
+                (fact_key, row["value_hash"], row["head_assertion_id"]))
+            verification = cur.fetchone()
+            if verification:
+                result["verification"] = {key: verification[key].isoformat() for key in ("checked_at", "expires_at")}
+                result["verification_state"] = "recheck_due" if verification["due"] else "verified_current"
+            else:
+                result["verification_state"] = "unchecked"
         return result
 
     @staticmethod
@@ -539,12 +584,14 @@ class StewardFactCommit:
             "max_age_seconds": self.max_age_seconds}
         proof = dict(observation.proof)
         proof.update(content_hash=observation.content_hash, observed_at=observation.observed_at)
-        if not proof.get("source_ref_id") or not observation.observed_at:
+        if not proof.get("source_ref_id"):
             raise FactResolutionError("source_receipt_required")
         request_hash = hash_payload([resolution_id, observation.version_id, value, current["content_hash"]])
         candidate_id = "mem_fact_" + request_hash[7:47]
         decision_id = "factdec_" + request_hash[7:47]
-        candidate = _candidate(current, rule, value, [proof], candidate_id, request_hash, decision_id)
+        checked = connection.execute("SELECT clock_timestamp() AS checked_at").fetchone()["checked_at"]
+        candidate = _candidate(current, rule, value, [proof], candidate_id, request_hash, decision_id,
+            verified_at=checked)
         # GUC만으로는 과거 resolution을 재사용할 수 있다. 이번 transaction과
         # 실제 target/successor를 묶고, commit 시 최종 resolution FK도 검증한다.
         connection.execute("""INSERT INTO lbrain_fact_mutation_intents

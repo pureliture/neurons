@@ -4,6 +4,8 @@
 
 아래의 v1 adapter 안내 이후 공통 fact 코어·Git의 하이브리드 의미 admission·v2 batch와 [근거 철회 자동 재검토](validation/2026-10-26-lbrain-source-lifecycle.md)를 추가했다. 최신 구현 범위와 남은 조건은 [전체 달성 추적](specs/2026-07-05-lbrain-knowledge-object-substrate/correction-acceptance.md)을 기준으로 판단한다.
 
+공통 fact의 [서버 검증 시각·기한 자동 재확인](validation/2026-10-26-lbrain-fact-verification-expiry.md)은 최초 관측 시각을 보존한다. `fact_source_lifecycle worker`가 등록된 사실의 기한 재검토도 처리하고 독립 monitor가 누락·기한 초과를 감지한다. 운영 상주 실행은 아직 활성화하지 않았다.
+
 현재 구현은 초기 adapter에 한정하며 전체 요구의 완료 상태가 아니다. 지연 세션 수집과의 합류 및 재현된 summary/payload 불일치 등은 [설계 감사](validation/2026-10-25-lbrain-correction-reconciliation-audit.md)에 기록했다. 이 문제를 해결하기 전 전체 기능이 준비됐다고 판단하지 않는다.
 
 자동 재검토의 PG 영속 예약·lease 회수·판단 cache·독립 감시 코어와 실험용 연결기를 추가했다. 별도 Ubuntu 프로세스에서 장애 복구와 구조화된 지연 근거의 자동 교정을 [실증](validation/2026-10-25-lbrain-recheck-runtime.md)했다. 운영 수집 연결·범용 모델 판단·충돌 B 읽기 정책은 아직 완료하지 않았다.

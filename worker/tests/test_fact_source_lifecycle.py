@@ -8,7 +8,7 @@ import pytest
 from agent_knowledge.llm_brain_core.graph_first_resolver import GraphFirstResolver
 from agent_knowledge.fact_source_lifecycle import FactSourceLifecycle
 from agent_knowledge.fact_resolution import FactResolutionError
-from agent_knowledge.public_safe_util import sha256_text
+from agent_knowledge.public_safe_util import hash_payload, sha256_text
 from test_fact_resolution import facts, coordinator, observation, invoke, set_current, head_card
 
 
@@ -286,7 +286,8 @@ def test_independent_remaining_support_keeps_value_and_exposes_only_valid_curren
     view = page["items"][0]["fact_views"][0]
     assert {ref["source_ref_id"] for ref in view["current_evidence"]} == {b.proof["source_ref_id"]}
     projected = f.resolver.project_cards([f.store.get_steward_card(first["current"]["memory_id"])])[0]
-    assert "typed_payload.status_value" not in projected.get("field_verifications", {})
+    assert projected["field_verifications"]["typed_payload.status_value"]["source_hash"] == hash_payload([
+        {**b.proof, "content_hash": b.content_hash, "observed_at": b.observed_at}])
     with f.store._scope() as db:
         assert db.execute("SELECT state FROM lbrain_fact_source_targets").fetchone()["state"] == "covered"
         assert db.execute("SELECT count(*) AS n FROM lbrain_fact_source_receipts").fetchone()["n"] == 2
@@ -392,7 +393,8 @@ def test_previous_field_verification_cannot_keep_revoked_proof_after_another_fie
     FactSourceLifecycle(f.store).revoke(project=f.scope.project, source_ref_id=a.proof["source_ref_id"],
         expected_content_hash=a.content_hash, request_key="withdraw-previous-field")
     card = f.resolver.project_cards([f.store.get_steward_card(result["current"]["memory_id"])])[0]
-    assert "typed_payload.status_value" not in card["field_verifications"]
+    assert card["field_verifications"]["typed_payload.status_value"]["source_hash"] == hash_payload([
+        {**alternate.proof, "content_hash": alternate.content_hash, "observed_at": alternate.observed_at}])
     assert "typed_payload.deployment_status" in card["field_verifications"]
     page = GraphFirstResolver(store=f.store).resolve(project=f.scope.project, mode="list")
     assert page["items"][0]["typed_payload"]["status_value"] == "ready"

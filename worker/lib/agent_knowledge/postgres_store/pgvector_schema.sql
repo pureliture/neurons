@@ -775,6 +775,66 @@ INSERT INTO lbrain_fact_project_versions(project,generation)
 ALTER TABLE lbrain_fact_scopes DROP CONSTRAINT IF EXISTS lbrain_fact_scopes_state_check;
 ALTER TABLE lbrain_fact_scopes ADD CONSTRAINT lbrain_fact_scopes_state_check
     CHECK (state IN ('current','pending','disputed','invalidated'));
+
+-- 원래 관측 시각과 서버의 현재성 재검증 시각을 분리한다. 기존 고정본의
+-- 관측/성공 결과를 갱신하여 검증 기한을 늘리지 않는다.
+CREATE TABLE IF NOT EXISTS lbrain_fact_verifications (
+    resolution_id VARCHAR(64) PRIMARY KEY REFERENCES lbrain_fact_resolutions(resolution_id)
+        DEFERRABLE INITIALLY DEFERRED,
+    fact_key VARCHAR(64) NOT NULL REFERENCES lbrain_fact_scopes(fact_key),
+    assertion_id VARCHAR(64) NOT NULL REFERENCES lbrain_fact_assertions(assertion_id),
+    policy_id VARCHAR(128) NOT NULL,
+    policy_version VARCHAR(71),
+    max_age_seconds INTEGER NOT NULL CHECK (max_age_seconds BETWEEN 1 AND 86400),
+    checked_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    expires_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+CREATE INDEX IF NOT EXISTS idx_lbrain_fact_verified_assertion
+    ON lbrain_fact_verifications(assertion_id,checked_at DESC);
+CREATE OR REPLACE FUNCTION lbrain_preserve_fact_verification() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP<>'INSERT' THEN
+        RAISE EXCEPTION 'fact_verification_immutable' USING ERRCODE='23514';
+    END IF;
+    NEW.checked_at := clock_timestamp();
+    NEW.expires_at := NEW.checked_at + NEW.max_age_seconds*interval '1 second';
+    RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS lbrain_preserve_fact_verification ON lbrain_fact_verifications;
+CREATE TRIGGER lbrain_preserve_fact_verification BEFORE INSERT OR UPDATE OR DELETE ON lbrain_fact_verifications
+    FOR EACH ROW EXECUTE FUNCTION lbrain_preserve_fact_verification();
+CREATE OR REPLACE FUNCTION lbrain_check_fact_verification() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM lbrain_fact_resolutions r
+        JOIN lbrain_fact_assertions a ON a.assertion_id=NEW.assertion_id
+        WHERE r.resolution_id=NEW.resolution_id AND r.fact_key=NEW.fact_key AND a.fact_key=NEW.fact_key
+            AND r.terminal AND r.result->>'action' IN ('replace_current','attach_evidence')
+            AND r.result->>'assertion_id'=NEW.assertion_id) THEN
+        RAISE EXCEPTION 'fact_verification_resolution_mismatch' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS lbrain_check_fact_verification ON lbrain_fact_verifications;
+CREATE CONSTRAINT TRIGGER lbrain_check_fact_verification AFTER INSERT ON lbrain_fact_verifications
+    DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION lbrain_check_fact_verification();
+CREATE TABLE IF NOT EXISTS lbrain_fact_check_schedules (
+    fact_key VARCHAR(64) NOT NULL REFERENCES lbrain_fact_scopes(fact_key),
+    project VARCHAR(64) NOT NULL,
+    policy_id VARCHAR(128) NOT NULL,
+    verified_resolution_id VARCHAR(64) REFERENCES lbrain_fact_verifications(resolution_id),
+    next_check_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    state VARCHAR(16) NOT NULL DEFAULT 'scheduled' CHECK(state IN ('scheduled','queued','blocked')),
+    generation BIGINT NOT NULL DEFAULT 1 CHECK(generation>=1),
+    task_id VARCHAR(64) REFERENCES lbrain_recheck_tasks(task_id),
+    reason_code VARCHAR(64) NOT NULL DEFAULT '',
+    PRIMARY KEY(fact_key,policy_id)
+);
+CREATE INDEX IF NOT EXISTS idx_lbrain_fact_checks_due
+    ON lbrain_fact_check_schedules(project,next_check_at) WHERE state IN ('scheduled','blocked');
 CREATE TABLE IF NOT EXISTS lbrain_fact_batches (
     batch_id VARCHAR(64) PRIMARY KEY,
     project VARCHAR(64) NOT NULL,
