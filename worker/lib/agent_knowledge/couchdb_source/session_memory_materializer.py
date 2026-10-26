@@ -399,6 +399,8 @@ def materialize_session_memory(*, session_id_hash: str, store: CouchDBSourceStor
         from ..session_memory.observation_refs import validate
         references = validate(bundle.get("observation_refs", []), body=bundle_body,
             session_id_hash=session_id_hash, provider=provider, project=project)
+        from ..session_memory.native_tool_receipts import from_bundle
+        from_bundle(bundle,references)
         for reference in references:
             reference["span_start"] += body_offset
             reference["span_end"] += body_offset

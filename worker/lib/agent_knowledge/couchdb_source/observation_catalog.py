@@ -31,15 +31,23 @@ class AdmittedNativeObservation:
     redacted_text: str
     _reference_json: str
     _aliases_json: str
+    _native_receipt_json: str = ""
 
     @property
     def reference(self):
         return json.loads(self._reference_json)
 
     def public_proof(self):
-        return {"adapter": "couch_native_observation.v1", "project": self.project, "provider": self.provider,
+        proof = {"adapter": "couch_native_observation.v1", "project": self.project, "provider": self.provider,
             "session_id_hash": self.session_id_hash, "source_hash": self.source_hash,
             "reference": self.reference, "source_aliases": json.loads(self._aliases_json)}
+        if self._native_receipt_json:
+            proof["native_receipt_hash"] = self.native_receipt["receipt_hash"]
+        return proof
+
+    @property
+    def native_receipt(self):
+        return json.loads(self._native_receipt_json) if self._native_receipt_json else None
 
 
 class CouchObservationCatalog:
@@ -86,6 +94,8 @@ class CouchObservationCatalog:
             try:
                 references = validate(bundle.get("observation_refs", []), body=body,
                     session_id_hash=session_id_hash, provider=provider, project=project)
+                from ..session_memory.native_tool_receipts import from_bundle
+                native_receipts = from_bundle(bundle,references)
             except (ValueError, TypeError, KeyError):
                 raise ObservationUnavailable("observation_source_integrity_invalid") from None
             for ref in references:
@@ -99,25 +109,43 @@ class CouchObservationCatalog:
                 if self.redaction_version != ref["redaction_version"]:
                     raise ObservationUnavailable("observation_redaction_policy_mismatch")
                 text = body[ref["span_start"]:ref["span_end"]]
-                signature = {key: value for key, value in ref.items() if key not in {"span_start", "span_end", "evidence_index"}}
+                signature = {key: value for key, value in ref.items()
+                    if key not in {"span_start", "span_end", "evidence_index", "source_event_index"}}
                 alias = {"source_document_hash": dm.sha256_hash(bundle["_id"]),
                     "span_start": ref["span_start"], "span_end": ref["span_end"],
                     "span_content_hash": ref["span_content_hash"]}
+                if evidence_id in native_receipts:
+                    alias["source_event_index"] = ref["source_event_index"]
                 previous = found.get(evidence_id)
                 if previous:
-                    if previous["signature"] != signature or previous["text"] != text:
+                    if (previous["signature"] != signature or previous["text"] != text
+                            or previous["native_receipt"] != native_receipts.get(evidence_id)):
                         raise ObservationUnavailable("observation_alias_conflict")
                     previous["aliases"].append(alias)
                 else:
-                    found[evidence_id] = {"reference": ref, "signature": signature, "text": text, "aliases": [alias]}
+                    found[evidence_id] = {"reference": ref, "signature": signature, "text": text,
+                        "native_receipt":native_receipts.get(evidence_id), "aliases": [alias]}
         if wanted != set(found):
             raise ObservationUnavailable("native_observation_not_found")
         # 도착 시각으로 승자를 정하지 않고 같은 source revision을 재확인한다.
         if self._resolve(session_id_hash).source_hash != source_hash:
             raise ObservationUnavailable("observation_source_changed_during_admission")
         return {key: AdmittedNativeObservation(project, provider, session_id_hash, source_hash, value["text"],
-            json.dumps(value["reference"], sort_keys=True), json.dumps(value["aliases"], sort_keys=True))
+            json.dumps(value["reference"], sort_keys=True), json.dumps(value["aliases"], sort_keys=True),
+            json.dumps(value["native_receipt"],sort_keys=True) if value["native_receipt"] else "")
             for key, value in found.items()}
+
+    def read_tool_result(self, *, project, provider, session_id_hash, source_hash, evidence_id_hash,
+                         require_complete=True):
+        """실제 저장된 native 결과를 읽는다. latest 세계 상태라는 capability는 없다."""
+        admitted=self.read_many(project=project,provider=provider,session_id_hash=session_id_hash,
+            source_hash=source_hash,evidence_id_hashes=[evidence_id_hash])[evidence_id_hash]
+        receipt=admitted.native_receipt
+        if receipt is None:
+            raise ObservationUnavailable("native_tool_receipt_required")
+        if require_complete and not (receipt["arguments_complete"] and receipt["result_complete"]):
+            raise ObservationUnavailable("native_tool_receipt_incomplete")
+        return admitted
 
     def assert_current(self, observation):
         if not isinstance(observation, AdmittedNativeObservation):

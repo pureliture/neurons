@@ -590,6 +590,7 @@ def build_tool_evidence_bundle_document(
     record_content_hashes: Iterable[str],
     body: str,
     observation_refs: Iterable[Mapping] = (),
+    native_tool_receipts: Iterable[Mapping] = (),
     observed_at_start: str = "",
     observed_at_end: str = "",
     source_locator_hash: str = "",
@@ -639,6 +640,13 @@ def build_tool_evidence_bundle_document(
             raise ValueError("observation reference coverage mismatch")
         doc["observation_refs"] = references
         doc["coverage_hash"] = coverage_hash(member_hashes, references)
+    receipts = list(native_tool_receipts)
+    if receipts:
+        from ..session_memory.native_tool_receipts import validate_bundle
+        from ..session_memory.observation_refs import coverage_hash
+        validate_bundle(receipts,references=references,provider=doc["provider"],session_id_hash=session_id_hash)
+        doc["native_tool_receipts"] = receipts
+        doc["coverage_hash"] = coverage_hash(member_hashes,references,receipts)
     return _finalize(doc)
 
 

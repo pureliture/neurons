@@ -94,10 +94,13 @@ def validate(references, *, body, session_id_hash, provider, project):
     return result
 
 
-def coverage_hash(content_hashes, references):
+def coverage_hash(content_hashes, references, native_receipts=()):
     """본문이 같아도 native 호출/해석 version이 다르면 같은 source로 덮어쓰지 않는다."""
-    return digest(json.dumps({"schema_version": SCHEMA, "record_content_hashes": list(content_hashes),
-        "observation_refs": list(references)}, sort_keys=True, ensure_ascii=True, separators=(",", ":")))
+    material = {"schema_version": SCHEMA, "record_content_hashes": list(content_hashes),
+        "observation_refs": list(references)}
+    if native_receipts:
+        material["native_tool_receipts"] = list(native_receipts)
+    return digest(json.dumps(material, sort_keys=True, ensure_ascii=True, separators=(",", ":")))
 
 
 def identity(reference):

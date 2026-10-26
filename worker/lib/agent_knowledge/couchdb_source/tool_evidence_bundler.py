@@ -36,6 +36,7 @@ from ..session_memory.transcript_model import (
     ToolEvidenceSummaryRecord,
 )
 from ..session_memory.transcript_packer import chunk_tool_evidence_records
+from ..session_memory.native_tool_receipts import MAX_BUNDLE_RECEIPT_BYTES
 
 
 def _bundle_material(records: list[ToolEvidenceSummaryRecord]) -> tuple[str, list[dict]]:
@@ -81,6 +82,12 @@ def build_tool_evidence_bundle_documents(
         raise ValueError("tool evidence bundling is per-session; mixed session_id_hash given")
     if len({(record.project, record.provider) for record in ordered}) != 1:
         raise ValueError("tool evidence bundling requires one project/provider scope")
+    native_versions = {}
+    for record in ordered:
+        if record.native_receipt_json:
+            previous = native_versions.setdefault(record.observation_id_hash,record.source_content_hash)
+            if previous != record.source_content_hash:
+                raise ValueError("native_tool_event_content_conflict")
 
     sized_parts = chunk_tool_evidence_records(ordered, max_chars=max_chars)
     # A bundle is the smallest temporal relevance unit downstream.  Never put
@@ -89,16 +96,22 @@ def build_tool_evidence_bundle_documents(
     parts: list[list[ToolEvidenceSummaryRecord]] = []
     for sized_part in sized_parts:
         current: list[ToolEvidenceSummaryRecord] = []
+        native_bytes = 2
         current_interval: tuple[str, str] | None | object = object()
         for record in sized_part:
             interval = normalize_observed_interval(
                 str(record.observed_at or ""),
                 str(record.observed_at or ""),
             )
-            if current and interval != current_interval:
+            # 원래 응답은 recall body와 별도로 제한한다. 요약이 짧아도
+            # native metadata가 무제한인 bundle을 만들지 않는다.
+            receipt_size = len(record.native_receipt_json.encode()) + 256 if record.native_receipt_json else 0
+            if current and (interval != current_interval or native_bytes+receipt_size>MAX_BUNDLE_RECEIPT_BYTES):
                 parts.append(current)
                 current = []
+                native_bytes = 2
             current.append(record)
+            native_bytes += receipt_size
             current_interval = interval
         if current:
             parts.append(current)
@@ -123,6 +136,9 @@ def build_tool_evidence_bundle_documents(
                 record_content_hashes=[record.content_hash for record in part],
                 body=body,
                 observation_refs=observation_refs,
+                native_tool_receipts=list({record.evidence_id_hash:{"evidence_id_hash":record.evidence_id_hash,
+                    "receipt":json.loads(record.native_receipt_json)}
+                    for record in part if record.native_receipt_json}.values()),
                 observed_at_start=observed_at_start,
                 observed_at_end=observed_at_end,
             )

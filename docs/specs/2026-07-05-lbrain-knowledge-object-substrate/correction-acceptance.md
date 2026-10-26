@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | G01 | 복수 사실별 변경안·근거 제출, exact target 또는 설명으로 기존 target 검색 | v2 batch·기존 값/불일치/제안/근거와 정확한 title/summary 검색 구현. 직접 검증 값과 제안 값이 달라도 결과를 구분한다. 일반 의미 검색은 남음 |
 | G02 | 코드 검증과 실제 판단 모델 연결, 별도 평가에서 오교정과 정상 교정 모두 검사 | Git 값 선택을 실제 worker/MCP HTTP에 연결. coordinator 수정 뒤 또 다른 새 독립 40건에서 정상 19/20·잘못된 허용 0/20, 실제 모델의 충돌·합의 자동 처리까지 확인. 앞선 20/20 평가와 원시 모델 1/20 잘못된 허용은 별도 유지. 일반 native·운영 근거의 의미 admission은 남음 |
-| G03 | 같은 관측의 교정·수집·재수집이 합류 | 공통 fact/관측/해석/판단 코어와 Git JSON 교정·수집·관리 대상 autopilot 합류 구현. native ID의 Couch→PG→정규 intake→관리 대상 fact queue 연결 검증. native는 trigger로 보존하고 현재 값은 독립 Git 검증. 일반 native 근거 자체의 의미 검증과 동일 관측 합류는 남음 |
+| G03 | 같은 관측의 교정·수집·재수집이 합류 | 공통 fact 코어와 Git 교정·수집·관리 대상 autopilot 합류, native ID의 Couch→PG→정규 intake→fact queue 연결 검증. 원래 native 호출/응답의 별도 보존·검증 읽기와 같은 요약의 다른 source 버전 구분도 실제 Couch/PG/CLI에서 확인. native는 현재 trigger이며 일반 native 의미 admission과 수집 전 교정 관측의 합류는 남음 |
 | G04 | 과거 지연 입력의 역전 방지와 실제 후속 변경의 반영 | 실제 Git+PG에서 지연 ancestor와 실제 ref A→B→A를 구분하고 불변 관측의 현재 재검증 확인. 일반 세션 전체 경로는 남음 |
 | G05 | 동일 사실의 단일 current, 복수 필드·중복 카드·동시 writer 처리 | 공통 head·필드 lineage·알려진 alias의 현재 표시·동시 key 처리 구현. 무관한 Git commit으로 상대 근거를 제거해 잘못 승인하던 문제를 실제 재현/수정하고 두 source의 자동 합의를 확인. 알려진 대상의 직접 DML·중복 current·최초 queue 대기·옛 snapshot 우회 차단. 미식별 의미 중복과 모든 writer 자동 합류는 남음 |
 | G06 | 근거 내용·버전·관측 시각과 모든 교정 이력 보존 | receipt/관측 불변성과 필수 FK, 참조 추가와 GC의 실제 잠금 경합 확인. 나중 결정에 함께 사용한 다른 source의 원래 보류 근거도 FK로 보존. 모든 source·모델 산출물·retention/GC CLI의 전체 보존 검증은 남음 |
@@ -26,10 +26,10 @@
 | C01 | 교정 뒤 같은 관측 수집 | 실제 Couch native trigger→정규 intake→기존 fact queue에서 별도 accepted 없이 현재 Git 값을 유지. native 자체를 같은 verified 관측으로 admission하는 일반 경로는 남음 |
 | C02 | 수집 뒤 같은 관측 교정 | native trigger의 정규 intake가 독립 Git 현재 값으로 교정한 뒤 같은 Git 근거의 교정이 추가 authority 없이 합류. 일반 native 근거의 동일 관측 합류는 남음 |
 | C03 | 같은 관측의 다른 miner 해석 | PG 코어의 해석 version별 보존과 실제 Couch/PG에서 extractor 변경 시 같은 벡터에 별도 source 연결·새 처리 키 확인. 기존 fact 영향 재검토는 남음 |
-| C04 | provider/import/chunk가 다른 재수집 | 미검증 |
+| C04 | provider/import/chunk가 다른 재수집 | 같은 native call의 위치가 달라도 같은 관측과 두 alias를 보존하는 검사 추가. 5개 provider의 native 구조와 실제 Couch 왕복 확인. provider가 다른 동등 관측은 증명 없이 병합하지 않으며 일반 import 간 명시적 alias 연결은 남음 |
 | C05 | 같은 값을 지지하는 독립 관측 | 실제 Git/PG·모델에서 독립 source가 같은 값을 지지하게 되면 자동 해결, matching pending support·후속 참조 보존·추가 authority 1건을 확인. 일반 source 연결은 남음 |
 | C06 | 최근 수집된 옛 snapshot | 실제 Git ancestor를 지연 수집해 history로 연결하고 현재 값 유지. 일반 세션 연결은 남음 |
-| C07 | 한 세션의 여러 실제 상태 변화 | 미검증 |
+| C07 | 한 세션의 여러 실제 상태 변화 | native 추출에서 A→B→A 세 호출의 별도 관측·원래 응답·순서 보존 확인. 일반 세션의 각 관측이 fact resolution까지 연결되는 검증은 남음 |
 | C08 | 실제 후속 제거·rollback | 실제 Git ref A→B→A와 같은 불변 관측의 현재 재검증, 오래된 terminal 요청 무변경 확인. 일반 source/운영 흐름은 남음 |
 | C09 | 과거 원인을 몰라도 검증된 현재 값 교정 | 직접 Git 데이터와 파일 내용의 실제 의미 모델 경로에서 현재 값 교정 확인. 일반 native/운영 근거 경로는 남음 |
 | C10 | clock skew·관측 시각 누락 | PG 코어에서 원래 과거/미래/누락 시각 보존과 DB 검증 시각·기한 분리, replay 비연장 확인. 실제 Git/모델에서 같은 고정본의 기한 자동 재확인·중단/감지/복구 확인. 전체 native/provider와 PG 서버 clock 변화 검증은 남음 |
@@ -42,11 +42,11 @@
 | C17 | summary·typed payload·표시문 일관성 | 초기 adapter에서 수정. summary와 typed payload의 동시 갱신 및 전체 freshness 비승격을 실제 PG에서 확인. 일반 복수 사실 경로는 미검증 |
 | C18 | 오래된 cursor·target lineage | fact generation에 cursor 결속, 같은 값의 stale target 합류와 변경하지 않은 필드의 lineage 확인. 일반 의미 target의 전체 연결은 남음 |
 | C19 | 서버 수집 전의 근거 제출 | 미검증 |
-| C20 | 오래되거나 불완전한 근거 | 초기 source adapter에서 부분 확인. 일반 경로 미검증 |
+| C20 | 오래되거나 불완전한 근거 | native 원래 응답의 byte 한도·잘림·redaction 구분, 불완전한 응답의 성공 요약 거부와 기본 complete 읽기의 차단을 검사. 원천 전체 freshness와 일반 의미 admission은 남음 |
 | C21 | 우열을 판단할 수 없는 상충 근거 | B 정책 미결정. 증거 확보 전 임의 선택하지 않음 |
-| C22 | 자기 재인용을 독립 근거로 오인 | 미검증 |
+| C22 | 자기 재인용을 독립 근거로 오인 | native parser에서 assistant 문장/다른 역할의 tool result를 원래 응답으로 승격하지 않고, 옛 native 요약을 full result로 대신 읽지 않음. native 출력 자체에도 독립 HTTP 등 세계 상태 capability를 발급하지 않음. 일반 native 의미 admission·자기 재인용의 전체 lineage 처리는 남음 |
 | C23 | 테스트·구현을 운영 배포로 과대 해석 | 원시 모델 실패는 보존. repository 관측을 graph/HTTP/test/query 결과로 승격하지 못하는 code gate와 새 실제 모델 평가 확인. 모든 runtime 근거 reader의 교정 연결은 남음 |
-| C24 | evidence 안의 명령·위조·권한 위반 | 초기 hash·정책 검사 있음. 일반 의미 경로 미검증 |
+| C24 | evidence 안의 명령·위조·권한 위반 | 기존 hash·정책 검사에 native call/result 충돌·범위/본문/coverage 변조·중복 JSON key·symlink/FIFO/크기 거부를 추가. 실제 모델의 일반 native 지시문/locator/권한 경로는 남음 |
 | C25 | source 철회·삭제·권한 회수 | 실제 PG receipt 철회 직후 조회 제외, 다른 필드·독립 근거 보존과 실제 CLI 종료/monitor/자동 재개 확인. 일반 source 권한 이벤트·파생 기억 전파는 남음 |
 | C26 | parser·miner·redaction·정책 변경 | 미검증 |
 | C27 | evidence 저장 뒤 authority 실패 | 초기 adapter와 공통 PG 코어의 canonical/resolution 동시 rollback 확인. 일반 source 보존/GC 경합은 남음 |
@@ -87,3 +87,5 @@ Git 내용의 의미 기반 값 선택·새 독립 실제 모델 평가·실제 
 무관한 commit과 실제 rollback에서 독립 근거를 누락하던 오류·자동 합의·새 독립 모델 평가의 증거는 [독립 source 재검토 검사](../../validation/2026-10-26-lbrain-competing-source-revalidation.md)를 따른다.
 
 동일 카드의 복수 원천 정책·실제 동시 요청·초기 예약과 migration의 증거는 [동시 원천 검사](../../validation/2026-10-26-lbrain-concurrent-sources.md)를 따른다.
+
+원래 native tool 응답의 보존·한도·역할·관측 identity와 실제 Couch/PG/CLI 증거는 [native receipt 검사](../../validation/2026-10-27-lbrain-native-tool-receipts.md)를 따른다.

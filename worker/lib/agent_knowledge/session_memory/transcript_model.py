@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import asdict, dataclass
 
@@ -24,6 +25,7 @@ TOOL_EVIDENCE_CATEGORIES = (
     "local_audit",
     "command_error",
     "approval_evidence",
+    "native_observation",
 )
 TOOL_EVIDENCE_OUTCOMES = ("pass", "fail", "error", "info")
 
@@ -297,6 +299,7 @@ class ToolEvidenceSummaryRecord:
     observation_id_hash: str = ""
     source_event_index: int | None = None
     extractor_version: str = "unknown"
+    native_receipt_json: str = ""
 
     def __post_init__(self) -> None:
         command_summary = redact_and_bound_evidence_text(self.command_summary, MAX_TOOL_EVIDENCE_COMMAND_CHARS)
@@ -317,6 +320,14 @@ class ToolEvidenceSummaryRecord:
                 self.outcome, command_summary, content_hash, self.redaction_version, self.extractor_version]
         elif self.extractor_version != "unknown":
             identity_parts.extend([self.project, self.extractor_version, self.redaction_version])
+        if self.native_receipt_json:
+            from .native_tool_receipts import validate
+            receipt = validate(json.loads(self.native_receipt_json), provider=self.provider, session_id_hash=self.session_id_hash)
+            if (receipt["source_event_id_hash"],receipt["source_content_hash"],receipt["extractor_version"]) != (
+                    self.source_event_id_hash,self.source_content_hash,self.extractor_version):
+                raise ValueError("native_tool_receipt_record_mismatch")
+            object.__setattr__(self,"native_receipt_json",json.dumps(receipt,ensure_ascii=False,sort_keys=True,separators=(",",":")))
+            identity_parts.append(receipt["receipt_hash"])
         evidence_id_hash = _sha256("|".join(identity_parts))
         object.__setattr__(self, "evidence_id_hash", evidence_id_hash)
         for field_name in ("source_event_id_hash", "source_content_hash"):
@@ -339,4 +350,7 @@ class ToolEvidenceSummaryRecord:
         return f"{self.provider} tool evidence {self.category} {self.outcome}"
 
     def to_record(self) -> dict:
-        return asdict(self)
+        result = asdict(self)
+        if not self.native_receipt_json:
+            result.pop("native_receipt_json",None)
+        return result
