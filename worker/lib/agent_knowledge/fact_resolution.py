@@ -61,7 +61,11 @@ class FactScope:
 
 @dataclass(frozen=True)
 class VerifiedObservation:
-    """RPC 입력이 아니다. server admission 뒤 생성하는 source witness다."""
+    """RPC 입력이 아니다. server admission 뒤 생성하는 source witness다.
+
+    current_verified=False는 검증된 과거 snapshot이다. 아직 admission하지
+    못한 입력을 이 타입으로 만들어 현재 사실 판단에 참여시키지 않는다.
+    """
 
     observation_id: str
     project: str
@@ -109,9 +113,10 @@ class FactResolutionService:
     def _reconcile(self, *, scope: FactScope, memory_id: str, field_path: str, render_template: str,
                   expected_content_hash: str, value: str, observation: VerifiedObservation,
                   request_key: str, request_hash: str, requested_value: str | None,
-                  is_current: Callable[[VerifiedObservation], bool],
+                  is_current: Callable[[VerifiedObservation], bool | None],
                   compare: Callable[[VerifiedObservation, VerifiedObservation], str],
-                  commit: Callable[..., Mapping[str, Any]], admission: Mapping[str, Any] | None = None) -> dict:
+                  commit: Callable[..., Mapping[str, Any]], admission: Mapping[str, Any] | None = None,
+                  source_coverage_complete: bool = True) -> dict:
         """source 재검증 후 canonical commit과 resolution을 같은 PG tx에 보존한다.
 
         commit은 제공한 connection의 PgVectorStore로 steward_decision을 호출하고
@@ -192,19 +197,33 @@ class FactResolutionService:
             # history는 과거의 선택 위치다. 실제 current source가 그 고정본으로
             # 돌아왔음을 독립 재검증하면 새 resolution에서 다시 사용할 수 있다.
             # 철회는 별개이며 source tombstone/현재성 검사는 우회하지 않는다.
-            current = (assertion_state != "revoked"
-                       and source_active
-                       and observation.current_verified and is_current(observation))
+            checked = is_current(observation) if (assertion_state != "revoked" and source_active
+                and observation.current_verified) else False
+            current, unknown = checked is True, checked is None
+            source_was_current = current
+            if current:
+                # 같은 source/해석의 새 현재 고정본이 확인됐으면 이전의 다른
+                # 본문은 현재 근거가 아니다. 시각이나 도착 순서로 고르지 않는다.
+                cur.execute("""UPDATE lbrain_fact_assertions a SET state='history'
+                    FROM lbrain_fact_observations o WHERE o.version_id=a.observation_version
+                        AND a.fact_key=%s AND o.source_id=%s AND o.interpretation_version=%s
+                        AND o.observation->>'content_hash'<>%s AND a.state IN ('support','pending')""",
+                    (scope.key, observation.source_id, observation.interpretation_version, observation.content_hash))
             competing, incomplete = self._competing_current(cur, scope.key, hash_payload(value), is_current) if current else (False, False)
             # source가 재검증 사이에 바뀌면 해당 관측으로 새 authority를 만들지 않는다.
-            if current and not is_current(observation):
-                current = False
+            if current:
+                checked = is_current(observation)
+                current, unknown = checked is True, checked is None
             relation = "unknown"
             if old_observation and old_observation.source_id == observation.source_id:
                 relation = compare(old_observation, observation)
                 if relation not in {"same", "incoming_before", "incoming_after", "incomparable", "unknown"}:
                     raise FactResolutionError("invalid_source_order")
-            if incomplete:
+            if not observation.current_verified:
+                # 과거 입력의 처리 완료는 새 current 승인이나 검증 기한 연장이
+                # 아니다. 최신 source 재검토와 별개로 history 합류를 끝낼 수 있다.
+                action = "retain_history"
+            elif incomplete or unknown or not source_coverage_complete:
                 action = "pending_evidence"
             elif current and competing:
                 action = "disputed"
@@ -267,13 +286,37 @@ class FactResolutionService:
                     updated_at=clock_timestamp() WHERE fact_key=%s""", (assertion_id, scope.key))
             elif action in {"disputed", "pending_evidence"}:
                 cur.execute("UPDATE lbrain_fact_scopes SET state=%s WHERE fact_key=%s",
-                    ("disputed" if action == "disputed" else "pending", scope.key))
+                    ("disputed" if action == "disputed" or head["state"] == "disputed" else "pending", scope.key))
             assertion_state = {"attach_evidence": "support", "replace_current": "support", "retain_history": "history"}.get(action, "pending")
             cur.execute("UPDATE lbrain_fact_assertions SET state=%s WHERE assertion_id=%s", (assertion_state, assertion_id))
             if current and action in {"replace_current", "attach_evidence"}:
+                cur.execute("""SELECT DISTINCT ON(o.source_id,o.interpretation_version)
+                        a.assertion_id,o.observation,a.state FROM lbrain_fact_assertions a
+                    JOIN lbrain_fact_observations o ON o.version_id=a.observation_version
+                    JOIN lbrain_fact_observation_sources s ON s.observation_version=o.version_id
+                    JOIN lbrain_fact_source_receipts r ON r.source_ref_id=s.source_ref_id
+                    WHERE a.fact_key=%s AND a.value_hash=%s AND a.state IN ('support','pending') AND r.state='active'
+                        AND NOT (o.source_id=%s AND o.interpretation_version=%s)
+                        AND o.observation->>'current_verified'='true'
+                    ORDER BY o.source_id,o.interpretation_version,a.created_at DESC,a.assertion_id LIMIT 256""",
+                    (scope.key, hash_payload(value), observation.source_id, observation.interpretation_version))
+                corroborating = []
+                for row in cur.fetchall():
+                    if is_current(VerifiedObservation(**row["observation"])) is True:
+                        if row["state"] == "pending":
+                            cur.execute("UPDATE lbrain_fact_assertions SET state='support' WHERE assertion_id=%s", (row["assertion_id"],))
+                        cur.execute("INSERT INTO lbrain_fact_corroborations(resolution_id,assertion_id) VALUES (%s,%s) ON CONFLICT DO NOTHING",
+                            (resolution_id, row["assertion_id"]))
+                        corroborating.append(row["assertion_id"])
+                if corroborating:
+                    result["corroborating_assertion_ids"] = corroborating
+                if is_current(observation) is not True:
+                    raise FactResolutionError("source_changed_during_resolution")
                 from .fact_verification import FactVerificationService
                 result["verification"] = FactVerificationService.record_on(cur, scope=scope,
                     resolution_id=resolution_id, assertion_id=assertion_id, observation=observation, commit=commit)
+            elif source_was_current and is_current(observation) is not True:
+                raise FactResolutionError("source_changed_during_resolution")
             cur.execute("""INSERT INTO lbrain_fact_project_versions(project,generation) VALUES (%s,1)
                 ON CONFLICT(project) DO UPDATE SET generation=lbrain_fact_project_versions.generation+1 RETURNING generation""", (scope.project,))
             project_generation = cur.fetchone()["generation"]
@@ -543,8 +586,7 @@ class FactResolutionService:
 
     @staticmethod
     def _competing_current(cur, fact_key, value_hash, is_current):
-        cur.execute("""SELECT DISTINCT ON (o.source_id,o.source_revision,o.interpretation_version,a.value_hash)
-            o.observation FROM lbrain_fact_assertions a JOIN lbrain_fact_observations o
+        cur.execute("""SELECT a.assertion_id,o.observation FROM lbrain_fact_assertions a JOIN lbrain_fact_observations o
             ON o.version_id=a.observation_version
             JOIN lbrain_fact_observation_sources s ON s.observation_version=o.version_id
             JOIN lbrain_fact_source_receipts r ON r.source_ref_id=s.source_ref_id AND r.state='active'
@@ -555,7 +597,17 @@ class FactResolutionService:
         rows = cur.fetchall()
         if len(rows) > 256:
             return False, True
-        return any(is_current(VerifiedObservation(**row["observation"])) for row in rows), False
+        for row in rows:
+            checked = is_current(VerifiedObservation(**row["observation"]))
+            if checked is None:
+                return False, True
+            if checked:
+                return True, False
+            # False는 독립 확인된 소멸/대체다. 확인 불가(None)와 구분한다.
+            # 지난 값을 지지하던 assertion을 현재 근거로 계속 표시하지 않는다.
+            cur.execute("UPDATE lbrain_fact_assertions SET state='history' WHERE assertion_id=%s",
+                (row["assertion_id"],))
+        return False, False
 
 
 class StewardFactCommit:

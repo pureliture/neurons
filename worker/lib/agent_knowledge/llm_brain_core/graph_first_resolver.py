@@ -863,7 +863,7 @@ class GraphFirstResolver:
         for card in cards:
             context_mode = request.mode == "context"
             item = _context_item(card) if context_mode else _item(card)
-            section_identity = ({"id": item["id"], **{k: item[k] for k in ("disputed_fields", "recheck_due_fields")
+            section_identity = ({"id": item["id"], **{k: item[k] for k in ("disputed_fields", "pending_fields", "recheck_due_fields")
                 if item.get(k)}} if context_mode
                 else {k: v for k, v in item.items() if k != "typed_payload"})
             # Temporal envelope (FR-AGE): only on the non-context (slim) item,
@@ -1461,6 +1461,9 @@ def _context_item(card: Mapping[str, Any]) -> dict[str, Any]:
     disputed_fields = [view["field_path"] for view in card.get("fact_views", []) if view.get("state") == "disputed"]
     if disputed_fields:
         item["disputed_fields"] = disputed_fields
+    pending_fields = [view["field_path"] for view in card.get("fact_views", []) if view.get("state") == "pending"]
+    if pending_fields:
+        item["pending_fields"] = pending_fields
     due_fields = [view["field_path"] for view in card.get("fact_views", []) if view.get("verification_state") == "recheck_due"]
     if due_fields:
         item["recheck_due_fields"] = due_fields

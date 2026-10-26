@@ -444,6 +444,31 @@ CREATE TABLE IF NOT EXISTS lbrain_fact_project_versions (
     project VARCHAR(64) PRIMARY KEY,
     generation BIGINT NOT NULL DEFAULT 0
 );
+-- 다른 source의 보류 근거가 채택된 값과 일치해 함께 사용되면, 그 source의
+-- 원래 보류 기록보다 나중 결정이 오래 남더라도 근거를 먼저 지우지 못한다.
+CREATE TABLE IF NOT EXISTS lbrain_fact_corroborations (
+    resolution_id VARCHAR(64) NOT NULL REFERENCES lbrain_fact_resolutions(resolution_id)
+        DEFERRABLE INITIALLY DEFERRED,
+    assertion_id VARCHAR(64) NOT NULL REFERENCES lbrain_fact_assertions(assertion_id),
+    PRIMARY KEY(resolution_id,assertion_id)
+);
+CREATE INDEX IF NOT EXISTS idx_lbrain_fact_corroboration_assertion ON lbrain_fact_corroborations(assertion_id);
+CREATE OR REPLACE FUNCTION lbrain_preserve_fact_corroboration() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP='UPDATE' OR EXISTS (SELECT 1 FROM lbrain_fact_resolutions WHERE resolution_id=OLD.resolution_id) THEN
+        RAISE EXCEPTION 'fact_corroboration_retention_required' USING ERRCODE='23514';
+    END IF;
+    RETURN OLD;
+END;
+$$;
+DROP TRIGGER IF EXISTS lbrain_preserve_fact_corroboration ON lbrain_fact_corroborations;
+CREATE TRIGGER lbrain_preserve_fact_corroboration BEFORE UPDATE OR DELETE ON lbrain_fact_corroborations
+    FOR EACH ROW EXECUTE FUNCTION lbrain_preserve_fact_corroboration();
+INSERT INTO lbrain_fact_corroborations(resolution_id,assertion_id)
+    SELECT r.resolution_id,item.value FROM lbrain_fact_resolutions r
+    CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(r.result->'corroborating_assertion_ids','[]'::jsonb)) item
+    ON CONFLICT DO NOTHING;
 
 -- 공통 교정만 managed card의 내용/상태를 바꾼다. 과거 resolution ID의 재사용은
 -- 허용하지 않으며 card, intent, resolution은 같은 transaction에서 commit한다.

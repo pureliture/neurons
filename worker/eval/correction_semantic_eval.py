@@ -31,7 +31,7 @@ def freeze(fixture):
     development = []
     for name in ("correction_judgment_cases.json", "correction_judgment_v3_holdout.json",
                  "correction_relation_v4_holdout.json", "correction_relation_support_holdout.json",
-                 "correction_semantic_holdout.json"):
+                 "correction_semantic_holdout.json", "correction_semantic_v2_holdout.json"):
         data = json.loads(Path(__file__).with_name(name).read_text())
         development.extend(hash_payload(case) for case in data["cases"])
     cases = fixture["cases"]
@@ -82,7 +82,7 @@ def evaluate_case(case, *, client, policy):
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--phase", choices=("freeze", "run"), required=True)
-    parser.add_argument("--fixture", type=Path, default=Path(__file__).with_name("correction_semantic_v2_holdout.json"))
+    parser.add_argument("--fixture", type=Path, default=Path(__file__).with_name("correction_semantic_v3_holdout.json"))
     parser.add_argument("--plan", type=Path)
     parser.add_argument("--key-file", type=Path)
     parser.add_argument("--output", type=Path, required=True)

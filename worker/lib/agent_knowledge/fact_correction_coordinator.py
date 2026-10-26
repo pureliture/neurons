@@ -254,6 +254,15 @@ class FactCorrectionCoordinator:
                 card["memory_id"], rule.target_title, card["card_type"], rule.field_path))
         if not self._registered_rule(cur, rule, card_type=card["card_type"]):
             raise FactResolutionError("fact_policy_changed")
+        cur.execute("SELECT 1 FROM lbrain_fact_scopes WHERE fact_key=%s AND project=%s", (rule.scope.key, rule.scope.project))
+        if cur.fetchone():
+            # 서버가 같은 사실로 등록한 기존 alias도 즉시 공통 head에 연결한다.
+            # 근거 미확인 상태에서 새 값을 승인하는 작업과는 별개다.
+            self.resolver._bind(cur, card["memory_id"], rule.field_path, rule.scope.key, rule.render_template)
+            if cur.rowcount:
+                cur.execute("""INSERT INTO lbrain_fact_project_versions(project,generation) VALUES (%s,1)
+                    ON CONFLICT(project) DO UPDATE SET generation=lbrain_fact_project_versions.generation+1""",
+                    (rule.scope.project,))
 
     @staticmethod
     def _registered_rule(cur, rule, *, card_type=None):
@@ -463,11 +472,76 @@ class FactCorrectionCoordinator:
                 raise RecheckBlocked("source_receipt_unavailable")
         return proof
 
-    def _current(self, rule, observation, db):
+    @staticmethod
+    def _wake_competing_check(db, rule, policy_version=None):
+        # 다른 worker의 queue row를 authority 잠금 안에서 기다리지 않는다.
+        # 내구성 일정만 앞당기고 기존 dispatcher가 queue에 연결한다.
+        db.execute("""INSERT INTO lbrain_fact_check_schedules(fact_key,project,policy_id,next_check_at,reason_code)
+            SELECT fact_key,project,policy_id,clock_timestamp(),'competing_source_recheck_required'
+            FROM lbrain_fact_admission_rules WHERE project=%s AND fact_key=%s
+                AND ((%s::text IS NULL AND policy_id=%s) OR policy_version=%s)
+            ON CONFLICT(fact_key,policy_id) DO UPDATE SET
+                next_check_at=LEAST(lbrain_fact_check_schedules.next_check_at,clock_timestamp()),
+                reason_code='competing_source_recheck_required'
+            WHERE lbrain_fact_check_schedules.state IN ('scheduled','blocked')""",
+            (rule.scope.project, rule.scope.key, policy_version, rule.policy_id, policy_version))
+
+    def _source_coverage(self, rule, observation, db):
+        """반대 값뿐 아니라 같은 값의 source가 달라졌는지도 확인한다.
+
+        새 본문의 값 선택은 이 잠금 안에서 하지 않는다. 선택할 정보가
+        부족하면 incoming assertion만 pending으로 남기고 해당 source를 예약한다.
+        """
+        with db.cursor(row_factory=dict_row) as cur:
+            cur.execute("""SELECT * FROM lbrain_fact_admission_rules WHERE project=%s AND fact_key=%s
+                AND policy_id<>%s AND active ORDER BY policy_id LIMIT 257""",
+                (rule.scope.project, rule.scope.key, rule.policy_id))
+            others = cur.fetchall()
+            if len(others)>256:
+                return False
+            for registration in others:
+                other = self.policies.get(registration["policy_id"])
+                if not other or not self._registered_rule(cur, other):
+                    self._wake_competing_check(db, rule, policy_version=registration["policy_version"])
+                    return False
+                try:
+                    if isinstance(other, GitSemanticFactPolicy):
+                        from .correction_semantic import load_validated_profile
+                        load_validated_profile(other.validation_profile_path, expected_hash=other.validation_profile_hash)
+                    current = self.git_reader.read_current(repository=other.scope.repository, relative_path=other.relative_path)
+                except (SourceUnavailable, ValueError):
+                    self._wake_competing_check(db, other)
+                    return False
+                if (current.revision != observation.source_revision
+                        or current.branch_ref_hash != observation.proof.get("branch_ref_hash")
+                        or current.content_hash != current.redacted_content_hash):
+                    self._wake_competing_check(db, other)
+                    return False
+                field = "semantic_claims" if isinstance(other, GitSemanticFactPolicy) else other.json_pointer
+                source_id = hash_payload([other.scope.context_hash, current.relative_path_hash, field])
+                interpretation = ("git_semantic.v1:" if isinstance(other, GitSemanticFactPolicy) else "git_json.v1:") + other.version[7:23]
+                cur.execute("""SELECT 1 FROM lbrain_fact_assertions a
+                    JOIN lbrain_fact_observations o ON o.version_id=a.observation_version
+                    JOIN lbrain_fact_observation_sources s ON s.observation_version=o.version_id
+                    JOIN lbrain_fact_source_receipts r ON r.source_ref_id=s.source_ref_id
+                    WHERE a.fact_key=%s AND o.source_id=%s AND o.interpretation_version=%s
+                        AND o.observation->>'content_hash'=%s AND o.observation#>>'{proof,blob_id}'=%s
+                        AND o.observation#>>'{proof,branch_ref_hash}'=%s
+                        AND o.observation#>>'{proof,policy_version}'=%s AND o.observation->>'current_verified'='true'
+                        AND a.state IN ('support','pending') AND r.state='active' LIMIT 1""",
+                    (rule.scope.key, source_id, interpretation, current.content_hash,
+                        current.blob_id, current.branch_ref_hash, other.version))
+                if not cur.fetchone():
+                    self._wake_competing_check(db, other)
+                    return False
+        return True
+
+    def _current(self, rule, observation, db, incoming=None):
         admitted_rule = next((item for item in self.policies.values()
             if item.version == observation.proof.get("policy_version") and item.scope.key == rule.scope.key), None)
         if admitted_rule is None:
-            return False
+            self._wake_competing_check(db, rule, policy_version=observation.proof.get("policy_version"))
+            return None
         rule = admitted_rule
         if isinstance(rule, GitSemanticFactPolicy):
             from .correction_capabilities import CapabilityUnavailable
@@ -475,14 +549,18 @@ class FactCorrectionCoordinator:
             try:
                 load_validated_profile(rule.validation_profile_path, expected_hash=rule.validation_profile_hash)
             except CapabilityUnavailable:
-                return False
+                self._wake_competing_check(db, rule)
+                return None
         with db.cursor(row_factory=dict_row) as cur:
             if not self._registered_rule(cur, rule):
-                return False
+                self._wake_competing_check(db, rule)
+                return None
             cur.execute("SELECT state FROM lbrain_fact_source_receipts WHERE source_ref_id=%s",
                 (observation.proof["source_ref_id"],))
             receipt = cur.fetchone()
-        if not receipt or receipt["state"] != "active":
+        if not receipt:
+            return None
+        if receipt["state"] != "active":
             return False
         proof = observation.proof
         source = VerifiedGitSource(repository=rule.scope.repository, revision=observation.source_revision,
@@ -494,7 +572,47 @@ class FactCorrectionCoordinator:
             self.git_reader.assert_still_current(source)
             return True
         except SourceUnavailable:
+            pass
+        if incoming and observation.version_id == incoming.version_id:
+            # incoming은 이번 판단이 읽은 고정 HEAD를 유지한다. 다른 파일의
+            # commit이 판단 도중 생겨도 전체 source 확인을 새 snapshot에서 재시도한다.
+            self._wake_competing_check(db, rule)
+            return None
+        try:
+            current = self.git_reader.read_current(repository=rule.scope.repository, relative_path=rule.relative_path)
+        except SourceUnavailable:
+            self._wake_competing_check(db, rule)
+            return None
+        if (current.branch_ref_hash == source.branch_ref_hash and current.blob_id == source.blob_id
+                and current.relative_path_hash == source.relative_path_hash
+                and current.content_hash == source.content_hash
+                and current.redacted_content_hash == source.redacted_content_hash):
+            return True
+        if (incoming and observation.source_id == incoming.source_id
+                and observation.interpretation_version == incoming.interpretation_version
+                and incoming.content_hash == current.content_hash
+                and incoming.proof.get("blob_id") == current.blob_id
+                and incoming.proof.get("branch_ref_hash") == current.branch_ref_hash):
             return False
+        with db.cursor(row_factory=dict_row) as cur:
+            cur.execute("""SELECT 1 FROM lbrain_fact_assertions a
+                JOIN lbrain_fact_observations o ON o.version_id=a.observation_version
+                JOIN lbrain_fact_observation_sources s ON s.observation_version=o.version_id
+                JOIN lbrain_fact_source_receipts r ON r.source_ref_id=s.source_ref_id
+                WHERE a.fact_key=%s AND o.source_id=%s AND o.interpretation_version=%s
+                    AND o.observation->>'content_hash'=%s AND o.observation#>>'{proof,blob_id}'=%s
+                    AND o.observation#>>'{proof,branch_ref_hash}'=%s
+                    AND o.observation#>>'{proof,policy_version}'=%s
+                    AND a.state IN ('support','pending') AND r.state='active'
+                    AND o.observation->>'current_verified'='true' LIMIT 1""",
+                (rule.scope.key, observation.source_id, observation.interpretation_version,
+                    current.content_hash, current.blob_id, current.branch_ref_hash, rule.version))
+            if cur.fetchone():
+                return False
+        # 상대 source가 바뀌었다는 사실만으로 상대의 현재 값이 무엇인지
+        # 알 수 없다. 새 해석을 authority transaction 밖에서 재검토한다.
+        self._wake_competing_check(db, rule)
+        return None
 
     def _apply(self, task, snapshot, judgment):
         if "recovered_result" in snapshot.data:
@@ -536,15 +654,17 @@ class FactCorrectionCoordinator:
                     view.get("typed_payload", {}).get(rule.field_path.split(".", 1)[1])):
                 raise RecheckBlocked("target_revision_conflict")
             try:
+                source_complete = self._source_coverage(rule, observation, db)
                 result = resolver.reconcile(scope=rule.scope, memory_id=view["memory_id"],
                     field_path=rule.field_path, render_template=rule.render_template,
                     expected_content_hash=view["content_hash"], value=value, observation=observation,
                     request_key=task["task_id"], request_hash=task["request_hash"],
                     requested_value=task["request"]["change"]["proposed_value"],
-                    is_current=lambda obs: self._current(rule, obs, db),
+                    is_current=lambda obs: self._current(rule, obs, db, observation),
                     compare=lambda old, incoming: self.git_reader.compare_revisions(repository=rule.scope.repository,
                         previous=old.source_revision, incoming=incoming.source_revision),
                     admission=admission,
+                    source_coverage_complete=source_complete,
                     commit=StewardFactCommit(field_path=rule.field_path, render_template=rule.render_template,
                         policy_id=rule.policy_id, max_age_seconds=rule.max_age_seconds))
             except FactResolutionError as exc:

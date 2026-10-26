@@ -137,3 +137,14 @@ def test_live_model_expiry_recheck_and_stopped_worker_recovery(coordinator, tmp_
     test_expiry_worker_stop_monitor_and_automatic_restart_reverify_and_update(c, tmp_path,
         policy_descriptor={**asdict(c.rule), "adapter": "git_semantic.v1"},
         additional_env={"OPENROUTER_API_KEY": os.environ["OPENROUTER_API_KEY"]}, lease_seconds=10)
+
+
+def test_live_model_competing_sources_retain_conflict_then_resolve_actual_agreement(coordinator, tmp_path):
+    from test_fact_source_competition import test_real_worker_keeps_unchanged_conflict_then_automatically_resolves_new_agreement
+    c = coordinator
+    c.rule = GitSemanticFactPolicy("status", c.rule.scope, c.rule.target_title, c.rule.field_path,
+        c.rule.render_template, "facts.json", "등록 branch의 이 파일에 적힌 현재 기능 상태 기록",
+        (("ready", "이 파일의 현재 기능 상태 기록은 ready다."), ("failed", "이 파일의 현재 기능 상태 기록은 failed다.")),
+        "repository_content", os.environ["LBRAIN_TEST_SEMANTIC_PROFILE"], os.environ["LBRAIN_TEST_SEMANTIC_PROFILE_HASH"])
+    test_real_worker_keeps_unchanged_conflict_then_automatically_resolves_new_agreement(c, tmp_path,
+        additional_env={"OPENROUTER_API_KEY": os.environ["OPENROUTER_API_KEY"]})
