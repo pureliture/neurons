@@ -218,6 +218,48 @@ def test_independent_monitor_detects_stopped_worker_and_expired_lease(queue):
     assert not inspect_recheck_health(queue, project=PROJECT)["heartbeat_recent"]
 
 
+def test_healthy_retry_worker_cannot_hide_a_day_old_unresolved_task(queue):
+    task = register(queue)
+    leased = claim(queue)
+    queue.finish(leased, RecheckOutcome("waiting", "source_conflict"), fingerprint=None, delay_seconds=3600)
+    with queue.store.transaction() as db:
+        db.execute("UPDATE lbrain_recheck_tasks SET created_at=clock_timestamp()-interval '25 hours' WHERE task_id=%s",
+            (task["task_id"],))
+    queue.heartbeat(project=PROJECT, worker_id="alive-retrying")
+    health = inspect_recheck_health(queue, project=PROJECT)
+    assert health["heartbeat_recent"] and health["overdue"] == 0 and health["expired_leases"] == 0
+    assert health["attention_required"], health
+    assert health["aged"] == 1 and not health["stalled"]
+    assert health["oldest_unfinished_seconds"] >= 25*3600
+
+
+def test_retries_restart_and_foreign_work_do_not_reset_unresolved_age(queue):
+    import time
+    task = register(queue)
+    queue.heartbeat(project=PROJECT, worker_id="running")
+    assert inspect_recheck_health(queue, project=PROJECT)["aged"] == 0
+    time.sleep(.25)
+    for _ in range(2):
+        lease = claim(queue)
+        queue.finish(lease, RecheckOutcome("waiting", "source_conflict"), fingerprint=None, delay_seconds=0)
+    restarted = PgRecheckQueue(queue.store)
+    restarted.heartbeat(project=PROJECT, worker_id="restarted")
+    health = inspect_recheck_health(restarted, project=PROJECT, pending_age_seconds=.2)
+    assert health["status"] == "attention" and health["aged"] == 1 and health["heartbeat_recent"]
+    foreign = inspect_recheck_health(restarted, project="another-project", pending_age_seconds=.2)
+    assert foreign["aged"] == 0 and foreign["oldest_unfinished_seconds"] == 0
+    lease = claim(restarted)
+    restarted.finish(lease, RecheckOutcome("resolved", "confirmed", "decision:confirmed"), fingerprint=None)
+    health = inspect_recheck_health(restarted, project=PROJECT, pending_age_seconds=.2)
+    assert health["status"] == "healthy" and health["aged"] == 0 and health["oldest_unfinished_seconds"] == 0
+    assert restarted.get(task["task_id"])["attempt_count"] == 3
+
+
+@pytest.mark.parametrize("threshold", [0, -.1, True, 86401, float("nan")])
+def test_invalid_pending_age_never_returns_healthy(queue, threshold):
+    assert inspect_recheck_health(queue, project=PROJECT, pending_age_seconds=threshold)["status"] == "unavailable"
+
+
 def test_blocked_job_remains_visible_and_cannot_be_silently_completed(queue):
     task = register(queue)
     lease = claim(queue)

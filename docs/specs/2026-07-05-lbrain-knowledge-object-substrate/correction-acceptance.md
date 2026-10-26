@@ -12,7 +12,7 @@
 | G04 | 과거 지연 입력의 역전 방지와 실제 후속 변경의 반영 | 실제 Git+PG에서 지연 ancestor와 실제 ref A→B→A를 구분하고 불변 관측의 현재 재검증 확인. 일반 세션 전체 경로는 남음 |
 | G05 | 동일 사실의 단일 current, 복수 필드·중복 카드·동시 writer 처리 | 공통 head·필드 lineage·알려진 alias의 현재 표시·동시 key 처리 구현. 무관한 Git commit으로 상대 근거를 제거해 잘못 승인하던 문제를 실제 재현/수정하고 두 source의 자동 합의를 확인. 알려진 대상의 직접 DML·중복 current·최초 queue 대기·옛 snapshot 우회 차단. 미식별 의미 중복과 모든 writer 자동 합류는 남음 |
 | G06 | 근거 내용·버전·관측 시각과 모든 교정 이력 보존 | receipt/관측 불변성과 필수 FK, 참조 추가와 GC의 실제 잠금 경합 확인. 나중 결정에 함께 사용한 다른 source의 원래 보류 근거도 FK로 보존. 모든 source·모델 산출물·retention/GC CLI의 전체 보존 검증은 남음 |
-| G07 | 예약·장애·설정 차단·저장 직후 종료·만료 후 복구와 독립 감지 | 실제 모델 경로의 응답 유실 복구·source 철회·검증 기한 경과→CLI worker 종료→독립 monitor 감지→재시작 후 자동 해결 확인. 원래 관측을 보존한 서버 검증 영수증·기한 예약과 기존 head의 예약 누락 감지 구현. 상주 supervisor·외부 통지·장기 운영 자동 실행/감시는 남음 |
+| G07 | 예약·장애·설정 차단·저장 직후 종료·만료 후 복구와 독립 감지 | 실제 모델의 응답 유실·철회·기한 경과→CLI worker 종료→독립 감지→재시작 후 자동 해결 확인. 서버 검증 영수증·기한 예약·예약 누락 감지와, 살아 있는 worker의 재시도에도 장기 미해결 경고 유지·완료 후 해제를 실제 PG/CLI에서 확인. 상주 supervisor·외부 통지·장기 운영 자동 실행/감시는 남음 |
 | G08 | context/list/query와 graph·embedding 지연·역순 작업에서도 올바른 조회 | 최종 fact view·generation·cursor와 실제 query를 연결. 실제 Neo4j에서 projection 전 누락을 수정하고 종료/복구·역순/중복·만료 generation을 확인. 실제 embedding provider·미식별 session chunk·장기 수렴은 남음 |
 | G09 | 철회·parser 정정·권한 변경과 파생 기억 영향 처리 | 사용한 receipt의 철회→내구성 영향 target→자동 재검토, 즉시 조회 제외와 독립 유효 근거 유지 구현. parser·정책·접근 권한 자동 전파와 파생 기억 재계산은 남음 |
 | G10 | 실제 작업 근거로 전체 흐름 검증, artifact identity·백업 복원·정리 | 기존 좁은 실증에 Git+PG+실제 CLI/HTTP 검사를 추가. 최종 배포 identity·LLM 실제 전체 작업·보존/정리는 남음 |

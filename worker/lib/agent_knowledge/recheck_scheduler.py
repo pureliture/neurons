@@ -214,24 +214,32 @@ class PgRecheckQueue:
                 VALUES (%s,%s,clock_timestamp()) ON CONFLICT(project,worker_id)
                 DO UPDATE SET last_seen_at=excluded.last_seen_at""", (project, worker_id))
 
-    def health(self, *, project: str, heartbeat_grace: float = 120, overdue_grace: float = 120) -> dict:
+    def health(self, *, project: str, heartbeat_grace: float = 120, overdue_grace: float = 120,
+               pending_age_seconds: float = 86400) -> dict:
         _text(project, 64)
         _delay(heartbeat_grace)
         _delay(overdue_grace)
+        _delay(pending_age_seconds, minimum=0.1)
         with self.store._scope() as db, db.cursor(row_factory=dict_row) as cur:
             cur.execute("""SELECT count(*) FILTER (WHERE state<>'resolved') AS unfinished,
                 count(*) FILTER (WHERE state='blocked') AS blocked,
                 count(*) FILTER (WHERE state IN ('queued','waiting','blocked') AND
                     next_check_at<clock_timestamp()-(%s * interval '1 second')) AS overdue,
-                count(*) FILTER (WHERE state='leased' AND lease_until<clock_timestamp()) AS expired_leases
-                FROM lbrain_recheck_tasks WHERE project=%s""", (overdue_grace, project))
+                count(*) FILTER (WHERE state='leased' AND lease_until<clock_timestamp()) AS expired_leases,
+                count(*) FILTER (WHERE state<>'resolved' AND
+                    created_at<=clock_timestamp()-(%s * interval '1 second')) AS aged,
+                max(extract(epoch FROM clock_timestamp()-created_at)) FILTER (WHERE state<>'resolved')
+                    AS oldest_unfinished_seconds
+                FROM lbrain_recheck_tasks WHERE project=%s""", (overdue_grace, pending_age_seconds, project))
             counts = dict(cur.fetchone())
+            oldest = max(0.0, float(counts.pop("oldest_unfinished_seconds") or 0))
             cur.execute("""SELECT coalesce(max(last_seen_at)>clock_timestamp()-(%s * interval '1 second'),false)
                 AS heartbeat_recent FROM lbrain_recheck_heartbeats WHERE project=%s""", (heartbeat_grace, project))
             recent = bool(cur.fetchone()["heartbeat_recent"])
         return {**{key: int(value) for key, value in counts.items()}, "heartbeat_recent": recent,
+                "oldest_unfinished_seconds": oldest, "pending_age_seconds": pending_age_seconds,
                 "stalled": bool(counts["unfinished"] and (not recent or counts["overdue"] or counts["expired_leases"])),
-                "attention_required": bool(counts["blocked"] or (counts["unfinished"] and
+                "attention_required": bool(counts["aged"] or counts["blocked"] or (counts["unfinished"] and
                     (not recent or counts["overdue"] or counts["expired_leases"])))}
 
 
@@ -301,10 +309,12 @@ class RecheckWorker:
 
 
 def inspect_recheck_health(queue: PgRecheckQueue, *, project: str,
-                           heartbeat_grace: float = 120, overdue_grace: float = 120) -> dict:
+                           heartbeat_grace: float = 120, overdue_grace: float = 120,
+                           pending_age_seconds: float = 86400) -> dict:
     """독립 감시에서 저장소 장애를 정상 상태로 오인하지 않게 한다."""
     try:
-        result = queue.health(project=project, heartbeat_grace=heartbeat_grace, overdue_grace=overdue_grace)
+        result = queue.health(project=project, heartbeat_grace=heartbeat_grace, overdue_grace=overdue_grace,
+            pending_age_seconds=pending_age_seconds)
         return {"status": "attention" if result["attention_required"] else "healthy", **result}
     except Exception:
         return {"status": "unavailable", "attention_required": True, "reason_code": "recheck_storage_unavailable"}

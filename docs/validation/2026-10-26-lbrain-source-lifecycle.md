@@ -30,10 +30,13 @@ uv run -m agent_knowledge.fact_source_lifecycle worker \
   --project synthetic-correction --config '<private-config-file>' \
   --iterations 1000 --poll-seconds 1
 uv run -m agent_knowledge.fact_source_lifecycle monitor \
-  --project synthetic-correction --heartbeat-grace 120 --overdue-grace 120
+  --project synthetic-correction --heartbeat-grace 120 --overdue-grace 120 \
+  --pending-age-seconds 86400
 ```
 
 worker와 별도 프로세스인 monitor는 설정 파일·source·모델을 읽지 않고 PG의 event/target/queue/heartbeat를 확인한다. 사용할 수 없으면 `attention_required=true`와 비정상 종료를 돌려준다. worker의 source 영향 transaction은 lock 1초·statement 5초, CLI의 DB 연결은 5초로 상한을 둔다. 기존 caller의 더 짧은 제한은 유지한다. 실제 semantic worker는 기존 coordinator의 더 긴 lease를 사용한다. 상주 supervisor 설치, 외부 통지 연결, 장기 운영 감시는 별도 남은 조건이다.
+
+후속 [장기 미해결 감시 검사](2026-10-26-lbrain-pending-age-monitor.md)에서 정상 heartbeat와 미래 재시도 예약 때문에 오래된 충돌이 정상으로 표시되는 누락을 수정했다. 기본 86400초 또는 명시한 임계값을 넘긴 미해결 작업은 `reviews.aged`와 `attention_required`에 표시한다. 재시도·재시작은 최초 등록부터의 경과 시간을 초기화하지 않는다. 이 경고는 값을 선택하거나 작업을 강제로 완료하는 정책이 아니다.
 
 ## 검증과 한계
 

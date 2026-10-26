@@ -178,12 +178,25 @@ def test_real_worker_keeps_unchanged_conflict_then_automatically_resolves_new_ag
             with c.f.store._scope() as db:
                 assert db.execute("SELECT value,state FROM lbrain_fact_scopes").fetchone() == original
                 assert db.execute("SELECT count(*) AS n FROM steward_card_decisions").fetchone()["n"] == decisions
+            # 실제 살아 있는 worker의 재시도/미래 backoff도 장기 미해결 경고를
+            # 가리지 않는다. 짧은 테스트 임계값을 실제로 기다리며 DB 시각을 바꾸지 않는다.
+            time.sleep(.15)
+            monitor = subprocess.run(["uv", "run", "--no-project", "-m", "agent_knowledge.fact_source_lifecycle",
+                "monitor", "--project", c.f.scope.project, "--pending-age-seconds", ".1"],
+                env=env, capture_output=True, text=True, timeout=10)
+            assert monitor.returncode == 0, "independent conflict monitor failed"
+            health = json.loads(monitor.stdout)
+            assert health["attention_required"] and health["reviews"]["aged"] >= 1
+            assert health["reviews"]["heartbeat_recent"]
             # 실제 두 source가 같은 값을 지지하게 된 뒤에는 보류에 방치하지 않는다.
             (c.root / "facts.json").write_text('{"status":"failed"}')
             git(c.root, "add", "facts.json"); git(c.root, "commit", "-m", "두 독립 source의 새로운 합의")
             wait_for(lambda db: db.execute("SELECT 1 FROM lbrain_fact_scopes WHERE value='\"failed\"'::jsonb AND state='current'").fetchone())
             wait_for(lambda db: db.execute("SELECT count(*) AS n FROM lbrain_recheck_tasks WHERE state<>'resolved'").fetchone()["n"] == 0)
             stop()
+            from agent_knowledge.fact_source_lifecycle import FactSourceLifecycle
+            assert FactSourceLifecycle(c.f.store).health(project=c.f.scope.project,
+                pending_age_seconds=.1)["reviews"]["aged"] == 0
             with c.f.store._scope() as db:
                 assert db.execute("SELECT count(*) AS n FROM steward_card_decisions").fetchone()["n"] == decisions+1
             page = GraphFirstResolver(store=c.f.store).resolve(project=c.f.scope.project, mode="list")

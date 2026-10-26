@@ -189,7 +189,7 @@ class FactSourceLifecycle:
                     (changed["project"],))
         return head
 
-    def health(self, *, project, heartbeat_grace=120, overdue_grace=120):
+    def health(self, *, project, heartbeat_grace=120, overdue_grace=120, pending_age_seconds=86400):
         from .recheck_scheduler import inspect_recheck_health
         from .fact_verification import FactVerificationService
         from .postgres_store.pgvector_store import PgVectorStore
@@ -204,7 +204,7 @@ class FactSourceLifecycle:
                 WHERE e.project=%s AND t.state IN ('pending','blocked')""", (project,))
             targets = cur.fetchone()["n"]
             reviews = inspect_recheck_health(PgRecheckQueue(PgVectorStore(connection=db)), project=project,
-                heartbeat_grace=heartbeat_grace, overdue_grace=overdue_grace)
+                heartbeat_grace=heartbeat_grace, overdue_grace=overdue_grace, pending_age_seconds=pending_age_seconds)
             verifications = FactVerificationService.health_on(db, project=project, overdue_grace=overdue_grace)
         return {"pending_events": events, "pending_targets": targets, "reviews": reviews,
             "verifications": verifications,
@@ -234,9 +234,13 @@ def main(argv=None):
     parser.add_argument("--lease-seconds", type=float)
     parser.add_argument("--heartbeat-grace", type=float, default=120)
     parser.add_argument("--overdue-grace", type=float, default=120)
+    parser.add_argument("--pending-age-seconds", type=float, default=86400,
+        help="미해결 작업의 누적 경과 경고 기준(초). 재시도·heartbeat로 초기화하지 않는다")
     args = parser.parse_args(argv)
     if not 1 <= args.iterations <= 100000 or not .01 <= args.poll_seconds <= 60:
         parser.error("bounded worker run required")
+    if not .1 <= args.pending_age_seconds <= 86400:
+        parser.error("pending age must be between 0.1 and 86400 seconds")
     try:
         dsn = os.environ.get(args.dsn_env, "")
         if not dsn:
@@ -261,7 +265,7 @@ def main(argv=None):
                     expected_content_hash=args.expected_hash, request_key=args.request_key)
             elif args.mode == "monitor":
                 result = service.health(project=args.project, heartbeat_grace=args.heartbeat_grace,
-                    overdue_grace=args.overdue_grace)
+                    overdue_grace=args.overdue_grace, pending_age_seconds=args.pending_age_seconds)
             else:
                 result = {"dispatch": service.dispatch_once(project=args.project, retry_seconds=args.retry_seconds),
                     "verification": FactVerificationService(store).dispatch_once(project=args.project, retry_seconds=args.retry_seconds),
