@@ -1,7 +1,7 @@
 """교정 batch와 source 수집을 같은 내구성 queue·fact resolution에 연결한다.
 
-첫 source admission은 서버에 등록한 Git JSON 필드의 직접 검증이다.
-자연어 의미 판단을 이 adapter의 직접 검증으로 대체하거나 허용하지 않는다.
+Git JSON 필드는 직접 검증한다. 의미 기반 Git source는 별도 독립 평가를
+통과한 profile과 서버의 고정 주장/근거 범위를 재검증한 뒤에만 적용한다.
 """
 from __future__ import annotations
 
@@ -95,8 +95,55 @@ class GitJsonFactPolicy:
         return hash_payload(self.public_identity())
 
 
+@dataclass(frozen=True)
+class GitSemanticFactPolicy:
+    """서버가 고정한 source 범위와 값별 주장만 모델에 판별시킨다."""
+    policy_id: str
+    scope: FactScope
+    target_title: str
+    field_path: str
+    render_template: str
+    relative_path: str
+    scope_description: str
+    claims: tuple[tuple[str, str], ...]
+    required_capability: str
+    validation_profile_path: str
+    validation_profile_hash: str
+    max_age_seconds: int = 300
+
+    def __post_init__(self):
+        from .correction_capabilities import ObservedCapability
+        from .correction_semantic import validate_claims
+        from .correction_sources import _relative_path
+        from .public_safe_util import require_sha256
+        if (not self.policy_id or not self.target_title or not self.scope.branch.startswith("refs/heads/")
+                or not isinstance(self.scope_description, str) or not self.scope_description.strip()
+                or len(self.scope_description) > 2048 or not self.validation_profile_path):
+            raise ValueError("explicit fixed semantic source policy required")
+        validate_claims(self.claims)
+        object.__setattr__(self, "claims", tuple(tuple(pair) for pair in self.claims))
+        ObservedCapability(self.required_capability)
+        require_sha256(self.validation_profile_hash, "semantic validation profile")
+        _relative_path(self.relative_path)
+        StewardFactCommit(field_path=self.field_path, render_template=self.render_template,
+            policy_id=self.policy_id, max_age_seconds=self.max_age_seconds)
+        ensure_public_safe(self.public_identity(), "GitSemanticFactPolicy")
+
+    def public_identity(self):
+        data = asdict(self)
+        data["adapter"] = "git_semantic.v1"
+        data["relative_path_hash"] = sha256_text(data.pop("relative_path"))
+        data["validation_profile_path_hash"] = sha256_text(data.pop("validation_profile_path"))
+        return data
+
+    @property
+    def version(self):
+        return hash_payload(self.public_identity())
+
+
 class FactCorrectionCoordinator:
-    def __init__(self, *, store, git_reader: GitSourceReader, policies: list[GitJsonFactPolicy]):
+    def __init__(self, *, store, git_reader: GitSourceReader, policies: list[GitJsonFactPolicy | GitSemanticFactPolicy],
+                 relation_client=None):
         self.store, self.git_reader = store, git_reader
         self.policies = {rule.policy_id: rule for rule in policies}
         if not policies or len(self.policies) != len(policies):
@@ -107,6 +154,7 @@ class FactCorrectionCoordinator:
                 raise ValueError("fact scope and admitted source branch must agree")
         self.queue = PgRecheckQueue(store)
         self.resolver = FactResolutionService(store)
+        self.relation_client = relation_client
 
     def submit(self, arguments, *, lane="correction"):
         if lane not in {"correction", "intake"}:
@@ -217,9 +265,42 @@ class FactCorrectionCoordinator:
             and row["field_path"] == rule.field_path and (card_type is None or row["card_type"] == card_type))
 
     def worker(self, *, project, worker_id, retry_seconds=60):
+        semantic = any(isinstance(rule, GitSemanticFactPolicy) and rule.scope.project == project
+            for rule in self.policies.values())
         return RecheckWorker(queue=self.queue, project=project, worker_id=worker_id,
-            load=self._load, judge=lambda task, snapshot: {"direct_source_mapping": True},
-            apply=self._apply, retry_seconds=retry_seconds)
+            load=self._load, judge=self._judge,
+            apply=self._apply, retry_seconds=retry_seconds, lease_seconds=180 if semantic else 60)
+
+    def _semantic_reader(self, rule):
+        from .correction_capabilities import EvidenceRequirement, GitRepositoryReader, ObservedCapability
+        reader = GitRepositoryReader(self.git_reader, scope=rule.scope, relative_path=rule.relative_path)
+        return reader, EvidenceRequirement(ObservedCapability(rule.required_capability),
+            rule.scope.context_hash, reader.resource_hash)
+
+    def _judge(self, task, snapshot):
+        if "recovered_result" in snapshot.data:
+            return {"recovered_result": snapshot.data["recovered_result"]}
+        rule = self.policies[task["request"]["policy_id"]]
+        if not isinstance(rule, GitSemanticFactPolicy):
+            return {"direct_source_mapping": True}
+        from .correction_capabilities import CapabilityUnavailable
+        from .correction_judgment import JudgmentUnavailable
+        from .correction_relation import CorrectionRelationClient
+        from .correction_semantic import load_validated_profile, select_value
+        import os
+        try:
+            profile = load_validated_profile(rule.validation_profile_path, expected_hash=rule.validation_profile_hash)
+            reader, requirement = self._semantic_reader(rule)
+            # 인증 객체 생성 전에도 source capability를 검사한다. credential 부재가
+            # 다른 범위의 source를 허용하는 이유나 모델 fallback의 이유가 되지 않는다.
+            if not reader.read().satisfies(requirement):
+                raise CapabilityUnavailable("source_capability_or_scope_mismatch")
+            client = self.relation_client or CorrectionRelationClient(api_key=os.environ.get("OPENROUTER_API_KEY", ""))
+            return select_value(reader=reader, requirement=requirement, scope_description=rule.scope_description,
+                claims=rule.claims, policy=profile.policy, policy_version=rule.version, client=client,
+                expected_source_binding=snapshot.data["semantic_source_binding"])
+        except (CapabilityUnavailable, JudgmentUnavailable) as exc:
+            raise RecheckBlocked(exc.reason_code) from None
 
     def submit_candidate(self, candidate, *, refresh_watermark):
         """정규 miner 후보를 새 승인 대신 기존 사실의 동일 resolution으로 보낸다.
@@ -303,28 +384,73 @@ class FactCorrectionCoordinator:
                 evidence = FactEvidence.model_validate(descriptor)
                 source = self.git_reader.read(repository=rule.scope.repository, revision=evidence.revision,
                     relative_path=rule.relative_path, expected_content_hash=evidence.content_hash)
+            if isinstance(rule, GitSemanticFactPolicy) and not source.current_verified:
+                # 지연 입력은 trigger로 남기고 등록된 현재 source를 독립 재조회한다.
+                # 오래된 본문을 현재 관측으로 재인증하지 않는다.
+                self._save_receipt(rule, source)
+                source = self.git_reader.read_current(repository=rule.scope.repository, relative_path=rule.relative_path)
         except SourceUnavailable as exc:
             raise RecheckBlocked(exc.reason_code) from None
         # JSON 내용을 바꾼 redaction 결과를 원본의 명시적 값으로 취급하지 않는다.
         if source.content_hash != source.redacted_content_hash:
             raise RecheckBlocked("source_redaction_changed_content")
-        try:
-            document = json.loads(source.redacted_text, object_pairs_hook=_unique_object)
-            value = _pointer(document, rule.json_pointer)
-            if not isinstance(value, str) or not value.strip() or value != value.strip() or len(value) > 2048:
-                raise ValueError("explicit string fact required")
-        except (ValueError, TypeError, KeyError):
-            raise RecheckBlocked("source_fact_unverifiable") from None
-        ensure_public_safe(value, "SourceFact")
+        semantic_binding = None
+        value = None
+        if isinstance(rule, GitSemanticFactPolicy):
+            from .correction_capabilities import CapabilityUnavailable
+            from .correction_semantic import load_validated_profile
+            try:
+                load_validated_profile(rule.validation_profile_path, expected_hash=rule.validation_profile_hash)
+                reader, requirement = self._semantic_reader(rule)
+                observed = reader.read()
+                if not observed.satisfies(requirement):
+                    raise CapabilityUnavailable("source_capability_or_scope_mismatch")
+                # _load의 receipt와 모델이 읽은 source가 다르면 다음 예약에서 재조회한다.
+                expected_proof = source.public_proof()
+                expected_proof.pop("observed_at")
+                if observed.value != source.redacted_text or observed.revision_hash != hash_payload(expected_proof):
+                    raise CapabilityUnavailable("source_read_changed")
+                semantic_binding = hash_payload(asdict(observed))
+            except CapabilityUnavailable as exc:
+                raise RecheckBlocked(exc.reason_code) from None
+        else:
+            try:
+                document = json.loads(source.redacted_text, object_pairs_hook=_unique_object)
+                value = _pointer(document, rule.json_pointer)
+                if not isinstance(value, str) or not value.strip() or value != value.strip() or len(value) > 2048:
+                    raise ValueError("explicit string fact required")
+            except (ValueError, TypeError, KeyError):
+                raise RecheckBlocked("source_fact_unverifiable") from None
+            ensure_public_safe(value, "SourceFact")
+        proof = self._save_receipt(rule, source)
+        source_field = "semantic_claims" if isinstance(rule, GitSemanticFactPolicy) else rule.json_pointer
+        interpretation = "git_semantic.v1:" if isinstance(rule, GitSemanticFactPolicy) else "git_json.v1:"
+        observation = VerifiedObservation(observation_id=hash_payload([rule.scope.context_hash, source.content_identity]),
+            project=rule.scope.project, source_id=hash_payload([rule.scope.context_hash, source.relative_path_hash, source_field]),
+            source_revision=source.revision, content_hash=source.content_hash, context_hash=rule.scope.context_hash,
+            interpretation_version=interpretation + rule.version[7:23], proof=proof,
+            current_verified=source.current_verified, observed_at=source.observed_at)
+        with self.store.transaction() as db, db.cursor(row_factory=dict_row) as cur:
+            cur.execute("""INSERT INTO lbrain_fact_observations
+                (version_id,observation_id,project,source_id,source_revision,interpretation_version,observation)
+                VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(version_id) DO NOTHING""",
+                (observation.version_id, observation.observation_id, observation.project, observation.source_id,
+                    observation.source_revision, observation.interpretation_version, Jsonb(asdict(observation))))
+            cur.execute("SELECT observation FROM lbrain_fact_observations WHERE version_id=%s", (observation.version_id,))
+            observation = VerifiedObservation(**cur.fetchone()["observation"])
+        # source 본문은 immutable receipt에만 두고 snapshot/cache에 복제하지 않는다.
+        data = {"value": value, "observation": asdict(observation)}
+        if semantic_binding:
+            data["semantic_source_binding"] = semantic_binding
+        return RecheckSnapshot.from_data(task, data)
+
+    def _save_receipt(self, rule, source):
+        if source.content_hash != source.redacted_content_hash:
+            raise RecheckBlocked("source_redaction_changed_content")
         proof = source.public_proof()
         proof.pop("observed_at")
         proof["policy_version"] = rule.version
         proof["source_ref_id"] = "src_fact_" + hash_payload(proof)[7:47]
-        observation = VerifiedObservation(observation_id=hash_payload([rule.scope.context_hash, source.content_identity]),
-            project=rule.scope.project, source_id=hash_payload([rule.scope.context_hash, source.relative_path_hash, rule.json_pointer]),
-            source_revision=source.revision, content_hash=source.content_hash, context_hash=rule.scope.context_hash,
-            interpretation_version="git_json.v1:" + rule.version[7:23], proof=proof,
-            current_verified=source.current_verified, observed_at=source.observed_at)
         with self.store.transaction() as db, db.cursor(row_factory=dict_row) as cur:
             cur.execute("""INSERT INTO lbrain_fact_source_receipts(source_ref_id,content_hash,redacted_content,proof)
                 VALUES (%s,%s,%s,%s) ON CONFLICT(source_ref_id) DO NOTHING""",
@@ -335,15 +461,7 @@ class FactCorrectionCoordinator:
             if (receipt["content_hash"] != source.content_hash or receipt["redacted_content"] != source.redacted_text
                     or receipt["proof"] != proof or receipt["state"] != "active"):
                 raise RecheckBlocked("source_receipt_unavailable")
-            cur.execute("""INSERT INTO lbrain_fact_observations
-                (version_id,observation_id,project,source_id,source_revision,interpretation_version,observation)
-                VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(version_id) DO NOTHING""",
-                (observation.version_id, observation.observation_id, observation.project, observation.source_id,
-                    observation.source_revision, observation.interpretation_version, Jsonb(asdict(observation))))
-            cur.execute("SELECT observation FROM lbrain_fact_observations WHERE version_id=%s", (observation.version_id,))
-            observation = VerifiedObservation(**cur.fetchone()["observation"])
-        # 원문을 snapshot/model cache에 복제하지 않고 receipt로 고정한다.
-        return RecheckSnapshot.from_data(task, {"value": value, "observation": asdict(observation)})
+        return proof
 
     def _current(self, rule, observation, db):
         admitted_rule = next((item for item in self.policies.values()
@@ -351,6 +469,13 @@ class FactCorrectionCoordinator:
         if admitted_rule is None:
             return False
         rule = admitted_rule
+        if isinstance(rule, GitSemanticFactPolicy):
+            from .correction_capabilities import CapabilityUnavailable
+            from .correction_semantic import load_validated_profile
+            try:
+                load_validated_profile(rule.validation_profile_path, expected_hash=rule.validation_profile_hash)
+            except CapabilityUnavailable:
+                return False
         with db.cursor(row_factory=dict_row) as cur:
             if not self._registered_rule(cur, rule):
                 return False
@@ -377,6 +502,26 @@ class FactCorrectionCoordinator:
         from .postgres_store.pgvector_store import PgVectorStore
         rule = self.policies[task["request"]["policy_id"]]
         observation = VerifiedObservation(**snapshot.data["observation"])
+        value, admission = snapshot.data["value"], None
+        if isinstance(rule, GitSemanticFactPolicy):
+            from .correction_capabilities import CapabilityUnavailable
+            from .correction_semantic import load_validated_profile, verify_selection
+            try:
+                profile = load_validated_profile(rule.validation_profile_path, expected_hash=rule.validation_profile_hash)
+                reader, requirement = self._semantic_reader(rule)
+                observed = reader.read()
+                if hash_payload(asdict(observed)) != snapshot.data["semantic_source_binding"]:
+                    raise CapabilityUnavailable("source_read_changed")
+                value = verify_selection(observed=observed, requirement=requirement,
+                    scope_description=rule.scope_description, claims=rule.claims, policy=profile.policy,
+                    policy_version=rule.version, selection=judgment)
+                reader.assert_still_current(observed)
+            except CapabilityUnavailable as exc:
+                raise RecheckBlocked(exc.reason_code) from None
+            if value is None:
+                return RecheckOutcome("waiting", judgment["reason_code"])
+            admission = {"kind": "semantic", "profile_hash": profile.artifact_hash,
+                "judgment_hash": hash_payload(judgment), "task_id": task["task_id"], "input_hash": snapshot.fingerprint}
         with self.queue.owned_transaction(task) as db, db.cursor(row_factory=dict_row) as cur:
             bound = PgVectorStore(connection=db)
             resolver = FactResolutionService(bound)
@@ -387,18 +532,19 @@ class FactCorrectionCoordinator:
             if not target or target.get("currentness") != "current":
                 raise RecheckBlocked("fact_target_not_current")
             view = resolver.project_cards([target], connection=db)[0]
-            if (task["request"].get("stale_target") and snapshot.data["value"] !=
+            if (task["request"].get("stale_target") and value !=
                     view.get("typed_payload", {}).get(rule.field_path.split(".", 1)[1])):
                 raise RecheckBlocked("target_revision_conflict")
             try:
                 result = resolver.reconcile(scope=rule.scope, memory_id=view["memory_id"],
                     field_path=rule.field_path, render_template=rule.render_template,
-                    expected_content_hash=view["content_hash"], value=snapshot.data["value"], observation=observation,
+                    expected_content_hash=view["content_hash"], value=value, observation=observation,
                     request_key=task["task_id"], request_hash=task["request_hash"],
                     requested_value=task["request"]["change"]["proposed_value"],
                     is_current=lambda obs: self._current(rule, obs, db),
                     compare=lambda old, incoming: self.git_reader.compare_revisions(repository=rule.scope.repository,
                         previous=old.source_revision, incoming=incoming.source_revision),
+                    admission=admission,
                     commit=StewardFactCommit(field_path=rule.field_path, render_template=rule.render_template,
                         policy_id=rule.policy_id, max_age_seconds=rule.max_age_seconds))
             except FactResolutionError as exc:
@@ -466,7 +612,14 @@ def load_configuration(path):
     if len({item.repository for item in repositories}) != len(repositories):
         raise ValueError("duplicate source repository")
     reader = GitSourceReader({item.repository: item for item in repositories})
-    rules = [GitJsonFactPolicy(**{**item, "scope": FactScope(**item["scope"])}) for item in data["rules"]]
+    rules = []
+    for item in data["rules"]:
+        fields = dict(item)
+        adapter = fields.pop("adapter", "git_json.v1")
+        kind = {"git_json.v1": GitJsonFactPolicy, "git_semantic.v1": GitSemanticFactPolicy}.get(adapter)
+        if kind is None:
+            raise ValueError("unknown fact source adapter")
+        rules.append(kind(**{**fields, "scope": FactScope(**fields["scope"])}))
     return reader, rules
 
 

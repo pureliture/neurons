@@ -458,7 +458,8 @@ def test_duplicate_card_fact_reads_same_value_and_retains_unrelated_text(facts):
         reader.resolve(project=f.scope.project, mode="list", limit=1, cursor=page_one["next_cursor"])
 
 
-def test_real_cli_http_configuration_source_read_and_current_query(coordinator, tmp_path):
+def test_real_cli_http_configuration_source_read_and_current_query(coordinator, tmp_path,
+        policy_descriptor=None, additional_env=None):
     """실제 CLI subprocess·HTTP·Git·PG 경로를 통과한다. graph/모델 대역은 넣지 않는다."""
     import asyncio
     from dataclasses import asdict
@@ -476,7 +477,7 @@ def test_real_cli_http_configuration_source_read_and_current_query(coordinator, 
     config_file = tmp_path / "fact-policy.json"
     config_file.write_text(json.dumps({"schema_version": "fact_correction_config.v1", "repositories": [{
         "repository": c.rule.scope.repository, "root": str(c.root), "branch_ref": c.rule.scope.branch}],
-        "rules": [asdict(c.rule)]}, ensure_ascii=False))
+        "rules": [policy_descriptor if policy_descriptor is not None else asdict(c.rule)]}, ensure_ascii=False))
     config_file.chmod(0o600)
     ledger_path = tmp_path / "http-ledger.sqlite"
     Ledger(ledger_path)
@@ -486,6 +487,7 @@ def test_real_cli_http_configuration_source_read_and_current_query(coordinator, 
     env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path), "UV_CACHE_DIR": str(tmp_path / "uv-cache"),
         "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "lib"),
         "NEURON_LBRAIN_PGVECTOR_DSN": c.f.store.dsn, "LLM_BRAIN_CORRECTION_TOKEN": token}
+    env.update(additional_env or {})
     argv = ["uv", "run", "--no-project", "neuron-knowledge", "mcp-http", "--surface", "correction",
         "--ledger", str(ledger_path), "--allow-evidence-backed-object-corrections",
         "--fact-correction-policy-file", str(config_file), "--host", "127.0.0.1", "--port", str(port)]

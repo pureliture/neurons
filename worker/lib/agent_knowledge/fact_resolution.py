@@ -100,7 +100,7 @@ class FactResolutionService:
                   request_key: str, request_hash: str, requested_value: str | None,
                   is_current: Callable[[VerifiedObservation], bool],
                   compare: Callable[[VerifiedObservation, VerifiedObservation], str],
-                  commit: Callable[..., Mapping[str, Any]]) -> dict:
+                  commit: Callable[..., Mapping[str, Any]], admission: Mapping[str, Any] | None = None) -> dict:
         """source 재검증 후 canonical commit과 resolution을 같은 PG tx에 보존한다.
 
         commit은 제공한 connection의 PgVectorStore로 steward_decision을 호출하고
@@ -110,6 +110,10 @@ class FactResolutionService:
         _field(field_path); _template(render_template)
         require_sha256(expected_content_hash, "expected revision")
         require_sha256(request_hash, "request hash")
+        if admission is not None:
+            ensure_public_safe(admission, "FactAdmission")
+            if len(str(admission).encode()) > 4096:
+                raise ValueError("bounded admission receipt required")
         if observation.project != scope.project or observation.context_hash != scope.context_hash:
             raise FactResolutionError("observation_scope_mismatch")
         ensure_public_safe(value, "assertion value")
@@ -200,6 +204,8 @@ class FactResolutionService:
                 "applied_value": head["value"], "authority_write_performed": False,
                 "observation_id": observation.observation_id, "observation_version": observation.version_id,
                 "assertion_id": assertion_id, "duplicate": False, "generation": head["generation"]}
+            if admission is not None:
+                result["admission"] = copy.deepcopy(dict(admission))
             if action == "replace_current":
                 base = self.store.get_steward_card(head["memory_id"], conn=db)
                 if not base or base.get("currentness") != "current":

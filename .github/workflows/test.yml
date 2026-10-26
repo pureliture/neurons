@@ -107,7 +107,7 @@ jobs:
         run: uv run --group dev --extra mcp-http pytest -q -rs tests/test_pg_schema_apply_cli.py
       - name: 공통 교정 transaction과 일반 writer 우회 차단 검증
         working-directory: worker
-        run: uv run --group dev --extra mcp-http pytest -q -rs tests/test_fact_resolution.py tests/test_fact_writer_guard.py
+        run: uv run --group dev --extra mcp-http pytest -q -rs tests/test_fact_resolution.py tests/test_fact_writer_guard.py tests/test_correction_semantic.py
 
   worker-lbrain-pg-neo4j:
     name: worker LBrain PG + Neo4j live (uv)
