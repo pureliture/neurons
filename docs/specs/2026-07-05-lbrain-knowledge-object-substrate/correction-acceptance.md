@@ -33,9 +33,9 @@
 | C08 | 실제 후속 제거·rollback | 실제 Git ref A→B→A와 같은 불변 관측의 현재 재검증, 오래된 terminal 요청 무변경 확인. 일반 source/운영 흐름은 남음 |
 | C09 | 과거 원인을 몰라도 검증된 현재 값 교정 | 직접 Git 데이터와 파일 내용의 실제 의미 모델 경로에서 현재 값 교정 확인. 일반 native/운영 근거 경로는 남음 |
 | C10 | clock skew·관측 시각 누락 | PG 코어에서 원래 과거/미래/누락 시각 보존과 DB 검증 시각·기한 분리, replay 비연장 확인. 실제 Git/모델에서 같은 고정본의 기한 자동 재확인·중단/감지/복구 확인. 전체 native/provider와 PG 서버 clock 변화 검증은 남음 |
-| C11 | 같은 revision의 상충 동시 교정 | 미검증 |
+| C11 | 같은 revision의 상충 동시 교정 | 실제 Git/PG의 두 worker를 snapshot 읽기 뒤 동시에 실행해, 다른 제안은 실제 단일 값으로 합류하고 두 독립 파일의 실제 반대 값은 동일 카드에서 충돌 보류함을 확인. 일반 native 경로는 남음 |
 | C12 | 다른 key의 동일 사실·동일 값 | 실제 PG 동시 key에서 단일 successor 확인. 일반 admission 경로는 남음 |
-| C13 | 같은 카드의 다른 필드 동시 교정 | 같은 원래 revision의 두 필드를 순차 교정해 보존 확인. 다른 필드의 실제 동시 실행은 남음 |
+| C13 | 같은 카드의 다른 필드 동시 교정 | 동일 원래 revision에서 실제로 다른 PG backend connection 두 개를 동시 실행해 최종 단일 successor에 두 변경 보존 확인. 코어 admission callback은 대역이며 일반 native 경로는 남음 |
 | C14 | 다른 카드 ID에 중복된 사실 | 알려진 두 title의 정책 등록과 공통 head 연결, 실제 CLI/모델 합의 뒤 두 카드의 동일 값 표시 확인. 미식별 중복·일반 query/graph 경로는 남음 |
 | C15 | 유사 문장의 다른 환경·branch | 고정 branch의 실제 Git reader가 checkout/dirty 변경을 혼동하지 않고 후속 commit을 재검증함을 확인. 자동 교정의 동적 HEAD 거부와 source context/resource mismatch 선차단 구현. 일반 target 의미 식별·모든 source의 환경/branch 검증은 남음 |
 | C16 | 여러 사실 중 한 사실만 교정 | 정확한 표시 구간 patch와 v2 batch 구현. 다른 사실 보존·모호한 구간 거부 확인. 의미 기반 span 결정은 남음 |
@@ -85,3 +85,5 @@ Git 내용의 의미 기반 값 선택·새 독립 실제 모델 평가·실제 
 원래 관측 시각·서버 검증 시각의 분리와 실제 기한 자동 재검토는 [검증 기한 검사](../../validation/2026-10-26-lbrain-fact-verification-expiry.md)를 따른다.
 
 무관한 commit과 실제 rollback에서 독립 근거를 누락하던 오류·자동 합의·새 독립 모델 평가의 증거는 [독립 source 재검토 검사](../../validation/2026-10-26-lbrain-competing-source-revalidation.md)를 따른다.
+
+동일 카드의 복수 원천 정책·실제 동시 요청·초기 예약과 migration의 증거는 [동시 원천 검사](../../validation/2026-10-26-lbrain-concurrent-sources.md)를 따른다.

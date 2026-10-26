@@ -492,6 +492,15 @@ INSERT INTO lbrain_fact_guard_epoch(singleton) VALUES (TRUE) ON CONFLICT DO NOTH
 
 -- queue 대기 중에는 아직 fact head가 없을 수 있다. 첫 요청 수락 시 서버가
 -- 확정한 정확한 대상 범위를 등록하여 그 사이의 일반 승인도 막는다.
+CREATE TABLE IF NOT EXISTS lbrain_fact_admission_targets (
+    project VARCHAR(64) NOT NULL,
+    target_title TEXT NOT NULL,
+    card_type VARCHAR(32) NOT NULL,
+    field_path VARCHAR(128) NOT NULL,
+    fact_key VARCHAR(64) NOT NULL,
+    PRIMARY KEY(project,target_title,card_type,field_path),
+    UNIQUE(project,target_title,card_type,field_path,fact_key)
+);
 CREATE TABLE IF NOT EXISTS lbrain_fact_admission_rules (
     project VARCHAR(64) NOT NULL,
     policy_id VARCHAR(128) NOT NULL,
@@ -502,9 +511,54 @@ CREATE TABLE IF NOT EXISTS lbrain_fact_admission_rules (
     card_type VARCHAR(32) NOT NULL,
     field_path VARCHAR(128) NOT NULL,
     active BOOLEAN NOT NULL DEFAULT TRUE,
-    PRIMARY KEY(project,policy_id),
-    UNIQUE(project,target_title,card_type,field_path)
+    PRIMARY KEY(project,policy_id)
 );
+-- 같은 필드는 하나의 fact에만 속하지만 그 fact를 검증하는 원천 정책은
+-- 여러 개일 수 있다. 기존 단일 원천 UNIQUE를 소유권 FK로 교체한다.
+INSERT INTO lbrain_fact_admission_targets(project,target_title,card_type,field_path,fact_key)
+    SELECT DISTINCT project,target_title,card_type,field_path,fact_key FROM lbrain_fact_admission_rules
+    ON CONFLICT DO NOTHING;
+DO $$
+DECLARE old_constraint TEXT;
+BEGIN
+    FOR old_constraint IN SELECT c.conname FROM pg_constraint c
+        WHERE c.conrelid='lbrain_fact_admission_rules'::regclass AND c.contype='u'
+            AND (SELECT array_agg(a.attname::text ORDER BY k.ordinality)
+                FROM unnest(c.conkey) WITH ORDINALITY k(attnum,ordinality)
+                JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.attnum)
+                = ARRAY['project','target_title','card_type','field_path']::text[]
+    LOOP
+        EXECUTE format('ALTER TABLE lbrain_fact_admission_rules DROP CONSTRAINT %I',old_constraint);
+    END LOOP;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='lbrain_fact_admission_rules'::regclass
+        AND conname='lbrain_fact_admission_target_scope') THEN
+        ALTER TABLE lbrain_fact_admission_rules ADD CONSTRAINT lbrain_fact_admission_target_scope
+            FOREIGN KEY(project,target_title,card_type,field_path,fact_key)
+            REFERENCES lbrain_fact_admission_targets(project,target_title,card_type,field_path,fact_key);
+    END IF;
+END;
+$$;
+CREATE OR REPLACE FUNCTION lbrain_admit_fact_target_scope() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+DECLARE admitted_fact VARCHAR(64);
+BEGIN
+    -- 동일 대상의 동시 등록도 PK 충돌과 행 잠금으로 하나의 소유권에 합류한다.
+    INSERT INTO lbrain_fact_admission_targets(project,target_title,card_type,field_path,fact_key)
+        VALUES (NEW.project,NEW.target_title,NEW.card_type,NEW.field_path,NEW.fact_key)
+        ON CONFLICT(project,target_title,card_type,field_path) DO UPDATE
+            SET fact_key=lbrain_fact_admission_targets.fact_key
+        RETURNING fact_key INTO admitted_fact;
+    IF admitted_fact<>NEW.fact_key THEN
+        -- 기존 INSERT ... ON CONFLICT DO NOTHING과 같은 거부 계약이다.
+        -- coordinator는 등록되지 않은 정책을 fact_policy_changed로 보고한다.
+        RETURN NULL;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS lbrain_admit_fact_target_scope ON lbrain_fact_admission_rules;
+CREATE TRIGGER lbrain_admit_fact_target_scope BEFORE INSERT OR UPDATE OF project,target_title,card_type,field_path,fact_key
+    ON lbrain_fact_admission_rules FOR EACH ROW EXECUTE FUNCTION lbrain_admit_fact_target_scope();
 
 CREATE OR REPLACE FUNCTION lbrain_fact_scope_guard_epoch() RETURNS TRIGGER
 LANGUAGE plpgsql AS $$
@@ -847,7 +901,7 @@ DROP TRIGGER IF EXISTS lbrain_check_fact_verification ON lbrain_fact_verificatio
 CREATE CONSTRAINT TRIGGER lbrain_check_fact_verification AFTER INSERT ON lbrain_fact_verifications
     DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION lbrain_check_fact_verification();
 CREATE TABLE IF NOT EXISTS lbrain_fact_check_schedules (
-    fact_key VARCHAR(64) NOT NULL REFERENCES lbrain_fact_scopes(fact_key),
+    fact_key VARCHAR(64) NOT NULL REFERENCES lbrain_fact_scopes(fact_key) DEFERRABLE INITIALLY DEFERRED,
     project VARCHAR(64) NOT NULL,
     policy_id VARCHAR(128) NOT NULL,
     verified_resolution_id VARCHAR(64) REFERENCES lbrain_fact_verifications(resolution_id),
@@ -858,6 +912,19 @@ CREATE TABLE IF NOT EXISTS lbrain_fact_check_schedules (
     reason_code VARCHAR(64) NOT NULL DEFAULT '',
     PRIMARY KEY(fact_key,policy_id)
 );
+-- 첫 동시 입력은 상대 정책의 확인 예약을 먼저 만들고 같은 transaction에서
+-- 공통 head를 생성할 수 있다. commit 시에는 여전히 실제 head가 필수다.
+DO $$
+DECLARE scope_constraint TEXT;
+BEGIN
+    FOR scope_constraint IN SELECT conname FROM pg_constraint
+        WHERE conrelid='lbrain_fact_check_schedules'::regclass
+            AND confrelid='lbrain_fact_scopes'::regclass AND contype='f'
+    LOOP
+        EXECUTE format('ALTER TABLE lbrain_fact_check_schedules ALTER CONSTRAINT %I DEFERRABLE INITIALLY DEFERRED',scope_constraint);
+    END LOOP;
+END;
+$$;
 CREATE INDEX IF NOT EXISTS idx_lbrain_fact_checks_due
     ON lbrain_fact_check_schedules(project,next_check_at) WHERE state IN ('scheduled','blocked');
 CREATE TABLE IF NOT EXISTS lbrain_fact_batches (
