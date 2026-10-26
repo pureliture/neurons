@@ -560,10 +560,17 @@ def _run_worker(argv=None, *, boundary_factory=None):
             not attestation.evidence_ref.strip()):
             raise ValueError("attestation")
         revision = code_revision()
+        # SIGALRM 예외가 weakref/finalizer 안에서 전달되면 Python이 이를
+        # unraisable로 처리할 수 있다. 비싼 preflight 뒤와 I/O 진입 전에는
+        # monotonic 기한도 확인해 이미 만료된 작업을 시작하지 않는다.
+        budget.check()
         attestation_digest = digest(asdict(attestation))
         approved = read_approved(args, argv, attestation_digest, revision) if args.apply else None
+        budget.check()
         boundary = (boundary_factory or LiveBoundary)(args, budget)
+        budget.check()
         metadata = boundary.collection_metadata()
+        budget.check()
         collection = LegacyCollection(args.collection, metadata["size"], metadata["distance"])
         if type(collection.dimension) is not int or collection.dimension != 3072 or collection.distance != "Cosine":
             raise ValueError("collection")

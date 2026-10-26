@@ -768,12 +768,15 @@ def test_supervised_main_never_reports_success_when_cleanup_fails(lane, capsys):
     assert "private-secret" not in captured.out + captured.err
 
 
-def test_deadline_interrupts_blocking_boundary(lane, capsys):
+def test_deadline_interrupts_blocking_boundary(lane, capsys, monkeypatch):
     import time
     boundary, argv, path = lane
     argv[argv.index("--timeout-seconds") + 1] = "0.1"
     argv[argv.index("--request-timeout-seconds") + 1] = "0.05"
     finished = []
+    # 이 검사는 I/O 차단을 검사한다. 코드 전체 hashing의 소요 시간은
+    # 아래의 별도 만료 preflight 검사에서 다룬다.
+    monkeypatch.setattr(cli(), "code_revision", lambda: "fixture-code-revision")
     def blocked():
         time.sleep(0.4)
         finished.append(True)
@@ -781,6 +784,28 @@ def test_deadline_interrupts_blocking_boundary(lane, capsys):
     boundary.collection_metadata = blocked
     rc, report = invoke(lane, capsys)
     assert rc == 1 and finished == []
+    assert not (path / "manifest.json").exists()
+
+
+def test_expired_preflight_cannot_start_io_after_alarm_was_swallowed(lane, capsys, monkeypatch):
+    import time
+    api = cli()
+    _, argv, path = lane
+    argv[argv.index("--timeout-seconds") + 1] = "0.05"
+    argv[argv.index("--request-timeout-seconds") + 1] = "0.01"
+    def swallowed_alarm():
+        try:
+            time.sleep(.2)
+        except api.DeadlineExpired:
+            # CI에서 weakref callback이 실제 SIGALRM 예외를 삼킨 경우를
+            # 명시적으로 모델링한다. supervisor의 process 종료 대역이 아니다.
+            pass
+        return "fixture-code-revision"
+    monkeypatch.setattr(api, "code_revision", swallowed_alarm)
+    def forbidden(*args):
+        pytest.fail("expired preflight started a boundary")
+    rc = api._run_worker(argv, boundary_factory=forbidden)
+    assert rc == 1 and json.loads(capsys.readouterr().out)["status"] == "rejected"
     assert not (path / "manifest.json").exists()
 
 
