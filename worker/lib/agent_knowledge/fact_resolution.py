@@ -18,6 +18,17 @@ from psycopg.errors import DeadlockDetected, LockNotAvailable, SerializationFail
 from .public_safe_util import ensure_public_safe, hash_payload, require_sha256
 
 
+# f는 호출 SQL의 lbrain_fact_scopes alias다. 마지막 승인 head가 pending인
+# disputed 상태도 포함하므로, 우열 불명 충돌의 조회 정책을 바꾸지 않는다.
+CURRENT_FACT_EVIDENCE_SQL = """EXISTS (
+    SELECT 1 FROM lbrain_fact_assertions a
+    JOIN lbrain_fact_observation_sources s ON s.observation_version=a.observation_version
+    JOIN lbrain_fact_source_receipts r ON r.source_ref_id=s.source_ref_id
+    WHERE a.fact_key=f.fact_key AND a.value_hash=f.value_hash AND r.state='active'
+        AND a.state IN ('support','pending')
+        AND (a.state='support' OR a.assertion_id=f.head_assertion_id))"""
+
+
 class FactResolutionError(ValueError):
     def __init__(self, reason_code: str, *, retryable: bool = False):
         self.reason_code = reason_code
@@ -176,8 +187,13 @@ class FactResolutionService:
                 (assertion_id, scope.key, observation.version_id, Jsonb(value), hash_payload(value)))
             cur.execute("SELECT state FROM lbrain_fact_assertions WHERE assertion_id=%s", (assertion_id,))
             assertion_state = cur.fetchone()["state"]
+            source_active = self._source_active(cur, observation.version_id)
             old_observation = self._head_observation(cur, head)
-            current = (assertion_state not in {"history", "revoked"}
+            # history는 과거의 선택 위치다. 실제 current source가 그 고정본으로
+            # 돌아왔음을 독립 재검증하면 새 resolution에서 다시 사용할 수 있다.
+            # 철회는 별개이며 source tombstone/현재성 검사는 우회하지 않는다.
+            current = (assertion_state != "revoked"
+                       and source_active
                        and observation.current_verified and is_current(observation))
             competing, incomplete = self._competing_current(cur, scope.key, hash_payload(value), is_current) if current else (False, False)
             # source가 재검증 사이에 바뀌면 해당 관측으로 새 authority를 만들지 않는다.
@@ -194,10 +210,12 @@ class FactResolutionService:
                 action = "disputed"
             elif head["value_hash"] == hash_payload(value):
                 action = "attach_evidence" if current else "retain_history"
+            elif not source_active:
+                action = "retain_history"
             elif not current:
                 action = "retain_history" if relation == "incoming_before" else "pending_evidence"
             else:
-                # 실제 현재 source가 옛 hash로 돌아온 경우도 새 관측이면 갱신한다.
+                # 실제 현재 source가 옛 hash로 돌아온 경우도 독립 재검증 후 갱신한다.
                 action = "replace_current"
             result = {"schema_version": "fact_resolution.v1", "resolution_id": resolution_id,
                 "fact_key": scope.key, "action": action, "requested_value": requested_value,
@@ -275,9 +293,26 @@ class FactResolutionService:
         from .evidence_correction import _render_fact
         with self.store._scope(conn=connection) as db, db.cursor(row_factory=dict_row) as cur:
             cur.execute("""SELECT m.*,f.value,f.generation,f.state,f.memory_id AS head_memory_id,
-                    c.steward_envelope->>'render_text' AS original_render_text
+                    c.steward_envelope->>'render_text' AS original_render_text,
+                    f.head_assertion_id,
+                    EXISTS (SELECT 1 FROM lbrain_fact_assertions a
+                        JOIN lbrain_fact_observation_sources s ON s.observation_version=a.observation_version
+                        JOIN lbrain_fact_source_receipts r ON r.source_ref_id=s.source_ref_id
+                        WHERE a.assertion_id=f.head_assertion_id AND r.state='active') AS head_source_active,
+                    proof.current_evidence
                 FROM lbrain_fact_members m JOIN lbrain_fact_scopes f ON f.fact_key=m.fact_key
                 JOIN memory_cards c ON c.memory_id=m.memory_id
+                LEFT JOIN LATERAL (SELECT jsonb_agg(p.evidence ORDER BY p.assertion_id) AS current_evidence FROM (
+                    SELECT a.assertion_id,jsonb_build_object('observation_version',o.version_id,
+                        'source_ref_id',r.source_ref_id,'content_hash',r.content_hash,
+                        'observed_at',o.observation->>'observed_at',
+                        'proof',o.observation->'proof') AS evidence
+                    FROM lbrain_fact_assertions a JOIN lbrain_fact_observations o ON o.version_id=a.observation_version
+                    JOIN lbrain_fact_observation_sources s ON s.observation_version=o.version_id
+                    JOIN lbrain_fact_source_receipts r ON r.source_ref_id=s.source_ref_id
+                    WHERE a.fact_key=f.fact_key AND a.value_hash=f.value_hash AND r.state='active'
+                        AND a.state IN ('support','pending') AND (a.state='support' OR a.assertion_id=f.head_assertion_id)
+                    ORDER BY a.assertion_id LIMIT 17) p) proof ON TRUE
                 WHERE m.memory_id=ANY(%s) ORDER BY m.memory_id,m.field_path""", ([c["memory_id"] for c in cards],))
             by_memory = {}
             for row in cur.fetchall():
@@ -297,8 +332,24 @@ class FactResolutionService:
                     # 표시를 갱신해도 원래 card의 다른 사실까지 새로 검증된 것은 아니다.
                     card["freshness_state"] = "unchecked"
                     card.setdefault("field_verifications", {}).pop(member["field_path"], None)
-                views.append({"fact_key": member["fact_key"], "field_path": member["field_path"],
-                    "generation": member["generation"], "state": member["state"], "head_memory_id": member["head_memory_id"]})
+                view = {"fact_key": member["fact_key"], "field_path": member["field_path"],
+                    "generation": member["generation"], "state": member["state"], "head_memory_id": member["head_memory_id"]}
+                if member["head_assertion_id"]:
+                    evidence = member["current_evidence"] or []
+                    proof_hashes = set()
+                    for proof_ref in evidence:
+                        proof = proof_ref.pop("proof")
+                        proof.update(content_hash=proof_ref["content_hash"], observed_at=proof_ref["observed_at"])
+                        proof_hashes.add(hash_payload([proof]))
+                    view.update(current_evidence=evidence[:16], evidence_truncated=len(evidence)>16)
+                    if not evidence:
+                        view["state"] = "invalidated"
+                    verification = card.get("field_verifications", {}).get(member["field_path"])
+                    stale_verification = bool(verification and verification.get("source_hash") not in proof_hashes)
+                    if not member["head_source_active"] or stale_verification:
+                        card["freshness_state"] = "unchecked"
+                        card.setdefault("field_verifications", {}).pop(member["field_path"], None)
+                views.append(view)
             if views:
                 card["canonical_content_hash"] = card["content_hash"]
                 card["fact_views"] = views
@@ -328,12 +379,47 @@ class FactResolutionService:
                             or row["currentness"] != card.get("currentness")):
                         raise FactResolutionError("authority_changed_during_read")
             projected = self.project_cards(cards, connection=db)
+            # 조회 전체를 실패시키지 않는다. 같은 snapshot에서 무효 필드만
+            # 빼고 유효 필드의 등록된 표시로 재구성한다. 원본 authority는 불변이다.
+            with db.cursor(row_factory=dict_row) as cur:
+                cur.execute("""SELECT memory_id,field_path,render_template FROM lbrain_fact_members
+                    WHERE memory_id=ANY(%s)""", (ids,))
+                templates = {(r["memory_id"], r["field_path"]): r["render_template"] for r in cur.fetchall()}
+                cur.execute(f"""SELECT count(DISTINCT f.fact_key) AS n
+                    FROM lbrain_fact_scopes f WHERE f.project=%s AND f.head_assertion_id IS NOT NULL
+                    AND NOT {CURRENT_FACT_EVIDENCE_SQL} AND EXISTS (
+                        SELECT 1 FROM lbrain_fact_members m JOIN memory_cards c ON c.memory_id=m.memory_id
+                        WHERE m.fact_key=f.fact_key AND c.currentness='current'
+                            AND c.authorization_status='active'
+                            AND c.lifecycle_state IN ('accepted','human_accepted','auto_accepted'))""", (project,))
+                gap_fields = cur.fetchone()["n"]
+            visible = []
+            partial_cards = 0
+            for card in projected:
+                views = card.get("fact_views", [])
+                invalid = [v for v in views if v["state"] == "invalidated"]
+                if not invalid:
+                    visible.append(card)
+                    continue
+                kept = [v for v in views if v["state"] != "invalidated"]
+                if not kept:
+                    continue
+                for view in invalid:
+                    card["typed_payload"].pop(view["field_path"].split(".", 1)[1], None)
+                    card.setdefault("field_verifications", {}).pop(view["field_path"], None)
+                rendered = "; ".join(templates[(card["memory_id"], v["field_path"])].replace(
+                    "{value}", str(_value(card, v["field_path"]))) for v in kept)
+                card.update(summary=rendered, render_text=rendered, freshness_state="unchecked")
+                card["verification_scope"] = {"whole_card": False, "fields": [v["field_path"] for v in kept]}
+                visible.append(card)
+                partial_cards += 1
             with db.cursor(row_factory=dict_row) as cur:
                 cur.execute("SELECT generation FROM lbrain_fact_project_versions WHERE project=%s", (project,))
                 row = cur.fetchone()
             generation = row["generation"] if row else 0
-            return {"cards": projected, "metadata": {"fact_resolution": "postgres_current",
-                "fact_generation": generation}}
+            return {"cards": visible, "metadata": {"fact_resolution": "postgres_current",
+                "fact_generation": generation, "source_evidence_gap_fields": gap_fields,
+                "source_evidence_partial_cards": partial_cards}}
 
     def _observation(self, cur, observation):
         value = asdict(observation)
@@ -348,6 +434,14 @@ class FactResolutionService:
              observation.source_revision, observation.interpretation_version, Jsonb(value)))
 
     @staticmethod
+    def _source_active(cur, observation_version):
+        cur.execute("""SELECT r.state FROM lbrain_fact_observation_sources s
+            JOIN lbrain_fact_source_receipts r ON r.source_ref_id=s.source_ref_id
+            WHERE s.observation_version=%s FOR SHARE OF r""", (observation_version,))
+        row = cur.fetchone()
+        return bool(row and row["state"] == "active")
+
+    @staticmethod
     def _bind(cur, memory_id, field_path, fact_key, template):
         cur.execute("SELECT fact_key,render_template FROM lbrain_fact_members WHERE memory_id=%s AND field_path=%s", (memory_id, field_path))
         previous = cur.fetchone()
@@ -360,7 +454,19 @@ class FactResolutionService:
     def _head(cur, fact_key, locked=False):
         cur.execute("SELECT * FROM lbrain_fact_scopes WHERE fact_key=%s" + (" FOR UPDATE" if locked else ""), (fact_key,))
         row = cur.fetchone()
-        return {key: value for key, value in row.items() if key != "updated_at"} if row else None
+        if not row:
+            return None
+        result = {key: value for key, value in row.items() if key != "updated_at"}
+        if row["head_assertion_id"]:
+            cur.execute("""SELECT 1 FROM lbrain_fact_assertions a
+                JOIN lbrain_fact_observation_sources s ON s.observation_version=a.observation_version
+                JOIN lbrain_fact_source_receipts r ON r.source_ref_id=s.source_ref_id
+                WHERE a.fact_key=%s AND a.value_hash=%s AND a.state IN ('support','pending')
+                    AND (a.state='support' OR a.assertion_id=%s) AND r.state='active' LIMIT 1""",
+                (fact_key, row["value_hash"], row["head_assertion_id"]))
+            if cur.fetchone() is None:
+                result["state"] = "invalidated"
+        return result
 
     @staticmethod
     def _head_observation(cur, head):
@@ -395,6 +501,8 @@ class FactResolutionService:
         cur.execute("""SELECT DISTINCT ON (o.source_id,o.source_revision,o.interpretation_version,a.value_hash)
             o.observation FROM lbrain_fact_assertions a JOIN lbrain_fact_observations o
             ON o.version_id=a.observation_version
+            JOIN lbrain_fact_observation_sources s ON s.observation_version=o.version_id
+            JOIN lbrain_fact_source_receipts r ON r.source_ref_id=s.source_ref_id AND r.state='active'
             WHERE a.fact_key=%s AND a.value_hash<>%s AND a.state IN ('support','pending')
               AND o.observation->>'current_verified'='true'
             ORDER BY o.source_id,o.source_revision,o.interpretation_version,a.value_hash,o.created_at DESC

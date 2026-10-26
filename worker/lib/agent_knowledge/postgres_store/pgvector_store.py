@@ -1739,6 +1739,8 @@ class PgVectorStore:
         params.extend((as_of_dt, as_of_dt))
         clauses.append(_STATUS_EXPIRY_FILTER)
         params.append(as_of_dt)
+        if not as_of:
+            clauses.append(_current_fact_filter())
         score_expression = "1.0 - distance"
         query_params = [vector_literal, *params, vector_literal, max(50, int(limit) * 5)]
         if text_query and text_query.strip():
@@ -2444,13 +2446,26 @@ _STATUS_EXPIRY_FILTER = r"""(
 
 def _authority_filter(project: str, as_of: Any) -> tuple[list[str], list[Any]]:
     instant = _parse_as_of(as_of) or datetime.now(timezone.utc)
-    return [
+    clauses = [
         "project = %s", "authorization_status = 'active'",
         "currentness IN ('current', 'superseded')" if as_of else "currentness = 'current'",
         "lifecycle_state IN ('accepted', 'human_accepted', 'auto_accepted')",
         "valid_from <= %s", "(valid_to IS NULL OR valid_to > %s)",
         _STATUS_EXPIRY_FILTER,
-    ], [project, instant, instant, instant]
+    ]
+    if not as_of:
+        clauses.append(_current_fact_filter())
+    return clauses, [project, instant, instant, instant]
+
+
+def _current_fact_filter() -> str:
+    """필터 후 LIMIT을 적용해 무효 카드가 정상 카드의 페이지를 차지하지 않게 한다."""
+    from ..fact_resolution import CURRENT_FACT_EVIDENCE_SQL
+    return f"""(NOT EXISTS (SELECT 1 FROM lbrain_fact_members m
+        WHERE m.memory_id=memory_cards.memory_id) OR EXISTS (
+        SELECT 1 FROM lbrain_fact_members m JOIN lbrain_fact_scopes f ON f.fact_key=m.fact_key
+        WHERE m.memory_id=memory_cards.memory_id
+            AND (f.head_assertion_id IS NULL OR {CURRENT_FACT_EVIDENCE_SQL})))"""
 
 
 def _card_values(card: MemoryCard) -> tuple[Any, ...]:

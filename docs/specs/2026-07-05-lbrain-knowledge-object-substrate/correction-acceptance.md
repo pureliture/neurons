@@ -9,12 +9,12 @@
 | G01 | 복수 사실별 변경안·근거 제출, exact target 또는 설명으로 기존 target 검색 | v2 batch·기존 값/불일치/제안/근거와 정확한 title/summary 검색 구현. 직접 검증 값과 제안 값이 달라도 결과를 구분한다. 일반 의미 검색은 남음 |
 | G02 | 코드 검증과 실제 판단 모델 연결, 별도 평가에서 오교정과 정상 교정 모두 검사 | Git 파일 내용의 하이브리드 값 선택을 실제 worker/MCP HTTP에 연결. 새 독립 40건에서 정상 20/20·잘못된 허용 0건, 실제 모델 교정/수집/복구 통과. 기존 원시 모델의 1/20 잘못된 허용은 별도 유지. 일반 native·운영 runtime 근거의 의미 admission은 남음 |
 | G03 | 같은 관측의 교정·수집·재수집이 합류 | 공통 fact/관측/해석/판단 코어와 Git JSON 교정·수집·관리 대상 autopilot 합류 구현. native ID의 Couch→PG→정규 intake→관리 대상 fact queue 연결 검증. native는 trigger로 보존하고 현재 값은 독립 Git 검증. 일반 native 근거 자체의 의미 검증과 동일 관측 합류는 남음 |
-| G04 | 과거 지연 입력의 역전 방지와 실제 후속 변경의 반영 | 실제 Git+PG에서 지연된 ancestor의 history 연결, 코어에서 새로운 현재 관측의 rollback 확인. 일반 세션 전체 경로는 남음 |
+| G04 | 과거 지연 입력의 역전 방지와 실제 후속 변경의 반영 | 실제 Git+PG에서 지연 ancestor와 실제 ref A→B→A를 구분하고 불변 관측의 현재 재검증 확인. 일반 세션 전체 경로는 남음 |
 | G05 | 동일 사실의 단일 current, 복수 필드·중복 카드·동시 writer 처리 | 공통 head·다른 필드의 lineage 재검증·연결된 중복 카드의 현재 표시·동시 key 처리 구현. 알려진 대상의 직접 DML·같은 식별자의 새 current·최초 queue 대기·옛 snapshot 우회를 DB에서 차단. 아직 식별하지 않은 의미상 중복과 일반 writer의 전체 자동 합류는 남음 |
-| G06 | 근거 내용·버전·관측 시각과 모든 교정 이력 보존 | Git redacted source receipt·관측·assertion·resolution/event와 canonical 이력 보존. retention 참조 보호와 GC 경합 검사 필요 |
-| G07 | 예약·장애·설정 차단·저장 직후 종료·만료 후 복구와 독립 감지 | 공통 coordinator를 내구성 queue/worker에 연결. 실제 모델 경로에서도 source/profile 변경 차단과 commit 후 응답 유실·source 부재 상태 복구 확인. 전체 운영 자동 실행·독립 감시는 남음 |
+| G06 | 근거 내용·버전·관측 시각과 모든 교정 이력 보존 | receipt 본문/hash/proof·관측 불변성과 필수 FK 참조, 교정 참조가 추가되는 실제 GC 잠금 경합의 삭제 거부 확인. 모든 source·모델 산출물·retention/GC CLI의 전체 보존 검증은 남음 |
+| G07 | 예약·장애·설정 차단·저장 직후 종료·만료 후 복구와 독립 감지 | 실제 모델 경로의 저장 후 응답 유실 복구와 source 철회→CLI worker 종료→독립 monitor 감지→재시작 후 동일 작업 자동 해결 확인. 상주 supervisor·외부 통지·장기 운영 자동 실행/감시는 남음 |
 | G08 | context/list/query와 graph·embedding 지연·역순 작업에서도 올바른 조회 | 최종 fact view·generation·cursor와 실제 query를 연결. 실제 Neo4j에서 projection 전 누락을 수정하고 종료/복구·역순/중복·만료 generation을 확인. 실제 embedding provider·미식별 session chunk·장기 수렴은 남음 |
-| G09 | 철회·parser 정정·권한 변경과 파생 기억 영향 처리 | 영향 관계와 재검토 연결 필요 |
+| G09 | 철회·parser 정정·권한 변경과 파생 기억 영향 처리 | 사용한 receipt의 철회→내구성 영향 target→자동 재검토, 즉시 조회 제외와 독립 유효 근거 유지 구현. parser·정책·접근 권한 자동 전파와 파생 기억 재계산은 남음 |
 | G10 | 실제 작업 근거로 전체 흐름 검증, artifact identity·백업 복원·정리 | 기존 좁은 실증에 Git+PG+실제 CLI/HTTP 검사를 추가. 최종 배포 identity·LLM 실제 전체 작업·보존/정리는 남음 |
 
 ## 시나리오별 완료 추적
@@ -30,7 +30,7 @@
 | C05 | 같은 값을 지지하는 독립 관측 | PG 코어에서 복수 관측을 보존하고 중복 authority를 만들지 않음. 일반 source 연결은 남음 |
 | C06 | 최근 수집된 옛 snapshot | 실제 Git ancestor를 지연 수집해 history로 연결하고 현재 값 유지. 일반 세션 연결은 남음 |
 | C07 | 한 세션의 여러 실제 상태 변화 | 미검증 |
-| C08 | 실제 후속 제거·rollback | 새 현재 관측의 rollback을 PG 코어에서 확인. 실제 후속 source/운영 흐름은 남음 |
+| C08 | 실제 후속 제거·rollback | 실제 Git ref A→B→A와 같은 불변 관측의 현재 재검증, 오래된 terminal 요청 무변경 확인. 일반 source/운영 흐름은 남음 |
 | C09 | 과거 원인을 몰라도 검증된 현재 값 교정 | 직접 Git 데이터와 파일 내용의 실제 의미 모델 경로에서 현재 값 교정 확인. 일반 native/운영 근거 경로는 남음 |
 | C10 | clock skew·관측 시각 누락 | 미검증 |
 | C11 | 같은 revision의 상충 동시 교정 | 미검증 |
@@ -47,7 +47,7 @@
 | C22 | 자기 재인용을 독립 근거로 오인 | 미검증 |
 | C23 | 테스트·구현을 운영 배포로 과대 해석 | 원시 모델 실패는 보존. repository 관측을 graph/HTTP/test/query 결과로 승격하지 못하는 code gate와 새 실제 모델 평가 확인. 모든 runtime 근거 reader의 교정 연결은 남음 |
 | C24 | evidence 안의 명령·위조·권한 위반 | 초기 hash·정책 검사 있음. 일반 의미 경로 미검증 |
-| C25 | source 철회·삭제·권한 회수 | 교정 시 거부 확인. 기존 교정 영향 재평가 미검증 |
+| C25 | source 철회·삭제·권한 회수 | 실제 PG receipt 철회 직후 조회 제외, 다른 필드·독립 근거 보존과 실제 CLI 종료/monitor/자동 재개 확인. 일반 source 권한 이벤트·파생 기억 전파는 남음 |
 | C26 | parser·miner·redaction·정책 변경 | 미검증 |
 | C27 | evidence 저장 뒤 authority 실패 | 초기 adapter와 공통 PG 코어의 canonical/resolution 동시 rollback 확인. 일반 source 보존/GC 경합은 남음 |
 | C28 | authority 저장 뒤 응답·완료 기록 유실 | 실제 모델/Git/PG 교정에서도 commit receipt를 같은 transaction에 기록하고 응답 유실 및 source 부재 후 중복 successor 없이 복구 확인. 일반 native/runtime·운영 process 전체 연결은 남음 |
@@ -79,3 +79,5 @@ native 관측의 source 보존과 실제 Couch/PG intake 증거는 [관측 출�
 관리 대상의 일반 writer 우회 차단과 남은 식별 범위는 [DB writer 보호 검사](../../validation/2026-10-26-lbrain-fact-writer-guard.md)에 기록한다.
 
 Git 내용의 의미 기반 값 선택·새 독립 실제 모델 평가·실제 worker/MCP HTTP 증거는 [의미 admission 검사](../../validation/2026-10-26-lbrain-semantic-admission.md)를 따른다. 이 결과는 전체 source 종류와 모든 달성 기준의 완료를 뜻하지 않는다.
+
+기존 교정 근거의 FK 보존·철회 전파·조회 범위와 자동 복구의 부분 증거는 [근거 lifecycle 검사](../../validation/2026-10-26-lbrain-source-lifecycle.md)를 따른다.

@@ -423,6 +423,8 @@ CREATE TABLE IF NOT EXISTS lbrain_fact_assertions (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE(fact_key,observation_version,value_hash)
 );
+CREATE INDEX IF NOT EXISTS idx_lbrain_fact_current_support ON lbrain_fact_assertions(fact_key,value_hash,assertion_id)
+    WHERE state IN ('support','pending');
 CREATE TABLE IF NOT EXISTS lbrain_fact_resolutions (
     resolution_id VARCHAR(64) PRIMARY KEY,
     fact_key VARCHAR(64) NOT NULL REFERENCES lbrain_fact_scopes(fact_key),
@@ -583,6 +585,196 @@ CREATE TABLE IF NOT EXISTS lbrain_fact_source_receipts (
     state VARCHAR(16) NOT NULL DEFAULT 'active' CHECK (state IN ('active','revoked')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE lbrain_fact_source_receipts ADD COLUMN IF NOT EXISTS owner_project VARCHAR(64);
+-- 관측 INSERT→source row 잠금과 같은 순서로 migration을 fence한다.
+LOCK TABLE lbrain_fact_observations IN SHARE ROW EXCLUSIVE MODE;
+LOCK TABLE lbrain_fact_source_receipts IN SHARE ROW EXCLUSIVE MODE;
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM lbrain_fact_source_receipts WHERE content_hash IS DISTINCT FROM
+        'sha256:' || encode(sha256(convert_to(redacted_content,'UTF8')),'hex')) THEN
+        RAISE EXCEPTION 'fact_source_content_hash_mismatch' USING ERRCODE='23514';
+    END IF;
+END $$;
+
+-- 교정 이력이 참조하는 근거를 실제 FK로 보존한다. 관측과 연결은 함께
+-- 삭제할 수 있지만 assertion/이력이 남아 있으면 관측 FK가 삭제를 막는다.
+CREATE TABLE IF NOT EXISTS lbrain_fact_observation_sources (
+    observation_version VARCHAR(71) PRIMARY KEY REFERENCES lbrain_fact_observations(version_id)
+        DEFERRABLE INITIALLY DEFERRED,
+    source_ref_id VARCHAR(180) NOT NULL REFERENCES lbrain_fact_source_receipts(source_ref_id)
+);
+CREATE INDEX IF NOT EXISTS idx_lbrain_observation_sources_ref
+    ON lbrain_fact_observation_sources(source_ref_id,observation_version);
+
+CREATE OR REPLACE FUNCTION lbrain_check_observation_source() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+DECLARE observed lbrain_fact_observations%ROWTYPE;
+        receipt lbrain_fact_source_receipts%ROWTYPE;
+BEGIN
+    IF TG_OP='UPDATE' THEN
+        RAISE EXCEPTION 'fact_observation_source_immutable' USING ERRCODE='23514';
+    END IF;
+    SELECT * INTO observed FROM lbrain_fact_observations WHERE version_id=NEW.observation_version FOR KEY SHARE;
+    SELECT * INTO receipt FROM lbrain_fact_source_receipts WHERE source_ref_id=NEW.source_ref_id FOR UPDATE;
+    IF observed.version_id IS NULL OR receipt.source_ref_id IS NULL THEN
+        RAISE EXCEPTION 'fact_observation_source_required' USING ERRCODE='23514';
+    END IF;
+    IF receipt.owner_project IS NULL THEN
+        UPDATE lbrain_fact_source_receipts SET owner_project=observed.project
+            WHERE source_ref_id=NEW.source_ref_id RETURNING * INTO receipt;
+    END IF;
+    IF receipt.owner_project<>observed.project THEN
+        RAISE EXCEPTION 'fact_source_project_conflict' USING ERRCODE='23514';
+    END IF;
+    IF observed.observation#>>'{proof,source_ref_id}' IS DISTINCT FROM NEW.source_ref_id
+       OR observed.observation->>'content_hash' IS DISTINCT FROM receipt.content_hash
+       OR observed.observation->>'project' IS DISTINCT FROM observed.project
+       OR observed.observation->>'source_id' IS DISTINCT FROM observed.source_id
+       OR observed.observation->>'source_revision' IS DISTINCT FROM observed.source_revision
+       OR observed.observation->>'interpretation_version' IS DISTINCT FROM observed.interpretation_version THEN
+        RAISE EXCEPTION 'fact_observation_source_mismatch' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS lbrain_check_observation_source ON lbrain_fact_observation_sources;
+CREATE TRIGGER lbrain_check_observation_source BEFORE INSERT OR UPDATE ON lbrain_fact_observation_sources
+    FOR EACH ROW EXECUTE FUNCTION lbrain_check_observation_source();
+
+CREATE OR REPLACE FUNCTION lbrain_link_observation_source() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP='UPDATE' THEN
+        RAISE EXCEPTION 'fact_observation_immutable' USING ERRCODE='23514';
+    END IF;
+    IF NEW.observation#>>'{proof,source_ref_id}' IS NULL THEN
+        RAISE EXCEPTION 'fact_observation_source_required' USING ERRCODE='23514';
+    END IF;
+    INSERT INTO lbrain_fact_observation_sources(observation_version,source_ref_id)
+        VALUES (NEW.version_id,NEW.observation#>>'{proof,source_ref_id}');
+    RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS lbrain_link_observation_source ON lbrain_fact_observations;
+CREATE TRIGGER lbrain_link_observation_source AFTER INSERT ON lbrain_fact_observations
+    FOR EACH ROW EXECUTE FUNCTION lbrain_link_observation_source();
+DROP TRIGGER IF EXISTS lbrain_preserve_observation ON lbrain_fact_observations;
+CREATE TRIGGER lbrain_preserve_observation BEFORE UPDATE ON lbrain_fact_observations
+    FOR EACH ROW EXECUTE FUNCTION lbrain_link_observation_source();
+
+-- 옛 관측에 근거가 없으면 migration 전체를 중단한다. dangling history를
+-- 임의 삭제하거나 nullable FK로 통과시키지 않는다.
+INSERT INTO lbrain_fact_observation_sources(observation_version,source_ref_id)
+    SELECT version_id,observation#>>'{proof,source_ref_id}' FROM lbrain_fact_observations
+    ON CONFLICT(observation_version) DO NOTHING;
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='lbrain_fact_observations'::regclass
+        AND conname='lbrain_observation_has_source') THEN
+        ALTER TABLE lbrain_fact_observations ADD CONSTRAINT lbrain_observation_has_source
+            FOREIGN KEY(version_id) REFERENCES lbrain_fact_observation_sources(observation_version)
+            DEFERRABLE INITIALLY DEFERRED;
+    END IF;
+END $$;
+
+CREATE OR REPLACE FUNCTION lbrain_preserve_fact_source() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP='UPDATE' AND ((to_jsonb(NEW)-ARRAY['state','owner_project'])
+            IS DISTINCT FROM (to_jsonb(OLD)-ARRAY['state','owner_project'])
+        OR (OLD.state='revoked' AND NEW.state<>'revoked')
+        OR (OLD.owner_project IS NOT NULL AND NEW.owner_project IS DISTINCT FROM OLD.owner_project)) THEN
+        RAISE EXCEPTION 'fact_source_immutable' USING ERRCODE='23514';
+    END IF;
+    IF NEW.content_hash IS DISTINCT FROM
+        'sha256:' || encode(sha256(convert_to(NEW.redacted_content,'UTF8')),'hex') THEN
+        RAISE EXCEPTION 'fact_source_content_hash_mismatch' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS lbrain_preserve_fact_source ON lbrain_fact_source_receipts;
+CREATE TRIGGER lbrain_preserve_fact_source BEFORE INSERT OR UPDATE ON lbrain_fact_source_receipts
+    FOR EACH ROW EXECUTE FUNCTION lbrain_preserve_fact_source();
+
+CREATE TABLE IF NOT EXISTS lbrain_fact_source_events (
+    event_id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    source_ref_id VARCHAR(180) NOT NULL UNIQUE REFERENCES lbrain_fact_source_receipts(source_ref_id),
+    project VARCHAR(64) NOT NULL,
+    last_fact_key VARCHAR(64) NOT NULL DEFAULT '',
+    last_policy_id VARCHAR(128) NOT NULL DEFAULT '',
+    expansion_done BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS lbrain_fact_source_commands (
+    command_id VARCHAR(71) PRIMARY KEY,
+    request_hash VARCHAR(71) NOT NULL,
+    result JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS lbrain_fact_source_targets (
+    event_id UUID NOT NULL REFERENCES lbrain_fact_source_events(event_id),
+    fact_key VARCHAR(64) NOT NULL REFERENCES lbrain_fact_scopes(fact_key),
+    policy_id VARCHAR(128) NOT NULL DEFAULT '',
+    task_id VARCHAR(64) REFERENCES lbrain_recheck_tasks(task_id),
+    state VARCHAR(16) NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','blocked','queued','expanded','covered')),
+    reason_code VARCHAR(64) NOT NULL DEFAULT '',
+    last_policy_id VARCHAR(128) NOT NULL DEFAULT '',
+    next_check_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    attempt_count BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY(event_id,fact_key,policy_id)
+);
+CREATE INDEX IF NOT EXISTS idx_lbrain_fact_source_targets_due
+    ON lbrain_fact_source_targets(next_check_at) WHERE state IN ('pending','blocked');
+
+CREATE OR REPLACE FUNCTION lbrain_plan_new_rule_source_targets() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO lbrain_fact_source_targets(event_id,fact_key,policy_id)
+        SELECT DISTINCT e.event_id,NEW.fact_key,NEW.policy_id
+        FROM lbrain_fact_source_events e JOIN lbrain_fact_observation_sources s ON s.source_ref_id=e.source_ref_id
+        JOIN lbrain_fact_assertions a ON a.observation_version=s.observation_version
+        WHERE e.project=NEW.project AND a.fact_key=NEW.fact_key ON CONFLICT DO NOTHING;
+    RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS lbrain_plan_new_rule_source_targets ON lbrain_fact_admission_rules;
+CREATE TRIGGER lbrain_plan_new_rule_source_targets AFTER INSERT ON lbrain_fact_admission_rules
+    FOR EACH ROW EXECUTE FUNCTION lbrain_plan_new_rule_source_targets();
+
+CREATE OR REPLACE FUNCTION lbrain_record_source_revocation() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.owner_project IS NULL THEN
+        RETURN NEW; -- 참조가 없던 receipt의 tombstone은 향후 authority에 사용될 수 없다.
+    END IF;
+    INSERT INTO lbrain_fact_source_events(source_ref_id,project)
+        VALUES (NEW.source_ref_id,NEW.owner_project) ON CONFLICT DO NOTHING;
+    -- worker보다 먼저 새 조회와 cursor/cache에 철회가 보이도록 generation도
+    -- 같은 transaction에서 올린다. callback/모델 호출은 trigger에 넣지 않는다.
+    INSERT INTO lbrain_fact_project_versions(project,generation)
+        VALUES (NEW.owner_project,1)
+        ON CONFLICT(project) DO UPDATE SET generation=lbrain_fact_project_versions.generation+1;
+    RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS lbrain_record_source_revocation ON lbrain_fact_source_receipts;
+CREATE TRIGGER lbrain_record_source_revocation AFTER UPDATE OF state,owner_project ON lbrain_fact_source_receipts
+    FOR EACH ROW WHEN (NEW.state='revoked' AND (OLD.state<>'revoked'
+        OR (OLD.owner_project IS NULL AND NEW.owner_project IS NOT NULL)))
+    EXECUTE FUNCTION lbrain_record_source_revocation();
+
+WITH added AS (
+    INSERT INTO lbrain_fact_source_events(source_ref_id,project)
+        SELECT source_ref_id,owner_project FROM lbrain_fact_source_receipts
+        WHERE state='revoked' AND owner_project IS NOT NULL ON CONFLICT DO NOTHING RETURNING project
+)
+INSERT INTO lbrain_fact_project_versions(project,generation)
+    SELECT DISTINCT project,1 FROM added ON CONFLICT(project)
+    DO UPDATE SET generation=lbrain_fact_project_versions.generation+1;
+
+ALTER TABLE lbrain_fact_scopes DROP CONSTRAINT IF EXISTS lbrain_fact_scopes_state_check;
+ALTER TABLE lbrain_fact_scopes ADD CONSTRAINT lbrain_fact_scopes_state_check
+    CHECK (state IN ('current','pending','disputed','invalidated'));
 CREATE TABLE IF NOT EXISTS lbrain_fact_batches (
     batch_id VARCHAR(64) PRIMARY KEY,
     project VARCHAR(64) NOT NULL,

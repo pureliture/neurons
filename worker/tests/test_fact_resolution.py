@@ -41,12 +41,19 @@ def facts(tmp_path, isolated_pg_store, request):
 
 
 def observation(f, revision, *, source="git", event=None, current=True, interpreter="v1"):
+    from psycopg.types.json import Jsonb
+    body = f"source-{source}-{revision}"
+    source_ref = "src_" + sha256_text(source + str(revision))[7:31]
+    # admission callback은 대역이지만 근거 참조/내용 보존은 실제 PG 계약을 따른다.
+    with f.store.transaction() as db:
+        db.execute("""INSERT INTO lbrain_fact_source_receipts(source_ref_id,content_hash,redacted_content,proof)
+            VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING""", (source_ref, sha256_text(body), body, Jsonb({"fixture": True})))
     return VerifiedObservation(observation_id=sha256_text(event or f"{source}-{revision}"),
         project=f.scope.project, source_id=sha256_text(source), source_revision=str(revision),
         content_hash=sha256_text(f"source-{source}-{revision}"), context_hash=f.scope.context_hash,
         interpretation_version=interpreter, current_verified=current,
         observed_at="2026-10-25T01:00:00+00:00",
-        proof={"source_ref_id": "src_" + sha256_text(source + str(revision))[7:31]})
+        proof={"source_ref_id": source_ref})
 
 
 def invoke(f, obs, value, *, key="request", target=None, request_hash=None, commit=None, scope=None):
