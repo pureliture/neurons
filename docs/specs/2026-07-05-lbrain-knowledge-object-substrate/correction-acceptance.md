@@ -7,7 +7,7 @@
 | ID | 필수 결과 | 현재 증거와 남은 범위 |
 | --- | --- | --- |
 | G01 | 복수 사실별 변경안·근거 제출, exact target 또는 설명으로 기존 target 검색 | v2 batch·기존 값/불일치/제안/근거와 정확한 title/summary 검색 구현. 직접 검증 값과 제안 값이 달라도 결과를 구분한다. 일반 의미 검색은 남음 |
-| G02 | 코드 검증과 실제 판단 모델 연결, 별도 평가에서 오교정과 정상 교정 모두 검사 | typed Decisions 연결 구현. v2 독립 정상 허용 1/4·잘못된 허용 0/12, v3 새 48건에서 7/16·0/32. 배타적 choice v4는 기존 76건으로 고정 후 새 40건에서 정상 허용 12/16·잘못된 허용 0/24로 아직 미통과. 실제 교정 작업자 연결 필요 |
+| G02 | 코드 검증과 실제 판단 모델 연결, 별도 평가에서 오교정과 정상 교정 모두 검사 | typed Decisions/choice 연결 구현. v2·v3·v4에 이어 단일 지지 정책을 기존 116건으로 고정 후 새 40건에서 정상 허용 18/20·잘못된 허용 1/20으로 미통과. source capability의 코드 검사와 실제 하이브리드 작업자 연결 필요 |
 | G03 | 같은 관측의 교정·수집·재수집이 합류 | 공통 fact/관측/해석/판단 코어와 Git JSON 교정·수집·관리 대상 autopilot 합류 구현. native ID의 Couch→PG→정규 intake→관리 대상 fact queue 연결 검증. native는 trigger로 보존하고 현재 값은 독립 Git 검증. 일반 native 근거 자체의 의미 검증과 동일 관측 합류는 남음 |
 | G04 | 과거 지연 입력의 역전 방지와 실제 후속 변경의 반영 | 실제 Git+PG에서 지연된 ancestor의 history 연결, 코어에서 새로운 현재 관측의 rollback 확인. 일반 세션 전체 경로는 남음 |
 | G05 | 동일 사실의 단일 current, 복수 필드·중복 카드·동시 writer 처리 | 공통 head·다른 필드의 lineage 재검증·연결된 중복 카드의 현재 표시·동시 key 처리 구현. 연결된 authority의 기존 steward 우회 거부. 아직 식별하지 않은 신규 중복과 모든 일반 writer는 남음 |
@@ -73,3 +73,5 @@ native 관측의 source 보존과 실제 Couch/PG intake 증거는 [관측 출�
 선택 모델의 새 독립 평가와 미통과 원인은 [판단 v3 평가](../../validation/2026-10-26-lbrain-judgment-v3-evaluation.md)를 따른다. 실호출 성공과 의미 판단 기준의 통과를 구분한다.
 
 배타적 관계 분류와 별도 독립 평가의 미통과 결과는 [관계 판단 v4 평가](../../validation/2026-10-26-lbrain-relation-v4-evaluation.md)에 기록한다.
+
+단일 지지 정책의 잘못된 허용과 source capability 연결의 필요성은 [단일 지지 평가](../../validation/2026-10-26-lbrain-relation-support-evaluation.md)에 기록한다.
