@@ -443,6 +443,137 @@ CREATE TABLE IF NOT EXISTS lbrain_fact_project_versions (
     generation BIGINT NOT NULL DEFAULT 0
 );
 
+-- 공통 교정만 managed card의 내용/상태를 바꾼다. 과거 resolution ID의 재사용은
+-- 허용하지 않으며 card, intent, resolution은 같은 transaction에서 commit한다.
+CREATE TABLE IF NOT EXISTS lbrain_fact_mutation_intents (
+    resolution_id VARCHAR(64) PRIMARY KEY REFERENCES lbrain_fact_resolutions(resolution_id)
+        DEFERRABLE INITIALLY DEFERRED,
+    fact_key VARCHAR(64) NOT NULL REFERENCES lbrain_fact_scopes(fact_key),
+    transaction_id TEXT NOT NULL,
+    target_memory_id VARCHAR(64) NOT NULL REFERENCES memory_cards(memory_id),
+    candidate_memory_id VARCHAR(64) NOT NULL REFERENCES memory_cards(memory_id)
+        DEFERRABLE INITIALLY DEFERRED,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+-- 오래된 Repeatable Read snapshot도 신규 관리 대상을 누락하지 못하게 한다.
+-- scope 등록이 epoch를 바꾸면 과거 snapshot의 writer는 serialization 실패한다.
+CREATE TABLE IF NOT EXISTS lbrain_fact_guard_epoch (
+    singleton BOOLEAN PRIMARY KEY CHECK (singleton),
+    generation BIGINT NOT NULL DEFAULT 0
+);
+INSERT INTO lbrain_fact_guard_epoch(singleton) VALUES (TRUE) ON CONFLICT DO NOTHING;
+
+-- queue 대기 중에는 아직 fact head가 없을 수 있다. 첫 요청 수락 시 서버가
+-- 확정한 정확한 대상 범위를 등록하여 그 사이의 일반 승인도 막는다.
+CREATE TABLE IF NOT EXISTS lbrain_fact_admission_rules (
+    project VARCHAR(64) NOT NULL,
+    policy_id VARCHAR(128) NOT NULL,
+    policy_version VARCHAR(71) NOT NULL,
+    fact_key VARCHAR(64) NOT NULL,
+    target_memory_id VARCHAR(64) NOT NULL REFERENCES memory_cards(memory_id),
+    target_title TEXT NOT NULL,
+    card_type VARCHAR(32) NOT NULL,
+    field_path VARCHAR(128) NOT NULL,
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    PRIMARY KEY(project,policy_id),
+    UNIQUE(project,target_title,card_type,field_path)
+);
+
+CREATE OR REPLACE FUNCTION lbrain_fact_scope_guard_epoch() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE lbrain_fact_guard_epoch SET generation=generation+1 WHERE singleton;
+    RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS lbrain_fact_scope_guard_epoch ON lbrain_fact_scopes;
+CREATE TRIGGER lbrain_fact_scope_guard_epoch AFTER INSERT ON lbrain_fact_scopes
+    FOR EACH ROW EXECUTE FUNCTION lbrain_fact_scope_guard_epoch();
+DROP TRIGGER IF EXISTS lbrain_fact_rule_guard_epoch ON lbrain_fact_admission_rules;
+CREATE TRIGGER lbrain_fact_rule_guard_epoch AFTER INSERT OR UPDATE OR DELETE ON lbrain_fact_admission_rules
+    FOR EACH ROW EXECUTE FUNCTION lbrain_fact_scope_guard_epoch();
+
+CREATE OR REPLACE FUNCTION lbrain_guard_managed_card() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+DECLARE
+    managed BOOLEAN;
+    admitted BOOLEAN;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        IF EXISTS (SELECT 1 FROM lbrain_fact_members WHERE memory_id=OLD.memory_id)
+           OR EXISTS (SELECT 1 FROM lbrain_fact_scopes WHERE memory_id=OLD.memory_id)
+           OR EXISTS (SELECT 1 FROM lbrain_fact_admission_rules WHERE target_memory_id=OLD.memory_id) THEN
+            RAISE EXCEPTION 'managed_fact_history_retention_required' USING ERRCODE='23514';
+        END IF;
+        RETURN OLD;
+    END IF;
+    IF TG_OP = 'UPDATE' THEN
+        -- Embedding lease/CAS는 사실의 내용이나 수명 상태를 바꾸지 않는다.
+        IF (to_jsonb(NEW) - ARRAY['embedding','embedding_model','embedding_state','embedding_revision','updated_at'])
+           = (to_jsonb(OLD) - ARRAY['embedding','embedding_model','embedding_state','embedding_revision','updated_at']) THEN
+            RETURN NEW;
+        END IF;
+    END IF;
+    PERFORM generation FROM lbrain_fact_guard_epoch WHERE singleton FOR SHARE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'managed_fact_guard_unavailable' USING ERRCODE='23514';
+    END IF;
+    SELECT EXISTS (SELECT 1 FROM lbrain_fact_members WHERE memory_id=NEW.memory_id)
+        OR EXISTS (SELECT 1 FROM lbrain_fact_scopes WHERE memory_id=NEW.memory_id)
+        OR EXISTS (SELECT 1 FROM lbrain_fact_admission_rules WHERE target_memory_id=NEW.memory_id)
+        INTO managed;
+    IF NEW.authorization_status='active' AND NEW.currentness='current' THEN
+        managed := managed OR EXISTS (
+            SELECT 1 FROM lbrain_fact_members m JOIN memory_cards c ON c.memory_id=m.memory_id
+            WHERE c.project=NEW.project AND c.card_type=NEW.card_type AND c.title=NEW.title)
+            OR EXISTS (SELECT 1 FROM lbrain_fact_admission_rules r WHERE r.project=NEW.project
+                AND r.card_type=NEW.card_type AND r.target_title=NEW.title);
+    END IF;
+    IF managed THEN
+        SELECT EXISTS (SELECT 1 FROM lbrain_fact_mutation_intents i
+            WHERE i.resolution_id=current_setting('neurons.fact_resolution_id',TRUE)
+              AND i.transaction_id=pg_current_xact_id()::text
+              AND NEW.memory_id IN (i.target_memory_id,i.candidate_memory_id)) INTO admitted;
+        IF NOT admitted THEN
+            RAISE EXCEPTION 'managed_fact_resolution_required' USING ERRCODE='23514';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS lbrain_guard_managed_card ON memory_cards;
+CREATE TRIGGER lbrain_guard_managed_card BEFORE INSERT OR UPDATE OR DELETE ON memory_cards
+    FOR EACH ROW EXECUTE FUNCTION lbrain_guard_managed_card();
+
+CREATE OR REPLACE FUNCTION lbrain_check_fact_mutation_result() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM lbrain_fact_resolutions r WHERE r.resolution_id=NEW.resolution_id
+        AND r.fact_key=NEW.fact_key AND r.terminal
+        AND r.result->>'action'='replace_current'
+        AND r.result->>'authority_write_performed'='true'
+        AND r.result->>'successor_memory_id'=NEW.candidate_memory_id
+        AND r.result->'current'->>'memory_id'=NEW.candidate_memory_id) THEN
+        RAISE EXCEPTION 'managed_fact_resolution_result_required' USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END;
+$$;
+DROP TRIGGER IF EXISTS lbrain_check_fact_mutation_result ON lbrain_fact_mutation_intents;
+CREATE CONSTRAINT TRIGGER lbrain_check_fact_mutation_result
+    AFTER INSERT OR UPDATE ON lbrain_fact_mutation_intents DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION lbrain_check_fact_mutation_result();
+
+CREATE OR REPLACE FUNCTION lbrain_preserve_fact_mutation_intent() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'managed_fact_history_retention_required' USING ERRCODE='23514';
+END;
+$$;
+DROP TRIGGER IF EXISTS lbrain_preserve_fact_mutation_intent ON lbrain_fact_mutation_intents;
+CREATE TRIGGER lbrain_preserve_fact_mutation_intent BEFORE UPDATE OR DELETE ON lbrain_fact_mutation_intents
+    FOR EACH ROW EXECUTE FUNCTION lbrain_preserve_fact_mutation_intent();
+
 -- 명시적으로 허용된 source adapter의 redacted 근거만 보존한다.
 CREATE TABLE IF NOT EXISTS lbrain_fact_source_receipts (
     source_ref_id VARCHAR(180) PRIMARY KEY,

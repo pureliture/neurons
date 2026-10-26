@@ -10,7 +10,7 @@
 | G02 | 코드 검증과 실제 판단 모델 연결, 별도 평가에서 오교정과 정상 교정 모두 검사 | typed Decisions/choice 연결 구현. v2·v3·v4에 이어 단일 지지 정책을 기존 116건으로 고정 후 새 40건에서 정상 허용 18/20·잘못된 허용 1/20으로 미통과. source capability의 코드 검사와 실제 하이브리드 작업자 연결 필요 |
 | G03 | 같은 관측의 교정·수집·재수집이 합류 | 공통 fact/관측/해석/판단 코어와 Git JSON 교정·수집·관리 대상 autopilot 합류 구현. native ID의 Couch→PG→정규 intake→관리 대상 fact queue 연결 검증. native는 trigger로 보존하고 현재 값은 독립 Git 검증. 일반 native 근거 자체의 의미 검증과 동일 관측 합류는 남음 |
 | G04 | 과거 지연 입력의 역전 방지와 실제 후속 변경의 반영 | 실제 Git+PG에서 지연된 ancestor의 history 연결, 코어에서 새로운 현재 관측의 rollback 확인. 일반 세션 전체 경로는 남음 |
-| G05 | 동일 사실의 단일 current, 복수 필드·중복 카드·동시 writer 처리 | 공통 head·다른 필드의 lineage 재검증·연결된 중복 카드의 현재 표시·동시 key 처리 구현. 연결된 authority의 기존 steward 우회 거부. 아직 식별하지 않은 신규 중복과 모든 일반 writer는 남음 |
+| G05 | 동일 사실의 단일 current, 복수 필드·중복 카드·동시 writer 처리 | 공통 head·다른 필드의 lineage 재검증·연결된 중복 카드의 현재 표시·동시 key 처리 구현. 알려진 대상의 직접 DML·같은 식별자의 새 current·최초 queue 대기·옛 snapshot 우회를 DB에서 차단. 아직 식별하지 않은 의미상 중복과 일반 writer의 전체 자동 합류는 남음 |
 | G06 | 근거 내용·버전·관측 시각과 모든 교정 이력 보존 | Git redacted source receipt·관측·assertion·resolution/event와 canonical 이력 보존. retention 참조 보호와 GC 경합 검사 필요 |
 | G07 | 예약·장애·설정 차단·저장 직후 종료·만료 후 복구와 독립 감지 | 공통 coordinator를 내구성 queue/worker에 연결. source 복구와 commit 참조 복구 검사. 전체 운영 자동 실행·독립 감시와 의미 경로 증거는 남음 |
 | G08 | context/list/query와 graph·embedding 지연·역순 작업에서도 올바른 조회 | 최종 fact view·generation·cursor와 실제 query를 연결. 실제 Neo4j에서 projection 전 누락을 수정하고 종료/복구·역순/중복·만료 generation을 확인. 실제 embedding provider·미식별 session chunk·장기 수렴은 남음 |
@@ -75,3 +75,5 @@ native 관측의 source 보존과 실제 Couch/PG intake 증거는 [관측 출�
 배타적 관계 분류와 별도 독립 평가의 미통과 결과는 [관계 판단 v4 평가](../../validation/2026-10-26-lbrain-relation-v4-evaluation.md)에 기록한다.
 
 단일 지지 정책의 잘못된 허용과 source capability 연결의 필요성은 [단일 지지 평가](../../validation/2026-10-26-lbrain-relation-support-evaluation.md)에 기록한다.
+
+관리 대상의 일반 writer 우회 차단과 남은 식별 범위는 [DB writer 보호 검사](../../validation/2026-10-26-lbrain-fact-writer-guard.md)에 기록한다.

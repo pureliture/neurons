@@ -133,6 +133,7 @@ class FactCorrectionCoordinator:
                     continue
                 try:
                     target = self._target(cur, rule, change)
+                    self._register_rule(cur, rule, target)
                     job = {"schema_version": "fact_source_job.v1", "policy_id": rule.policy_id,
                         "fact_key": rule.scope.key,
                         "policy_version": rule.version, "lane": lane, "change": change.model_dump(),
@@ -166,6 +167,7 @@ class FactCorrectionCoordinator:
         card = rows[0]["steward_envelope"]
         if card.get("authorization_status") != "active" or card.get("title") != rule.target_title:
             raise FactResolutionError("target_scope_mismatch")
+        self._check_binding(cur, rule, card)
         if card.get("currentness") == "superseded" and change.target_memory_id:
             if change.expected_content_hash != card["content_hash"]:
                 raise FactResolutionError("target_revision_conflict")
@@ -184,6 +186,35 @@ class FactCorrectionCoordinator:
         if card.get("typed_payload", {}).get(rule.field_path.split(".", 1)[1]) != change.old_value:
             raise FactResolutionError("target_value_conflict")
         return card
+
+    @staticmethod
+    def _check_binding(cur, rule, card):
+        cur.execute("SELECT fact_key FROM lbrain_fact_members WHERE memory_id=%s AND field_path=%s",
+            (card["memory_id"], rule.field_path))
+        bound = cur.fetchone()
+        if bound and bound["fact_key"] != rule.scope.key:
+            raise FactResolutionError("target_scope_mismatch")
+
+    def _register_rule(self, cur, rule, card):
+        self._check_binding(cur, rule, card)
+        # 실행 중인 옛 worker가 새 설정을 덮어쓰지 않는다. 설정 변경/철회는
+        # 별도 관리 작업에서 CAS한다. 읽기 전용 constructor는 DB를 바꾸지 않는다.
+        cur.execute("""INSERT INTO lbrain_fact_admission_rules
+            (project,policy_id,policy_version,fact_key,target_memory_id,target_title,card_type,field_path)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+            (rule.scope.project, rule.policy_id, rule.version, rule.scope.key,
+                card["memory_id"], rule.target_title, card["card_type"], rule.field_path))
+        if not self._registered_rule(cur, rule, card_type=card["card_type"]):
+            raise FactResolutionError("fact_policy_changed")
+
+    @staticmethod
+    def _registered_rule(cur, rule, *, card_type=None):
+        cur.execute("SELECT * FROM lbrain_fact_admission_rules WHERE project=%s AND policy_id=%s",
+            (rule.scope.project, rule.policy_id))
+        row = cur.fetchone()
+        return bool(row and row["active"] and row["policy_version"] == rule.version
+            and row["fact_key"] == rule.scope.key and row["target_title"] == rule.target_title
+            and row["field_path"] == rule.field_path and (card_type is None or row["card_type"] == card_type))
 
     def worker(self, *, project, worker_id, retry_seconds=60):
         return RecheckWorker(queue=self.queue, project=project, worker_id=worker_id,
@@ -232,6 +263,7 @@ class FactCorrectionCoordinator:
                     results.append({"policy_id": rule.policy_id, "status": "needs_review", "reason_code": "existing_target_not_unique"})
                     continue
                 card = rows[0]["steward_envelope"]
+                self._register_rule(cur, rule, card)
                 request = {"schema_version": "fact_source_job.v1", "policy_id": rule.policy_id,
                     "fact_key": rule.scope.key,
                     "policy_version": rule.version, "lane": "intake", "initial_memory_id": card["memory_id"],
@@ -260,6 +292,9 @@ class FactCorrectionCoordinator:
         rule = self.policies.get(request["policy_id"])
         if not rule or rule.version != request["policy_version"]:
             raise RecheckBlocked("fact_policy_changed")
+        with self.store._scope() as db, db.cursor(row_factory=dict_row) as cur:
+            if not self._registered_rule(cur, rule):
+                raise RecheckBlocked("fact_policy_changed")
         try:
             descriptor = request["change"]["evidence"]
             if request["lane"] == "intake" and descriptor == {"mode": "server_current"}:
@@ -317,6 +352,8 @@ class FactCorrectionCoordinator:
             return False
         rule = admitted_rule
         with db.cursor(row_factory=dict_row) as cur:
+            if not self._registered_rule(cur, rule):
+                return False
             cur.execute("SELECT state FROM lbrain_fact_source_receipts WHERE source_ref_id=%s",
                 (observation.proof["source_ref_id"],))
             receipt = cur.fetchone()

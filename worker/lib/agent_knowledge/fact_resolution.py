@@ -431,6 +431,13 @@ class StewardFactCommit:
         candidate_id = "mem_fact_" + request_hash[7:47]
         decision_id = "factdec_" + request_hash[7:47]
         candidate = _candidate(current, rule, value, [proof], candidate_id, request_hash, decision_id)
+        # GUC만으로는 과거 resolution을 재사용할 수 있다. 이번 transaction과
+        # 실제 target/successor를 묶고, commit 시 최종 resolution FK도 검증한다.
+        connection.execute("""INSERT INTO lbrain_fact_mutation_intents
+            (resolution_id,fact_key,transaction_id,target_memory_id,candidate_memory_id)
+            SELECT %s,fact_key,pg_current_xact_id()::text,%s,%s
+            FROM lbrain_fact_members WHERE memory_id=%s AND field_path=%s""",
+            (resolution_id, current["memory_id"], candidate_id, current["memory_id"], self.field_path))
         store.put_steward_proposal(candidate)
 
         def transform(proposal, target):

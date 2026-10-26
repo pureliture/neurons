@@ -8,6 +8,8 @@
 
 현재 값 변경은 기존 `correct_fact` authority transaction을 사용한다. successor·supersession·audit·embedding/graph outbox와 fact head·판단 결과·재검토 완료 참조가 함께 저장된다. 이미 공통 fact에 연결된 카드의 기존 steward authority 변경은 resolution transaction을 통과해야 한다. 아직 식별하지 않은 신규 중복 후보까지 모두 차단하는 규칙은 남아 있다.
 
+후속 [DB writer 보호 검사](2026-10-26-lbrain-fact-writer-guard.md)에서 알려진 대상의 직접 SQL 변경과 같은 식별자의 새 current 생성을 DB trigger로 차단했다. 최초 queue 대기와 옛 snapshot도 보호하며 정상 embedding/CAS는 유지한다. 다른 표현의 의미상 중복 식별과 모든 writer의 자동 합류까지 완료한 것은 아니다.
+
 도착 시각은 승자 결정에 사용하지 않는다. 실제 source의 현재 branch/head를 다시 확인하고 commit ancestry를 비교한다. 같은 값이면 근거만 연결하고, 오래된 관측이면 이력으로 남긴다. 새 관측으로 확인한 실제 rollback은 반영할 수 있다. 다른 값의 근거가 동시에 현재 유효하면 `disputed`로 보존한다. 현재 유효한 반대 근거가 남아 있는 동안 같은 값을 다시 제출해도 충돌을 해소하지 않는다. 이 상태의 제품 읽기 정책 B는 아직 선택하지 않았다.
 
 같은 카드의 다른 필드가 먼저 바뀌었으면 후속 lineage의 모든 revision에서 지정 필드가 그대로였는지 확인한다. 확인될 때만 현재 카드로 이어가 두 변경을 모두 보존한다. 지정 필드까지 바뀐 stale 요청은 거부한다. 이미 같은 사실을 교정한 뒤 원래 revision으로 도착한 요청은 source가 현재 값과 일치함을 독립 확인한 경우에만 근거를 연결한다.
