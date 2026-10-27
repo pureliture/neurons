@@ -6,8 +6,8 @@
 
 | ID | 필수 결과 | 현재 증거와 남은 범위 |
 | --- | --- | --- |
-| G01 | 복수 사실별 변경안·근거 제출, exact target 또는 설명으로 기존 target 검색 | v2 batch·기존 값/불일치/제안/근거와 정확한 title/summary 검색 구현. 직접 검증 값과 제안 값이 달라도 결과를 구분한다. 일반 의미 검색은 남음 |
-| G02 | 코드 검증과 실제 판단 모델 연결, 별도 평가에서 오교정과 정상 교정 모두 검사 | Git 값 선택을 실제 worker/MCP HTTP에 연결. 관찰 참조 모듈을 포함한 새 코드 identity의 독립 v5 40건에서 정상 20/20·잘못된 허용 0/20, threshold 0.8 유지. redaction으로 중단된 v4는 제외하고 앞선 원시 모델 오허용·v3 정상 보류도 유지. 실제 모델의 충돌·합의 자동 처리 확인. 일반 native·운영 근거의 의미 admission은 남음 |
+| G01 | 복수 사실별 변경안·근거 제출, exact target 또는 설명으로 기존 target 검색 | v2 batch·기존 값/불일치/제안/근거와 exact 검색 구현. 등록 source/fact 정책 범위에서 설명 검색·완전성 검사·범위 code gate·별도 의미 판단을 연결하고 실제 MCP HTTP 교정, 불확실 보류·판단 재사용과 완전한 부재를 확인. 직접 검증 값과 제안 값을 구분한다. 임의 사실/source 정책으로의 일반화는 남음 |
+| G02 | 코드 검증과 실제 판단 모델 연결, 별도 평가에서 오교정과 정상 교정 모두 검사 | 새 코드 identity에서 대상 독립 v3 정상 18/20·잘못된 선택 0건, 값 선택 독립 v6 정상 20/20·잘못된 허용 0/20을 확인. 두 client/질문을 분리하고 threshold 0.8/fallback 없음 유지. 이전 실패·중단·정상 보류를 모두 보존하고 개발 자료로 재사용한 표본은 독립 평가에서 제외. 실제 모델의 교정·충돌·합의·불확실 보류·부재 처리를 확인. 일반 native·운영 근거의 의미 admission은 남음 |
 | G03 | 같은 관측의 교정·수집·재수집이 합류 | 공통 fact 코어·Git·관리 대상 autopilot과 native source→intake 연결에 더해, 서버 발급 관찰 참조를 수집 전 교정과 지연 native 세션이 같은 관찰/assertion에 합류하는 경로를 검증. 5개 provider 형식·실제 Couch/PG/HTTP/CLI에서 추가 authority 없는 합류 확인. 임의 native 응답의 일반 의미 admission은 남음 |
 | G04 | 과거 지연 입력의 역전 방지와 실제 후속 변경의 반영 | 실제 Git+PG에서 지연 ancestor와 실제 ref A→B→A를 구분하고 불변 관측의 현재 재검증 확인. 일반 세션 전체 경로는 남음 |
 | G05 | 동일 사실의 단일 current, 복수 필드·중복 카드·동시 writer 처리 | 공통 head·필드 lineage·알려진 alias의 현재 표시·동시 key 처리 구현. 무관한 Git commit으로 상대 근거를 제거해 잘못 승인하던 문제를 실제 재현/수정하고 두 source의 자동 합의를 확인. 알려진 대상의 직접 DML·중복 current·최초 queue 대기·옛 snapshot 우회 차단. 미식별 의미 중복과 모든 writer 자동 합류는 남음 |

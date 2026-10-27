@@ -48,4 +48,6 @@ Ubuntu의 실제 PG·CouchDB·Neo4j 13개 모듈은 **222 passed in 187.21s**, s
 
 최종 로컬 `cd worker && uv run pytest -q`는 **5375 passed, 787 skipped in 56.46s**다. skip을 실제 연동 통과로 세지 않는다. `JAVA_HOME="$(/usr/libexec/java_home -v 25)" gradle test`는 **BUILD SUCCESSFUL**, test UP-TO-DATE다. 변경 모듈의 `uv tool run ruff check --select F ...`와 `git diff --check`도 통과했다. CI의 실제 PostgreSQL 필수 step에 대상 검색/응답 계약 모듈을 추가했다. 작업 전용 OpenRouter 임시 인증 파일을 삭제하고 부재를 확인했으며 원본 인증은 변경하지 않았다.
 
+구현 커밋 `29b3a7aacfa36e0c2be8678b40e54ba536d04b4e`의 CI 8개가 모두 성공했다. 실제 job logs는 전체 worker **5375 passed, 787 skipped (110.53s)**, 기존 PG 계약 **782 passed (102.74s)**, schema **8 passed (0.52s)**, 공통 교정/새 대상·응답 계약 **159 passed (75.13s)**, native Couch/PG **162 passed (32.98s)**다. CodeRabbit의 Draft skip은 코드 리뷰 성공으로 세지 않는다.
+
 운영 활성화·merge·운영 GC는 실행하지 않았다. rollback 시 새 대상 검색 설정을 제거하고 기존 exact 경로를 사용할 수 있지만, 저장된 판단·receipt·resolution과 보존 제약은 유지해야 한다.
