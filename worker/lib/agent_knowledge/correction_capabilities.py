@@ -89,7 +89,16 @@ class PgFactReader:
             cur.execute("""SELECT f.scope,f.memory_id,f.field_path,f.value,f.generation,c.content_hash,c.steward_envelope
                 FROM lbrain_fact_scopes f JOIN memory_cards c ON c.memory_id=f.memory_id
                 WHERE f.fact_key=%s AND f.project=%s AND c.project=%s
-                  AND c.currentness='current' AND c.authorization_status='active'""",
+                  AND c.currentness='current' AND c.authorization_status='active'
+                  AND f.state='current' AND f.head_assertion_id IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1 FROM lbrain_fact_assertions a
+                      JOIN lbrain_fact_observation_sources s ON s.observation_version=a.observation_version
+                      JOIN lbrain_fact_source_receipts r ON r.source_ref_id=s.source_ref_id
+                      WHERE a.fact_key=f.fact_key AND a.value_hash=f.value_hash AND r.state='active'
+                        AND a.state IN ('support','pending')
+                        AND (a.state='support' OR a.assertion_id=f.head_assertion_id)
+                  )""",
                 (self.scope.key, self.scope.project, self.scope.project))
             row = cur.fetchone()
         if (not row or row["scope"] != asdict(self.scope) or row["field_path"] != self.field_path

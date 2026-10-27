@@ -1,7 +1,6 @@
 """source capability를 실제 reader에 결속하고 모델 점수 이전에 범위를 검사한다."""
 from dataclasses import replace
 import json
-import os
 import uuid
 
 import pytest
@@ -12,8 +11,10 @@ from agent_knowledge.correction_capabilities import (
 )
 from agent_knowledge.correction_relation import CorrectionRelationClient, DEFAULT_CORRECTION_MODEL
 from agent_knowledge.public_safe_util import hash_payload
-from test_fact_resolution import facts, coordinator, counts
-from test_fact_resolution_graph import graph_adapter, NEO4J_URI
+from test_fact_resolution import counts
+from test_fact_resolution_graph import NEO4J_URI
+
+pytest_plugins = ("test_fact_resolution_graph",)
 
 
 def observation():
@@ -143,3 +144,62 @@ def test_actual_pg_cannot_prove_graph_state_but_direct_neo4j_read_can(coordinato
     assert result["observation"] == graph_read
     assert result["judgment"]["source_binding_hash"] == result["source_binding_hash"]
     assert counts(c.f)["steward_card_decisions"] == 2  # 판단 경로는 authority를 쓰지 않는다.
+
+
+def test_pg_fact_reader_rejects_revoked_source_before_dispatch(coordinator):
+    from test_fact_source_lifecycle import seeded
+    c = coordinator
+    source = seeded(c)
+    reader = PgFactReader(c.f.store, scope=c.rule.scope, field_path=c.rule.field_path)
+    assert reader.read().value == "ready"
+    with c.f.store.transaction() as db:
+        db.execute("UPDATE lbrain_fact_source_receipts SET state='revoked' WHERE source_ref_id=%s",
+            (source["source_ref_id"],))
+    with pytest.raises(CapabilityUnavailable, match="canonical_source_binding_unavailable"):
+        reader.read()
+
+
+def test_pg_fact_reader_rejects_disputed_head(facts):
+    from test_fact_resolution import observation, set_current, invoke, head_card
+    f = facts
+    left = observation(f, 1, source="left")
+    right = observation(f, 1, source="right")
+    set_current(f, left)
+    set_current(f, right)
+    first = invoke(f, left, "ready")
+    assert invoke(f, right, "failed", key="opposing", target=head_card(f, first))["action"] == "disputed"
+    reader = PgFactReader(f.store, scope=f.scope, field_path=f.commit.field_path)
+    with pytest.raises(CapabilityUnavailable, match="canonical_source_binding_unavailable"):
+        reader.read()
+
+
+def test_pg_fact_reader_retains_independent_active_support(facts):
+    from test_fact_resolution import observation, set_current, invoke, head_card
+    f = facts
+    left = observation(f, 1, source="left")
+    right = observation(f, 1, source="right")
+    set_current(f, left)
+    set_current(f, right)
+    first = invoke(f, left, "ready")
+    assert invoke(f, right, "ready", key="independent", target=head_card(f, first))["action"] == "attach_evidence"
+    with f.store.transaction() as db:
+        db.execute("UPDATE lbrain_fact_source_receipts SET state='revoked' WHERE source_ref_id=%s",
+            (left.proof["source_ref_id"],))
+    reader = PgFactReader(f.store, scope=f.scope, field_path=f.commit.field_path)
+    assert reader.read().value == "ready"
+
+
+def test_pg_fact_reader_discards_model_result_if_support_is_revoked_during_call(coordinator):
+    from test_fact_source_lifecycle import seeded
+    c = coordinator
+    source = seeded(c)
+    reader = PgFactReader(c.f.store, scope=c.rule.scope, field_path=c.rule.field_path)
+    observed = reader.read()
+    requirement = EvidenceRequirement(observed.capability, observed.context_hash, observed.resource_hash)
+    def revoke():
+        with c.f.store.transaction() as db:
+            db.execute("UPDATE lbrain_fact_source_receipts SET state='revoked' WHERE source_ref_id=%s",
+                (source["source_ref_id"],))
+    gate = CapabilityCheckedRelation(reader=reader, requirement=requirement, client=supported_client(revoke))
+    with pytest.raises(CapabilityUnavailable, match="canonical_source_binding_unavailable"):
+        gate.evaluate(scope_description="현재 사실", hypothesis="값은 ready다", policy_version="fixture")

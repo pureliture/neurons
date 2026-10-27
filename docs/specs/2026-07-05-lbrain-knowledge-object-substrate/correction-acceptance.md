@@ -7,7 +7,7 @@
 | ID | 필수 결과 | 현재 증거와 남은 범위 |
 | --- | --- | --- |
 | G01 | 복수 사실별 변경안·근거 제출, exact target 또는 설명으로 기존 target 검색 | v2 batch·기존 값/불일치/제안/근거와 exact 검색 구현. 등록 source/fact 정책 범위에서 설명 검색·완전성 검사·범위 code gate·별도 의미 판단을 연결하고 실제 MCP HTTP 교정, 불확실 보류·판단 재사용과 완전한 부재를 확인. 직접 검증 값과 제안 값을 구분한다. 임의 사실/source 정책으로의 일반화는 남음 |
-| G02 | 코드 검증과 실제 판단 모델 연결, 별도 평가에서 오교정과 정상 교정 모두 검사 | 현재 정책 변경 코드 identity에서 대상 독립 v4 정상 20/20·잘못된 선택 0건, 값 선택 독립 v9 정상 20/20·잘못된 허용 0건. v7의 미확인 조건 오판과 v8 실행 중단을 보존하고 개발 자료는 독립 평가에서 제외. Python 분기는 모델 앞에서 보류하며 다른 언어·조각 전체에 대한 실행 분석은 남음. threshold 0.8/fallback 없음 유지. 일반 native·운영 근거의 의미 admission은 남음 |
+| G02 | 코드 검증과 실제 판단 모델 연결, 별도 평가에서 오교정과 정상 교정 모두 검사 | 현재 reader 코드 identity에서 대상 독립 v4 정상 20/20·잘못된 선택 0건, 값 선택 독립 v10 정상 19/20·잘못된 허용 0건. v7의 미확인 조건 오판과 v8 실행 중단을 보존하고 개발 자료는 독립 평가에서 제외. Python 분기는 모델 앞에서 보류하며 다른 언어·조각 전체에 대한 실행 분석은 남음. threshold 0.8/fallback 없음 유지. 일반 native·운영 근거의 의미 admission은 남음 |
 | G03 | 같은 관측의 교정·수집·재수집이 합류 | 공통 fact 코어·Git·관리 대상 autopilot과 native source→intake 연결에 더해, 서버 발급 관찰 참조를 수집 전 교정과 지연 native 세션이 같은 관찰/assertion에 합류하는 경로를 검증. 5개 provider 형식·실제 Couch/PG/HTTP/CLI에서 추가 authority 없는 합류 확인. 임의 native 응답의 일반 의미 admission은 남음 |
 | G04 | 과거 지연 입력의 역전 방지와 실제 후속 변경의 반영 | 실제 Git+PG에서 지연 ancestor와 실제 ref A→B→A를 구분하고 불변 관측의 현재 재검증 확인. 일반 세션 전체 경로는 남음 |
 | G05 | 동일 사실의 단일 current, 복수 필드·중복 카드·동시 writer 처리 | 공통 head·필드 lineage·알려진 alias의 현재 표시·동시 key 처리 구현. 무관한 Git commit으로 상대 근거를 제거해 잘못 승인하던 문제를 실제 재현/수정하고 두 source의 자동 합의를 확인. 알려진 대상의 직접 DML·중복 current·최초 queue 대기·옛 snapshot 우회 차단. 미식별 의미 중복과 모든 writer 자동 합류는 남음 |
@@ -56,7 +56,7 @@
 | C31 | projection 장기 실패와 복구 | 실제 Neo4j 종료·실패 예약·재시작·backoff 후 수렴 확인. 장기 운영/감시·복원 검사는 남음 |
 | C32 | A→B 후 A의 오래된 재시도 | PG 코어에서 A의 불변 결과와 이후 현재 B를 구분하고 재변경하지 않음. 범용 의미 경로는 남음 |
 | C33 | 복구·재구축·backfill 재생 | 쓰기 중지된 합성 PG/Couch 복원 후 옛 교정과 지연 native 합류, 새 실제 graph 영역의 projection 역순·중복 재생이 현재 값을 되돌리지 않음을 확인. 일반 session backfill·전체 graph 재구축·동시 쓰기 중 다중 저장소 복원은 남음 |
-| C34 | 교정 전 사실에 의존한 파생물 | 미검증 |
+| C34 | 교정 전 사실에 의존한 파생물 | 실제 PG의 합성 진단에서 `derived_from` edge가 있어도 원래 사실 교정 뒤 파생 카드가 현재 조회에 남고 재검토가 예약되지 않는 결함을 확인. 구현과 연결 검증은 남음 |
 | C35 | 외부 cache·기존 prompt와 새 조회의 경계 | cache 무효화, generation/cursor, 같은 fact의 옛 표현 질의를 현재 head로 연결하는 실제 PG/Neo4j 검사 확인. 미식별 세션·외부 cache·기존 prompt 자체는 남음 |
 | C36 | 대상 부재·모호함·검색 실패·잘림 | 등록 source/fact 정책 범위의 설명 검색·PG 전체 후보 한도/legacy 불완전 차단·별도 대상 판단과 불변 결과 보존 구현. 현재 코드 identity의 독립 실제 모델 평가에서 정상 20/20·잘못된 선택 0건 확인. 일반 정책/원천으로의 확대와 전체 연결 검증은 남음 |
 
@@ -97,3 +97,7 @@ Git 내용의 의미 기반 값 선택·새 독립 실제 모델 평가·실제 
 등록 Git 정책 공표·이전 해석 정지·자동 재검토와 새 독립 평가의 범위는 [정책 재검토 검사](../../validation/2026-10-27-lbrain-policy-revalidation.md)를 따른다. 일반 parser·권한·파생물 변경의 전파로 확대하지 않는다.
 
 합성 사실의 실제 PG 백업 복원과 오래된 교정·source 수집 재생은 [PG 복원 검사](../../validation/2026-10-27-lbrain-pg-restore-replay.md)를 따른다. 일반 session·graph·Couch를 포함한 전체 복구로 확대하지 않는다.
+
+파생 기억의 감지·자동 재검토·복구 요구는 [파생 사실 재검토 계약](derived-fact-revalidation.md)을 따른다. 현재는 결함 재현과 달성 조건이며 구현 완료가 아니다.
+
+철회·충돌 상태의 PostgreSQL 사실을 검증된 source capability로 발급하지 않는 차단과 새 모델 평가는 [현재 사실 reader 검사](../../validation/2026-10-27-lbrain-canonical-reader-guard.md)를 따른다. 이것은 공개 충돌 B 정책을 선택하거나 파생물 재검토를 완료했다는 뜻이 아니다.

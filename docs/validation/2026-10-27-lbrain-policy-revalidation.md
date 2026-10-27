@@ -28,6 +28,8 @@ Python 문법으로 파싱되는 원천에 조건 분기·조건식·논리 분�
 
 새 독립 값 선택 v9는 정상 **20/20**, 잘못된 허용 **0건**, 의미 판단을 거친 거부 13건, 조건문 코드 차단 3건이다. 나머지 거부는 capability 또는 범위가 달라 코드가 차단했다. 평가 plan hash는 `sha256:f46fb3200c2fef53b619338af7deb589e87af790f0443b95412748e1c82cbe2a`, private artifact hash는 `sha256:a5f45d8d7d31627a8893dde4b13963c506e18c333836604052df55ab4cd51db3`, reported cost는 0.00031688 USD다. 새 대상 식별 v4도 정상 **20/20**, 잘못된 선택 **0건**, 의미 거부 16건으로 통과했으며 artifact hash는 `sha256:e2e76944bb91085eb5648979e12cf23cefd28c4e56aa44f5937efba2ae8b9ca6`이다. 둘 다 선택한 `perplexity/pplx-decider-flash-v1.2-20261016`의 실제 응답이며 이 표본의 통과가 모든 입력의 정확성을 보장하지는 않는다.
 
+이후 현재 사실 reader의 철회·충돌 차단을 수정해 v9의 코드 identity는 더 이상 현재 코드에 맞지 않는다. 새 독립 v10과 수정 범위는 [현재 사실 reader 검사](2026-10-27-lbrain-canonical-reader-guard.md)에 기록한다.
+
 ## 현재 검증 범위
 
 Ubuntu 전용 PostgreSQL·Couch에서 정책 공표, CAS 경합, source 부재와 복구, 이전 요청과 지연 native의 이력 연결, worker 중단·독립 감지·재시작, 완료 응답 유실을 검사했다. 정책 변경 초기 묶음은 **144 passed, 0 skipped**, 변경한 판단 질문과 코드 차단을 포함한 새 묶음은 **203 passed, 0 skipped in 210.11s**다. 두 묶음은 중복되므로 합산하지 않는다. 일부 검사에는 모델 응답 대역을 사용했으므로 실제 모델 품질을 입증하지 않는다.

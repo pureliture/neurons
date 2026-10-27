@@ -175,7 +175,7 @@ jobs:
         run: test -n "$LBRAIN_TEST_PG_DSN" && test -n "$LBRAIN_TEST_NEO4J_URI"
       - name: Actual PG authority and Neo4j graph card round trip
         working-directory: worker
-        run: uv run --group dev --extra mcp-http pytest -q -rs tests/test_pg_neo4j_card_e2e.py tests/test_fact_resolution_graph.py tests/test_graph_replay.py
+        run: uv run --group dev --extra mcp-http pytest -q -rs tests/test_pg_neo4j_card_e2e.py tests/test_fact_resolution_graph.py tests/test_graph_replay.py tests/test_correction_capabilities.py
 
   worker-postgres-parity:
     name: worker PostgreSQL parity (uv)
