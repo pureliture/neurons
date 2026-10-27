@@ -147,6 +147,12 @@ class FactSourceLifecycle:
                             target["event_id"], target["fact_key"]))
                     continue
                 rule = rules[0]
+                cur.execute("SELECT lbrain_policy_intentionally_disabled(%s,%s) AS disabled",(project,rule["policy_id"]))
+                if cur.fetchone()["disabled"]:
+                    cur.execute("""UPDATE lbrain_fact_source_targets SET state='covered',reason_code='policy_disabled',
+                        attempt_count=attempt_count+1 WHERE event_id=%s AND fact_key=%s AND policy_id=%s""",
+                        (target["event_id"],target["fact_key"],target["policy_id"]))
+                    continue
                 request = {"schema_version": "fact_source_job.v1", "policy_id": rule["policy_id"],
                     "fact_key": head["fact_key"], "policy_version": rule["policy_version"], "lane": "intake",
                     "initial_memory_id": head["memory_id"], "change": {"proposed_value": head["value"],
@@ -193,6 +199,7 @@ class FactSourceLifecycle:
                native_source_key=None):
         from .recheck_scheduler import inspect_recheck_health
         from .fact_verification import FactVerificationService
+        from .fact_policy_lifecycle import FactPolicyLifecycle
         from .postgres_store.pgvector_store import PgVectorStore
         with self.store._scope() as db, db.cursor(row_factory=dict_row) as cur:
             if self.store.connection is None:
@@ -207,6 +214,8 @@ class FactSourceLifecycle:
             reviews = inspect_recheck_health(PgRecheckQueue(PgVectorStore(connection=db)), project=project,
                 heartbeat_grace=heartbeat_grace, overdue_grace=overdue_grace, pending_age_seconds=pending_age_seconds)
             verifications = FactVerificationService.health_on(db, project=project, overdue_grace=overdue_grace)
+            policy_reviews = FactPolicyLifecycle.health_on(db,project=project,overdue_grace=overdue_grace,
+                pending_age_seconds=pending_age_seconds)
             cur.execute("""SELECT count(*) AS configured,
                 count(*) FILTER (WHERE checked_at IS NULL OR reason_code<>'' OR
                     checked_at<clock_timestamp()-(%s * interval '1 second')) AS unhealthy
@@ -216,8 +225,9 @@ class FactSourceLifecycle:
             native_sources=cur.fetchone()
             native_sources['missing_required']=bool(native_source_key and not native_sources['configured'])
         return {"pending_events": events, "pending_targets": targets, "reviews": reviews,
-            "verifications": verifications,"native_sources":native_sources,
+            "verifications": verifications,"native_sources":native_sources,"policy_reviews":policy_reviews,
             "attention_required": bool(events or targets or reviews["attention_required"] or verifications["attention_required"]
+                or policy_reviews["attention_required"] or (policy_reviews["unfinished"] and not reviews["heartbeat_recent"])
                 or native_sources["unhealthy"] or native_sources['missing_required'])}
 
 
@@ -228,6 +238,7 @@ def main(argv=None):
     from psycopg.conninfo import conninfo_to_dict, make_conninfo
     from .fact_correction_coordinator import FactCorrectionCoordinator, load_configuration
     from .fact_verification import FactVerificationService
+    from .fact_policy_lifecycle import FactPolicyLifecycle
     from .postgres_store.pgvector_store import PgVectorStore
     parser = argparse.ArgumentParser(description="근거 철회·영향 재검토 worker와 독립 감시")
     parser.add_argument("mode", choices=("revoke", "worker", "monitor"))
@@ -293,6 +304,7 @@ def main(argv=None):
             else:
                 coordinator.queue.heartbeat(project=args.project,worker_id=args.worker_id)
                 result = {"dispatch": service.dispatch_once(project=args.project, retry_seconds=args.retry_seconds),
+                    "policy_reviews":FactPolicyLifecycle(coordinator).dispatch_once(project=args.project,retry_seconds=args.retry_seconds),
                     "verification": FactVerificationService(store).dispatch_once(project=args.project, retry_seconds=args.retry_seconds),
                     "native_discovery":native_bridge.dispatch_once(project=args.project) if native_bridge else {"status":"unconfigured"},
                     "review": review_worker.run_once()}

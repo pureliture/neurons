@@ -11,7 +11,7 @@ from agent_knowledge.correction_capabilities import CapabilityUnavailable, Evide
 from agent_knowledge.correction_relation import CorrectionRelationClient, DEFAULT_CORRECTION_MODEL, questions
 from agent_knowledge.correction_relation_policy import RelationSupportPolicy
 from agent_knowledge.public_safe_util import hash_payload, sha256_text
-from test_fact_resolution import facts, coordinator, counts
+from test_fact_resolution import facts, coordinator, counts  # noqa: F401
 
 MODEL = DEFAULT_CORRECTION_MODEL + "-20261016"
 
@@ -76,7 +76,7 @@ def test_profile_recomputes_criteria_and_rejects_runtime_changes(unit_profile, m
         semantic.load_validated_profile(path, expected_hash=digest)
 
 
-@pytest.mark.parametrize("change", ["bytes", "false_positive", "overlap", "missing_result", "wrong_model"])
+@pytest.mark.parametrize("change", ["bytes", "false_positive", "overlap", "missing_result", "wrong_model", "development"])
 def test_profile_rejects_unproven_validation(unit_profile, change):
     path, digest = unit_profile
     report = json.loads(path.read_text())
@@ -88,6 +88,7 @@ def test_profile_rejects_unproven_validation(unit_profile, change):
         elif change == "overlap": report["development_case_hashes"].append(report["results"][0]["case_hash"])
         elif change == "missing_result": report["results"][30]["selection"]["judgments"]["a"].pop("relation")
         elif change == "wrong_model": report["resolved_model"] = DEFAULT_CORRECTION_MODEL + "-other"
+        elif change == "development": report["execution"] = "development_openrouter"
         path.write_text(json.dumps(report, ensure_ascii=False))
         digest = sha256_text(path.read_text())
     with pytest.raises(CapabilityUnavailable, match="semantic_profile_unvalidated"):
@@ -102,6 +103,22 @@ def test_multiple_supported_values_are_not_resolved_by_candidate_order():
         scope_description="단위 범위", claims=[["a", "값은 A다"], ["b", "값은 B다"]],
         policy=candidate_policy(), policy_version="unit", client=client_for(lambda state: True))
     assert selection["value"] is None and selection["reason_code"] == "semantic_values_conflict"
+
+
+@pytest.mark.parametrize("source", [
+    "selected_name = primary_name if external_mode else secondary_name\n",
+    "if flags.enabled:\n    result = 'enabled'\nelse:\n    result = 'disabled'\n",
+    "result = supplied_value or 'default'\n",
+])
+def test_conditional_python_is_held_before_the_model_even_if_it_would_support_a_value(source):
+    reader = Reader(source)
+    observed = reader.read()
+    with pytest.raises(CapabilityUnavailable, match="source_conditional_execution_unverifiable"):
+        semantic.select_value(reader=reader,
+            requirement=EvidenceRequirement(observed.capability, observed.context_hash, observed.resource_hash),
+            scope_description="실제 선택 결과", claims=[["a", "결과는 A다"], ["b", "결과는 B다"]],
+            policy=candidate_policy(), policy_version="unit", client=client_for(lambda state: True,
+                on_call=lambda state: pytest.fail("분기 원천에서 모델 호출 금지")))
 
 
 def test_json_wrapped_yaml_does_not_become_a_false_windows_path():
@@ -124,7 +141,7 @@ def test_structured_premise_still_rejects_private_leaf_before_transport(private)
 
 
 @pytest.fixture
-def semantic_coordinator(coordinator, unit_profile):
+def semantic_coordinator(coordinator, unit_profile):  # noqa: F811
     from agent_knowledge.fact_correction_coordinator import FactCorrectionCoordinator, GitSemanticFactPolicy
     from test_correction_sources import git
     c = coordinator

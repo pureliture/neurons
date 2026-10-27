@@ -92,6 +92,7 @@ def freeze(fixture):
     )
     development += cases(Path(__file__).with_name("correction_target_holdout.json"))
     development += cases(Path(__file__).with_name("correction_target_v2_holdout.json"))
+    development += cases(Path(__file__).with_name("correction_target_v3_holdout.json"))
     hashes = [hash_payload(case) for case in fixture]
     excluded = sorted({hash_payload(case) for case in development})
     excluded_ids = sorted({case["id"] for case in development})
@@ -128,7 +129,7 @@ def main(argv=None):
     parser.add_argument(
         "--fixture",
         type=Path,
-        default=Path(__file__).with_name("correction_target_v3_holdout.json"),
+        default=Path(__file__).with_name("correction_target_v4_holdout.json"),
     )
     parser.add_argument("--plan", type=Path)
     parser.add_argument("--output", type=Path, required=True)

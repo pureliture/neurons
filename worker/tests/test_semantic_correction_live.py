@@ -285,3 +285,58 @@ def test_live_unrelated_target_absence_never_creates_a_fact(coordinator):
     receipt = service.result(task_id)["target_resolution"]
     assert receipt["reason_code"] == "target_not_found" and receipt["search_complete"]
     assert not receipt["authority_write_performed"] and counts(c.f)["steward_card_decisions"] == 1
+
+
+def test_live_policy_reinterprets_one_immutable_source_and_late_native_stays_history(
+        coordinator,actual_couch_source,tmp_path):
+    """실제 모델로 같은 Git 관측을 새 정책으로 재해석하고 옛 native는 별도로 보존한다."""
+    from dataclasses import replace
+    from agent_knowledge.fact_policy_lifecycle import FactPolicyLifecycle
+    from agent_knowledge.source_observation import SourceObservationService
+    from test_source_observation import capture,native_tasks
+    c = coordinator
+    text = "FEATURE_STATE = 'ready'\nOBSERVED_STATUS = 'failed'\n"
+    (c.root/"facts.json").write_text(text)
+    git(c.root,"add","facts.json");git(c.root,"commit","-m","같은 관측의 정책 해석 변경 검증")
+    old = GitSemanticFactPolicy("status",c.rule.scope,c.rule.target_title,c.rule.field_path,c.rule.render_template,
+        "facts.json","이 파일의 FEATURE_STATE 상수 값",
+        (("ready","이 파일의 FEATURE_STATE 값은 ready다."),("failed","이 파일의 FEATURE_STATE 값은 failed다.")),
+        "repository_content",os.environ["LBRAIN_TEST_SEMANTIC_PROFILE"],os.environ["LBRAIN_TEST_SEMANTIC_PROFILE_HASH"])
+    c.rule = old
+    c.service = FactCorrectionCoordinator(store=c.f.store,git_reader=c.service.git_reader,policies=[old])
+    read = SourceObservationService(c.service).observe(project=old.scope.project,repository=old.scope.repository,
+        policy_id=old.policy_id,idempotency_key="before-policy-publication")
+    request = copy.deepcopy(c.request)
+    request["changes"][0]["evidence"] = read["evidence"]
+    original = c.service.submit(request)["changes"][0]["task_id"]
+    old_run = c.service.worker(project=c.f.scope.project,worker_id="live-old-policy").run_once(task_id=original)
+    assert old_run["state"]=="resolved",old_run
+    original_resolution = c.service.result(original)["resolution"]["resolution_id"]
+    new = replace(old,scope_description="이 파일의 OBSERVED_STATUS 상수 값",
+        claims=(("ready","이 파일의 OBSERVED_STATUS 값은 ready다."),("failed","이 파일의 OBSERVED_STATUS 값은 failed다.")),
+        publication_revision=1)
+    current = FactCorrectionCoordinator(store=c.f.store,git_reader=c.service.git_reader,policies=[new])
+    lifecycle = FactPolicyLifecycle(current)
+    published = lifecycle.publish(project=c.f.scope.project,policy_id=new.policy_id,expected_policy_version=old.version,
+        request_key="live-policy-publication",actor="live-fixture")
+    assert not published["canonical_write_performed"]
+    lifecycle.dispatch_once(project=c.f.scope.project)
+    with c.f.store._scope() as db:
+        child = db.execute("SELECT task_id FROM lbrain_fact_policy_reviews").fetchone()["task_id"]
+    new_run = current.worker(project=c.f.scope.project,worker_id="live-new-policy").run_once(task_id=child)
+    assert new_run["state"]=="resolved",new_run
+    assert current.result(child)["resolution"]["applied_value"]=="failed"
+    assert lifecycle.dispatch_once(project=c.f.scope.project)["verified"]==1
+    bridge = capture(c,actual_couch_source,tmp_path,read)
+    assert bridge.dispatch_once(project=c.f.scope.project,batch_size=100)["queued"]==1
+    [native] = native_tasks(c)
+    late = c.service.worker(project=c.f.scope.project,worker_id="live-late-old-policy").run_once(task_id=native["task_id"])
+    assert late["state"]=="resolved",late
+    result = c.service.result(native["task_id"])
+    assert result["policy_review"]["native_source_read"]["historical_resolution_id"]==original_resolution
+    assert not result["policy_review"]["original_change_applied"]
+    assert result["review_resolution"]["current"]["value"]=="failed"
+    assert counts(c.f)["steward_card_decisions"]==3 and counts(c.f)["lbrain_fact_assertions"]==2
+    with c.f.store._scope() as db:
+        row = db.execute("SELECT count(*) AS interpretations,count(DISTINCT observation_id) AS observations FROM lbrain_fact_observations").fetchone()
+    assert row["interpretations"]==2 and row["observations"]==1

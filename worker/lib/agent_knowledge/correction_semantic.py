@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import ast
 import json
 from pathlib import Path
 
@@ -20,6 +21,20 @@ GATE_VERSION = "capability_semantic_selection.v1"
 VALIDATION_SCHEMA = "semantic_admission_validation.v1"
 EVALUATION_POLICY = "semantic-hybrid-eval.v1"
 SUPPORT_MIN = .8
+
+
+def conditional_python_source(value):
+    """Python 분기의 실행 결과를 소스만으로 선택하지 않는다.
+
+    이 검사는 Python 문법으로 파싱되는 입력에만 적용된다. 다른 언어와
+    미완성 조각의 실행 가능성까지 판별하는 일반 정적 분석은 아니다.
+    """
+    try:
+        tree = ast.parse(value)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return False
+    return any(isinstance(node, (ast.If, ast.IfExp, ast.BoolOp, ast.Match, ast.Try))
+        for node in ast.walk(tree))
 
 
 def runtime_identity():
@@ -64,6 +79,8 @@ def verify_selection(*, observed, requirement, scope_description, claims, policy
     validate_claims(claims)
     if not observed.satisfies(requirement):
         raise capabilities.CapabilityUnavailable("source_capability_or_scope_mismatch")
+    if conditional_python_source(observed.value):
+        raise capabilities.CapabilityUnavailable("source_conditional_execution_unverifiable")
     binding = hash_payload(asdict(observed))
     if (selection.get("schema_version") != GATE_VERSION or selection.get("source_binding_hash") != binding
             or selection.get("requirement_hash") != hash_payload(asdict(requirement))
@@ -104,6 +121,8 @@ def select_value(*, reader, requirement, scope_description, claims, policy, poli
     observed = reader.read()
     if not observed.satisfies(requirement):
         raise capabilities.CapabilityUnavailable("source_capability_or_scope_mismatch")
+    if conditional_python_source(observed.value):
+        raise capabilities.CapabilityUnavailable("source_conditional_execution_unverifiable")
     binding = hash_payload(asdict(observed))
     if expected_source_binding is not None and expected_source_binding != binding:
         raise capabilities.CapabilityUnavailable("source_read_changed")
@@ -150,7 +169,7 @@ def validate_report(report):
         require_sha256(value, "development case")
     if not isinstance(rows, list) or not 40 <= len(rows) <= 500:
         raise ValueError("independent semantic validation sample required")
-    case_hashes, positive, negative, correct, wrong, semantic_negative, cost = set(), 0, 0, 0, 0, 0, 0.
+    case_hashes, positive, negative, correct, wrong, semantic_negative, code_rejections, cost = set(), 0, 0, 0, 0, 0, 0, 0.
     policy = policies.RelationSupportPolicy(SUPPORT_MIN, "validation-only", report["resolved_model"],
         hash_payload(relation.questions()))
     for row in rows:
@@ -172,7 +191,12 @@ def validate_report(report):
             raise ValueError("validation observation content mismatch")
         if requirement.capability.value != case["required_capability"]:
             raise ValueError("validation requirement mismatch")
-        if observed.satisfies(requirement):
+        if observed.satisfies(requirement) and conditional_python_source(observed.value):
+            if row.get("reason_code") != "source_conditional_execution_unverifiable" or row.get("selection") is not None:
+                raise ValueError("conditional source rejection required")
+            code_rejections += 1
+            chosen = None
+        elif observed.satisfies(requirement):
             if row.get("source_revalidated") is not True:
                 raise ValueError("source postcheck required")
             chosen = verify_selection(observed=observed, requirement=requirement,
@@ -193,7 +217,7 @@ def validate_report(report):
         wrong += chosen is not None and chosen != expected
     summary = {"cases": len(rows), "positive_cases": positive, "positive_permits": correct,
         "negative_cases": negative, "semantic_negative_cases": semantic_negative,
-        "wrong_permits": wrong, "reported_cost_usd": cost}
+        "wrong_permits": wrong, "conditional_code_rejections": code_rejections, "reported_cost_usd": cost}
     if positive < 20 or negative < 20 or semantic_negative < 10 or wrong or correct / positive < .8:
         raise ValueError("independent semantic validation criterion not met")
     return summary

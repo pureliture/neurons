@@ -206,8 +206,8 @@ class SourceObservationService:
             )
             return result
 
-    def previous_resolution(self, reference):
-        with self.store._scope() as db:
+    def previous_resolution(self, reference, *, connection=None):
+        with self.store._scope(conn=connection) as db:
             row = db.execute(
                 """SELECT x.resolution_id FROM lbrain_fact_source_reads r
                 JOIN lbrain_fact_resolutions x ON x.fact_key=r.fact_key
@@ -499,11 +499,7 @@ class NativeSourceObservationBridge:
         self._checked_reference(task["project"], matches[0])
         return {"receipt": receipt, "proof": admitted.public_proof()}
 
-    def attach_on(
-        self, db, task, native, resolution_id, *, join_only, authority_write_performed
-    ):
-        if native.get("recovered"):
-            return
+    def _save_native_receipt_on(self, db, task, native):
         receipt = native["receipt"]
         body = json.dumps(
             receipt, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -532,6 +528,15 @@ class NativeSourceObservationBridge:
             saved["state"],
         ) != (sha256_text(body), body, proof, task["project"], "active"):
             raise RecheckBlocked("native_receipt_integrity_invalid")
+        return source_ref
+
+    def attach_on(
+        self, db, task, native, resolution_id, *, join_only, authority_write_performed
+    ):
+        if native.get("recovered"):
+            return
+        receipt = native["receipt"]
+        source_ref = self._save_native_receipt_on(db,task,native)
         db.execute(
             """INSERT INTO lbrain_fact_native_read_links(task_id,observation_ref,native_observation_id,native_receipt_hash,
             native_source_ref_id,native_proof,resolution_id,join_only,authority_write_performed)
@@ -564,3 +569,23 @@ class NativeSourceObservationBridge:
         )
         if not saved or tuple(saved.values()) != expected:
             raise RecheckBlocked("native_read_link_integrity_invalid")
+
+    def attach_policy_history_on(self, db, task, native, policy_result_id, *, historical_resolution_id=None):
+        """옛 policy의 지연 native 기록을 새 policy의 지지 근거로 승격하지 않는다."""
+        if native.get("recovered"):
+            raise RecheckBlocked("native_policy_history_unavailable")
+        receipt = native["receipt"]
+        source_ref = self._save_native_receipt_on(db,task,native)
+        reference = task["request"]["change"]["evidence"]["observation_ref"]
+        db.execute("""INSERT INTO lbrain_fact_native_policy_read_links
+            (task_id,policy_result_id,observation_ref,native_observation_id,native_receipt_hash,
+             native_source_ref_id,native_proof,historical_resolution_id)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+            (task["task_id"],policy_result_id,reference,receipt["observation_id_hash"],receipt["receipt_hash"],
+                source_ref,Jsonb(native["proof"]),historical_resolution_id))
+        row = db.execute("""SELECT policy_result_id,observation_ref,native_observation_id,native_receipt_hash,
+            native_source_ref_id,native_proof,historical_resolution_id
+            FROM lbrain_fact_native_policy_read_links WHERE task_id=%s""",(task["task_id"],)).fetchone()
+        if not row or tuple(row.values())!=(policy_result_id,reference,receipt["observation_id_hash"],
+                receipt["receipt_hash"],source_ref,native["proof"],historical_resolution_id):
+            raise RecheckBlocked("native_policy_history_binding_mismatch")

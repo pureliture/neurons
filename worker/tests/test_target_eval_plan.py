@@ -14,11 +14,12 @@ from test_correction_target import client, policy, MODEL
 def test_new_target_plan_excludes_development_and_previous_failed_holdout():
     root = Path(__file__).resolve().parents[1] / "eval"
     evaluator = runpy.run_path(str(root / "correction_target_eval.py"))
-    cases = evaluator["cases"](root / "correction_target_v3_holdout.json")
+    cases = evaluator["cases"](root / "correction_target_v4_holdout.json")
     plan = evaluator["freeze"](cases)
     assert len(cases) == 40
     assert sum(case["expected_memory_id"] is not None for case in cases) == 20
     assert "target-h1-01" in plan["development_case_ids"]
+    assert "target-h3-01" in plan["development_case_ids"]
     assert "dev-target-1" in plan["development_case_ids"]
     previous = evaluator["cases"](root / "correction_target_holdout.json")
     with pytest.raises(ValueError, match="independent target cases required"):
@@ -38,7 +39,7 @@ def test_target_profile_requires_normal_coverage_and_zero_wrong_permits(normal_p
     """확률 응답 대역으로 profile guard만 검사한다. 실제 모델 증거로 사용하지 않는다."""
     root = Path(__file__).resolve().parents[1] / "eval"
     evaluator = runpy.run_path(str(root / "correction_target_eval.py"))
-    cases = evaluator["cases"](root / "correction_target_v3_holdout.json")
+    cases = evaluator["cases"](root / "correction_target_v4_holdout.json")
     plan = evaluator["freeze"](cases)
     rows = []
     positive = 0
@@ -48,7 +49,7 @@ def test_target_profile_requires_normal_coverage_and_zero_wrong_permits(normal_p
             if row["memory_id"] == expected}
         permit = expected is not None and positive < normal_permits
         positive += expected is not None
-        if wrong and case["id"] == "target-h3-21":
+        if wrong and case["id"] == "target-h4-21":
             label = lambda text: "supported"
         elif permit:
             label = lambda text: "supported" if any(text.startswith(title) for title in titles) else "unrelated"

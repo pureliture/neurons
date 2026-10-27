@@ -35,12 +35,18 @@ def freeze(fixture):
         semantic.validate_claims(case['claims'])
         if redact_public_ingress_text(case['content'])!=case['content']:
             raise ValueError('evaluation source changed by redaction')
+        ObservedCapability(case['required_capability'])
+        if case.get('mismatch') not in (None, 'context', 'resource'):
+            raise ValueError('invalid evaluation mismatch')
+        if case['expected_value'] is not None and case['expected_value'] not in {pair[0] for pair in case['claims']}:
+            raise ValueError('invalid evaluation expected value')
     development = []
     for name in ("correction_judgment_cases.json", "correction_judgment_v3_holdout.json",
                  "correction_relation_v4_holdout.json", "correction_relation_support_holdout.json",
                  "correction_semantic_holdout.json", "correction_semantic_v2_holdout.json",
                  "correction_semantic_v3_holdout.json", "correction_semantic_v4_holdout.json",
-                 "correction_semantic_v5_holdout.json"):
+                 "correction_semantic_v5_holdout.json", "correction_semantic_v6_holdout.json",
+                 "correction_semantic_v7_holdout.json", "correction_semantic_v8_holdout.json"):
         data = json.loads(Path(__file__).with_name(name).read_text())
         development.extend(hash_payload(case) for case in data["cases"])
     cases = fixture["cases"]
@@ -94,10 +100,19 @@ def evaluate_case(case, *, client, policy):
         return row
 
 
+def evaluate_safely(case, *, client, policy):
+    try:
+        return evaluate_case(case, client=client, policy=policy)
+    except Exception:
+        # 다른 작업에서 이미 받은 모델 응답은 보존하고 이 행은 평가 실패로 남긴다.
+        return {"case": case, "case_hash": hash_payload(case), "selection": None,
+            "source_revalidated": False, "reason_code": "evaluation_setup_failed"}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("--phase", choices=("freeze", "run"), required=True)
-    parser.add_argument("--fixture", type=Path, default=Path(__file__).with_name("correction_semantic_v6_holdout.json"))
+    parser.add_argument("--phase", choices=("freeze", "run", "development"), required=True)
+    parser.add_argument("--fixture", type=Path, default=Path(__file__).with_name("correction_semantic_v9_holdout.json"))
     parser.add_argument("--plan", type=Path)
     parser.add_argument("--key-file", type=Path)
     parser.add_argument("--output", type=Path, required=True)
@@ -110,15 +125,20 @@ def main(argv=None):
         save_new(args.output, plan)
         print(json.dumps({"plan_hash": hash_payload(plan), "cases": len(fixture["cases"])}))
         return 0
-    plan = json.loads(args.plan.read_text())
-    if plan != freeze(fixture):
-        raise ValueError("evaluation plan or implementation changed")
+    if args.phase == "run":
+        plan = json.loads(args.plan.read_text())
+        if plan != freeze(fixture):
+            raise ValueError("evaluation plan or implementation changed")
+    else:
+        plan = {"resolved_model": DEFAULT_CORRECTION_MODEL + "-20261016",
+            "development_case_hashes": [hash_payload("development-only")]}
     client = CorrectionRelationClient(api_key=(args.key_file.read_text() if args.key_file else os.environ.get("OPENROUTER_API_KEY", "")))
     policy = RelationSupportPolicy(semantic.SUPPORT_MIN, "evaluation-only", plan["resolved_model"], hash_payload(questions()))
     with ThreadPoolExecutor(max_workers=4) as executor:
-        rows = list(executor.map(lambda case: evaluate_case(case, client=client, policy=policy), fixture["cases"]))
+        rows = list(executor.map(lambda case: evaluate_safely(case, client=client, policy=policy), fixture["cases"]))
     report = {"schema_version": semantic.VALIDATION_SCHEMA, "identity": semantic.runtime_identity(),
-        "execution": "live_openrouter", "support_min": semantic.SUPPORT_MIN, "policy_version": semantic.EVALUATION_POLICY,
+        "execution": "live_openrouter" if args.phase == "run" else "development_openrouter",
+        "support_min": semantic.SUPPORT_MIN, "policy_version": semantic.EVALUATION_POLICY,
         "plan_hash": hash_payload(plan), "development_case_hashes": plan["development_case_hashes"],
         "resolved_model": plan["resolved_model"], "results": rows}
     try:
@@ -126,12 +146,12 @@ def main(argv=None):
         passed = True
     except (KeyError, ValueError, TypeError):
         # 실패 표본을 고쳐 같은 자료를 독립 평가로 다시 합격시키지 않는다.
-        summary = {"cases": len(rows), "unavailable": sum(row["selection"] is None and row.get("reason_code") !=
-            "source_capability_or_scope_mismatch" for row in rows)}
+        summary = {"cases": len(rows), "unavailable": sum(row["selection"] is None and row.get("reason_code") not in
+            {"source_capability_or_scope_mismatch", "source_conditional_execution_unverifiable"} for row in rows)}
         passed = False
     save_new(args.output, report)
     print(json.dumps({"validated": passed, "summary": summary, "artifact_hash": sha256_text(args.output.read_text())}))
-    return 0 if passed else 1
+    return 0 if passed or args.phase == "development" else 1
 
 
 if __name__ == "__main__":

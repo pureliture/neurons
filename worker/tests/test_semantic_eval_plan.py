@@ -27,7 +27,7 @@ def test_freeze_rejects_redacted_source_before_execution():
 def test_fresh_plan_excludes_all_earlier_samples():
     root = Path(__file__).resolve().parents[1] / "eval"
     evaluator = runpy.run_path(str(root / "correction_semantic_eval.py"))
-    fixture = json.loads((root / "correction_semantic_v6_holdout.json").read_text())
+    fixture = json.loads((root / "correction_semantic_v9_holdout.json").read_text())
     plan = evaluator["freeze"](fixture)
     from agent_knowledge.public_safe_util import hash_payload
 
@@ -40,6 +40,12 @@ def test_fresh_plan_excludes_all_earlier_samples():
     assert all(
         hash_payload(case) in plan["development_case_hashes"] for case in fifth["cases"]
     )
+    sixth = json.loads((root / "correction_semantic_v6_holdout.json").read_text())
+    assert all(hash_payload(case) in plan["development_case_hashes"] for case in sixth["cases"])
+    seventh = json.loads((root / "correction_semantic_v7_holdout.json").read_text())
+    assert all(hash_payload(case) in plan["development_case_hashes"] for case in seventh["cases"])
+    eighth = json.loads((root / "correction_semantic_v8_holdout.json").read_text())
+    assert all(hash_payload(case) in plan["development_case_hashes"] for case in eighth["cases"])
     assert not {hash_payload(case) for case in fixture["cases"]} & set(
         plan["development_case_hashes"]
     )
@@ -61,3 +67,19 @@ def test_source_read_failure_is_retained_as_failed_row_without_model_call(monkey
     )
     assert row["selection"] is None and row["reason_code"] == "source_read_changed"
     assert row["case"] == fixture["cases"][0]
+
+
+def test_freeze_rejects_unknown_capability_before_any_call():
+    root = Path(__file__).resolve().parents[1] / "eval"
+    evaluator = runpy.run_path(str(root / "correction_semantic_eval.py"))
+    fixture = json.loads((root / "correction_semantic_v8_holdout.json").read_text())
+    with pytest.raises(ValueError, match="not a valid ObservedCapability"):
+        evaluator["freeze"](fixture)
+
+
+def test_unexpected_setup_failure_keeps_other_rows_eligible_for_recording(monkeypatch):
+    root = Path(__file__).resolve().parents[1] / "eval"
+    evaluator = runpy.run_path(str(root / "correction_semantic_eval.py"))
+    case = {"id": "broken-setup"}
+    row = evaluator["evaluate_safely"](case, client=object(), policy=object())
+    assert row["case"] == case and row["reason_code"] == "evaluation_setup_failed"

@@ -76,8 +76,10 @@ class GitJsonFactPolicy:
     relative_path: str
     json_pointer: str
     max_age_seconds: int = 300
+    publication_revision: int = 0
 
     def __post_init__(self):
+        _publication_revision(self.publication_revision)
         if not self.policy_id or not self.target_title or not self.json_pointer.startswith("/"):
             raise ValueError("explicit fact identity and source field mapping required")
         if not self.scope.branch.startswith("refs/heads/"):
@@ -91,6 +93,8 @@ class GitJsonFactPolicy:
 
     def public_identity(self):
         data = asdict(self)
+        if self.publication_revision == 0:
+            data.pop("publication_revision")
         data["relative_path_hash"] = sha256_text(data.pop("relative_path"))
         return data
 
@@ -114,8 +118,10 @@ class GitSemanticFactPolicy:
     validation_profile_path: str
     validation_profile_hash: str
     max_age_seconds: int = 300
+    publication_revision: int = 0
 
     def __post_init__(self):
+        _publication_revision(self.publication_revision)
         from .correction_capabilities import ObservedCapability
         from .correction_semantic import validate_claims
         from .correction_sources import _relative_path
@@ -135,6 +141,8 @@ class GitSemanticFactPolicy:
 
     def public_identity(self):
         data = asdict(self)
+        if self.publication_revision == 0:
+            data.pop("publication_revision")
         data["adapter"] = "git_semantic.v1"
         data["relative_path_hash"] = sha256_text(data.pop("relative_path"))
         data["validation_profile_path_hash"] = sha256_text(data.pop("validation_profile_path"))
@@ -143,6 +151,11 @@ class GitSemanticFactPolicy:
     @property
     def version(self):
         return hash_payload(self.public_identity())
+
+
+def _publication_revision(value):
+    if type(value) is not int or not 0 <= value <= 2_147_483_647:
+        raise ValueError("bounded server policy publication revision required")
 
 
 class FactCorrectionCoordinator:
@@ -276,12 +289,16 @@ class FactCorrectionCoordinator:
         # 실행 중인 옛 worker가 새 설정을 덮어쓰지 않는다. 설정 변경/철회는
         # 별도 관리 작업에서 CAS한다. 읽기 전용 constructor는 DB를 바꾸지 않는다.
         cur.execute("""INSERT INTO lbrain_fact_admission_rules
-            (project,policy_id,policy_version,fact_key,target_memory_id,target_title,card_type,field_path)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+            (project,policy_id,policy_version,fact_key,target_memory_id,target_title,card_type,field_path,publication_revision,policy_descriptor)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
             (rule.scope.project, rule.policy_id, rule.version, rule.scope.key,
-                card["memory_id"], rule.target_title, card["card_type"], rule.field_path))
+                card["memory_id"], rule.target_title, card["card_type"], rule.field_path, rule.publication_revision,
+                Jsonb(rule.public_identity())))
         if not self._registered_rule(cur, rule, card_type=card["card_type"]):
             raise FactResolutionError("fact_policy_changed")
+        cur.execute("""UPDATE lbrain_fact_admission_rules SET policy_descriptor=%s
+            WHERE project=%s AND policy_id=%s AND policy_version=%s AND policy_descriptor IS NULL""",
+            (Jsonb(rule.public_identity()),rule.scope.project,rule.policy_id,rule.version))
         cur.execute("SELECT 1 FROM lbrain_fact_scopes WHERE fact_key=%s AND project=%s", (rule.scope.key, rule.scope.project))
         if cur.fetchone():
             # 서버가 같은 사실로 등록한 기존 alias도 즉시 공통 head에 연결한다.
@@ -298,6 +315,8 @@ class FactCorrectionCoordinator:
             (rule.scope.project, rule.policy_id))
         row = cur.fetchone()
         return bool(row and row["active"] and row["policy_version"] == rule.version
+            and row.get("publication_revision", 0) == rule.publication_revision
+            and (row.get("policy_descriptor") is None or hash_payload(row["policy_descriptor"])==rule.version)
             and row["fact_key"] == rule.scope.key and row["target_title"] == rule.target_title
             and row["field_path"] == rule.field_path and (card_type is None or row["card_type"] == card_type))
 
@@ -318,6 +337,8 @@ class FactCorrectionCoordinator:
     def _judge(self, task, snapshot):
         if "recovered_result" in snapshot.data:
             return {"recovered_result": snapshot.data["recovered_result"]}
+        if "policy_review" in snapshot.data:
+            return {"schema_version":"fact_policy_review_judgment.v1","policy_review":snapshot.data["policy_review"]}
         if "target_inventory" in snapshot.data:
             from .correction_target import load_profile, select_target
             from .correction_capabilities import CapabilityUnavailable
@@ -422,9 +443,6 @@ class FactCorrectionCoordinator:
 
     def _load(self, task):
         native = None
-        if task["request"].get("native_source_read"):
-            from .source_observation import NativeSourceObservationBridge
-            native = NativeSourceObservationBridge(self, self.native_catalog).read_native(task)
         if task["result_ref"]:
             with self.store._scope() as db, db.cursor(row_factory=dict_row) as cur:
                 cur.execute("SELECT terminal,result FROM lbrain_fact_resolutions WHERE resolution_id=%s", (task["result_ref"],))
@@ -436,6 +454,21 @@ class FactCorrectionCoordinator:
                     (task["result_ref"], task["task_id"], task["request_hash"]))
                 if cur.fetchone():
                     return RecheckSnapshot.from_data(task, {"recovered_result": task["result_ref"]})
+                cur.execute("""SELECT 1 FROM lbrain_fact_policy_review_results
+                    WHERE result_id=%s AND task_id=%s AND request_hash=%s""",
+                    (task["result_ref"],task["task_id"],task["request_hash"]))
+                if cur.fetchone():
+                    return RecheckSnapshot.from_data(task,{"recovered_result":task["result_ref"]})
+        if task["request"].get("native_source_read"):
+            from .source_observation import NativeSourceObservationBridge
+            native = NativeSourceObservationBridge(self, self.native_catalog).read_native(task)
+        from .fact_policy_lifecycle import FactPolicyLifecycle
+        policy_review = FactPolicyLifecycle(self).review_snapshot(task)
+        if policy_review is not None:
+            data = {"policy_review":policy_review}
+            if native:
+                data["native_source_read"] = native
+            return RecheckSnapshot.from_data(task,data)
         if native:
             from .source_observation import SourceObservationService
             previous = SourceObservationService(self).previous_resolution(
@@ -704,6 +737,9 @@ class FactCorrectionCoordinator:
                         join_only=True, authority_write_performed=False)
                     self.queue.checkpoint_result(task, snapshot.data["recovered_result"], connection=db)
             return RecheckOutcome("resolved", "fact_result_recovered", snapshot.data["recovered_result"])
+        if "policy_review" in snapshot.data:
+            from .fact_policy_lifecycle import FactPolicyLifecycle
+            return FactPolicyLifecycle(self).complete_original(task,snapshot,judgment)
         from .postgres_store.pgvector_store import PgVectorStore
         rule = self.policies[task["request"]["policy_id"]]
         target_admission = None
@@ -759,6 +795,8 @@ class FactCorrectionCoordinator:
             bound = PgVectorStore(connection=db)
             resolver = FactResolutionService(bound)
             bound._lock_steward_authority_on(db)
+            if not self._registered_rule(cur, rule):
+                raise RecheckBlocked("fact_policy_changed")
             if target_admission is not None:
                 from .correction_target import PgTargetInventory
                 from .correction_capabilities import CapabilityUnavailable
@@ -861,6 +899,23 @@ class FactCorrectionCoordinator:
                 target_decision = cur.fetchone()
                 if target_decision:
                     result["target_resolution"] = target_decision["result"]
+                cur.execute("""SELECT result,resolution_id FROM lbrain_fact_policy_review_results
+                    WHERE result_id=%s AND task_id=%s AND request_hash=%s""",
+                    (resolution_ref,task_id,task["request_hash"]))
+                policy_review = cur.fetchone()
+                if policy_review:
+                    result["policy_review"] = policy_review["result"]
+                    if policy_review["resolution_id"]:
+                        cur.execute("SELECT result FROM lbrain_fact_resolutions WHERE resolution_id=%s",
+                            (policy_review["resolution_id"],))
+                        child = cur.fetchone()["result"]
+                        child["decision_time_current"] = child.pop("current",None)
+                        child["current"] = self.resolver._head(cur,child["fact_key"])
+                        result["review_resolution"] = child
+                    cur.execute("SELECT generation FROM lbrain_fact_project_versions WHERE project=%s",(task["project"],))
+                    generation = cur.fetchone()
+                    result["consistency_token"] = {"project":task["project"],
+                        "min_fact_generation":generation["generation"] if generation else 0}
                 cur.execute("SELECT result FROM lbrain_fact_resolutions WHERE resolution_id=%s", (resolution_ref,))
                 row = cur.fetchone()
                 if row:

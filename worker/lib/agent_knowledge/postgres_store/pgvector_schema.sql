@@ -511,8 +511,19 @@ CREATE TABLE IF NOT EXISTS lbrain_fact_admission_rules (
     card_type VARCHAR(32) NOT NULL,
     field_path VARCHAR(128) NOT NULL,
     active BOOLEAN NOT NULL DEFAULT TRUE,
+    publication_revision BIGINT NOT NULL DEFAULT 0,
+    policy_descriptor JSONB,
     PRIMARY KEY(project,policy_id)
 );
+ALTER TABLE lbrain_fact_admission_rules ADD COLUMN IF NOT EXISTS publication_revision BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE lbrain_fact_admission_rules ADD COLUMN IF NOT EXISTS policy_descriptor JSONB;
+DO $$ BEGIN
+    IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='lbrain_fact_admission_rules'::regclass
+        AND conname='lbrain_policy_revision_nonnegative') THEN
+        ALTER TABLE lbrain_fact_admission_rules ADD CONSTRAINT lbrain_policy_revision_nonnegative
+            CHECK(publication_revision>=0 AND publication_revision<=2147483647);
+    END IF;
+END; $$;
 -- 같은 필드는 하나의 fact에만 속하지만 그 fact를 검증하는 원천 정책은
 -- 여러 개일 수 있다. 기존 단일 원천 UNIQUE를 소유권 FK로 교체한다.
 INSERT INTO lbrain_fact_admission_targets(project,target_title,card_type,field_path,fact_key)
@@ -983,7 +994,146 @@ DROP TRIGGER IF EXISTS lbrain_preserve_target_judgment ON lbrain_recheck_judgmen
 CREATE TRIGGER lbrain_preserve_target_judgment BEFORE UPDATE OR DELETE ON lbrain_recheck_judgments
     FOR EACH ROW EXECUTE FUNCTION lbrain_preserve_target_judgment();
 -- graph/embedding 반영 전에도 관련된 현재 fact만 indexed lexical 후보로 회수한다.
+CREATE TABLE IF NOT EXISTS lbrain_fact_policy_publications (
+    publication_id VARCHAR(64) PRIMARY KEY,
+    project VARCHAR(64) NOT NULL,
+    policy_id VARCHAR(128) NOT NULL,
+    publication_revision BIGINT NOT NULL CHECK(publication_revision>0 AND publication_revision<=2147483647),
+    previous_version VARCHAR(71) NOT NULL,
+    policy_version VARCHAR(71) NOT NULL,
+    previous_active BOOLEAN NOT NULL,
+    active BOOLEAN NOT NULL,
+    fact_key VARCHAR(64) NOT NULL,
+    target_memory_id VARCHAR(64) NOT NULL REFERENCES memory_cards(memory_id),
+    field_path VARCHAR(128) NOT NULL,
+    previous_descriptor JSONB,
+    descriptor JSONB NOT NULL,
+    command_id VARCHAR(71) NOT NULL UNIQUE,
+    request_hash VARCHAR(71) NOT NULL,
+    actor VARCHAR(128) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    FOREIGN KEY(project,policy_id) REFERENCES lbrain_fact_admission_rules(project,policy_id),
+    UNIQUE(project,policy_id,publication_revision),
+    UNIQUE(project,policy_id,policy_version)
+);
+CREATE OR REPLACE FUNCTION lbrain_preserve_policy_publication() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$ BEGIN
+    RAISE EXCEPTION 'policy_publication_retention_required' USING ERRCODE='23514';
+END; $$;
+DROP TRIGGER IF EXISTS lbrain_preserve_policy_publication ON lbrain_fact_policy_publications;
+CREATE TRIGGER lbrain_preserve_policy_publication BEFORE UPDATE OR DELETE ON lbrain_fact_policy_publications
+    FOR EACH ROW EXECUTE FUNCTION lbrain_preserve_policy_publication();
+CREATE OR REPLACE FUNCTION lbrain_policy_intentionally_disabled(project_name TEXT,policy_name TEXT) RETURNS BOOLEAN
+LANGUAGE SQL STABLE AS $$
+    SELECT EXISTS(SELECT 1 FROM lbrain_fact_admission_rules r JOIN lbrain_fact_policy_publications p
+        ON p.project=r.project AND p.policy_id=r.policy_id AND p.policy_version=r.policy_version
+        WHERE r.project=project_name AND r.policy_id=policy_name AND NOT r.active AND NOT p.active);
+$$;
+CREATE TABLE IF NOT EXISTS lbrain_fact_policy_reviews (
+    publication_id VARCHAR(64) PRIMARY KEY REFERENCES lbrain_fact_policy_publications(publication_id),
+    task_id VARCHAR(64) REFERENCES lbrain_recheck_tasks(task_id),
+    state VARCHAR(16) NOT NULL DEFAULT 'scheduled'
+        CHECK(state IN ('scheduled','queued','blocked','disabled','superseded','verified')),
+    next_check_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    attempt_count BIGINT NOT NULL DEFAULT 0,
+    reason_code VARCHAR(80) NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_lbrain_policy_reviews_due
+    ON lbrain_fact_policy_reviews(next_check_at) WHERE state IN ('scheduled','blocked');
+CREATE TABLE IF NOT EXISTS lbrain_fact_policy_review_attempts (
+    publication_id VARCHAR(64) NOT NULL REFERENCES lbrain_fact_policy_publications(publication_id),
+    attempt BIGINT NOT NULL CHECK(attempt>0),
+    task_id VARCHAR(64) NOT NULL UNIQUE REFERENCES lbrain_recheck_tasks(task_id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY(publication_id,attempt),
+    UNIQUE(publication_id,task_id)
+);
+DROP TRIGGER IF EXISTS lbrain_preserve_policy_review_attempt ON lbrain_fact_policy_review_attempts;
+CREATE TRIGGER lbrain_preserve_policy_review_attempt BEFORE UPDATE OR DELETE ON lbrain_fact_policy_review_attempts
+    FOR EACH ROW EXECUTE FUNCTION lbrain_preserve_policy_publication();
+DO $$ BEGIN
+    IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='lbrain_fact_policy_reviews'::regclass
+        AND conname='lbrain_policy_review_task_binding') THEN
+        ALTER TABLE lbrain_fact_policy_reviews ADD CONSTRAINT lbrain_policy_review_task_binding
+            FOREIGN KEY(publication_id,task_id)
+            REFERENCES lbrain_fact_policy_review_attempts(publication_id,task_id)
+            DEFERRABLE INITIALLY DEFERRED;
+    END IF;
+END; $$;
 -- 서버의 독립 source 관측을 먼저 보존하고 교정/지연 native 수집이 공유한다.
+CREATE TABLE IF NOT EXISTS lbrain_fact_policy_review_results (
+    result_id VARCHAR(64) PRIMARY KEY,
+    task_id VARCHAR(64) NOT NULL UNIQUE REFERENCES lbrain_recheck_tasks(task_id),
+    publication_id VARCHAR(64) NOT NULL REFERENCES lbrain_fact_policy_publications(publication_id),
+    request_hash VARCHAR(71) NOT NULL,
+    input_hash VARCHAR(71) NOT NULL,
+    review_task_id VARCHAR(64),
+    resolution_id VARCHAR(64) REFERENCES lbrain_fact_resolutions(resolution_id),
+    snapshot JSONB NOT NULL,
+    result JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    FOREIGN KEY(task_id,input_hash) REFERENCES lbrain_recheck_judgments(task_id,input_hash),
+    FOREIGN KEY(publication_id,review_task_id)
+        REFERENCES lbrain_fact_policy_review_attempts(publication_id,task_id),
+    CHECK((review_task_id IS NULL)=(resolution_id IS NULL))
+);
+DROP TRIGGER IF EXISTS lbrain_preserve_policy_review_result ON lbrain_fact_policy_review_results;
+CREATE TRIGGER lbrain_preserve_policy_review_result BEFORE UPDATE OR DELETE ON lbrain_fact_policy_review_results
+    FOR EACH ROW EXECUTE FUNCTION lbrain_preserve_policy_publication();
+CREATE OR REPLACE FUNCTION lbrain_preserve_policy_review_judgment() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$ BEGIN
+    IF EXISTS(SELECT 1 FROM lbrain_fact_policy_review_results WHERE task_id=OLD.task_id AND input_hash=OLD.input_hash) THEN
+        RAISE EXCEPTION 'policy_review_judgment_retention_required' USING ERRCODE='23514';
+    END IF;
+    IF TG_OP='DELETE' THEN RETURN OLD; END IF;
+    RETURN NEW;
+END; $$;
+DROP TRIGGER IF EXISTS lbrain_preserve_policy_review_judgment ON lbrain_recheck_judgments;
+CREATE TRIGGER lbrain_preserve_policy_review_judgment BEFORE UPDATE OR DELETE ON lbrain_recheck_judgments
+    FOR EACH ROW EXECUTE FUNCTION lbrain_preserve_policy_review_judgment();
+CREATE OR REPLACE FUNCTION lbrain_check_policy_review_result() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$ BEGIN
+    IF NOT EXISTS(SELECT 1 FROM lbrain_recheck_tasks t
+        JOIN lbrain_recheck_judgments j ON j.task_id=t.task_id AND j.input_hash=NEW.input_hash
+        JOIN lbrain_fact_policy_publications p ON p.publication_id=NEW.publication_id
+        JOIN lbrain_fact_admission_rules a ON a.project=p.project AND a.policy_id=p.policy_id
+        WHERE t.task_id=NEW.task_id AND t.request_hash=NEW.request_hash AND t.project=p.project
+          AND t.request->>'fact_key'=p.fact_key AND t.request->>'policy_id'=p.policy_id
+          AND t.request->>'policy_version'<>p.policy_version
+          AND a.policy_version=p.policy_version AND a.active=p.active
+          AND j.judgment->>'schema_version'='fact_policy_review_judgment.v1'
+          AND j.judgment->'policy_review'=NEW.snapshot
+          AND NEW.snapshot->>'publication_id'=p.publication_id
+          AND NEW.snapshot->>'status'=(CASE WHEN p.active THEN 'verified' ELSE 'disabled' END)
+          AND (NEW.snapshot->>'resolution_id') IS NOT DISTINCT FROM NEW.resolution_id
+          AND NEW.result->>'original_task_id'=t.task_id
+          AND NEW.result->>'original_request_hash'=t.request_hash
+          AND NEW.result->>'original_policy_version'=t.request->>'policy_version'
+          AND NEW.result->>'policy_version'=p.policy_version
+          AND NEW.result->>'publication_id'=p.publication_id
+          AND NEW.result->>'status'='superseded'
+          AND (NEW.result->>'review_task_id') IS NOT DISTINCT FROM NEW.review_task_id
+          AND (NEW.result->>'review_resolution_id') IS NOT DISTINCT FROM NEW.resolution_id
+          AND NEW.result->>'original_change_applied'='false'
+          AND NEW.result->>'canonical_write_performed'='false'
+          AND ((NOT p.active AND NEW.review_task_id IS NULL AND NEW.result->>'reason_code'='policy_disabled')
+            OR (p.active AND NEW.result->>'reason_code'='policy_revalidated' AND EXISTS(
+                SELECT 1 FROM lbrain_fact_resolutions r
+                JOIN lbrain_fact_verifications v ON v.resolution_id=r.resolution_id
+                JOIN lbrain_recheck_tasks child ON child.task_id=NEW.review_task_id
+                WHERE r.resolution_id=NEW.resolution_id AND r.terminal AND r.fact_key=p.fact_key
+                  AND r.request_hash=child.request_hash
+                  AND r.resolution_id='factres_'||substring(encode(sha256(convert_to(
+                      '["'||p.fact_key||'","'||child.task_id||'"]','UTF8')),'hex') FROM 1 FOR 40)
+                  AND child.result_ref=r.resolution_id
+                  AND v.policy_id=p.policy_id AND v.policy_version=p.policy_version)))) THEN
+        RAISE EXCEPTION 'policy_review_result_binding_mismatch' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END; $$;
+DROP TRIGGER IF EXISTS lbrain_check_policy_review_result ON lbrain_fact_policy_review_results;
+CREATE CONSTRAINT TRIGGER lbrain_check_policy_review_result AFTER INSERT ON lbrain_fact_policy_review_results
+    DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION lbrain_check_policy_review_result();
 CREATE TABLE IF NOT EXISTS lbrain_fact_source_reads (
     observation_ref VARCHAR(64) PRIMARY KEY,
     project VARCHAR(64) NOT NULL,
@@ -1091,6 +1241,49 @@ END; $$;
 DROP TRIGGER IF EXISTS lbrain_preserve_native_read_link ON lbrain_fact_native_read_links;
 CREATE TRIGGER lbrain_preserve_native_read_link BEFORE UPDATE OR DELETE ON lbrain_fact_native_read_links
     FOR EACH ROW EXECUTE FUNCTION lbrain_preserve_native_read_link();
+CREATE TABLE IF NOT EXISTS lbrain_fact_native_policy_read_links (
+    task_id VARCHAR(64) PRIMARY KEY REFERENCES lbrain_fact_policy_review_results(task_id) DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY(task_id) REFERENCES lbrain_fact_source_read_tasks(task_id),
+    policy_result_id VARCHAR(64) NOT NULL REFERENCES lbrain_fact_policy_review_results(result_id),
+    observation_ref VARCHAR(64) NOT NULL REFERENCES lbrain_fact_source_reads(observation_ref),
+    native_observation_id VARCHAR(71) NOT NULL,
+    native_receipt_hash VARCHAR(71) NOT NULL,
+    native_source_ref_id VARCHAR(64) NOT NULL REFERENCES lbrain_fact_source_receipts(source_ref_id),
+    native_proof JSONB NOT NULL,
+    historical_resolution_id VARCHAR(64) REFERENCES lbrain_fact_resolutions(resolution_id),
+    join_only BOOLEAN NOT NULL DEFAULT TRUE CHECK(join_only),
+    authority_write_performed BOOLEAN NOT NULL DEFAULT FALSE CHECK(NOT authority_write_performed),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+DROP TRIGGER IF EXISTS lbrain_preserve_native_policy_read_link ON lbrain_fact_native_policy_read_links;
+CREATE TRIGGER lbrain_preserve_native_policy_read_link BEFORE UPDATE OR DELETE ON lbrain_fact_native_policy_read_links
+    FOR EACH ROW EXECUTE FUNCTION lbrain_preserve_policy_publication();
+CREATE OR REPLACE FUNCTION lbrain_check_native_policy_read_binding() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$ BEGIN
+    IF NOT EXISTS(SELECT 1 FROM lbrain_fact_source_read_tasks b
+        JOIN lbrain_fact_source_reads r ON r.observation_ref=b.observation_ref
+        JOIN lbrain_recheck_tasks t ON t.task_id=b.task_id AND t.project=r.project
+        JOIN lbrain_fact_policy_review_results w ON w.result_id=NEW.policy_result_id AND w.task_id=t.task_id
+        JOIN lbrain_fact_source_receipts s ON s.source_ref_id=NEW.native_source_ref_id AND s.owner_project=r.project
+        WHERE b.task_id=NEW.task_id AND b.observation_ref=NEW.observation_ref
+            AND r.policy_version=t.request->>'policy_version' AND r.fact_key=t.request->>'fact_key'
+            AND t.request#>>'{native_source_read,observation_id}'=NEW.native_observation_id
+            AND t.request#>>'{native_source_read,receipt_hash}'=NEW.native_receipt_hash
+            AND s.proof->>'receipt_hash'=NEW.native_receipt_hash
+            AND s.proof->>'adapter'='native_source_read_reference.v1'
+            AND w.result#>>'{native_source_read,observation_ref}'=NEW.observation_ref
+            AND w.result#>'{native_source_read,authority_write_performed}'='false'::jsonb
+            AND ((NEW.historical_resolution_id IS NULL AND w.result#>'{native_source_read,historical_resolution_id}'='null'::jsonb)
+                OR (NEW.historical_resolution_id=w.result#>>'{native_source_read,historical_resolution_id}' AND EXISTS(
+                    SELECT 1 FROM lbrain_fact_resolutions x WHERE x.resolution_id=NEW.historical_resolution_id
+                        AND x.fact_key=r.fact_key AND x.terminal AND x.result->>'observation_version'=r.observation_version)))) THEN
+        RAISE EXCEPTION 'native_policy_read_binding_mismatch' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END; $$;
+DROP TRIGGER IF EXISTS lbrain_check_native_policy_read_binding ON lbrain_fact_native_policy_read_links;
+CREATE CONSTRAINT TRIGGER lbrain_check_native_policy_read_binding AFTER INSERT ON lbrain_fact_native_policy_read_links
+    DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION lbrain_check_native_policy_read_binding();
 CREATE UNIQUE INDEX IF NOT EXISTS idx_lbrain_native_read_route
     ON lbrain_recheck_tasks(project,(request->>'native_route_key')) WHERE request ? 'native_route_key';
 CREATE TABLE IF NOT EXISTS lbrain_native_source_cursors (

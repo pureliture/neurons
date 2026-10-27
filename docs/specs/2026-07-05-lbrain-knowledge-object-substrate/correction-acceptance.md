@@ -7,14 +7,14 @@
 | ID | 필수 결과 | 현재 증거와 남은 범위 |
 | --- | --- | --- |
 | G01 | 복수 사실별 변경안·근거 제출, exact target 또는 설명으로 기존 target 검색 | v2 batch·기존 값/불일치/제안/근거와 exact 검색 구현. 등록 source/fact 정책 범위에서 설명 검색·완전성 검사·범위 code gate·별도 의미 판단을 연결하고 실제 MCP HTTP 교정, 불확실 보류·판단 재사용과 완전한 부재를 확인. 직접 검증 값과 제안 값을 구분한다. 임의 사실/source 정책으로의 일반화는 남음 |
-| G02 | 코드 검증과 실제 판단 모델 연결, 별도 평가에서 오교정과 정상 교정 모두 검사 | 새 코드 identity에서 대상 독립 v3 정상 18/20·잘못된 선택 0건, 값 선택 독립 v6 정상 20/20·잘못된 허용 0/20을 확인. 두 client/질문을 분리하고 threshold 0.8/fallback 없음 유지. 이전 실패·중단·정상 보류를 모두 보존하고 개발 자료로 재사용한 표본은 독립 평가에서 제외. 실제 모델의 교정·충돌·합의·불확실 보류·부재 처리를 확인. 일반 native·운영 근거의 의미 admission은 남음 |
+| G02 | 코드 검증과 실제 판단 모델 연결, 별도 평가에서 오교정과 정상 교정 모두 검사 | 현재 정책 변경 코드 identity에서 대상 독립 v4 정상 20/20·잘못된 선택 0건, 값 선택 독립 v9 정상 20/20·잘못된 허용 0건. v7의 미확인 조건 오판과 v8 실행 중단을 보존하고 개발 자료는 독립 평가에서 제외. Python 분기는 모델 앞에서 보류하며 다른 언어·조각 전체에 대한 실행 분석은 남음. threshold 0.8/fallback 없음 유지. 일반 native·운영 근거의 의미 admission은 남음 |
 | G03 | 같은 관측의 교정·수집·재수집이 합류 | 공통 fact 코어·Git·관리 대상 autopilot과 native source→intake 연결에 더해, 서버 발급 관찰 참조를 수집 전 교정과 지연 native 세션이 같은 관찰/assertion에 합류하는 경로를 검증. 5개 provider 형식·실제 Couch/PG/HTTP/CLI에서 추가 authority 없는 합류 확인. 임의 native 응답의 일반 의미 admission은 남음 |
 | G04 | 과거 지연 입력의 역전 방지와 실제 후속 변경의 반영 | 실제 Git+PG에서 지연 ancestor와 실제 ref A→B→A를 구분하고 불변 관측의 현재 재검증 확인. 일반 세션 전체 경로는 남음 |
 | G05 | 동일 사실의 단일 current, 복수 필드·중복 카드·동시 writer 처리 | 공통 head·필드 lineage·알려진 alias의 현재 표시·동시 key 처리 구현. 무관한 Git commit으로 상대 근거를 제거해 잘못 승인하던 문제를 실제 재현/수정하고 두 source의 자동 합의를 확인. 알려진 대상의 직접 DML·중복 current·최초 queue 대기·옛 snapshot 우회 차단. 미식별 의미 중복과 모든 writer 자동 합류는 남음 |
 | G06 | 근거 내용·버전·관측 시각과 모든 교정 이력 보존 | receipt/관측 불변성과 필수 FK, 참조 추가와 GC의 실제 잠금 경합 확인. 나중 결정에 함께 사용한 다른 source의 원래 보류 근거도 FK로 보존. 모든 source·모델 산출물·retention/GC CLI의 전체 보존 검증은 남음 |
 | G07 | 예약·장애·설정 차단·저장 직후 종료·만료 후 복구와 독립 감지 | 실제 모델의 응답 유실·철회·기한 경과→CLI worker 종료→독립 감지→재시작 후 자동 해결 확인. 서버 검증 영수증·기한 예약·예약 누락 감지와, 살아 있는 worker의 재시도에도 장기 미해결 경고 유지·완료 후 해제를 실제 PG/CLI에서 확인. 상주 supervisor·외부 통지·장기 운영 자동 실행/감시는 남음 |
 | G08 | context/list/query와 graph·embedding 지연·역순 작업에서도 올바른 조회 | 최종 fact view·generation·cursor와 실제 query를 연결. 실제 Neo4j에서 projection 전 누락을 수정하고 종료/복구·역순/중복·만료 generation을 확인. 실제 embedding provider·미식별 session chunk·장기 수렴은 남음 |
-| G09 | 철회·parser 정정·권한 변경과 파생 기억 영향 처리 | 사용한 receipt의 철회→내구성 영향 target→자동 재검토, 즉시 조회 제외와 독립 유효 근거 유지 구현. parser·정책·접근 권한 자동 전파와 파생 기억 재계산은 남음 |
+| G09 | 철회·parser 정정·권한 변경과 파생 기억 영향 처리 | receipt 철회와 등록 Git 정책 공표 시 이전 해석 효력 정지→내구성 자동 재검토, 독립 유효 근거 유지와 이력 보존 구현. 임의 parser·miner·redaction·접근 권한 자동 전파와 파생 기억 재계산은 남음 |
 | G10 | 실제 작업 근거로 전체 흐름 검증, artifact identity·백업 복원·정리 | 기존 좁은 실증에 Git+PG+실제 CLI/HTTP 검사를 추가. 최종 배포 identity·LLM 실제 전체 작업·보존/정리는 남음 |
 
 ## 시나리오별 완료 추적
@@ -25,7 +25,7 @@
 | --- | --- | --- |
 | C01 | 교정 뒤 같은 관측 수집 | 서버의 독립 Git 관찰 참조로 교정한 뒤 5개 provider 형식의 지연 native 기록을 같은 관찰/assertion과 원래 resolution에 연결. 추가 authority 0건 확인. 일반 native 세계 상태 admission은 남음 |
 | C02 | 수집 뒤 같은 관측 교정 | 서버 관찰 참조의 native 기록이 먼저 도착하면 기존 공통 reader·resolution으로 교정하고 후속 직접 교정은 근거만 합류. 실제 PG/Couch에서 assertion 1건·교정 1건 확인. 일반 native 세계 상태 admission은 남음 |
-| C03 | 같은 관측의 다른 miner 해석 | PG 코어의 해석 version별 보존과 실제 Couch/PG에서 extractor 변경 시 같은 벡터에 별도 source 연결·새 처리 키 확인. 기존 fact 영향 재검토는 남음 |
+| C03 | 같은 관측의 다른 miner 해석 | PG 코어의 해석 version별 보존과 실제 Couch/PG extractor 변경 확인. 같은 Git 원문을 새 정책과 실제 모델로 재해석해 현재 값을 바꾼 후 지연된 이전 native 기록은 과거에만 연결됨을 확인. 임의 miner 변경의 기존 fact 영향 전파는 남음 |
 | C04 | provider/import/chunk가 다른 재수집 | 같은 native call의 위치가 달라도 같은 관측과 두 alias를 보존하는 검사 추가. 5개 provider의 native 구조와 실제 Couch 왕복 확인. provider가 다른 동등 관측은 증명 없이 병합하지 않으며 일반 import 간 명시적 alias 연결은 남음 |
 | C05 | 같은 값을 지지하는 독립 관측 | 실제 Git/PG·모델에서 독립 source가 같은 값을 지지하게 되면 자동 해결, matching pending support·후속 참조 보존·추가 authority 1건을 확인. 일반 source 연결은 남음 |
 | C06 | 최근 수집된 옛 snapshot | 실제 Git ancestor를 지연 수집해 history로 연결하고 현재 값 유지. 일반 세션 연결은 남음 |
@@ -48,7 +48,7 @@
 | C23 | 테스트·구현을 운영 배포로 과대 해석 | 원시 모델 실패는 보존. repository 관측을 graph/HTTP/test/query 결과로 승격하지 못하는 code gate와 새 실제 모델 평가 확인. 모든 runtime 근거 reader의 교정 연결은 남음 |
 | C24 | evidence 안의 명령·위조·권한 위반 | 기존 hash·정책 검사에 native call/result 충돌·범위/본문/coverage 변조·중복 JSON key·symlink/FIFO/크기 거부를 추가. 실제 모델의 일반 native 지시문/locator/권한 경로는 남음 |
 | C25 | source 철회·삭제·권한 회수 | 실제 PG receipt 철회 직후 조회 제외, 다른 필드·독립 근거 보존과 실제 CLI 종료/monitor/자동 재개 확인. 일반 source 권한 이벤트·파생 기억 전파는 남음 |
-| C26 | parser·miner·redaction·정책 변경 | 미검증 |
+| C26 | parser·miner·redaction·정책 변경 | 등록 Git 정책의 CAS 공표·자동 재검토·이전 요청과 native 이력 연결을 실제 PG/Couch와 실제 모델에서 부분 검증. 임의 parser·miner·redaction 변경과 파생물 전파는 미검증 |
 | C27 | evidence 저장 뒤 authority 실패 | 초기 adapter와 공통 PG 코어의 canonical/resolution 동시 rollback 확인. 일반 source 보존/GC 경합은 남음 |
 | C28 | authority 저장 뒤 응답·완료 기록 유실 | 실제 모델/Git/PG의 원자적 commit/복구에 더해 native 연결·queue 복구 참조도 같은 transaction에 보존. 완료 기록 유실 뒤 Git과 Couch catalog 없이 중복 successor 없는 복구 확인. 일반 runtime·운영 process 전체 연결은 남음 |
 | C29 | PG 반영 뒤 graph·embedding 장애 | 실제 Neo4j 지연/종료와 embedding 미반영 중 현재 fact 조회 확인. 실제 embedding provider 장애와 일반 세션 경로는 남음 |
@@ -58,7 +58,7 @@
 | C33 | 복구·재구축·backfill 재생 | 미검증 |
 | C34 | 교정 전 사실에 의존한 파생물 | 미검증 |
 | C35 | 외부 cache·기존 prompt와 새 조회의 경계 | cache 무효화, generation/cursor, 같은 fact의 옛 표현 질의를 현재 head로 연결하는 실제 PG/Neo4j 검사 확인. 미식별 세션·외부 cache·기존 prompt 자체는 남음 |
-| C36 | 대상 부재·모호함·검색 실패·잘림 | 등록 source/fact 정책 범위의 설명 검색·PG 전체 후보 한도/legacy 불완전 차단·별도 대상 판단과 불변 결과 보존 구현. 독립 실제 모델 정상 18/20·잘못된 선택 0건 확인. 일반 정책/원천으로의 확대와 전체 연결 검증은 남음 |
+| C36 | 대상 부재·모호함·검색 실패·잘림 | 등록 source/fact 정책 범위의 설명 검색·PG 전체 후보 한도/legacy 불완전 차단·별도 대상 판단과 불변 결과 보존 구현. 현재 코드 identity의 독립 실제 모델 평가에서 정상 20/20·잘못된 선택 0건 확인. 일반 정책/원천으로의 확대와 전체 연결 검증은 남음 |
 
 ## 완료 판정 규칙
 
@@ -93,3 +93,5 @@ Git 내용의 의미 기반 값 선택·새 독립 실제 모델 평가·실제 
 서버 수집 전의 독립 관찰 참조, 지연 native source의 동일 관찰 합류와 수집 전 장애 감시는 [서버 관찰 참조 검사](../../validation/2026-10-27-lbrain-source-observation-join.md)를 따른다. 이 범위를 일반 native 세계 상태 admission이나 전체 goal 완료로 승격하지 않는다.
 
 등록 범위의 설명 기반 대상 식별, 실패한 모델 평가의 보존과 새 독립 평가 결과는 [대상 설명 검색 검사](../../validation/2026-10-27-lbrain-target-description-search.md)를 따른다. 이 범위를 임의 사실/source 정책의 자동 생성이나 전체 C36 완료로 승격하지 않는다.
+
+등록 Git 정책 공표·이전 해석 정지·자동 재검토와 새 독립 평가의 범위는 [정책 재검토 검사](../../validation/2026-10-27-lbrain-policy-revalidation.md)를 따른다. 일반 parser·권한·파생물 변경의 전파로 확대하지 않는다.

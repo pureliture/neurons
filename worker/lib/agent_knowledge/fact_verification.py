@@ -32,7 +32,7 @@ class FactVerificationService:
         cur.execute("""INSERT INTO lbrain_fact_check_schedules
             (fact_key,project,policy_id,verified_resolution_id,next_check_at)
             SELECT %s,%s,%s,%s,%s FROM lbrain_fact_admission_rules
-            WHERE project=%s AND policy_id=%s AND fact_key=%s AND policy_version=%s
+            WHERE project=%s AND policy_id=%s AND fact_key=%s AND policy_version=%s AND active
             ON CONFLICT(fact_key,policy_id) DO UPDATE SET
                 verified_resolution_id=excluded.verified_resolution_id,next_check_at=excluded.next_check_at,
                 state='scheduled',task_id=NULL,reason_code='',
@@ -60,13 +60,15 @@ class FactVerificationService:
             cur.execute("""INSERT INTO lbrain_fact_check_schedules(fact_key,project,policy_id)
                 SELECT f.fact_key,r.project,r.policy_id FROM lbrain_fact_admission_rules r
                 JOIN lbrain_fact_scopes f ON f.fact_key=r.fact_key AND f.project=r.project
-                WHERE r.project=%s AND NOT EXISTS (SELECT 1 FROM lbrain_fact_check_schedules s
+                WHERE r.project=%s AND NOT lbrain_policy_intentionally_disabled(r.project,r.policy_id)
+                AND NOT EXISTS (SELECT 1 FROM lbrain_fact_check_schedules s
                     WHERE s.fact_key=f.fact_key AND s.policy_id=r.policy_id)
                 ORDER BY f.fact_key,r.policy_id LIMIT %s ON CONFLICT DO NOTHING""", (project, batch_size))
             # source가 바뀌는 순간에 끝난 history-only 작업도 다음 확인을 잃지 않는다.
             cur.execute("""WITH completed AS (SELECT s.fact_key,s.policy_id
                 FROM lbrain_fact_check_schedules s JOIN lbrain_recheck_tasks t ON t.task_id=s.task_id
                 WHERE s.project=%s AND s.state='queued' AND t.state='resolved'
+                    AND NOT lbrain_policy_intentionally_disabled(s.project,s.policy_id)
                 ORDER BY s.fact_key,s.policy_id LIMIT %s)
                 UPDATE lbrain_fact_check_schedules s SET state='scheduled',task_id=NULL,
                     generation=generation+1,next_check_at=clock_timestamp()+(%s*interval '1 second'),
@@ -75,6 +77,7 @@ class FactVerificationService:
                 (project, batch_size, retry_seconds))
             cur.execute("""SELECT * FROM lbrain_fact_check_schedules
                 WHERE project=%s AND state IN ('scheduled','blocked') AND next_check_at<=clock_timestamp()
+                    AND NOT lbrain_policy_intentionally_disabled(project,policy_id)
                 ORDER BY next_check_at,fact_key,policy_id FOR UPDATE SKIP LOCKED LIMIT %s""", (project, batch_size))
             due = cur.fetchall()
             queue = PgRecheckQueue(PgVectorStore(connection=db))
@@ -110,11 +113,13 @@ class FactVerificationService:
             cur.execute("""SELECT count(*) FILTER (WHERE state IN ('scheduled','blocked')
                     AND next_check_at<=clock_timestamp()-(%s*interval '1 second')) AS overdue,
                 count(*) FILTER (WHERE state='blocked') AS blocked
-                FROM lbrain_fact_check_schedules WHERE project=%s""", (overdue_grace, project))
+                FROM lbrain_fact_check_schedules WHERE project=%s
+                    AND NOT lbrain_policy_intentionally_disabled(project,policy_id)""", (overdue_grace, project))
             row = cur.fetchone()
             cur.execute("""SELECT count(*) AS n FROM lbrain_fact_admission_rules r
                 JOIN lbrain_fact_scopes f ON f.fact_key=r.fact_key AND f.project=r.project
-                WHERE r.project=%s AND NOT EXISTS (SELECT 1 FROM lbrain_fact_check_schedules s
+                WHERE r.project=%s AND NOT lbrain_policy_intentionally_disabled(r.project,r.policy_id)
+                AND NOT EXISTS (SELECT 1 FROM lbrain_fact_check_schedules s
                     WHERE s.fact_key=r.fact_key AND s.policy_id=r.policy_id)""", (project,))
             unscheduled = cur.fetchone()["n"]
         return {"overdue": row["overdue"], "blocked": row["blocked"], "unscheduled": unscheduled,
