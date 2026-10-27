@@ -27,7 +27,7 @@ def test_freeze_rejects_redacted_source_before_execution():
 def test_fresh_plan_excludes_all_earlier_samples():
     root = Path(__file__).resolve().parents[1] / "eval"
     evaluator = runpy.run_path(str(root / "correction_semantic_eval.py"))
-    fixture = json.loads((root / "correction_semantic_v5_holdout.json").read_text())
+    fixture = json.loads((root / "correction_semantic_v6_holdout.json").read_text())
     plan = evaluator["freeze"](fixture)
     from agent_knowledge.public_safe_util import hash_payload
 
@@ -35,6 +35,10 @@ def test_fresh_plan_excludes_all_earlier_samples():
     assert all(
         hash_payload(case) in plan["development_case_hashes"]
         for case in earlier["cases"]
+    )
+    fifth = json.loads((root / "correction_semantic_v5_holdout.json").read_text())
+    assert all(
+        hash_payload(case) in plan["development_case_hashes"] for case in fifth["cases"]
     )
     assert not {hash_payload(case) for case in fixture["cases"]} & set(
         plan["development_case_hashes"]

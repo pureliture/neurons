@@ -270,8 +270,9 @@ def main(argv=None):
             catalog=_build_observation_catalog(args.native_source_policy_file)
             native_source_key=hash_payload([catalog.store.base_url,catalog.store.db])
         if args.mode == "worker":
-            reader, rules = load_configuration(args.config)
-            coordinator = FactCorrectionCoordinator(store=store, git_reader=reader, policies=rules,native_catalog=catalog)
+            reader, rules, target_search = load_configuration(args.config, with_target_search=True)
+            coordinator = FactCorrectionCoordinator(store=store, git_reader=reader, policies=rules,
+                native_catalog=catalog, target_search=target_search)
             if catalog is not None:
                 from .source_observation import NativeSourceObservationBridge
                 native_bridge=NativeSourceObservationBridge(coordinator,catalog)

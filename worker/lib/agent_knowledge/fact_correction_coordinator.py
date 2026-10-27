@@ -147,7 +147,7 @@ class GitSemanticFactPolicy:
 
 class FactCorrectionCoordinator:
     def __init__(self, *, store, git_reader: GitSourceReader, policies: list[GitJsonFactPolicy | GitSemanticFactPolicy],
-                 relation_client=None, native_catalog=None):
+                 relation_client=None, native_catalog=None, target_search=None, target_client=None):
         self.store, self.git_reader = store, git_reader
         self.policies = {rule.policy_id: rule for rule in policies}
         if not policies or len(self.policies) != len(policies):
@@ -160,6 +160,11 @@ class FactCorrectionCoordinator:
         self.resolver = FactResolutionService(store)
         self.relation_client = relation_client
         self.native_catalog = native_catalog
+        from .correction_target import TargetSearchPolicy
+        if target_search is not None and not isinstance(target_search, TargetSearchPolicy):
+            raise ValueError("explicit target search configuration required")
+        self.target_search = target_search
+        self.target_client = target_client
 
     def submit(self, arguments, *, lane="correction"):
         if lane not in {"correction", "intake"}:
@@ -198,6 +203,9 @@ class FactCorrectionCoordinator:
                         "policy_version": rule.version, "lane": lane, "change": change.model_dump(),
                         "initial_memory_id": target["memory_id"], "initial_revision": target["content_hash"]}
                     job["stale_target"] = target.get("_stale_target", False)
+                    if target.get("_semantic_target"):
+                        job["target_search"] = {"description": change.target_description,
+                            "policy_version": self.target_search.version}
                     task = queue.register(project=batch.project, memory_id=target.get("_queue_memory_id", target["memory_id"]), request=job,
                         request_key=hash_payload([batch_id, change.change_id]))
                     if isinstance(change.evidence, ReferencedFactEvidence):
@@ -212,7 +220,7 @@ class FactCorrectionCoordinator:
                 (batch_id, batch.project, request_hash, Jsonb(result)))
             return result
 
-    def _target(self, cur, rule, change):
+    def _target(self, cur, rule, change, *, allow_search=True, anchor_only=False):
         if change.target_memory_id:
             cur.execute("SELECT steward_envelope FROM memory_cards WHERE project=%s AND memory_id=%s",
                 (rule.scope.project, change.target_memory_id))
@@ -224,6 +232,12 @@ class FactCorrectionCoordinator:
                 AND (title=%s OR summary=%s) LIMIT 2""",
                 (rule.scope.project, change.target_description, change.target_description))
         rows = cur.fetchall()
+        if not rows and change.target_description and self.target_search is not None and allow_search:
+            # source 정책의 기존 대상에 검토를 예약한다. 의미 일치가 확인되기
+            # 전에는 이 anchor를 실제로 선택한 것으로 취급하거나 값을 쓰지 않는다.
+            anchored = self._target(cur, rule,
+                change.model_copy(update={"target_description": rule.target_title}), allow_search=False, anchor_only=True)
+            return {**anchored, "_semantic_target": True}
         if len(rows) != 1 or not rows[0]["steward_envelope"]:
             raise FactResolutionError("target_ambiguous" if rows else "target_not_found")
         card = rows[0]["steward_envelope"]
@@ -245,7 +259,7 @@ class FactCorrectionCoordinator:
         card = self.resolver.project_cards([card], connection=cur.connection)[0]
         if change.expected_content_hash and change.expected_content_hash != card["content_hash"]:
             raise FactResolutionError("target_revision_conflict")
-        if card.get("typed_payload", {}).get(rule.field_path.split(".", 1)[1]) != change.old_value:
+        if not anchor_only and card.get("typed_payload", {}).get(rule.field_path.split(".", 1)[1]) != change.old_value:
             raise FactResolutionError("target_value_conflict")
         return card
 
@@ -292,7 +306,8 @@ class FactCorrectionCoordinator:
             for rule in self.policies.values())
         return RecheckWorker(queue=self.queue, project=project, worker_id=worker_id,
             load=self._load, judge=self._judge,
-            apply=self._apply, retry_seconds=retry_seconds, lease_seconds=180 if semantic else 60)
+            apply=self._apply, retry_seconds=retry_seconds,
+            lease_seconds=600 if self.target_search is not None else 180 if semantic else 60)
 
     def _semantic_reader(self, rule):
         from .correction_capabilities import EvidenceRequirement, GitRepositoryReader, ObservedCapability
@@ -303,6 +318,26 @@ class FactCorrectionCoordinator:
     def _judge(self, task, snapshot):
         if "recovered_result" in snapshot.data:
             return {"recovered_result": snapshot.data["recovered_result"]}
+        if "target_inventory" in snapshot.data:
+            from .correction_target import load_profile, select_target
+            from .correction_capabilities import CapabilityUnavailable
+            from .correction_judgment import JudgmentUnavailable
+            from .correction_target_identity import CorrectionTargetClient
+            import os
+            try:
+                policy, _ = load_profile(self.target_search)
+                client = self.target_client or CorrectionTargetClient(
+                    api_key=os.environ.get("OPENROUTER_API_KEY", ""))
+                selection = select_target(snapshot.data["target_inventory"], client=client,
+                    policy=policy, policy_version=self.target_search.version)
+                return {"schema_version": "fact_target_judgment.v1", "target_selection": selection,
+                    "target_inventory": snapshot.data["target_inventory"],
+                    "source_selection": self._judge_source(task, snapshot) if selection["memory_id"] else None}
+            except (CapabilityUnavailable, JudgmentUnavailable) as exc:
+                raise RecheckBlocked(exc.reason_code) from None
+        return self._judge_source(task, snapshot)
+
+    def _judge_source(self, task, snapshot):
         rule = self.policies[task["request"]["policy_id"]]
         if not isinstance(rule, GitSemanticFactPolicy):
             return {"direct_source_mapping": True}
@@ -396,6 +431,11 @@ class FactCorrectionCoordinator:
                 row = cur.fetchone()
                 if row and row["terminal"]:
                     return RecheckSnapshot.from_data(task, {"recovered_result": task["result_ref"]})
+                cur.execute("""SELECT 1 FROM lbrain_fact_target_decisions
+                    WHERE decision_id=%s AND task_id=%s AND request_hash=%s""",
+                    (task["result_ref"], task["task_id"], task["request_hash"]))
+                if cur.fetchone():
+                    return RecheckSnapshot.from_data(task, {"recovered_result": task["result_ref"]})
         if native:
             from .source_observation import SourceObservationService
             previous = SourceObservationService(self).previous_resolution(
@@ -481,6 +521,16 @@ class FactCorrectionCoordinator:
             data["semantic_source_binding"] = semantic_binding
         if native:
             data["native_source_read"] = native
+        if request.get("target_search"):
+            from .correction_target import PgTargetInventory, load_profile
+            from .correction_capabilities import CapabilityUnavailable
+            try:
+                if self.target_search is None or request["target_search"]["policy_version"] != self.target_search.version:
+                    raise CapabilityUnavailable("target_search_policy_changed")
+                load_profile(self.target_search)
+                data["target_inventory"] = PgTargetInventory(self).read(rule, request["target_search"]["description"])
+            except CapabilityUnavailable as exc:
+                raise RecheckBlocked(exc.reason_code) from None
         return RecheckSnapshot.from_data(task, data)
 
     def _save_receipt(self, rule, source):
@@ -656,6 +706,32 @@ class FactCorrectionCoordinator:
             return RecheckOutcome("resolved", "fact_result_recovered", snapshot.data["recovered_result"])
         from .postgres_store.pgvector_store import PgVectorStore
         rule = self.policies[task["request"]["policy_id"]]
+        target_admission = None
+        if "target_inventory" in snapshot.data:
+            from .correction_target import load_profile, verify_selection
+            from .correction_capabilities import CapabilityUnavailable
+            try:
+                if self.target_search is None or task["request"]["target_search"]["policy_version"] != self.target_search.version:
+                    raise CapabilityUnavailable("target_search_policy_changed")
+                policy, _ = load_profile(self.target_search)
+                selected = verify_selection(snapshot.data["target_inventory"], judgment["target_selection"],
+                    policy=policy, policy_version=self.target_search.version)
+                if selected is None:
+                    reason = judgment["target_selection"]["reason_code"]
+                    if reason == "target_not_found":
+                        return self._reject_target(task, snapshot, judgment["target_selection"])
+                    return RecheckOutcome("waiting", reason)
+                candidate = next(row for row in snapshot.data["target_inventory"]["candidates"] if row["memory_id"] == selected)
+                if not ((candidate["fact_key"] == rule.scope.key) or
+                        (candidate["fact_key"] is None and selected == task["request"]["initial_memory_id"]
+                         and candidate["title"] == rule.target_title)):
+                    raise CapabilityUnavailable("target_source_scope_mismatch")
+                target_admission = {"profile_hash": self.target_search.validation_profile_hash,
+                    "selection_hash": hash_payload(judgment["target_selection"]),
+                    "inventory_hash": hash_payload(snapshot.data["target_inventory"]), "memory_id": selected}
+                judgment = judgment["source_selection"]
+            except CapabilityUnavailable as exc:
+                raise RecheckBlocked(exc.reason_code) from None
         observation = VerifiedObservation(**snapshot.data["observation"])
         value, admission = snapshot.data["value"], None
         if isinstance(rule, GitSemanticFactPolicy):
@@ -677,10 +753,22 @@ class FactCorrectionCoordinator:
                 return RecheckOutcome("waiting", judgment["reason_code"])
             admission = {"kind": "semantic", "profile_hash": profile.artifact_hash,
                 "judgment_hash": hash_payload(judgment), "task_id": task["task_id"], "input_hash": snapshot.fingerprint}
+        if target_admission is not None:
+            admission = {**(admission or {"kind": "direct_source"}), "target_search": target_admission}
         with self.queue.owned_transaction(task) as db, db.cursor(row_factory=dict_row) as cur:
             bound = PgVectorStore(connection=db)
             resolver = FactResolutionService(bound)
             bound._lock_steward_authority_on(db)
+            if target_admission is not None:
+                from .correction_target import PgTargetInventory
+                from .correction_capabilities import CapabilityUnavailable
+                try:
+                    load_profile(self.target_search)
+                    current_inventory = PgTargetInventory(self).read(rule, task["request"]["target_search"]["description"], connection=db)
+                except CapabilityUnavailable as exc:
+                    raise RecheckBlocked(exc.reason_code) from None
+                if hash_payload(current_inventory) != target_admission["inventory_hash"]:
+                    raise RecheckBlocked("target_inventory_changed")
             cur.execute("SELECT memory_id FROM lbrain_fact_scopes WHERE fact_key=%s", (rule.scope.key,))
             head = cur.fetchone()
             target = bound.get_steward_card(head["memory_id"] if head else task["memory_id"])
@@ -708,6 +796,11 @@ class FactCorrectionCoordinator:
                 raise RecheckBlocked(exc.reason_code) from None
             if result["action"] in {"disputed", "pending_evidence"}:
                 return RecheckOutcome("waiting", result["action"])
+            if target_admission is not None:
+                self._save_target_on(db, task, snapshot, {"status": "verified", "reason_code": "target_verified",
+                    "authority_write_performed": False,
+                    "project": task["project"], "profile_hash": self.target_search.validation_profile_hash,
+                    **target_admission}, resolution_id=result["resolution_id"])
             if snapshot.data.get("native_source_read"):
                 from .source_observation import NativeSourceObservationBridge
                 NativeSourceObservationBridge(self, self.native_catalog).attach_on(
@@ -715,6 +808,42 @@ class FactCorrectionCoordinator:
                     join_only=False, authority_write_performed=result["authority_write_performed"])
             self.queue.checkpoint_result(task, result["resolution_id"], connection=db)
             return RecheckOutcome("resolved", result["action"], result["resolution_id"])
+
+    def _reject_target(self, task, snapshot, selection):
+        from .correction_target import PgTargetInventory, load_profile
+        from .correction_capabilities import CapabilityUnavailable
+        rule = self.policies[task["request"]["policy_id"]]
+        with self.queue.owned_transaction(task) as db:
+            self.store._lock_steward_authority_on(db)
+            try:
+                load_profile(self.target_search)
+                current = PgTargetInventory(self).read(rule, task["request"]["target_search"]["description"], connection=db)
+            except CapabilityUnavailable as exc:
+                raise RecheckBlocked(exc.reason_code) from None
+            if hash_payload(current) != hash_payload(snapshot.data["target_inventory"]):
+                raise RecheckBlocked("target_inventory_changed")
+            result = {"status": "rejected", "reason_code": "target_not_found", "search_complete": True,
+                "authority_write_performed": False, "project": task["project"],
+                "inventory_hash": hash_payload(current), "selection_hash": hash_payload(selection),
+                "profile_hash": self.target_search.validation_profile_hash}
+            decision_id = self._save_target_on(db, task, snapshot, result)
+            self.queue.checkpoint_result(task, decision_id, connection=db)
+        return RecheckOutcome("resolved", "target_not_found", decision_id)
+
+    @staticmethod
+    def _save_target_on(db, task, snapshot, result, *, resolution_id=None):
+        decision_id = "targetdec_" + hash_payload([task["task_id"], snapshot.fingerprint])[7:47]
+        db.execute("""INSERT INTO lbrain_fact_target_decisions
+            (decision_id,task_id,request_hash,input_hash,resolution_id,snapshot,result)
+            VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+            (decision_id, task["task_id"], task["request_hash"], snapshot.fingerprint, resolution_id,
+                Jsonb(snapshot.data["target_inventory"]), Jsonb(result)))
+        saved = db.execute("""SELECT decision_id,request_hash,input_hash,resolution_id,snapshot,result
+            FROM lbrain_fact_target_decisions WHERE task_id=%s""", (task["task_id"],)).fetchone()
+        if not saved or tuple(saved.values()) != (decision_id, task["request_hash"], snapshot.fingerprint,
+                resolution_id, snapshot.data["target_inventory"], result):
+            raise RecheckBlocked("target_decision_conflict")
+        return decision_id
 
     def result(self, task_id):
         task = self.queue.get(task_id)
@@ -727,6 +856,11 @@ class FactCorrectionCoordinator:
             resolution_ref = "factres_" + hash_payload([task["request"]["fact_key"], task_id])[7:47]
         if resolution_ref:
             with self.store._scope() as db, db.cursor(row_factory=dict_row) as cur:
+                cur.execute("SELECT result FROM lbrain_fact_target_decisions WHERE decision_id=%s AND task_id=%s",
+                    (resolution_ref, task_id))
+                target_decision = cur.fetchone()
+                if target_decision:
+                    result["target_resolution"] = target_decision["result"]
                 cur.execute("SELECT result FROM lbrain_fact_resolutions WHERE resolution_id=%s", (resolution_ref,))
                 row = cur.fetchone()
                 if row:
@@ -766,7 +900,7 @@ def _pointer(value, pointer):
     return value
 
 
-def load_configuration(path):
+def load_configuration(path, *, with_target_search=False):
     """운영 경로를 출력하지 않고 서버가 소유한 adapter 설정만 읽는다."""
     from pathlib import Path
     from .correction_sources import GitSourcePolicy
@@ -774,7 +908,8 @@ def load_configuration(path):
     if len(raw) > 65536:
         raise ValueError("bounded fact configuration required")
     data = json.loads(raw, object_pairs_hook=_unique_object)
-    if (not isinstance(data, dict) or set(data) != {"schema_version", "repositories", "rules"}
+    if (not isinstance(data, dict) or not {"schema_version", "repositories", "rules"} <= set(data)
+            or set(data) - {"schema_version", "repositories", "rules", "target_search"}
             or data["schema_version"] != "fact_correction_config.v1"
             or not isinstance(data["repositories"], list) or not isinstance(data["rules"], list)
             or not 1 <= len(data["repositories"]) <= 20 or not 1 <= len(data["rules"]) <= 200):
@@ -791,6 +926,10 @@ def load_configuration(path):
         if kind is None:
             raise ValueError("unknown fact source adapter")
         rules.append(kind(**{**fields, "scope": FactScope(**fields["scope"])}))
+    from .correction_target import TargetSearchPolicy
+    target_search = TargetSearchPolicy(**data["target_search"]) if "target_search" in data else None
+    if with_target_search:
+        return reader, rules, target_search
     return reader, rules
 
 
@@ -816,8 +955,9 @@ def main(argv=None):
         parser.error("bounded worker iterations/poll interval required")
     try:
         dsn = os.environ.get(args.dsn_env, "")
-        reader, policies = load_configuration(args.config)
-        coordinator = FactCorrectionCoordinator(store=PgVectorStore(dsn=dsn), git_reader=reader, policies=policies)
+        reader, policies, target_search = load_configuration(args.config, with_target_search=True)
+        coordinator = FactCorrectionCoordinator(store=PgVectorStore(dsn=dsn), git_reader=reader,
+            policies=policies, target_search=target_search)
         if args.project not in {rule.scope.project for rule in policies}:
             raise ValueError("project not configured")
         worker = coordinator.worker(project=args.project, worker_id=args.worker_id, retry_seconds=args.retry_seconds)

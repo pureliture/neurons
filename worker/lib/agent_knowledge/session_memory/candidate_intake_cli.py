@@ -814,8 +814,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.fact_correction_policy_file:
         from ..fact_correction_coordinator import FactCorrectionCoordinator, load_configuration
         try:
-            reader, policies = load_configuration(args.fact_correction_policy_file)
-            fact_coordinator = FactCorrectionCoordinator(store=pgvector_store, git_reader=reader, policies=policies)
+            reader, policies, target_search = load_configuration(args.fact_correction_policy_file, with_target_search=True)
+            fact_coordinator = FactCorrectionCoordinator(store=pgvector_store, git_reader=reader,
+                policies=policies, target_search=target_search)
         except Exception:
             print(json.dumps({"error_code": "fact_configuration_invalid"}, sort_keys=True))
             return 2

@@ -94,7 +94,12 @@ def test_real_git_content_is_not_dirty_worktree_or_runtime_state(tmp_path):
     head_source = GitSourceReader({scope.repository: GitSourcePolicy(scope.repository, root, branch_ref="HEAD")})
     with pytest.raises(ValueError, match="fixed source branch"):
         GitRepositoryReader(head_source, scope=replace(scope, branch="HEAD"), relative_path="policy.md")
-    path.write_text("x" * 8193)
+    complete = '# 공개 구현 설명\n' + 'x' * 12000 + '\nfeature_state = "removed"\n'
+    path.write_text(complete)
+    git(root, "add", "policy.md"); git(root, "commit", "-m", "원래 한도 뒤의 상태도 전체 보존")
+    assert reader.read().value == complete
+    assert reader.read().value.endswith('feature_state = "removed"\n')
+    path.write_text("x" * 32769)
     git(root, "add", "policy.md"); git(root, "commit", "-m", "전체 문서 한도 검사")
     with pytest.raises(CapabilityUnavailable, match="bounded_full_source"):
         reader.read()

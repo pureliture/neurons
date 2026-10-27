@@ -15,6 +15,8 @@ from psycopg.rows import dict_row
 from .fact_resolution import FactScope
 from .public_safe_util import ensure_public_safe, hash_payload, require_sha256
 
+MAX_REPOSITORY_SOURCE_BYTES = 32768
+
 
 class ObservedCapability(str, Enum):
     CANONICAL_STATE = "canonical_state"
@@ -60,7 +62,7 @@ class ObservedFactRead:
                 "git_repository_content.v1": ObservedCapability.REPOSITORY_CONTENT}.get(self.adapter) != self.capability:
             raise ValueError("reader adapter capability mismatch")
         require_sha256(self.revision_hash, "source read revision")
-        limit = 8192 if self.capability == ObservedCapability.REPOSITORY_CONTENT else 2048
+        limit = MAX_REPOSITORY_SOURCE_BYTES if self.capability == ObservedCapability.REPOSITORY_CONTENT else 2048
         if (not isinstance(self.value, str) or not self.value.strip() or len(self.value) > limit
                 or (self.capability == ObservedCapability.REPOSITORY_CONTENT and len(self.value.encode()) > limit)):
             raise ValueError("bounded observed fact value required")
@@ -159,7 +161,7 @@ class GitRepositoryReader:
             raise CapabilityUnavailable(exc.reason_code) from None
         if not source.current_verified or source.content_hash != source.redacted_content_hash:
             raise CapabilityUnavailable("repository_content_not_independently_readable")
-        if len(source.redacted_text.encode()) > 8192:
+        if len(source.redacted_text.encode()) > MAX_REPOSITORY_SOURCE_BYTES:
             # 나머지 부분에 있는 조건을 버리고 전체 파일의 의미로 오인하지 않는다.
             raise CapabilityUnavailable("repository_content_requires_bounded_full_source")
         proof = source.public_proof()

@@ -934,6 +934,54 @@ CREATE TABLE IF NOT EXISTS lbrain_fact_batches (
     result JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+CREATE TABLE IF NOT EXISTS lbrain_fact_target_decisions (
+    decision_id VARCHAR(64) PRIMARY KEY,
+    task_id VARCHAR(64) NOT NULL UNIQUE REFERENCES lbrain_recheck_tasks(task_id),
+    request_hash VARCHAR(71) NOT NULL,
+    input_hash VARCHAR(71) NOT NULL,
+    resolution_id VARCHAR(64) REFERENCES lbrain_fact_resolutions(resolution_id),
+    snapshot JSONB NOT NULL,
+    result JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    FOREIGN KEY(task_id,input_hash) REFERENCES lbrain_recheck_judgments(task_id,input_hash)
+);
+CREATE OR REPLACE FUNCTION lbrain_preserve_target_decision() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$ BEGIN
+    RAISE EXCEPTION 'target_decision_retention_required' USING ERRCODE='23514';
+END; $$;
+DROP TRIGGER IF EXISTS lbrain_preserve_target_decision ON lbrain_fact_target_decisions;
+CREATE TRIGGER lbrain_preserve_target_decision BEFORE UPDATE OR DELETE ON lbrain_fact_target_decisions
+    FOR EACH ROW EXECUTE FUNCTION lbrain_preserve_target_decision();
+CREATE OR REPLACE FUNCTION lbrain_check_target_decision() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$ BEGIN
+    IF NOT EXISTS(SELECT 1 FROM lbrain_recheck_tasks t JOIN lbrain_recheck_judgments j ON j.task_id=t.task_id
+        WHERE t.task_id=NEW.task_id AND t.request_hash=NEW.request_hash AND j.input_hash=NEW.input_hash
+            AND j.judgment->'target_inventory'=NEW.snapshot
+            AND NEW.result->>'project'=t.project
+            AND NEW.result->>'profile_hash'=NEW.snapshot->>'profile_hash'
+            AND (NEW.resolution_id IS NOT NULL OR (NEW.result->>'reason_code'='target_not_found'
+                AND j.judgment#>>'{target_selection,reason_code}'='target_not_found')))
+        OR (NEW.resolution_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM lbrain_fact_resolutions r
+            JOIN lbrain_recheck_tasks t ON t.task_id=NEW.task_id
+            WHERE r.resolution_id=NEW.resolution_id AND r.fact_key=t.request->>'fact_key' AND r.terminal)) THEN
+        RAISE EXCEPTION 'target_decision_binding_mismatch' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END; $$;
+DROP TRIGGER IF EXISTS lbrain_check_target_decision ON lbrain_fact_target_decisions;
+CREATE CONSTRAINT TRIGGER lbrain_check_target_decision AFTER INSERT ON lbrain_fact_target_decisions
+    DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION lbrain_check_target_decision();
+CREATE OR REPLACE FUNCTION lbrain_preserve_target_judgment() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$ BEGIN
+    IF EXISTS(SELECT 1 FROM lbrain_fact_target_decisions WHERE task_id=OLD.task_id AND input_hash=OLD.input_hash) THEN
+        RAISE EXCEPTION 'target_judgment_retention_required' USING ERRCODE='23514';
+    END IF;
+    IF TG_OP='DELETE' THEN RETURN OLD; END IF;
+    RETURN NEW;
+END; $$;
+DROP TRIGGER IF EXISTS lbrain_preserve_target_judgment ON lbrain_recheck_judgments;
+CREATE TRIGGER lbrain_preserve_target_judgment BEFORE UPDATE OR DELETE ON lbrain_recheck_judgments
+    FOR EACH ROW EXECUTE FUNCTION lbrain_preserve_target_judgment();
 -- graph/embedding 반영 전에도 관련된 현재 fact만 indexed lexical 후보로 회수한다.
 -- 서버의 독립 source 관측을 먼저 보존하고 교정/지연 native 수집이 공유한다.
 CREATE TABLE IF NOT EXISTS lbrain_fact_source_reads (

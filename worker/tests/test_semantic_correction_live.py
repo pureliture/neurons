@@ -181,3 +181,107 @@ def test_live_source_observe_http_correction_then_native_cli_restart_join(coordi
     test_actual_http_observe_correct_then_cli_worker_discovers_late_session(c,actual_couch_source,tmp_path,
         policy_descriptor={**asdict(c.rule),'adapter':'git_semantic.v1'},
         additional_env={'OPENROUTER_API_KEY':os.environ['OPENROUTER_API_KEY']})
+
+
+def target_profile():
+    if not (os.environ.get("LBRAIN_TEST_TARGET_PROFILE") and os.environ.get("LBRAIN_TEST_TARGET_PROFILE_HASH")):
+        pytest.skip("실제 대상 식별 독립 평가 profile 필요")
+    return {
+        "validation_profile_path": os.environ["LBRAIN_TEST_TARGET_PROFILE"],
+        "validation_profile_hash": os.environ["LBRAIN_TEST_TARGET_PROFILE_HASH"],
+    }
+
+
+@pytest.mark.parametrize("facts", [{"title": "기억 교정 도구의 구현 상태",
+    "render_template": "기억 교정 도구 구현 상태: {value}"}], indirect=True)
+def test_live_target_and_source_judgments_through_real_http_cli(coordinator, tmp_path):
+    """실제 두 모델 판단과 source-observe/MCP/CLI/PG를 함께 통과한다."""
+    from dataclasses import asdict
+    c = coordinator
+    descriptor = target_profile()
+    text = "이 파일에서 기억 교정 도구의 현재 구현 상태는 ready다. 운영 배포 여부는 다루지 않는다."
+    (c.root / "facts.json").write_text(text)
+    git(c.root, "add", "facts.json"); git(c.root, "commit", "-m", "대상 식별과 값 교정의 실제 원천")
+    c.rule = GitSemanticFactPolicy("status", c.rule.scope, c.rule.target_title, c.rule.field_path,
+        "기억 교정 도구 구현 상태: {value}", "facts.json", "등록 파일에 명시된 기억 교정 도구의 구현 상태",
+        (("ready", "이 파일의 기억 교정 도구 구현 상태는 ready다."),
+         ("failed", "이 파일의 기억 교정 도구 구현 상태는 failed다.")),
+        "repository_content", os.environ["LBRAIN_TEST_SEMANTIC_PROFILE"], os.environ["LBRAIN_TEST_SEMANTIC_PROFILE_HASH"])
+    change = c.request["changes"][0]
+    change.pop("target_memory_id"); change.pop("expected_content_hash")
+    change["target_description"] = "기억 내용을 고치는 기능이 구현되어 있는지"
+    change["evidence"] = {"revision": git(c.root, "rev-parse", "HEAD"), "content_hash": sha256_text(text)}
+    test_fact_resolution.test_real_cli_http_configuration_source_read_and_current_query(c, tmp_path,
+        policy_descriptor={**asdict(c.rule), "adapter": "git_semantic.v1"},
+        target_search_descriptor=descriptor,
+        additional_env={"OPENROUTER_API_KEY": os.environ["OPENROUTER_API_KEY"]})
+    with c.f.store._scope() as db:
+        row = db.execute("SELECT snapshot,result,resolution_id FROM lbrain_fact_target_decisions").fetchone()
+    assert row["resolution_id"] and row["result"]["memory_id"] == c.f.old["memory_id"]
+    assert row["snapshot"]["description"] == change["target_description"]
+
+
+def test_live_full_source_over_eight_kilobytes_keeps_final_value(coordinator):
+    """기존 8 KiB 경계 뒤의 값도 source를 자르지 않고 실제 모델로 확인한다."""
+    c = coordinator
+    text = ("# 공개 검증용 주석이다. 이 행은 기능 상태를 주장하지 않는다.\n" * 180
+        + "FEATURE_STATUS = 'failed'\n")
+    assert 8192 < len(text.encode()) <= 32768
+    (c.root / "facts.json").write_text(text)
+    git(c.root, "add", "facts.json"); git(c.root, "commit", "-m", "전체 파일 끝부분 값 검증")
+    rule = GitSemanticFactPolicy("status", c.rule.scope, c.rule.target_title, c.rule.field_path,
+        c.rule.render_template, "facts.json", "등록 파일의 FEATURE_STATUS 상수 값",
+        (("ready", "이 파일의 FEATURE_STATUS 상수 값은 ready다."),
+         ("failed", "이 파일의 FEATURE_STATUS 상수 값은 failed다.")),
+        "repository_content", os.environ["LBRAIN_TEST_SEMANTIC_PROFILE"], os.environ["LBRAIN_TEST_SEMANTIC_PROFILE_HASH"])
+    service = FactCorrectionCoordinator(store=c.f.store, git_reader=c.service.git_reader, policies=[rule])
+    change = c.request["changes"][0]
+    change["evidence"] = {"revision": git(c.root, "rev-parse", "HEAD"), "content_hash": sha256_text(text)}
+    task_id = service.submit(c.request)["changes"][0]["task_id"]
+    run = service.worker(project=c.f.scope.project, worker_id="live-full-file").run_once(task_id=task_id)
+    assert run["state"] == "resolved", run
+    receipt = service.result(task_id)["resolution"]
+    assert receipt["applied_value"] == "failed" and counts(c.f)["steward_card_decisions"] == 2
+    with c.f.store._scope() as db:
+        contents = [row["redacted_content"] for row in db.execute("SELECT redacted_content FROM lbrain_fact_source_receipts")]
+    assert text in contents
+
+
+@pytest.mark.parametrize("facts", [{"title": "기억 교정 도구의 구현 상태",
+    "render_template": "기억 교정 도구 구현 상태: {value}"}], indirect=True)
+def test_live_target_uncertainty_keeps_recheck_and_never_changes_the_anchor(coordinator):
+    """확실히 구분하지 못한 실제 모델 응답을 대상 부재로 바꾸지 않는다."""
+    from agent_knowledge.correction_target import TargetSearchPolicy
+    c = coordinator
+    service = FactCorrectionCoordinator(store=c.f.store, git_reader=c.service.git_reader,
+        policies=[c.rule], target_search=TargetSearchPolicy(**target_profile()))
+    change = c.request["changes"][0]
+    change.pop("target_memory_id"); change.pop("expected_content_hash")
+    change["target_description"] = "기억 교정 도구 프로세스의 현재 가동 여부"
+    task_id = service.submit(c.request)["changes"][0]["task_id"]
+    worker = service.worker(project=c.f.scope.project, worker_id="live-target-uncertain", retry_seconds=.1)
+    outcome = worker.run_once(task_id=task_id)
+    assert outcome["state"] == "waiting" and outcome["reason_code"] == "target_identity_uncertain", outcome
+    assert service.result(task_id)["automatic_recheck_scheduled"]
+    time.sleep(.12)
+    repeated = worker.run_once(task_id=task_id)
+    assert repeated["state"] == "waiting" and repeated["judgment_reused"], repeated
+    assert counts(c.f)["steward_card_decisions"] == 1
+
+
+@pytest.mark.parametrize("facts", [{"title": "기억 교정 도구의 구현 상태",
+    "render_template": "기억 교정 도구 구현 상태: {value}"}], indirect=True)
+def test_live_unrelated_target_absence_never_creates_a_fact(coordinator):
+    from agent_knowledge.correction_target import TargetSearchPolicy
+    c = coordinator
+    service = FactCorrectionCoordinator(store=c.f.store, git_reader=c.service.git_reader,
+        policies=[c.rule], target_search=TargetSearchPolicy(**target_profile()))
+    change = c.request["changes"][0]
+    change.pop("target_memory_id"); change.pop("expected_content_hash")
+    change["target_description"] = "사용자 화면의 글꼴 크기 설정"
+    task_id = service.submit(c.request)["changes"][0]["task_id"]
+    outcome = service.worker(project=c.f.scope.project, worker_id="live-target-absence").run_once(task_id=task_id)
+    assert outcome["state"] == "resolved", outcome
+    receipt = service.result(task_id)["target_resolution"]
+    assert receipt["reason_code"] == "target_not_found" and receipt["search_complete"]
+    assert not receipt["authority_write_performed"] and counts(c.f)["steward_card_decisions"] == 1

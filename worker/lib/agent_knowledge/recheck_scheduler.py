@@ -134,7 +134,9 @@ class PgRecheckQueue:
     def save_judgment(self, task: Mapping[str, Any], fingerprint: str, judgment: Mapping[str, Any]) -> dict:
         require_sha256(fingerprint, "fingerprint")
         ensure_public_safe(judgment, "RecheckJudgment")
-        if len(json.dumps(judgment).encode()) > 32768:
+        target_judgment = (judgment.get("schema_version") == "fact_target_judgment.v1" and
+            set(judgment) == {"schema_version", "target_selection", "target_inventory", "source_selection"})
+        if len(json.dumps(judgment).encode()) > (262144 if target_judgment else 32768):
             raise ValueError("recheck judgment is too large")
         with self.store.transaction() as db, db.cursor(row_factory=dict_row) as cur:
             self._fence(cur, task)

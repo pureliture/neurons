@@ -23,10 +23,14 @@ def facts(tmp_path, isolated_pg_store, request):
     store = isolated_pg_store
     ledger = Ledger(tmp_path / "ledger.sqlite")
     steward = BrainStewardService(ledger, pgvector_store=store, allow_restricted=True)
-    project = request.param if isinstance(getattr(request, "param", None), str) else "fact-test"
+    parameter = getattr(request, "param", None)
+    metadata = parameter if isinstance(parameter, dict) else {}
+    project = parameter if isinstance(parameter, str) else metadata.get("project", "fact-test")
+    render_template = metadata.get("render_template", "기능 상태: {value}")
     scope = FactScope(project, "neurons", "main", "test", "correction", "status")
     span = {"card_type": "status", "project": scope.project, "provider": "codex", "scope": "project",
-        "title": "교정 상태", "redacted_summary": "기능 상태: missing; 배포는 별도 확인이 필요하다.",
+        "title": metadata.get("title", "교정 상태"),
+        "redacted_summary": render_template.format(value="missing") + "; 배포는 별도 확인이 필요하다.",
         "typed_payload": {"status_value": "missing", "observed_at": utc_now_iso(),
             "expires_at": "", "current_authority": "structured-facts"},
         "source_ref": {"source_id": "fixture-old"}, "span_ref": {"span_id": "fixture-span"},
@@ -36,7 +40,7 @@ def facts(tmp_path, isolated_pg_store, request):
     f = SimpleNamespace(store=store, ledger=ledger, scope=scope, old=store.get_steward_card(memory_id),
         resolver=FactResolutionService(store), current={}, calls=0, span=span)
     f.commit = StewardFactCommit(field_path="typed_payload.status_value",
-        render_template="기능 상태: {value}", policy_id="fixture-status")
+        render_template=render_template, policy_id="fixture-status")
     yield f
 
 
@@ -280,7 +284,7 @@ def coordinator(facts, tmp_path):
     current = git(root, "rev-parse", "HEAD")
     scope = replace(f.scope, branch="refs/heads/fixture")
     rule = GitJsonFactPolicy("status", scope, f.old["title"], "typed_payload.status_value",
-        "기능 상태: {value}", "facts.json", "/status")
+        f.commit.render_template, "facts.json", "/status")
     service = FactCorrectionCoordinator(store=f.store,
         git_reader=GitSourceReader({scope.repository: GitSourcePolicy(scope.repository, root, branch_ref=scope.branch)}),
         policies=[rule])
@@ -466,7 +470,7 @@ def test_duplicate_card_fact_reads_same_value_and_retains_unrelated_text(facts):
 
 
 def test_real_cli_http_configuration_source_read_and_current_query(coordinator, tmp_path,
-        policy_descriptor=None, additional_env=None, return_read=False):
+        policy_descriptor=None, additional_env=None, return_read=False, target_search_descriptor=None):
     """실제 CLI subprocess·HTTP·Git·PG 경로를 통과한다. graph/모델 대역은 넣지 않는다."""
     import asyncio
     import copy
@@ -483,9 +487,12 @@ def test_real_cli_http_configuration_source_read_and_current_query(coordinator, 
     from mcp.client.streamable_http import streamable_http_client
     c = coordinator
     config_file = tmp_path / "fact-policy.json"
-    config_file.write_text(json.dumps({"schema_version": "fact_correction_config.v1", "repositories": [{
+    configuration = {"schema_version": "fact_correction_config.v1", "repositories": [{
         "repository": c.rule.scope.repository, "root": str(c.root), "branch_ref": c.rule.scope.branch}],
-        "rules": [policy_descriptor if policy_descriptor is not None else asdict(c.rule)]}, ensure_ascii=False))
+        "rules": [policy_descriptor if policy_descriptor is not None else asdict(c.rule)]}
+    if target_search_descriptor is not None:
+        configuration["target_search"] = target_search_descriptor
+    config_file.write_text(json.dumps(configuration, ensure_ascii=False))
     config_file.chmod(0o600)
     ledger_path = tmp_path / "http-ledger.sqlite"
     Ledger(ledger_path)
@@ -501,7 +508,7 @@ def test_real_cli_http_configuration_source_read_and_current_query(coordinator, 
         "--fact-correction-policy-file", str(config_file), "--host", "127.0.0.1", "--port", str(port)]
     base = f"http://127.0.0.1:{port}"
     async def roundtrip():
-        async with httpx.AsyncClient(headers={"Authorization": f"Bearer {token}"}) as client:
+        async with httpx.AsyncClient(headers={"Authorization": f"Bearer {token}"}, timeout=90) as client:
             async with streamable_http_client(base + "/mcp", http_client=client) as (read, write, _):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
@@ -515,7 +522,10 @@ def test_real_cli_http_configuration_source_read_and_current_query(coordinator, 
                     request['changes'][0]['evidence']=observed.structuredContent['evidence']
                     changed = await session.call_tool("brain_object_correct", request)
                     assert not changed.isError
-                    receipt = changed.structuredContent["changes"][0]["outcome"]["resolution"]
+                    outcome = changed.structuredContent["changes"][0]["outcome"]
+                    assert outcome.get("state") == "resolved", {key: outcome.get(key)
+                        for key in ("state", "reason_code", "automatic_recheck_scheduled")}
+                    receipt = outcome["resolution"]
                     assert receipt["applied_value"] == "ready"
                     current = await session.call_tool("brain.resolve", {"project": c.f.scope.project,
                         "mode": "list", "response_mode": "slim", "min_fact_generation": 1})

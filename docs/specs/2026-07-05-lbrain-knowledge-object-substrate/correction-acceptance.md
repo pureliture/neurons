@@ -58,7 +58,7 @@
 | C33 | 복구·재구축·backfill 재생 | 미검증 |
 | C34 | 교정 전 사실에 의존한 파생물 | 미검증 |
 | C35 | 외부 cache·기존 prompt와 새 조회의 경계 | cache 무효화, generation/cursor, 같은 fact의 옛 표현 질의를 현재 head로 연결하는 실제 PG/Neo4j 검사 확인. 미식별 세션·외부 cache·기존 prompt 자체는 남음 |
-| C36 | 대상 부재·모호함·검색 실패·잘림 | exact target과 정확한 title/summary 검색에서 부재·복수 거부 구현. 일반 의미 검색과 잘림 검증은 남음 |
+| C36 | 대상 부재·모호함·검색 실패·잘림 | 등록 source/fact 정책 범위의 설명 검색·PG 전체 후보 한도/legacy 불완전 차단·별도 대상 판단과 불변 결과 보존 구현. 독립 실제 모델 정상 18/20·잘못된 선택 0건 확인. 일반 정책/원천으로의 확대와 전체 연결 검증은 남음 |
 
 ## 완료 판정 규칙
 
@@ -91,3 +91,5 @@ Git 내용의 의미 기반 값 선택·새 독립 실제 모델 평가·실제 
 원래 native tool 응답의 보존·한도·역할·관측 identity와 실제 Couch/PG/CLI 증거는 [native receipt 검사](../../validation/2026-10-27-lbrain-native-tool-receipts.md)를 따른다.
 
 서버 수집 전의 독립 관찰 참조, 지연 native source의 동일 관찰 합류와 수집 전 장애 감시는 [서버 관찰 참조 검사](../../validation/2026-10-27-lbrain-source-observation-join.md)를 따른다. 이 범위를 일반 native 세계 상태 admission이나 전체 goal 완료로 승격하지 않는다.
+
+등록 범위의 설명 기반 대상 식별, 실패한 모델 평가의 보존과 새 독립 평가 결과는 [대상 설명 검색 검사](../../validation/2026-10-27-lbrain-target-description-search.md)를 따른다. 이 범위를 임의 사실/source 정책의 자동 생성이나 전체 C36 완료로 승격하지 않는다.

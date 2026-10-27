@@ -284,7 +284,7 @@ def _build_recall_service(
     try:
         correction_policies = load_policies(getattr(args, "evidence_correction_policy_file", ""))
         fact_policy_file = getattr(args, "fact_correction_policy_file", "")
-        fact_configuration = load_fact_configuration(fact_policy_file) if fact_policy_file else None
+        fact_configuration = load_fact_configuration(fact_policy_file, with_target_search=True) if fact_policy_file else None
         correction_enabled = bool(getattr(args, "allow_evidence_backed_object_corrections", False))
         if correction_enabled and not correction_policies and not fact_configuration:
             raise ValueError("correction policy required")
@@ -412,7 +412,7 @@ def _build_recall_service(
         from .fact_correction_coordinator import FactCorrectionCoordinator
         try:
             fact_coordinator = FactCorrectionCoordinator(store=pgvector_store,
-                git_reader=fact_configuration[0], policies=fact_configuration[1])
+                git_reader=fact_configuration[0], policies=fact_configuration[1], target_search=fact_configuration[2])
         except (ValueError, TypeError):
             raise _ServiceWiringError(2, "invalid fact correction source configuration") from None
 
