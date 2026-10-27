@@ -5,11 +5,12 @@ import time
 
 import pytest
 
-from test_fact_resolution import facts, coordinator
 from agent_knowledge.llm_brain_core.graph_first_resolver import GraphFirstResolver
 from agent_knowledge.llm_brain_core.graphiti_adapter import GraphitiNeo4jGraphMemoryAdapter, _AsyncLoopRunner
 from agent_knowledge.postgres_store.outbox_worker import GraphProjectionWorker
 from agent_knowledge.postgres_store.pgvector_store import make_dummy_vector
+
+pytest_plugins = ("test_fact_resolution",)
 
 
 NEO4J_URI = os.environ.get("LBRAIN_TEST_NEO4J_URI", "")
@@ -177,6 +178,31 @@ def test_real_graph_reverse_duplicate_and_expired_same_worker_lease(coordinator,
         project=c.f.scope.project, mode="query", query="기능 상태")
     assert [item["typed_payload"]["status_value"] for item in result["items"]] == ["ready"]
     assert result["items"][0]["id"] == head
+
+
+@pytest.mark.parametrize("facts", ["fact-rebuild-" + uuid.uuid4().hex[:12]], indirect=True)
+def test_fresh_graph_replays_saved_authority_jobs_without_reviving_old_value(coordinator, facts, graph_adapter):
+    """새 graph project에 보존된 작업을 재생한다. 운영 재구축 도구 검사는 아니다."""
+    c = coordinator
+    task_id = c.service.submit(c.request)["changes"][0]["task_id"]
+    assert c.service.worker(project=c.f.scope.project, worker_id="before-rebuild").run_once(task_id=task_id)["state"] == "resolved"
+    head = c.service.result(task_id)["resolution"]["current"]["memory_id"]
+    jobs = c.f.store.list_graph_projection_jobs()
+    assert len(jobs) >= 2
+    assert any(job.source_id == head for job in jobs)
+    assert any(job.source_id == c.f.old["memory_id"] for job in jobs)
+    projector = GraphProjectionWorker(c.f.store, graph_adapter=graph_adapter, worker_id="fresh-graph-rebuild")
+    # 최신 결과를 먼저 기록한 뒤 옛 current payload를 중복 전달한다.
+    jobs.sort(key=lambda job: (job.source_id != head, job.projection_id))
+    for job in jobs:
+        projector.process_job(job)
+        projector.process_job(job)
+    reader = GraphFirstResolver(store=c.f.store, graph_adapter=graph_adapter,
+        embed_query=lambda query: make_dummy_vector(42))
+    result = reader.resolve(project=c.f.scope.project, mode="query", query="기능 상태")
+    assert result["metadata"]["retrieval_path"] == "graph_neo4j", result["metadata"]
+    assert [item["id"] for item in result["items"]] == [head], result
+    assert result["items"][0]["typed_payload"]["status_value"] == "ready"
 
 
 @pytest.mark.parametrize("facts", ["fact-old-query-" + uuid.uuid4().hex[:12]], indirect=True)

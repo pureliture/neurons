@@ -55,7 +55,7 @@
 | C30 | graph 작업 역순·중복·lease 만료 | 실제 PG/Neo4j에서 역순·중복·옛 current 재생과 만료/동일 worker 재claim generation 거부 확인. 일반 재구축/다른 source는 남음 |
 | C31 | projection 장기 실패와 복구 | 실제 Neo4j 종료·실패 예약·재시작·backoff 후 수렴 확인. 장기 운영/감시·복원 검사는 남음 |
 | C32 | A→B 후 A의 오래된 재시도 | PG 코어에서 A의 불변 결과와 이후 현재 B를 구분하고 재변경하지 않음. 범용 의미 경로는 남음 |
-| C33 | 복구·재구축·backfill 재생 | 합성 교정 schema의 실제 PG dump/restore 후 옛 교정 재시도와 Git source 수집이 현재 값을 되돌리지 않음을 확인. 일반 session backfill·graph 재구축·PG/Couch 일관 복원은 남음 |
+| C33 | 복구·재구축·backfill 재생 | 합성 교정 schema의 실제 PG 복원 후 옛 교정 재시도와 Git source 수집, 새 실제 graph 영역의 저장된 projection 역순·중복 재생이 현재 값을 되돌리지 않음을 확인. 일반 session backfill·전체 graph 재구축·PG/Couch 일관 복원은 남음 |
 | C34 | 교정 전 사실에 의존한 파생물 | 미검증 |
 | C35 | 외부 cache·기존 prompt와 새 조회의 경계 | cache 무효화, generation/cursor, 같은 fact의 옛 표현 질의를 현재 head로 연결하는 실제 PG/Neo4j 검사 확인. 미식별 세션·외부 cache·기존 prompt 자체는 남음 |
 | C36 | 대상 부재·모호함·검색 실패·잘림 | 등록 source/fact 정책 범위의 설명 검색·PG 전체 후보 한도/legacy 불완전 차단·별도 대상 판단과 불변 결과 보존 구현. 현재 코드 identity의 독립 실제 모델 평가에서 정상 20/20·잘못된 선택 0건 확인. 일반 정책/원천으로의 확대와 전체 연결 검증은 남음 |
