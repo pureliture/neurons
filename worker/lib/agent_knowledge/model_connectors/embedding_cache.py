@@ -14,6 +14,10 @@ DEFAULT_EMBEDDING_CACHE_ENTRIES = 256
 EMBEDDING_CACHE_ENABLED_ENV = "LLM_BRAIN_EMBEDDING_CACHE_ENABLED"
 
 
+class _RetryInflight(Exception):
+    """Signal that an in-flight owner was cancelled and should be retried."""
+
+
 def embedding_cache_enabled(environ: dict[str, str] | None = None) -> bool:
     source = os.environ if environ is None else environ
     raw = source.get(EMBEDDING_CACHE_ENABLED_ENV, "true").strip().lower()
@@ -82,28 +86,32 @@ class CachedEmbedder:
             return await self._backend.create(input_data)
 
         key = self._cache_key(input_data)
-        with self._lock:
-            cached = self._cache.get(key)
-            if cached is not None:
-                self._cache.move_to_end(key)
-                return list(cached)
-            future = self._inflight.get(key)
-            owner = future is None
-            if owner:
-                future = Future()
-                self._inflight[key] = future
+        while True:
+            with self._lock:
+                cached = self._cache.get(key)
+                if cached is not None:
+                    self._cache.move_to_end(key)
+                    return list(cached)
+                future = self._inflight.get(key)
+                owner = future is None
+                if owner:
+                    future = Future()
+                    self._inflight[key] = future
 
-        if not owner:
-            return list(await asyncio.shield(asyncio.wrap_future(future)))
+            if not owner:
+                try:
+                    return list(await asyncio.shield(asyncio.wrap_future(future)))
+                except _RetryInflight:
+                    continue
 
-        try:
-            vector = self._validate_vector(await self._backend.create(input_data))
-        except BaseException as exc:
-            self._fail_inflight(key, future, exc)
-            raise
+            try:
+                vector = self._validate_vector(await self._backend.create(input_data))
+            except BaseException as exc:
+                self._fail_inflight(key, future, exc)
+                raise
 
-        self._cache_inflight(key, future, vector)
-        return list(vector)
+            self._cache_inflight(key, future, vector)
+            return list(vector)
 
     async def create_batch(self, input_data_list: list[str]) -> list[list[float]]:
         if not self._enabled:
@@ -116,42 +124,61 @@ class CachedEmbedder:
         keys = [self._cache_key(text) for text in input_data_list]
         unique_inputs = dict(zip(keys, input_data_list))
         resolved: dict[str, tuple[float, ...]] = {}
-        owned: dict[str, tuple[str, Future[tuple[float, ...]]]] = {}
-        waiting: dict[str, Future[tuple[float, ...]]] = {}
+        while len(resolved) < len(unique_inputs):
+            owned: dict[str, tuple[str, Future[tuple[float, ...]]]] = {}
+            waiting: dict[str, Future[tuple[float, ...]]] = {}
 
-        with self._lock:
-            for key in unique_inputs:
-                cached = self._cache.get(key)
-                if cached is not None:
-                    self._cache.move_to_end(key)
-                    resolved[key] = cached
+            with self._lock:
+                for key in unique_inputs:
+                    if key in resolved:
+                        continue
+                    cached = self._cache.get(key)
+                    if cached is not None:
+                        self._cache.move_to_end(key)
+                        resolved[key] = cached
+                        continue
+                    existing = self._inflight.get(key)
+                    if existing is not None:
+                        waiting[key] = existing
+                        continue
+                    future: Future[tuple[float, ...]] = Future()
+                    self._inflight[key] = future
+                    owned[key] = (unique_inputs[key], future)
+
+            if owned:
+                try:
+                    inputs = [text for text, _ in owned.values()]
+                    vectors = await self._backend.create_batch(inputs)
+                    if len(vectors) != len(inputs):
+                        raise ValueError("embedding batch result count mismatch")
+                    normalized = [self._validate_vector(vector) for vector in vectors]
+                except BaseException as exc:
+                    for key, (_, future) in owned.items():
+                        self._fail_inflight(key, future, exc)
+                    raise
+
+                for (key, (_, future)), vector in zip(owned.items(), normalized):
+                    self._cache_inflight(key, future, vector)
+                    resolved[key] = vector
+
+            if waiting:
+                wait_results = await asyncio.gather(
+                    *(
+                        asyncio.shield(asyncio.wrap_future(future))
+                        for future in waiting.values()
+                    ),
+                    return_exceptions=True,
+                )
+                retry = False
+                for key, result in zip(waiting, wait_results):
+                    if isinstance(result, _RetryInflight):
+                        retry = True
+                    elif isinstance(result, BaseException):
+                        raise result
+                    else:
+                        resolved[key] = result
+                if retry:
                     continue
-                existing = self._inflight.get(key)
-                if existing is not None:
-                    waiting[key] = existing
-                    continue
-                future: Future[tuple[float, ...]] = Future()
-                self._inflight[key] = future
-                owned[key] = (unique_inputs[key], future)
-
-        if owned:
-            try:
-                inputs = [text for text, _ in owned.values()]
-                vectors = await self._backend.create_batch(inputs)
-                if len(vectors) != len(inputs):
-                    raise ValueError("embedding batch result count mismatch")
-                normalized = [self._validate_vector(vector) for vector in vectors]
-            except BaseException as exc:
-                for key, (_, future) in owned.items():
-                    self._fail_inflight(key, future, exc)
-                raise
-
-            for (key, (_, future)), vector in zip(owned.items(), normalized):
-                self._cache_inflight(key, future, vector)
-                resolved[key] = vector
-
-        for key, future in waiting.items():
-            resolved[key] = await asyncio.shield(asyncio.wrap_future(future))
 
         return [list(resolved[key]) for key in keys]
 
@@ -169,12 +196,13 @@ class CachedEmbedder:
         vector: tuple[float, ...],
     ) -> None:
         with self._lock:
+            if self._inflight.get(key) is not future:
+                return
+            del self._inflight[key]
             self._cache[key] = vector
             self._cache.move_to_end(key)
             while len(self._cache) > self._max_entries:
                 self._cache.popitem(last=False)
-            if self._inflight.get(key) is future:
-                del self._inflight[key]
             future.set_result(vector)
 
     def _fail_inflight(
@@ -184,9 +212,11 @@ class CachedEmbedder:
         exc: BaseException,
     ) -> None:
         with self._lock:
-            if self._inflight.get(key) is future:
-                del self._inflight[key]
-            future.set_exception(exc)
+            if self._inflight.get(key) is not future:
+                return
+            del self._inflight[key]
+            exception = _RetryInflight() if isinstance(exc, asyncio.CancelledError) else exc
+            future.set_exception(exception)
 
     def _validate_vector(self, vector: Any) -> tuple[float, ...]:
         try:
