@@ -24,6 +24,7 @@ from agent_knowledge.model_connectors import (
     resolve_model_connection_config,
     resolve_reranker_spec,
 )
+from agent_knowledge.model_connectors.embedding_cache import CachedEmbedder
 from agent_knowledge.model_connectors.openai_compatible import (
     build_openai_compatible_graphiti_components,
 )
@@ -399,9 +400,11 @@ def test_openai_compatible_graphiti_components_use_shared_cross_encoder_adapter(
         reranker=RerankerSpec(provider="ollama", model="llm", base_url="http://localhost:11434/v1"),
     )
 
-    _llm_client, _embedder, cross_encoder = build_openai_compatible_graphiti_components(config)
+    _llm_client, embedder, cross_encoder = build_openai_compatible_graphiti_components(config)
 
     assert isinstance(cross_encoder, GraphitiCrossEncoderAdapter)
+    assert isinstance(embedder, CachedEmbedder)
+    assert embedder.config.embedding_dim == config.embedding.dim
 
 
 def test_importing_model_connectors_does_not_load_heavy_llm_brain_core():

@@ -110,10 +110,20 @@ class OutboxWorker:
     def process_job(self, job: OutboxJob) -> bool:
         """
         Process an outbox job:
-        1. Compute vector embedding outside DB transaction.
-        2. Apply CAS write-back with enqueued_content_hash guard.
-        3. Gracefully retire outbox job on CAS mismatch (stale write).
+        1. Retire stale work before spending on an embedding.
+        2. Compute vector embedding outside DB transaction.
+        3. Apply CAS write-back with enqueued_content_hash guard.
         """
+        stale_check = getattr(self.store, "skip_stale_outbox_embedding", None)
+        if stale_check is not None and stale_check(
+            outbox_id=job.outbox_id,
+            target_type=job.target_type,
+            target_id=job.target_id,
+            content_hash=job.content_hash,
+            worker_id=self.worker_id,
+        ):
+            return False
+
         # 1. Compute embedding vector
         vector = self.embedding_fn(job.payload_text)
         if not vector or len(vector) != DEFAULT_EMBEDDING_DIM:

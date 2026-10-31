@@ -48,6 +48,24 @@ PG projector는 UTF-8 본문이 8KiB를 넘으면 원문을 보존한 채 청크
 정책 버전이 없는 기존 선택 checkpoint는 pending 목록과 watermark를 유지한 채
 과거 PG DataError만 한 번 재선택해 새 검증으로 평가한다.
 
+## Graphiti 임베딩 중복 방지와 키워드 검색
+
+Graphiti embedder는 기본적으로 프로세스 내 LRU 캐시(최대 256개)를 사용한다.
+동일 batch 안의 중복 텍스트는 한 번만 임베딩하고, 동시 요청의 동일 텍스트도
+진행 중인 결과를 공유한다. 캐시 키는 provider/model/endpoint/차원/credential
+digest와 입력 digest를 조합하며, 입력 원문과 API key는 캐시에 저장하지 않는다.
+실패한 호출은 캐시하지 않는다. `LLM_BRAIN_EMBEDDING_CACHE_ENABLED=false`로
+캐시와 single-flight를 끄면 기존 embedder 호출 방식으로 돌아간다.
+
+PostgreSQL embedding outbox는 lease 소유권과 현재 target의 `content_hash`를
+트랜잭션 안에서 확인한다. 이미 오래된 작업은 임베딩 API를 부르기 전에
+`cas_skipped`로 종료하고, 임베딩 이후의 기존 CAS 검사는 처리 중 발생한 변경을
+막기 위해 계속 유지한다.
+
+Graphiti의 기존 `search()`는 벡터 검색과 Full-text(BM25/Lucene)를 결합하는
+하이브리드 경로다. 중복 방지는 이 검색 구성을 변경하거나 Lucene을 별도 설치하지
+않으며, 키워드 검색과 벡터 검색은 계속 함께 사용한다.
+
 ## 무엇을 가져왔고(vendored) 무엇을 뺐나
 
 라이브 worker가 실제로 실행하는 경로(`shadow_worker.run_consume` →

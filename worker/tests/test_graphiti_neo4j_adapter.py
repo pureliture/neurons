@@ -25,13 +25,39 @@ from agent_knowledge.llm_brain_core.graphiti_adapter import (
     _datetime_to_iso,
     _episode_node_to_ontology,
     _existing_fact_idx_values_from_messages,
+    _build_graphiti,
     _normalize_structured_response,
     _uses_configured_llm_client,
 )
+from agent_knowledge.model_connectors.embedding_cache import CachedEmbedder
 from agent_knowledge.llm_brain_core.graph_scope import (
     graph_group_id,
 )
 from agent_knowledge.llm_brain_core.models import OntologyEpisode
+
+
+def test_graphiti_configured_builder_wraps_embedder_with_reusable_cache(monkeypatch):
+    import graphiti_core
+
+    monkeypatch.delenv("LLM_BRAIN_EMBEDDING_CACHE_ENABLED", raising=False)
+
+    def graphiti_factory(*_args, **kwargs):
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr(graphiti_core, "Graphiti", graphiti_factory)
+    graphiti = _build_graphiti(
+        GraphitiNeo4jConfig(
+            llm_provider="openai",
+            llm_model="llm-model",
+            embedding_model="gemini-embedding-2",
+            embedding_dim=3072,
+            embedding_api_key="test-key",
+        )
+    )
+
+    assert isinstance(graphiti.embedder, CachedEmbedder)
+    assert graphiti.embedder.config.embedding_dim == 3072
+    assert graphiti.embedder._enabled is True
 
 
 def test_graphiti_adapter_upserts_public_safe_json_episode():
