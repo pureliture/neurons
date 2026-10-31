@@ -57,9 +57,10 @@ class MaterializedSessionMemory:
     observed_at_end: str = ""
     materialized_at: str = ""
     notes: tuple[str, ...] = field(default_factory=tuple)
+    observation_refs: tuple[dict, ...] = field(default_factory=tuple)
 
     def to_projection_document(self) -> dict:
-        return {
+        document = {
             "target_profile": self.target_profile,
             "session_id_hash": self.session_id_hash,
             "provider": self.provider,
@@ -73,6 +74,9 @@ class MaterializedSessionMemory:
             "observed_at_end": self.observed_at_end,
             "materialized_at": self.materialized_at,
         }
+        if self.observation_refs:
+            document["observation_refs"] = [dict(reference) for reference in self.observation_refs]
+        return document
 
 
 def upsert_transcript_session_aggregate(
@@ -385,10 +389,25 @@ def materialize_session_memory(*, session_id_hash: str, store: CouchDBSourceStor
         lines.append(view.text.rstrip())
     lines.append("")
     lines.append("## tool_evidence_summary")
+    observation_refs = []
+    body_offset = sum(len(line) + 1 for line in lines)
     for bundle in bundles:
         # Full materialization: embed the bundle body so recall needs no CouchDB ref.
         lines.append("")
-        lines.append(str(bundle.get("body", "")).rstrip())
+        body_offset += 1
+        bundle_body = str(bundle.get("body", ""))
+        from ..session_memory.observation_refs import validate
+        references = validate(bundle.get("observation_refs", []), body=bundle_body,
+            session_id_hash=session_id_hash, provider=provider, project=project)
+        from ..session_memory.native_tool_receipts import from_bundle
+        from_bundle(bundle,references)
+        for reference in references:
+            reference["span_start"] += body_offset
+            reference["span_end"] += body_offset
+            observation_refs.append(reference)
+        rendered_bundle = bundle_body.rstrip()
+        lines.append(rendered_bundle)
+        body_offset += len(rendered_bundle) + 1
     body = "\n".join(lines).rstrip() + "\n"
 
     notes: list[str] = []
@@ -446,6 +465,7 @@ def materialize_session_memory(*, session_id_hash: str, store: CouchDBSourceStor
         observed_at_end=observed_at_end,
         materialized_at=datetime.datetime.now(tz=datetime.timezone.utc).isoformat(),
         notes=tuple(notes),
+        observation_refs=tuple(observation_refs),
     )
 
 

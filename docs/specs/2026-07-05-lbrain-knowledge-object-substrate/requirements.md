@@ -8,7 +8,13 @@
 
 ## 현재 단계
 
-이 문서는 `grill-to-spec` Phase 1 요구사항 초안이다. 구현 설계, storage schema, MCP API 세부, migration order는 아직 확정하지 않는다. 요구사항은 Palantir Ontology reference corpus, 현재 LBrain read path, 기존 `neurons` repo 계약, 그리고 앞선 LBrain knowledge quality 실패 사례를 근거로 작성한다.
+이 문서는 LBrain Knowledge Object Substrate의 요구사항 SoT다. 2026-10-25 amendment는 작업 중 확인한 근거가 accepted/current 정보와 불일치할 때 사용하는 evidence-backed correction 경로와 완료 기준을 추가한다. 이 amendment는 스펙 변경이며, 코드 구현이나 운영 동작의 증거로 취급하지 않는다.
+
+### 2026-10-25 amendment: Evidence-backed correction
+
+- 상태: 요구사항 및 설계 변경 초안. 구현은 별도 milestone이다.
+- 범위: agent가 작업 중 authoritative source로 사실을 확인하고 기존 LBrain object와의 불일치를 발견하면, 근거가 검증된 객관적 사실을 사람의 건별 승인 없이 교정한다.
+- 경계: 근거의 권위·범위·최신성·무결성을 시스템이 확인할 수 없거나 근거끼리 충돌하면 권위 변경 없이 기존 proposal/review 경로를 사용한다.
 
 ## 문제 정의
 
@@ -154,7 +160,7 @@ Palantir Ontology를 그대로 복제하지 않는다. LBrain에 필요한 수�
 - raw document text를 곧바로 accepted/current memory로 승격하지 않는다.
 - graph/Qdrant/search mirror를 canonical authority로 만들지 않는다.
 - UI를 이번 요구사항의 필수 조건으로 두지 않는다. CLI/worker/MCP ingest가 우선 가능해야 한다.
-- live mutation, proposal write, ledger write, deployment/GitOps mutation은 승인된 design과 별도 실행 gate 전에는 수행하지 않는다.
+- 일반적인 proposal, ledger, live, deployment/GitOps mutation은 승인된 design과 별도 실행 gate를 따른다. FR13의 제한된 evidence-backed correction만 검증된 근거를 조건으로 건별 사람 승인 없이 권위 상태를 갱신할 수 있다. 이 예외는 deployment/GitOps/runtime 자체를 변경할 권한을 부여하지 않는다.
 
 ## 선택된 요구사항 방향
 
@@ -167,7 +173,7 @@ Palantir Ontology를 그대로 복제하지 않는다. LBrain에 필요한 수�
 1. Raw corpus와 accepted/current authority는 분리한다.
 2. Source schema를 그대로 object로 베끼지 않고, 작업자가 묻는 domain object를 모델링한다.
 3. 모든 판단은 evidence edge와 freshness/gap을 가져야 한다.
-4. Proposal/review lane은 accepted/current lane과 분리한다.
+4. Proposal/review lane은 accepted/current lane과 분리한다. FR13을 만족하는 증거 기반 사실 교정은 별도 감사와 이력 보존을 갖는 좁은 자동 갱신 경로를 사용한다.
 5. MCP는 context만 주는 것이 아니라 typed object 탐색과 proposal-safe action을 제공해야 한다.
 6. Agent context pack은 Codex/Claude/Gemini/Hermes가 시작부터 repo/user preference와 authority gap을 반영하게 해야 한다.
 
@@ -388,6 +394,7 @@ LBrain은 object를 바로 authoritative로 만들지 않고 proposal/review lif
 - `propose_supersede`
 - `propose_retire`
 - `request_evidence`
+- `correct_from_evidence`
 - `accept_current`
 - `reject_candidate`
 - `commit_supersession`
@@ -396,9 +403,37 @@ LBrain은 object를 바로 authoritative로 만들지 않고 proposal/review lif
 
 요구사항:
 
-- agent는 proposal을 만들 수 있지만 accepted/current authority 변경은 restricted gate를 거친다.
+- 일반 agent 제안은 proposal로 남기고 accepted/current authority 변경은 restricted gate를 거친다. FR13의 검증된 객관적 사실 교정은 예외로, 시스템이 근거 적격성을 확인한 경우 건별 사람 승인 없이 반영한다.
 - review queue가 비어 있더라도 query가 gap을 발견하면 candidate proposal 필요성을 답변에 노출한다.
-- stale/supersede/retire 판단은 원본 object를 즉시 수정하지 않고 proposal로 남긴다.
+- 일반 stale/supersede/retire 판단은 원본 object를 즉시 수정하지 않고 proposal로 남긴다. FR13 교정은 기존 object를 덮어쓰지 않고 successor revision을 만들며 이전 object와 supersession 이력을 보존한다.
+
+### FR13. Evidence-backed factual correction
+
+작업 중 agent가 조회된 accepted/current object의 객관적 사실이 현재 작업에서 확인한 authoritative source와 다름을 발견하면 `brain_object_correct`를 호출해 해당 사실을 교정할 수 있어야 한다. 적격한 교정에는 건별 사람 승인을 요구하지 않는다.
+
+자동 교정 적격성:
+
+- 대상은 정확한 `object_id` 또는 canonical `memory_id`와 expected content hash, project/repository scope, 현재 accepted/current revision으로 식별한다.
+- 대상은 실제 LBrain 조회 결과를 만든 canonical object와 결속해야 한다. correction 후 같은 read/recall route가 successor를 반환해야 하며, 지원되는 write-through/read-back adapter가 없으면 권위 상태를 바꾸지 않고 검토로 넘긴다.
+- 교정은 확인 가능한 사실 필드에 한정한다. preference, user intent, 평가·해석, 근거 없는 요약 문장은 자동 교정 대상이 아니다.
+- 근거는 해당 필드의 source-of-truth 정책에 맞아야 한다. repo code/file 근거는 정확한 repository, immutable commit/revision, path/locator, content hash에 결속한다. 명시적 structured data 근거는 authoritative system/source, record identity, revision, content hash에 결속한다. test 결과는 해당 commit과 실행한 assertion 범위만 입증한다.
+- source adapter가 내용을 독립적으로 재검증할 수 있는 사실을 대상으로 한다. 구조화된 값은 코드로 검증하고, 표현이 다른 주장과 근거의 의미 대응은 합의한 판단 모델과 검증된 적용 정책으로 확인한다. 단순 citation/hash나 요청 LLM의 설명만으로 적격성을 입증하지 않는다. 검증할 수 없는 source/field 조합은 명시적 보류와 재검토로 남긴다.
+- 초기 `registered_json` adapter는 서버 정책의 정확한 source locator hash와 JSON pointer에서 값을 직접 추출한다. 호출자가 작성한 target/value claim을 원천 근거로 취급하지 않는다. 등록된 전체 redacted source bytes와 hash를 검증할 수 없는 원문, content-addressed revision이 아닌 source ref, 관측 freshness window를 넘긴 source는 자동 교정하지 않는다.
+- 근거 유형은 주장 대상에 맞아야 한다. 코드·설정 파일만으로 deployed/live runtime 상태를 입증하지 않으며, runtime 사실에는 해당 runtime의 검증된 live evidence가 필요하다.
+- MCP는 agent가 전달한 설명이나 citation 문자열만 신뢰하지 않는다. 등록된 evidence ref를 source policy에 따라 재조회하고 hash를 독립 계산해 target, project, scope, revision, freshness, 무결성을 확인한다. source adapter가 근거를 재검증할 수 없으면 자동 교정을 거절한다.
+- 기존 object가 변경되지 않은 경우에만 `expected_revision` 또는 `expected_content_hash`를 compare-and-swap 조건으로 사용해 successor를 원자적으로 생성한다. 재시도는 동일 target/evidence/result에 멱등이어야 한다.
+- 기존 object를 in-place overwrite/delete하지 않는다. successor와 `supersedes` 관계, 검증한 evidence refs, source revision/hash, correction decision/audit를 보존하고 read-after-write를 수행한다.
+- source authority가 불명확하거나, 근거가 stale/malformed/incomplete이거나, 복수의 authoritative evidence가 충돌하거나, target이 동시 변경되었으면 authority write를 하지 않는다. 사유와 missing evidence를 반환하고 기존 proposal/review 경로로 넘긴다.
+- raw source body, secret, private path, raw external identifier는 correction 응답이나 public ledger projection에 노출하지 않는다.
+
+합의된 확장 계약:
+
+- 한 요청에서 복수 사실을 독립 처리하며 기존 값·변경안·불일치 설명·근거를 제출할 수 있다. exact target과 설명·범위에 의한 기존 대상 검색을 모두 지원한다. 대상 부재와 검색 실패·잘림·모호함을 구분하며 새 기억 생성으로 우회하지 않는다.
+- 같은 항목에서 독립 검증된 값이 요청값과 다르면 검증값을 적용하고 요청값·실제 반영값을 구분한다. 범위 밖 사실이나 환경을 갱신하지 않는다.
+- 교정과 정규 수집은 공통 관측·주장·사실 resolution을 사용한다. 같은 관측의 지연 수집은 기존 결정에 합류하고, 별개의 새 관측은 같은 기준으로 기존 사실을 갱신할 수 있다. 도착 시각만으로 현재 값을 역전하지 않는다.
+- 현재 값을 확인했으면 과거 변경 경위와 경위 미확인 필드를 요구하지 않는다. 근거는 교정 이력을 보관하는 동안 함께 보호하며 기간 경과만으로 삭제하지 않는다.
+- 우열을 가릴 수 없는 충돌의 최종 읽기 정책 B는 여전히 미결정이다. 자동 재검토·복구·지연 근거 해소·독립 감시의 필요한 증거를 확보한 뒤 결정한다. 그 밖의 확정된 구현은 계속 진행한다.
+- 전체 완료는 [달성 추적](correction-acceptance.md)의 요구·시나리오별 구현과 실제 검증을 모두 충족해야 한다. 초기 JSON adapter의 성공이나 개별 canary만으로 완료 처리하지 않는다.
 
 ### FR5. Authority Lane Separation
 
@@ -548,8 +583,8 @@ LBrain은 golden query 평가를 가져야 한다.
 | --- | --- |
 | Safety | raw private transcript, secret, token, private runtime evidence, raw dataset/document id를 출력하거나 public repo에 저장하지 않는다. |
 | Corpus boundary | raw external corpus는 local/private reference material이며 accepted/current memory가 아니다. |
-| Authority | accepted/current는 ledger-backed authority만 가능하다. graph/search/archive는 candidate evidence다. |
-| Reviewability | proposed object, stale, supersede, preference inference는 review queue에서 확인 가능해야 한다. |
+| Authority | accepted/current는 ledger-backed authority만 가능하다. graph/search/archive는 candidate evidence다. 사람 승인이 없는 갱신은 FR13 근거 검증을 통과한 사실 교정으로 제한한다. |
+| Reviewability | 일반 proposed object, stale, supersede, preference inference는 review queue에서 확인 가능해야 한다. FR13 적격 교정은 자동 반영 전에 시스템이 source evidence와 authority policy를 검증한다. |
 | Traceability | 모든 answer object는 evidence refs, source hash 또는 missing evidence gap을 가져야 한다. |
 | Freshness | source URL이 있는 external reference는 freshness check 대상이 되고, URL 없는 manual source는 보강 gap을 표시한다. |
 | Portability | OKF/Markdown/YAML/JSONL 같은 exchange format은 가능하지만 canonical authority를 대체하지 않는다. |
@@ -583,6 +618,10 @@ Codex/Claude/Gemini/Hermes가 repo 작업을 시작한다. LBrain은 current aut
 
 사용자가 선호하는 code style 또는 HTML review artifact 기준을 기억시키고 싶어 한다. LBrain은 raw source/body를 저장하지 않고 pattern summary, evidence hash, example ref, review state를 저장하며, 새 diff/artifact를 suggestion으로 평가한다.
 
+### S7. 작업 중 확인한 사실로 기억 교정
+
+agent가 저장소 작업 중 accepted/current memory와 다른 사실을 정확한 source file/commit 또는 권위 있는 structured record로 확인한다. agent는 `brain_object_correct`로 target revision과 근거를 제출한다. 시스템이 source authority와 hash/revision을 검증하면 건별 사람 승인 없이 새 revision을 accepted/current로 반영하고 기존 object와 correction audit를 보존한다. 근거가 충돌하거나 해당 source가 주장을 입증하지 못하면 아무 권위 상태도 바꾸지 않고 필요한 검토/근거를 반환한다.
+
 ## Acceptance Criteria
 
 요구사항이 승인되려면 다음을 만족해야 한다.
@@ -593,11 +632,32 @@ Codex/Claude/Gemini/Hermes가 repo 작업을 시작한다. LBrain은 current aut
 - 문서 전용 기능이 아니라 문서, 코드 영향, 배포 truth, preference/style, handoff를 공통 substrate로 다룬다.
 - 최소 3개 core use case를 비교한다: 문서 정리, 코드 변경 영향 분석, 배포/운영 truth 확인.
 - 외부 corpus 65개가 LBrain ingest-ready가 되기 위한 metadata/hash/freshness/source URL gap 요구사항을 포함한다.
-- current/stale/superseded/retired 판단이 proposal/review/accepted lifecycle을 통해 생성, 검증, 갱신되어야 함을 명시한다.
+- 일반 current/stale/superseded/retired 판단은 proposal/review/accepted lifecycle을 통해 생성, 검증, 갱신하고, FR13의 적격한 객관적 사실 교정만 근거 검증을 통과한 별도 경로를 사용할 수 있음을 명시한다.
 - accepted/current memory와 proposal/review queue가 분리되어야 함을 명시한다.
 - agent context pack과 MCP read/proposal/action 경계가 요구사항에 포함된다.
+- 작업 중 발견한 source-backed fact mismatch의 무승인 교정 경로와 자동 교정 거절 조건을 명시한다.
 - safety/privacy 요구사항은 public/private repo boundary와 raw/private data 금지를 반영한다.
 - 최종 요구사항은 구현자가 `design.md` 후보 접근을 만들 수 있을 만큼 object vocabulary, edge vocabulary, lifecycle, golden queries를 포함한다.
+
+### FR13 구현 완료 기준
+
+아래 조건은 FR13 구현 milestone의 완료 조건이며, 이 문서 변경 자체는 해당 조건의 구현 완료를 뜻하지 않는다.
+
+- `brain_object_correct`는 accepted/current object의 조회 값과 검증된 작업 근거가 다른 경우, 적격성 판단과 correction commit을 하나의 agent-facing action으로 수행한다.
+- 근거가 source-of-truth policy, 정확한 object/project scope, current revision/hash, freshness, integrity를 통과하면 건별 사람 승인 없이 successor를 accepted/current로 반영한다.
+- 기존 revision은 삭제·덮어쓰기 없이 `superseded` 이력으로 남고, correction decision/audit와 evidence refs가 successor에 결속된다.
+- 같은 correction 재호출은 중복 successor/audit mutation을 만들지 않으며, 동시 target revision 변경은 compare-and-swap conflict로 거부된다.
+- commit 응답의 read-after-write에서 successor와 이전 revision의 supersession 관계가 확인된다.
+- correction 전 조회 결과를 만든 동일한 LBrain read/recall route가 cache invalidation 뒤 successor 값을 반환한다. 지원되지 않는 target adapter는 권위 변경 없이 검토 대상으로 처리한다.
+- untrusted, stale, malformed, cross-scope, conflicting, non-authoritative evidence는 권위 변경 없이 구체적 이유와 fallback review action을 반환한다.
+- code/test evidence가 입증 범위를 넘어 runtime/deployment fact로 승격되지 않는다.
+- 안전 검증은 raw evidence body, secret, private path, raw external identifier 없이 통과한다.
+- source commit → build/image identity → deployed MCP identity가 서로 결속되고, `tools/list`에서 correction tool의 배포된 schema를 확인한다.
+- 설치된 wheel/image의 Python 코드와 필수 schema resource가 source와 일치해야 한다. source 경로 override 없이 새 DB 초기화와 실제 HTTP/stdio 프로세스 시작·호출을 검증한다.
+- 격리 synthetic project의 known mismatch를 실제 연결된 LLM agent가 동일한 LBrain read route로 조회하고, authoritative source를 확인한 뒤 tool을 호출해 교정한다. 같은 read route의 재조회에서 successor가 반환되고, 호출·decision·supersession·audit가 redacted receipt로 연결된다.
+- 동일 live environment에서 stale/unverifiable/conflicting/cross-scope evidence와 stale expected revision을 넣은 부정 경로는 `authority_write_performed=false`를 반환하고 ledger before/after에 authority mutation이 없음을 증명한다.
+- positive/negative runtime proof를 마친 뒤 synthetic current record는 audit 이력을 보존하는 successor 또는 격리 상태로 정리하고, 사용자 memory에는 mutation이 없음을 확인한다.
+- 구현·격리 배포 proof·main merge·운영 활성화 상태는 각각 보고한다. canary 통과를 운영 서비스 활성화로 표시하지 않는다.
 
 ## 확정된 Phase 2 결정
 

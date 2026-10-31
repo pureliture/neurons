@@ -531,3 +531,24 @@ def test_auto_accept_work_items_promotes_valid_candidates_and_redacts_paths():
     assert len(steward.auto_accepts) == 1
     assert steward.auto_accepts[0]["candidate_memory_id"] == "mem_steward_test"
 
+
+def test_auto_accept_or_resolution_failure_does_not_advance_checkpoint(tmp_path):
+    class RecoveringSteward(RecordingSteward):
+        allow_auto_accept = True
+        broken = True
+        def candidate_autopilot_accept(self, **kwargs):
+            if self.broken:
+                raise RuntimeError("injected queue failure")
+            return {"canonical_write_performed": False, "fact_resolution": {"managed": True,
+                "results": [{"status": "queued", "task_id": "task-fixture"}]}}
+    steward = RecoveringSteward()
+    path = tmp_path / "checkpoint.json"
+    settings = _settings(enable_proposals=True, auto_accept_work_items=True, checkpoint_path=str(path))
+    failed, state = run_candidate_intake(settings=settings, chunks=[_chunk()], completion_fn=_completion, steward=steward)
+    assert failed.status == "auto_accept_failed" and not path.exists()
+    assert state["projects"] == {}
+    steward.broken = False
+    recovered, _ = run_candidate_intake(settings=settings, chunks=[_chunk()], completion_fn=_completion, steward=steward)
+    assert recovered.status == "completed" and path.exists()
+    assert recovered.fact_resolution_queued_count == 1 and recovered.auto_accepted_count == 0
+

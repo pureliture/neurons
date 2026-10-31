@@ -90,6 +90,7 @@ class CandidateIntakeReport:
     error_code: str = ""
     remaining_chunks: int = 0
     auto_accepted_count: int = 0
+    fact_resolution_queued_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -110,6 +111,8 @@ class CandidateIntakeReport:
         }
         if self.auto_accepted_count > 0:
             payload["auto_accepted_count"] = self.auto_accepted_count
+        if self.fact_resolution_queued_count > 0:
+            payload["fact_resolution_queued_count"] = self.fact_resolution_queued_count
         return payload
 
 
@@ -412,6 +415,7 @@ def _run_candidate_intake(
     proposed = 0
     duplicates = 0
     auto_accepted = 0
+    fact_queued = 0
     seen_ids: set[str] = set()
     processed_sources: set[str] = set()
 
@@ -462,8 +466,16 @@ def _run_candidate_intake(
                         or accept_outcome.get("committed") is True
                     ):
                         auto_accepted += 1
+                    if isinstance(accept_outcome, Mapping):
+                        managed = accept_outcome.get("fact_resolution") or {}
+                        fact_queued += sum(item.get("status") == "queued" for item in managed.get("results", []))
                 except Exception:
-                    pass
+                    # queue/authority 실패를 삼키고 source 완료 checkpoint를
+                    # 전진시키면 다음 정규 실행에서 해당 후보가 영구 누락된다.
+                    return CandidateIntakeReport(project=settings.project, status="auto_accept_failed",
+                        dry_run=False, enabled=True, examined_chunks=len(bounded), proposed_count=proposed,
+                        error_code="auto_accept_or_resolution_failed", auto_accepted_count=auto_accepted,
+                        fact_resolution_queued_count=fact_queued), state
 
     # Repeat state is keyed on the chunk's own content hash, so one project has
     # many revisions and no chunk is ever skipped by a project-level key.
@@ -491,6 +503,7 @@ def _run_candidate_intake(
         skipped_count=skipped,
         remaining_chunks=len(fresh_all) - len(fresh),
         auto_accepted_count=auto_accepted,
+        fact_resolution_queued_count=fact_queued,
     )
     return report, state
 
@@ -529,6 +542,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=20,
         help="pg source: newest chunks to load per run (1..200)",
     )
+    parser.add_argument("--native-source-policy-file", default="",
+        help="PG intake: explicit Couch native observation policy JSON; unavailable provenance fails closed")
+    parser.add_argument("--fact-correction-policy-file", default="",
+        help="route server-managed existing facts through the common durable resolution queue")
     parser.add_argument(
         "--batch-candidates",
         type=int,
@@ -601,7 +618,7 @@ def list_active_projects_from_pg(dsn: str, *, limit: int = 20) -> list[str]:
     return [str(row[0]).strip() for row in rows if row and str(row[0] or "").strip()]
 
 
-def load_chunks_from_pg(dsn: str, *, project: str, limit: int) -> list[Mapping[str, Any]]:
+def load_chunks_from_pg(dsn: str, *, project: str, limit: int, observation_catalog=None) -> list[Mapping[str, Any]]:
     """Load the newest redacted session chunks for one project from PostgreSQL."""
     import psycopg
 
@@ -609,11 +626,18 @@ def load_chunks_from_pg(dsn: str, *, project: str, limit: int) -> list[Mapping[s
     with psycopg.connect(dsn, autocommit=True, connect_timeout=8) as conn:
         rows = conn.execute(
             "SELECT chunk_id, content_markdown, content_hash, provider "
+            + (", session_id_hash " if observation_catalog is not None else "") +
             "FROM session_memory_chunks WHERE project = %s "
             "ORDER BY updated_at DESC LIMIT %s",
             (project, bounded),
         ).fetchall()
     chunks: list[Mapping[str, Any]] = []
+    if observation_catalog is not None:
+        from ..postgres_store.pgvector_store import PgVectorStore
+        sql_store = PgVectorStore(dsn=dsn)
+        return [observation_catalog.read_projected_chunk(project=project, provider=str(provider),
+            session_id_hash=str(session_id_hash), chunk_id=str(chunk_id), sql_store=sql_store)
+            for chunk_id, _content, _content_hash, provider, session_id_hash in rows]
     for chunk_id, content, content_hash, provider in rows:
         body = str(content or "").strip()
         revision = str(content_hash or "").strip()
@@ -631,6 +655,28 @@ def load_chunks_from_pg(dsn: str, *, project: str, limit: int) -> list[Mapping[s
             }
         )
     return chunks
+
+
+def _build_observation_catalog(policy_path):
+    import base64
+    from ..couchdb_source.couchdb_http_store import CouchDBHttpSourceStore
+    from ..couchdb_source.observation_catalog import CouchObservationCatalog
+    try:
+        policy = json.loads(Path(policy_path).read_text(encoding="utf-8"))
+        if (not isinstance(policy, dict) or set(policy) != {"schema_version", "extractor_versions", "redaction_version"}
+                or policy["schema_version"] != "native_source_policy.v1"):
+            raise ValueError("invalid native source policy")
+        url = os.environ.get("COUCHDB_URL", "").strip()
+        if not url:
+            raise ValueError("Couch source configuration required")
+        user, password = os.environ.get("COUCHDB_USER", ""), os.environ.get("COUCHDB_PASSWORD", "")
+        auth = "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode() if user else ""
+        store = CouchDBHttpSourceStore(base_url=url, db=os.environ.get("COUCHDB_DB", "transcript_source"),
+            auth_header=auth, request_timeout_seconds=8)
+        return CouchObservationCatalog(store, extractor_versions=policy["extractor_versions"],
+            redaction_version=policy["redaction_version"])
+    except (OSError, ValueError, TypeError, KeyError):
+        raise CandidateIntakeConfigError("native source policy/configuration invalid") from None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -674,9 +720,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     dsn = ""
     project_chunks: list[tuple[str, list[Mapping[str, Any]]]] = []
     try:
+        if args.native_source_policy_file and args.source_mode != "pg":
+            raise CandidateIntakeConfigError("native source policy requires PG source mode")
         if dry_run:
             chunks = []
         elif args.source_mode == "pg":
+            catalog = _build_observation_catalog(args.native_source_policy_file) if args.native_source_policy_file else None
             dsn = (
                 os.environ.get("NEURON_LBRAIN_PGVECTOR_DSN")
                 or os.environ.get("LLM_BRAIN_PGVECTOR_DSN")
@@ -693,7 +742,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 target_projects = [settings.project]
             for proj in target_projects:
-                project_chunks.append((proj, load_chunks_from_pg(dsn, project=proj, limit=args.source_limit)))
+                native_options = {"observation_catalog": catalog} if catalog is not None else {}
+                project_chunks.append((proj, load_chunks_from_pg(dsn, project=proj, limit=args.source_limit, **native_options)))
             chunks = project_chunks[0][1] if len(project_chunks) == 1 else [c for _, cs in project_chunks for c in cs]
         else:
             chunks = _load_chunks(args.source_json)
@@ -760,11 +810,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     if pgvector_store is None:
         print(json.dumps({"error_code": "postgresql_required"}, sort_keys=True))
         return 3
+    fact_coordinator = None
+    if args.fact_correction_policy_file:
+        from ..fact_correction_coordinator import FactCorrectionCoordinator, load_configuration
+        try:
+            reader, policies, target_search = load_configuration(args.fact_correction_policy_file, with_target_search=True)
+            fact_coordinator = FactCorrectionCoordinator(store=pgvector_store, git_reader=reader,
+                policies=policies, target_search=target_search)
+        except Exception:
+            print(json.dumps({"error_code": "fact_configuration_invalid"}, sort_keys=True))
+            return 2
     steward = BrainStewardService(
         ledger,
         pgvector_store=pgvector_store,
         allow_restricted=auto_accept_work_items,
         allow_auto_accept=auto_accept_work_items,
+        fact_coordinator=fact_coordinator,
     )
 
     if len(project_chunks) > 1 or settings.project in ("all", "*"):

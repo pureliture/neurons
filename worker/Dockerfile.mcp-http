@@ -1,9 +1,13 @@
 # Streamable HTTP MCP transport 컨테이너 (optional extra: mcp-http).
 #
 # 기본 worker 이미지(Dockerfile)는 이 extra 없이 빌드된다(trim 철학 보존). 이 변형만
-# mcp(FastMCP) + starlette + uvicorn을 설치한다. 읽기 전용 recall transport 전용이며
+# mcp(FastMCP) + starlette + uvicorn을 설치한다. 기본 recall과 명시적으로 활성화한 교정 surface를 제공하며
 # host/port/tailnet/graph 플래그는 compose command가 주입한다(이미지 CMD는 안전 기본값).
 FROM python:3.13-slim
+
+# Git source adapter는 server가 등록한 immutable blob과 commit ancestry를 읽는다.
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
 
 ARG NEURONS_SOURCE_COMMIT
 RUN printf '%s' "${NEURONS_SOURCE_COMMIT}" | grep -Eq '^[0-9a-f]{40}$'

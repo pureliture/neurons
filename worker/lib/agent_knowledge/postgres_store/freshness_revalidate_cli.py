@@ -47,6 +47,7 @@ SELECT c.memory_id,
   JOIN session_memory_chunks s
     ON s.chunk_id = c.source_ref->0->>'source_id'
  WHERE c.authorization_status = 'active'
+   AND coalesce(c.steward_envelope->'verification_scope'->>'whole_card', 'true') <> 'false'
  ORDER BY c.memory_id
  LIMIT %s OFFSET %s
 """
@@ -55,6 +56,7 @@ _UNRESOLVED_SQL = """
 SELECT count(*)
   FROM memory_cards c
  WHERE c.authorization_status = 'active'
+   AND coalesce(c.steward_envelope->'verification_scope'->>'whole_card', 'true') <> 'false'
    AND NOT EXISTS (
         SELECT 1 FROM session_memory_chunks s
          WHERE s.chunk_id = c.source_ref->0->>'source_id')
@@ -67,6 +69,7 @@ UPDATE memory_cards
        freshness_next_check_after = %s,
        source_hash = %s
  WHERE memory_id = %s
+   AND coalesce(steward_envelope->'verification_scope'->>'whole_card', 'true') <> 'false'
 """
 
 
@@ -135,6 +138,10 @@ def plan(
             if isinstance(unresolved_row, Mapping)
             else unresolved_row[0]
         )
+        scoped_row = conn.execute("""SELECT count(*) FROM memory_cards
+            WHERE authorization_status='active'
+            AND steward_envelope->'verification_scope'->>'whole_card'='false'""").fetchone()
+        scoped = list(scoped_row.values())[0] if isinstance(scoped_row, Mapping) else scoped_row[0]
 
     def value(row: Any, name: str, index: int) -> Any:
         if isinstance(row, Mapping):
@@ -157,6 +164,7 @@ def plan(
         "checked_at": now.isoformat(),
         "resolvable_cards": len(rows),
         "unresolved_active_cards": int(unresolved),
+        "field_scoped_active_cards": int(scoped),
         "counts": counts,
         "verified_changed_sample": changes,
         "entries": entries,
@@ -165,13 +173,15 @@ def plan(
 
 
 def apply(store: PgVectorStore, entries: list[tuple[str, str, str, str, str]]) -> int:
+    written = 0
     with store.transaction() as conn:
         for memory_id, state, source_hash, checked_at, next_check in entries:
-            conn.execute(
+            cursor = conn.execute(
                 _UPDATE_SQL,
                 (state, checked_at, next_check, source_hash, memory_id),
             )
-    return len(entries)
+            written += cursor.rowcount
+    return written
 
 
 def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = None) -> int:

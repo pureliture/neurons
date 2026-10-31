@@ -85,6 +85,10 @@ class _RecordingCursor:
         self.connection.executed.append((query, deepcopy(tuple(params))))
         self.response = []
         self.rowcount = 0
+        if query.startswith("SELECT 1 FROM lbrain_fact_members"):
+            # 이 대역의 기존 intake 후보는 공통 fact에 아직 연결되지 않았다.
+            # 연결된 authority의 우회 거부는 test_fact_resolution의 실제 PG에서 검사한다.
+            return
         if query.startswith("SELECT pg_advisory_xact_lock"):
             return
         if query.startswith("SELECT decision_id"):

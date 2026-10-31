@@ -768,12 +768,15 @@ def test_supervised_main_never_reports_success_when_cleanup_fails(lane, capsys):
     assert "private-secret" not in captured.out + captured.err
 
 
-def test_deadline_interrupts_blocking_boundary(lane, capsys):
+def test_deadline_interrupts_blocking_boundary(lane, capsys, monkeypatch):
     import time
     boundary, argv, path = lane
     argv[argv.index("--timeout-seconds") + 1] = "0.1"
     argv[argv.index("--request-timeout-seconds") + 1] = "0.05"
     finished = []
+    # 이 검사는 I/O 차단을 검사한다. 코드 전체 hashing의 소요 시간은
+    # 아래의 별도 만료 preflight 검사에서 다룬다.
+    monkeypatch.setattr(cli(), "code_revision", lambda: "fixture-code-revision")
     def blocked():
         time.sleep(0.4)
         finished.append(True)
@@ -781,6 +784,28 @@ def test_deadline_interrupts_blocking_boundary(lane, capsys):
     boundary.collection_metadata = blocked
     rc, report = invoke(lane, capsys)
     assert rc == 1 and finished == []
+    assert not (path / "manifest.json").exists()
+
+
+def test_expired_preflight_cannot_start_io_after_alarm_was_swallowed(lane, capsys, monkeypatch):
+    import time
+    api = cli()
+    _, argv, path = lane
+    argv[argv.index("--timeout-seconds") + 1] = "0.05"
+    argv[argv.index("--request-timeout-seconds") + 1] = "0.01"
+    def swallowed_alarm():
+        try:
+            time.sleep(.2)
+        except api.DeadlineExpired:
+            # CI에서 weakref callback이 실제 SIGALRM 예외를 삼킨 경우를
+            # 명시적으로 모델링한다. supervisor의 process 종료 대역이 아니다.
+            pass
+        return "fixture-code-revision"
+    monkeypatch.setattr(api, "code_revision", swallowed_alarm)
+    def forbidden(*args):
+        pytest.fail("expired preflight started a boundary")
+    rc = api._run_worker(argv, boundary_factory=forbidden)
+    assert rc == 1 and json.loads(capsys.readouterr().out)["status"] == "rejected"
     assert not (path / "manifest.json").exists()
 
 
@@ -806,6 +831,7 @@ def test_real_core_apply_and_duplicate_new_plan_are_idempotent(lane, capsys):
         def __init__(self):
             super().__init__()
             self.rows = {}
+            self.provenance = {}
         def get_chunk(self, chunk_id, conn=None):
             return deepcopy(self.rows.get(chunk_id))
         @contextmanager
@@ -822,6 +848,12 @@ def test_real_core_apply_and_duplicate_new_plan_are_idempotent(lane, capsys):
             assert insert_only is True and row.chunk_id not in self.rows
             self.writes += 1
             self.rows[row.chunk_id] = deepcopy(row)
+        def put_chunk_source_provenance(self, **kwargs):
+            assert kwargs["conn"] is self
+            assert kwargs["chunk_id"] in self.rows
+            key = (kwargs["chunk_id"], kwargs["source_hash"])
+            payload = {k: deepcopy(v) for k, v in kwargs.items() if k != "conn"}
+            assert self.provenance.setdefault(key, payload) == payload
     boundary.sql = SyntheticSQL()
     assert invoke(lane, capsys)[0] == 0
     approve(lane)
@@ -829,6 +861,7 @@ def test_real_core_apply_and_duplicate_new_plan_are_idempotent(lane, capsys):
     receipt = deepcopy(boundary.source.get(dm.projection_state_doc_id(boundary.sid)))
     assert receipt["backend_receipts"]["postgres_pgvector"]["receipt_version"] == 2
     assert boundary.sql.writes == 1
+    assert len(boundary.sql.provenance) == 1
     # An old absent-target plan cannot authorize a repeated apply after target mutation.
     assert invoke(lane, capsys, ["--apply"])[0] == 1
     argv[argv.index("--manifest") + 1] = str(path / "second-manifest.json")
@@ -902,10 +935,11 @@ def actual_sql():
     try:
         # Session-local table shadows public; no persistent schema/data mutation.
         ddl = PgVectorStore.schema_sql()
-        table = ddl[ddl.index("CREATE TABLE IF NOT EXISTS session_memory_chunks ("):]
-        table = table[:table.index(";") + 1]
-        table = table.replace("CREATE TABLE IF NOT EXISTS", "CREATE TEMP TABLE", 1)
-        conn.execute(table)
+        for name in ("session_memory_chunks", "session_memory_chunk_sources"):
+            table = ddl[ddl.index(f"CREATE TABLE IF NOT EXISTS {name} ("):]
+            table = table[:table.index(";") + 1]
+            table = table.replace("CREATE TABLE IF NOT EXISTS", "CREATE TEMP TABLE", 1)
+            conn.execute(table)
         conn.commit()
         yield PgVectorStore(connection=conn), conn, dsn
     finally:
@@ -945,7 +979,7 @@ def test_actual_sql_readonly_batch_conflicts_and_equal_idempotence(lane, capsys,
     assert boundary.source.get(dm.projection_state_doc_id(boundary.sid)) == receipt
     conn.rollback()
     # Fresh absent canonical target: divergent vectors must reject before INSERT/CAS.
-    conn.execute("TRUNCATE session_memory_chunks")
+    conn.execute("TRUNCATE session_memory_chunk_sources, session_memory_chunks")
     conn.commit()
     boundary.source.delete(dm.projection_state_doc_id(boundary.sid))
     boundary.points[1]["vector"][0] = 1.001

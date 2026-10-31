@@ -770,6 +770,55 @@ def test_admin_mcp_requires_bearer_for_every_http_method_and_keeps_healthz_publi
     assert correct.status_code == 200
 
 
+def test_correction_http_uses_dedicated_bearer_and_only_scoped_tools():
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    class CorrectionStub(_StubService):
+        allow_evidence_backed_object_corrections = True
+        evidence_correction_policies = ({"policy_id": "synthetic"},)
+
+        def brain_object_correct(self, **arguments):
+            self.last_kwargs = arguments
+            return {"correction_status": "review_required", "authority_write_performed": False}
+
+    stub = CorrectionStub()
+    token = "synthetic-correction-bearer-for-http-test"
+    port = _free_port()
+    app = mh.build_app(stub, port=port, surface="correction", correction_token=token)
+
+    async def roundtrip(base):
+        async with httpx.AsyncClient(headers={"Authorization": f"Bearer {token}"}) as client:
+            async with streamable_http_client(f"{base}/mcp", http_client=client) as (read, write, _):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    tools = await session.list_tools()
+                    denied_admin = await session.call_tool("brain_object_decision_commit", {})
+                    corrected = await session.call_tool("brain_object_correct", {
+                        "project": "synthetic", "repository": "neurons", "target_object_id": "ko:MemoryCard:status:test",
+                        "expected_content_hash": "sha256:" + "1" * 64, "policy_id": "synthetic", "idempotency_key": "test",
+                        "evidence_refs": [{"source_ref_id": "source-test", "source_content_hash": "sha256:" + "2" * 64}],
+                    })
+                    return tools, denied_admin, corrected
+
+    with _ServerThread(app, port) as base:
+        assert httpx.post(f"{base}/mcp", timeout=2).status_code == 401
+        assert httpx.post(f"{base}/mcp", headers={"Authorization": "Bearer wrong"}, timeout=2).status_code == 401
+        tools, denied_admin, corrected = asyncio.run(roundtrip(base))
+    assert {tool.name for tool in tools.tools} == {"brain.resolve", "brain_object_correct"}
+    assert denied_admin.isError is True
+    assert corrected.isError is False
+    assert corrected.structuredContent["authority_write_performed"] is False
+    assert stub.last_kwargs["policy_id"] == "synthetic"
+
+
+@pytest.mark.parametrize("token", [None, "short", "lbrain_evidence_corrector", "한" * 32])
+def test_correction_http_rejects_missing_or_invalid_credential(token):
+    stub = SimpleNamespace(allow_evidence_backed_object_corrections=True, evidence_correction_policies=({},))
+    with pytest.raises(ValueError, match="correction token"):
+        mh.build_app(stub, surface="correction", correction_token=token)
+
+
 def test_agent_http_roundtrip_rejects_admin_tool_call():
     from mcp import ClientSession
     from mcp.client.streamable_http import streamablehttp_client

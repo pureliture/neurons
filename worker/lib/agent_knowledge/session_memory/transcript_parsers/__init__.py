@@ -73,9 +73,13 @@ def extract_tool_evidence(
     *,
     project: str,
     source_locator_hash: str,
+    include_native_observations: bool = False,
 ):
     """Dispatch tool-evidence extraction by provider."""
     provider = canonicalize_provider(provider)
+    if include_native_observations:
+        from ..native_tool_receipts import evidence_records
+        return evidence_records(provider,source_path,project=project)
     extractor = _TOOL_EVIDENCE_EXTRACTORS.get(provider)
     if extractor is None:
         raise ValueError(f"unsupported provider: {provider}")

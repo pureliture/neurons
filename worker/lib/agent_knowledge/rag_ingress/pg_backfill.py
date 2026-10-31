@@ -115,6 +115,11 @@ def project_pg_representation(*, materialized, source_store, sql_store, embed_pr
         or sha256_hash(materialized.body) != materialized.content_hash
         or not isinstance(body, str) or body != public_safe_mask_body(current.body)):
         raise ValueError("PG representation verification failed")
+    if getattr(current, "observation_refs", ()) != getattr(materialized, "observation_refs", ()):
+        raise ValueError("PG representation observation provenance mismatch")
+    from ..session_memory.observation_refs import validate as validate_observations
+    references = validate_observations(getattr(current, "observation_refs", ()), body=current.body,
+        session_id_hash=current.session_id_hash, provider=current.provider, project=current.project)
     try:
         assert_pg_text_safe(current.body, body, current.session_id_hash,
                             current.project, current.provider, current.source_hash)
@@ -220,6 +225,9 @@ def project_pg_representation(*, materialized, source_store, sql_store, embed_pr
             )
             validate(row, supplied=reusable is None)
             sql_store.insert_chunk(row, conn=conn, insert_only=True)
+        sql_store.put_chunk_source_provenance(chunk_id=chunk_id, source_hash=current.source_hash,
+            canonical_body=current.body, observation_refs=references, session_id_hash=current.session_id_hash,
+            provider=current.provider, project=current.project, conn=conn)
     stored = sql_store.get_chunk(chunk_id)
     if stored is None:
         raise ValueError("PG representation readback missing")
@@ -257,6 +265,18 @@ class PgSessionMemoryProjector:
         project = str(document.get("project") or "")
         provider = str(document.get("provider") or "unspecified")
         source_hash = str(document.get("source_hash") or "")
+        from ..session_memory.observation_refs import HASH, validate as validate_observations
+        references = validate_observations(document.get("observation_refs", []), body=body,
+            session_id_hash=session_id_hash, provider=provider, project=project)
+        source_known = bool(HASH.fullmatch(source_hash))
+        if references and not source_known:
+            raise ValueError("observation provenance requires exact source revision")
+        def bind_source(identity, *, conn=None):
+            if source_known:
+                self._store.put_chunk_source_provenance(chunk_id=identity, source_hash=source_hash,
+                    canonical_body=body, observation_refs=references, session_id_hash=session_id_hash,
+                    provider=provider, project=project, conn=conn)
+            return identity
         # Preserve the source's observation time. Never fall back to now(): an
         # unknown age must stay unknown rather than masquerade as fresh.
         observed_raw = (
@@ -305,7 +325,7 @@ class PgSessionMemoryProjector:
 
         reused = reuse_ready(self._store.get_chunk(chunk_id))
         if reused is not None:
-            return reused
+            return bind_source(reused)
         reused = None if chunked else reuse_ready(
             self._store.find_ready_chunk_by_identity(
                 session_id_hash=session_id_hash,
@@ -316,7 +336,7 @@ class PgSessionMemoryProjector:
             )
         )
         if reused is not None:
-            return reused
+            return bind_source(reused)
 
         # Validate embedding dimension
         if embedding_size <= 0:
@@ -362,7 +382,7 @@ class PgSessionMemoryProjector:
                 )
             concurrent = reuse_ready(self._store.get_chunk(chunk_id, conn=conn))
             if concurrent is not None:
-                return concurrent
+                return bind_source(concurrent, conn=conn)
             concurrent = None if chunked else reuse_ready(
                 self._store.find_ready_chunk_by_identity(
                     session_id_hash=session_id_hash,
@@ -374,8 +394,9 @@ class PgSessionMemoryProjector:
                 )
             )
             if concurrent is not None:
-                return concurrent
+                return bind_source(concurrent, conn=conn)
             self._store.insert_chunk(chunk, conn=conn)
+            bind_source(chunk_id, conn=conn)
 
         # Verify ready readback
         stored = self._store.get_chunk(chunk_id)

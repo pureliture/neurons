@@ -73,3 +73,6 @@ package-dir = {"" = "lib"}
 
 [tool.setuptools.packages.find]
 where = ["lib"]
+
+[tool.setuptools.package-data]
+"agent_knowledge.postgres_store" = ["pgvector_schema.sql"]

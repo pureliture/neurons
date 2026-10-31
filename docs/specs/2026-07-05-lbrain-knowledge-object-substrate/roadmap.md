@@ -1437,7 +1437,7 @@ P7 persisted attestation and phase-progress aggregation reconciliation
 → P9 runtime action interception and consumer-policy enforcement
 ```
 
-Configured/deployed LBrain MCP object-native route smoke, P7 receipt, gate-less denial behavior는 이제 live-proven입니다. Production authority write는 계속 preapproved이지만 read-path evidence를 닫기 위해 추가 write가 필요한 것은 아닙니다. 향후 write는 반드시 approval board, audit trail, rollback/supersession path, scoped promotion gate, redaction, postcheck flow를 통해서만 실행해야 합니다.
+Configured/deployed LBrain MCP object-native route smoke, P7 receipt, gate-less denial behavior는 이제 live-proven입니다. 이 read-path evidence를 닫기 위해 추가 authority write가 필요한 것은 아닙니다. 일반 production authority write는 기존 approval board, audit trail, rollback/supersession path, scoped promotion gate, redaction, postcheck flow를 따릅니다. FR13의 source-verified factual correction은 별도 capability이며, production validation gate로 대상이 활성화된 뒤에는 적격한 correction마다 사람 승인을 요구하지 않고 evidence-policy 검증, audit, compare-and-swap, supersession, redaction, postcheck로 제한합니다.
 
 Recommended goal:
 
@@ -1456,3 +1456,13 @@ Expected outputs:
 - 별도로 bounded되고 완전히 gated된 authority action이 필요한 경우를 제외한 production mutation 없음
 - no protected content, credentials, topology, or raw external ID output
 - clear PASS / PASS_WITH_GAPS / FAIL result with live gaps preserved
+
+## 별도 제품 기능: FR13 사실 교정
+
+`requirements.md` FR13과 `design.md` `brain_object_correct`는 P7/P8/P9 live-evidence loop와 별도로 추적한다. 이 변경만으로 기존 loop의 상태를 바꾸거나 production 쓰기를 활성화하지 않는다. 구현과 production-validation은 하나의 사용자 goal에 포함하며, 배포 MCP와 실제 agent 흐름이 live proof를 통과할 때까지 goal을 유지한다.
+
+- `milestones.md` M9에서 구현과 검증을 진행한다. source 변경·로컬 test·canary·운영 활성화 증거를 각각 명시하며, 아직 입증하지 않은 gate를 완료로 표시하지 않는다.
+- 2026-10-25 초기 `registered_json` 구현과 실제 LLM의 Ubuntu 격리 배포 HTTP/stdio proof는 [검증 보고서](../../validation/2026-10-25-lbrain-evidence-correction.md) 기준 PASS다. main merge와 운영 활성화는 미수행이며, 기존 P7/P8/P9 상태를 변경하지 않는다.
+- 격리된 환경에서 evidence validator와 successor 쓰기를 먼저 검증한다.
+- production 활성화는 별도 production-validation gate를 따른다.
+- 활성화한 대상의 적격 사실 교정은 건별 승인 없이 반영한다. 부적격 근거는 authority를 변경하지 않고 review로 넘긴다.

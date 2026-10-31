@@ -341,6 +341,7 @@ def run_tool_evidence(
     providers: list[str] | None = None,
     limit: int | None = None,
     runtime_dir: Path | None = None,
+    include_native_observations: bool = False,
 ) -> dict:
     """Second pass: extract tool_evidence_summary per session file and store it as
     bounded tool_evidence_bundle docs in CouchDB. Idempotent (deterministic ids).
@@ -412,6 +413,7 @@ def run_tool_evidence(
                     str(source_path),
                     project="",
                     source_locator_hash=source_locator_hash,
+                    **({"include_native_observations":True} if include_native_observations else {}),
                 )
                 if not records:
                     session_id_hash = source_session_id_hash
@@ -737,6 +739,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--reconcile-coverage", action="store_true", help="recompute coverage manifests from stored chunks and exit")
     parser.add_argument("--tool-evidence", action="store_true", help="second pass: store tool_evidence_bundle docs and exit")
+    parser.add_argument("--native-tool-receipts",action="store_true",help="native 호출 쌍과 제한된 원래 응답을 기존 Couch source에 보존")
     parser.add_argument(
         "--corrective-current-source",
         action="store_true",
@@ -744,6 +747,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv if argv is not None else None)
     effective_argv = list(sys.argv[1:] if argv is None else argv)
+
+    if args.native_tool_receipts and (not args.tool_evidence or args.corrective_current_source):
+        print(json.dumps({"status":"error","error_class":"native_tool_receipts_require_tool_evidence",
+            "mutation_performed":False,"network_used":False},sort_keys=True))
+        return 2
 
     if args.tool_evidence and args.limit is not None:
         print(json.dumps({
@@ -855,6 +863,7 @@ def main(argv: list[str] | None = None) -> int:
         report = run_tool_evidence(
             store=store, roots=roots, providers=args.provider, limit=args.limit,
             runtime_dir=runtime_dir,
+            **({"include_native_observations":True} if args.native_tool_receipts else {}),
         )
         if args.dry_run:
             report["source_context_seed_errors"] = source_context_seed_errors

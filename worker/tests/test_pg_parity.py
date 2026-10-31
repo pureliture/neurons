@@ -37,6 +37,30 @@ def _reset_pg(dsn: str) -> None:
         conn.commit()
 
 
+def test_native_observation_versions_survive_in_both_ledgers(tmp_path):
+    from agent_knowledge.session_memory.transcript_model import ToolEvidenceSummaryRecord
+    _reset_pg(PG_DSN)
+    sqlite = Ledger(tmp_path / "native-observations.sqlite")
+    postgres = Ledger("pg", db_adapter=PostgresLedgerDbAdapter(PG_DSN))
+    common = dict(session_id_hash=_sha("native-session"), provider="codex", project="synthetic-observation",
+        category="test_result", tool_name="exec_command", command_summary="uv run pytest -q",
+        source_event_id_hash=_sha("native-call"), source_event_index=3)
+    first = ToolEvidenceSummaryRecord(**common, outcome="pass", redacted_summary="1 passed",
+        source_content_hash=_sha("first-source-version"), extractor_version="synthetic-extractor.v2")
+    revised = ToolEvidenceSummaryRecord(**common, outcome="fail", redacted_summary="1 failed",
+        source_content_hash=_sha("revised-source-version"), extractor_version="synthetic-extractor.v3")
+    assert first.observation_id_hash == revised.observation_id_hash
+    for ledger in (sqlite, postgres):
+        for record in (first, revised, first):
+            ledger.upsert_tool_evidence_summary(record=record)
+        rows = ledger.list_tool_evidence_summaries(project="synthetic-observation", provider="codex")
+        assert len(rows) == 2
+        assert {row["observation_id_hash"] for row in rows} == {first.observation_id_hash}
+        assert {row["source_content_hash"] for row in rows} == {first.source_content_hash, revised.source_content_hash}
+        assert all(row["source_event_index"] == 3 for row in rows)
+        assert {row["extractor_version"] for row in rows} == {"synthetic-extractor.v2", "synthetic-extractor.v3"}
+
+
 def _install_permission_audit_product_db_marker_view(dsn: str) -> None:
     with psycopg.connect(dsn) as conn:
         conn.execute(

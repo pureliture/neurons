@@ -103,6 +103,7 @@ def run_autopilot_command(
     projection_client: Any | None = None,
     timestamp: str | None = None,
     pgvector_store: Any | None = None,
+    fact_coordinator: Any | None = None,
 ) -> dict:
     if pgvector_store is None:
         raise ValueError("PostgreSQL steward store is required for autopilot")
@@ -110,6 +111,7 @@ def run_autopilot_command(
         candidates=candidates,
         ledger=ledger,
         pgvector_store=pgvector_store,
+        fact_coordinator=fact_coordinator,
         refresh_watermark=refresh_watermark,
         supersede_detector=supersede_detector,
         projection_client=projection_client,

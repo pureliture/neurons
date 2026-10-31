@@ -151,6 +151,7 @@ class GraphOutboxJob:
     last_error: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    lease_generation: int = 0
 
 
 class PgVectorStore:
@@ -382,7 +383,7 @@ class PgVectorStore:
                         raise ValueError("steward proposal scope collision")
                     kind = str(envelope.get("steward_proposal_kind") or "")
                     committed = _row_value(row, "lifecycle_state", 2) not in ("candidate", "needs_review", "suggested_accept")
-                    if committed and kind not in ("candidate", "needs_review"):
+                    if committed and kind not in ("candidate", "needs_review", "evidence_correction"):
                         raise ValueError("proposal identity collision or already committed")
                     identity_fields = ("card_type", "source_refs", "span_refs", "provider", "observed_at")
                     if kind != "stale":
@@ -556,6 +557,20 @@ class PgVectorStore:
                 return {name: _row_value(row, name, index) for index, name in enumerate(
                     ('decision_id', 'memory_id', 'content_hash', 'action', 'actor', 'target_memory_id', 'result_card', 'result_target'))}
 
+    def record_correction_denial(self, *, request_hash: str, reason: str) -> str:
+        from ..public_safe_util import require_sha256, short_hash
+
+        require_sha256(request_hash, "request_hash")
+        if not re.fullmatch(r"[a-z_]{1,80}", reason):
+            raise ValueError("invalid correction denial reason")
+        audit_id = "correction-denial:" + short_hash([request_hash, reason], length=40)
+        with self.transaction() as db:
+            with db.cursor() as cur:
+                cur.execute("""INSERT INTO steward_correction_denials
+                    (audit_event_id, request_hash, reason_code) VALUES (%s, %s, %s)
+                    ON CONFLICT(audit_event_id) DO NOTHING""", (audit_id, request_hash, reason))
+        return audit_id
+
     def steward_bundle_decision(
         self, *, decision_id: str, request_fingerprint: str, project: str,
         brain_id: str, scope: str, member_ids: list[str] | tuple[str, ...], decide: Any,
@@ -623,9 +638,10 @@ class PgVectorStore:
                 return _json_value(_row_value(row, 'result', 0))
 
     def steward_decision(self, *, decision_id: str, memory_id: str, action: str, actor: str,
-                         content_hash: str, target_memory_id: str = "", transform: Any) -> dict[str, Any]:
+                         content_hash: str, target_memory_id: str = "", transform: Any,
+                         fact_resolution_id: str | None = None) -> dict[str, Any]:
         """Lock, validate and change steward rows, audit and outboxes in one PG transaction."""
-        if not decision_id or not actor or action not in {'approve', 'auto_accept', 'reject', 'supersede', 'stale'}:
+        if not decision_id or not actor or action not in {'approve', 'auto_accept', 'reject', 'supersede', 'stale', 'correct_fact'}:
             raise ValueError("steward decision identity required")
         with self.transaction() as db:
             self._lock_steward_authority_on(db)
@@ -644,10 +660,11 @@ class PgVectorStore:
                     if stored_card is None:
                         raise ValueError('steward decision result unavailable for safe retry')
                     stored_target = _row_value(previous, 'result_target', 7)
-                    if action == 'supersede':
+                    if action in {'supersede', 'correct_fact'}:
                         _require_same_supersede_scope(_json_value(stored_card), _json_value(stored_target))
                     return {'card': _json_value(stored_card),
-                            'target': _json_value(stored_target) if stored_target is not None else None}
+                            'target': _json_value(stored_target) if stored_target is not None else None,
+                            **({'duplicate': True} if action == 'correct_fact' else {})}
                 # Consistent lock ordering across competing decisions.
                 ids = sorted({memory_id, *([target_memory_id] if target_memory_id else [])})
                 for card_id in ids:
@@ -658,9 +675,16 @@ class PgVectorStore:
                     raise ValueError("unknown steward card or target")
                 if _row_value(rows[memory_id], 'content_hash', 2) != content_hash:
                     raise ValueError("steward card content hash changed")
+                cur.execute("SELECT 1 FROM lbrain_fact_members WHERE memory_id=ANY(%s) LIMIT 1", (ids,))
+                if cur.fetchone():
+                    cur.execute("SELECT current_setting('neurons.fact_resolution_id',true) AS resolution_id")
+                    owned = _row_value(cur.fetchone(), "resolution_id", 0)
+                    if (action != "correct_fact" or not fact_resolution_id or owned != fact_resolution_id
+                            or not re.fullmatch(r"factres_[a-f0-9]{40}", fact_resolution_id)):
+                        raise ValueError("managed_fact_resolution_required")
                 card = _json_value(_row_value(rows[memory_id], 'steward_envelope', 1))
                 target = _json_value(_row_value(rows[target_memory_id], 'steward_envelope', 1)) if target_memory_id else None
-                if action == 'supersede':
+                if action in {'supersede', 'correct_fact'}:
                     _require_same_supersede_scope(card, target)
                 changed_card, changed_target = transform(card, target)
                 # Use one DB timestamp inside the decision transaction for every
@@ -724,6 +748,18 @@ class PgVectorStore:
                                 'observed_at': str((changed.get('typed_payload') or {}).get('observed_at') or changed.get('valid_from') or ''),
                                 'created_at': str(changed.get('created_at') or ''),
                             })
+                if action == 'correct_fact':
+                    from ..public_safe_util import hash_payload
+                    cur.execute("""UPDATE memory_cards SET observed_at=%s::timestamptz,
+                        freshness_state=%s, freshness_checked_at=%s::timestamptz,
+                        freshness_next_check_after=%s::timestamptz, source_hash=%s WHERE memory_id=%s""",
+                        (changed_card.get('observed_at'), changed_card['freshness_state'], changed_card['freshness_checked_at'],
+                         changed_card['freshness_next_check_after'], changed_card['source_hash'], changed_card['memory_id']))
+                    self.insert_edge(MemoryEdge(
+                        src_id=changed_card['memory_id'], rel_type='supersedes',
+                        dst_id=changed_target['memory_id'], provenance_hash=hash_payload(decision_id),
+                        properties={'authority_basis': 'evidence_policy', 'decision_id': decision_id},
+                    ), conn=db)
                 cur.execute("""INSERT INTO steward_card_decisions
                     (decision_id, memory_id, content_hash, action, actor, target_memory_id, result_card, result_target)
                     VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)""",
@@ -984,6 +1020,51 @@ class PgVectorStore:
         if len(rows) > 1:
             raise ValueError("PG ready chunk identity is not unique")
         return _chunk_from_row(rows[0])
+
+    def put_chunk_source_provenance(self, *, chunk_id, source_hash, canonical_body, observation_refs,
+                                    session_id_hash, provider, project, conn=None):
+        """본문을 복제하지 않고 source version별 관측 참조를 불변 저장한다.
+
+        저장은 admission/현재성 인증이 아니다. 사용 시 Couch active revision과 대조해야 한다.
+        span 좌표는 representation이 아닌 canonical session source의 문자 위치다.
+        """
+        from ..public_safe_util import hash_payload, require_sha256
+        from ..session_memory.observation_refs import validate, digest
+        require_sha256(source_hash, "source revision")
+        references = validate(observation_refs, body=canonical_body, session_id_hash=session_id_hash,
+            provider=provider, project=project)
+        with self._scope(conn=conn, write=conn is None and self.connection is None) as db:
+            row = db.execute("SELECT session_id_hash,provider,project,content_hash FROM session_memory_chunks WHERE chunk_id=%s",
+                (chunk_id,)).fetchone()
+            if not row or tuple(_row_value(row, name, i) for i, name in enumerate(("session_id_hash", "provider", "project"))) != (
+                    session_id_hash, provider, project):
+                raise ValueError("chunk provenance scope mismatch")
+            payload = {"chunk_id": chunk_id, "source_hash": source_hash, "source_content_hash": digest(canonical_body),
+                "representation_content_hash": _row_value(row, "content_hash", 3), "observation_refs": references}
+            proof = hash_payload(payload)
+            db.execute("""INSERT INTO session_memory_chunk_sources
+                (chunk_id,source_hash,source_content_hash,representation_content_hash,observation_refs,provenance_hash)
+                VALUES (%s,%s,%s,%s,%s::jsonb,%s) ON CONFLICT(chunk_id,source_hash) DO NOTHING""",
+                (chunk_id, source_hash, payload["source_content_hash"], payload["representation_content_hash"],
+                    _json_text(references), proof))
+            stored = db.execute("SELECT provenance_hash FROM session_memory_chunk_sources WHERE chunk_id=%s AND source_hash=%s",
+                (chunk_id, source_hash)).fetchone()
+            if not stored or _row_value(stored, "provenance_hash", 0) != proof:
+                raise ValueError("immutable chunk provenance conflict")
+            return {**payload, "provenance_hash": proof, "coordinate_space": "canonical_session_source"}
+
+    def get_chunk_source_provenance(self, *, project, chunk_ids, conn=None):
+        if not project or not isinstance(chunk_ids, list) or not 1 <= len(chunk_ids) <= 100:
+            raise ValueError("bounded project chunk identities required")
+        with self._scope(conn=conn) as db:
+            with db.cursor() as cur:
+                cur.execute("""SELECT p.chunk_id,p.source_hash,p.source_content_hash,p.representation_content_hash,
+                    p.observation_refs,p.provenance_hash,c.session_id_hash,c.provider,c.project
+                    FROM session_memory_chunk_sources p JOIN session_memory_chunks c ON c.chunk_id=p.chunk_id
+                    WHERE c.project=%s AND c.chunk_id=ANY(%s) ORDER BY p.chunk_id,p.source_hash""", (project, chunk_ids))
+                names = [col.name for col in cur.description]
+                return [{**(dict(row) if isinstance(row, Mapping) else dict(zip(names, row))),
+                    "coordinate_space": "canonical_session_source"} for row in cur.fetchall()]
 
     def search_session_chunks(
         self,
@@ -1468,6 +1549,56 @@ class PgVectorStore:
                 if cur.rowcount != 1:
                     raise ValueError("outbox job not found or lease owner mismatch")
 
+    def resolve_fact_views(self, *, project, cards, as_of=None):
+        from ..fact_resolution import FactResolutionService
+        return FactResolutionService(self).read_view(project=project, cards=cards, as_of=as_of)
+
+    def fact_project_generation(self, project):
+        with self._scope() as db, db.cursor() as cur:
+            cur.execute("SELECT generation FROM lbrain_fact_project_versions WHERE project=%s", (project,))
+            row = cur.fetchone()
+            return int(_row_value(row, "generation", 0)) if row else 0
+
+    def search_current_fact_cards(self, *, project, query, limit=100):
+        """검증된 같은 fact의 옛 표현도 검색하되 현재 head만 반환한다.
+
+        과거 본문은 검색 alias이며 현재 값이 아니다. 모든 PG 카드를 Python으로 읽지 않는다.
+        """
+        if not project or type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("bounded fact search required")
+        from ..llm_brain_core.terms import query_terms
+        terms = query_terms(query)
+        if not terms:
+            return []
+        threshold = max(1, (len(terms) + 1) // 2)
+        with self._scope() as db, db.cursor() as cur:
+            cur.execute("""SELECT c.memory_id,c.content_hash,max(coverage.hits) AS hits
+                FROM memory_cards c JOIN lbrain_fact_scopes f ON f.memory_id=c.memory_id
+                JOIN lbrain_fact_members m ON m.fact_key=f.fact_key
+                JOIN memory_cards alias ON alias.memory_id=m.memory_id
+                CROSS JOIN LATERAL (SELECT count(DISTINCT term) AS hits FROM unnest(%s::text[]) AS q(term)
+                    WHERE term=ANY(regexp_split_to_array(regexp_replace(
+                        lower(coalesce(alias.title,'') || ' ' || coalesce(alias.summary,'')),
+                        '[^a-z0-9가-힣_-]+',' ','g'),'\\s+'))) AS coverage
+                WHERE f.project=%s AND c.project=%s AND alias.project=%s AND c.currentness='current'
+                    AND c.authorization_status='active'
+                    AND to_tsvector('simple',coalesce(alias.title,'') || ' ' || coalesce(alias.summary,''))
+                        @@websearch_to_tsquery('simple',%s) AND coverage.hits>=%s
+                GROUP BY c.memory_id,c.content_hash ORDER BY hits DESC,c.memory_id LIMIT %s""",
+                (terms, project, project, project, " OR ".join(terms), threshold, limit + 1))
+            rows = cur.fetchall()
+            keys = [str(_row_value(row, "memory_id", 0)) for row in rows[:limit]]
+            cards = PgVectorStore(connection=db).list_authorized_cards(project=project, memory_ids=keys,
+                limit=limit, steward_only=True)
+            by_id = {card["memory_id"]: card for card in cards}
+            result = []
+            for row in rows[:limit]:
+                memory_id, revision = _row_value(row, "memory_id", 0), _row_value(row, "content_hash", 1)
+                card = by_id.get(memory_id)
+                if card and card["content_hash"] == revision:
+                    result.append({**card, "_fact_retrieval": True, "_fact_candidates_truncated": len(rows) > limit})
+            return result
+
     def list_authorized_cards(
         self, *, project: str, memory_ids: list[str] | None = None,
         as_of: datetime | date | str | None = None, limit: int = 100,
@@ -1671,6 +1802,8 @@ class PgVectorStore:
         params.extend((as_of_dt, as_of_dt))
         clauses.append(_STATUS_EXPIRY_FILTER)
         params.append(as_of_dt)
+        if not as_of:
+            clauses.append(_current_fact_filter())
         score_expression = "1.0 - distance"
         query_params = [vector_literal, *params, vector_literal, max(50, int(limit) * 5)]
         if text_query and text_query.strip():
@@ -2028,6 +2161,7 @@ class PgVectorStore:
                     )
                     UPDATE graph_projection_outbox AS job
                        SET status = 'processing',
+                           lease_generation = job.lease_generation + 1,
                            worker_id = %s,
                            claimed_at = NOW(),
                            lease_until = NOW() + (%s * INTERVAL '1 second'),
@@ -2038,7 +2172,7 @@ class PgVectorStore:
                               job.source_revision, job.content_hash, job.episode_payload,
                               job.status, job.claimed_at, job.lease_until,
                               job.worker_id, job.retry_count, job.last_error,
-                              job.created_at, job.updated_at
+                              job.created_at, job.updated_at, job.lease_generation
                     """,
                     (
                         OUTBOX_RETRY_LIMIT,
@@ -2055,8 +2189,11 @@ class PgVectorStore:
         self,
         projection_id: int,
         worker_id: str,
+        lease_generation: int | None = None,
     ) -> None:
         """Mark a graph projection job completed after successful projection."""
+        if type(lease_generation) is not int or lease_generation < 1:
+            raise ValueError("graph projection lease generation required")
         with self._scope(write=True) as db:
             with db.cursor() as cur:
                 cur.execute(
@@ -2067,8 +2204,9 @@ class PgVectorStore:
                      WHERE projection_id = %s
                        AND worker_id = %s
                        AND status = 'processing'
+                       AND lease_generation = %s AND lease_until > clock_timestamp()
                     """,
-                    (int(projection_id), str(worker_id)),
+                    (int(projection_id), str(worker_id), lease_generation),
                 )
                 if cur.rowcount == 0:
                     raise ValueError(f"graph projection job {projection_id} not owned or not processing")
@@ -2080,12 +2218,15 @@ class PgVectorStore:
         max_retries: int = OUTBOX_RETRY_LIMIT,
         *,
         worker_id: str | None = None,
+        lease_generation: int | None = None,
     ) -> None:
         """Record graph projection failure, schedule retry, or move to dead letter."""
         if max_retries < 1:
             raise ValueError("max_retries must be positive")
         if not worker_id:
             raise ValueError("outbox failure requires worker_id")
+        if type(lease_generation) is not int or lease_generation < 1:
+            raise ValueError("graph projection lease generation required")
         with self._scope(write=True) as db:
             with db.cursor() as cur:
                 params: list[Any] = [
@@ -2094,6 +2235,7 @@ class PgVectorStore:
                     int(max_retries),
                     int(projection_id),
                     str(worker_id),
+                    lease_generation,
                 ]
                 cur.execute(
                     """
@@ -2112,6 +2254,7 @@ class PgVectorStore:
                      WHERE projection_id = %s
                        AND worker_id = %s
                        AND status = 'processing'
+                       AND lease_generation = %s AND lease_until > clock_timestamp()
                     """,
                     params,
                 )
@@ -2136,7 +2279,7 @@ class PgVectorStore:
                     SELECT projection_id, source_type, source_id, source_revision,
                            content_hash, episode_payload, status, claimed_at,
                            lease_until, worker_id, retry_count, last_error,
-                           created_at, updated_at
+                           created_at, updated_at, lease_generation
                       FROM graph_projection_outbox
                     """
                     + where
@@ -2366,13 +2509,26 @@ _STATUS_EXPIRY_FILTER = r"""(
 
 def _authority_filter(project: str, as_of: Any) -> tuple[list[str], list[Any]]:
     instant = _parse_as_of(as_of) or datetime.now(timezone.utc)
-    return [
+    clauses = [
         "project = %s", "authorization_status = 'active'",
         "currentness IN ('current', 'superseded')" if as_of else "currentness = 'current'",
         "lifecycle_state IN ('accepted', 'human_accepted', 'auto_accepted')",
         "valid_from <= %s", "(valid_to IS NULL OR valid_to > %s)",
         _STATUS_EXPIRY_FILTER,
-    ], [project, instant, instant, instant]
+    ]
+    if not as_of:
+        clauses.append(_current_fact_filter())
+    return clauses, [project, instant, instant, instant]
+
+
+def _current_fact_filter() -> str:
+    """필터 후 LIMIT을 적용해 무효 카드가 정상 카드의 페이지를 차지하지 않게 한다."""
+    from ..fact_resolution import CURRENT_FACT_EVIDENCE_SQL
+    return f"""(NOT EXISTS (SELECT 1 FROM lbrain_fact_members m
+        WHERE m.memory_id=memory_cards.memory_id) OR EXISTS (
+        SELECT 1 FROM lbrain_fact_members m JOIN lbrain_fact_scopes f ON f.fact_key=m.fact_key
+        WHERE m.memory_id=memory_cards.memory_id
+            AND (f.head_assertion_id IS NULL OR {CURRENT_FACT_EVIDENCE_SQL})))"""
 
 
 def _card_values(card: MemoryCard) -> tuple[Any, ...]:
@@ -2573,6 +2729,7 @@ def _graph_outbox_from_row(row: Any) -> GraphOutboxJob:
         source_revision=str(_row_value(row, "source_revision", 3)),
         content_hash=str(_row_value(row, "content_hash", 4)),
         episode_payload=payload,
+        lease_generation=int(_row_value(row, "lease_generation", 14) or 0),
         status=str(_row_value(row, "status", 6)),
         claimed_at=_as_optional_datetime(_row_value(row, "claimed_at", 7)),
         lease_until=_as_optional_datetime(_row_value(row, "lease_until", 8)),

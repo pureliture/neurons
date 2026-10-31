@@ -278,11 +278,24 @@ def _build_recall_service(
     _ServiceWiringError(code, redacted_message)를 던져 호출부가 종료 코드로 매핑한다.
     오류 메시지는 raw 예외를 에코하지 않고 type name만 노출한다(private path 비노출).
     """
+    from .evidence_correction import load_policies
+    from .fact_correction_coordinator import load_configuration as load_fact_configuration
+
+    try:
+        correction_policies = load_policies(getattr(args, "evidence_correction_policy_file", ""))
+        fact_policy_file = getattr(args, "fact_correction_policy_file", "")
+        fact_configuration = load_fact_configuration(fact_policy_file, with_target_search=True) if fact_policy_file else None
+        correction_enabled = bool(getattr(args, "allow_evidence_backed_object_corrections", False))
+        if correction_enabled and not correction_policies and not fact_configuration:
+            raise ValueError("correction policy required")
+    except (OSError, ValueError, TypeError) as exc:
+        raise _ServiceWiringError(2, "invalid evidence correction policy configuration") from exc
     try:
         steward_write_enabled = bool(
             getattr(args, "allow_steward_proposals", False)
             or getattr(args, "allow_steward_review_commit", False)
             or getattr(args, "allow_object_authority_production_writes", False)
+            or correction_enabled
         )
         if steward_write_enabled:
             # MCP steward write runtimes attach to an existing production ledger.
@@ -314,7 +327,13 @@ def _build_recall_service(
         or os.environ.get("NEURON_LEDGER_PG_DSN", "")
     )
     # PG authority 구성 시 Qdrant는 shadow/migration 전용이다.
-    if pgvector_dsn:
+    correction_only = getattr(args, "surface", "agent") == "correction"
+    if correction_only and (not pgvector_dsn or not correction_enabled):
+        raise _ServiceWiringError(2, "correction surface requires canonical PostgreSQL and an enabled policy")
+    if correction_only:
+        # 이 surface는 archive/embedding 도구를 노출하지 않는다.
+        mirror_search = None
+    elif pgvector_dsn:
         try:
             mirror_search = build_pg_brain_query_search_from_env(os.environ)
         except Exception:
@@ -386,6 +405,17 @@ def _build_recall_service(
         store_append = store_client.append_denied_once
     from .mcp_server import KnowledgeSearchService
 
+    fact_coordinator = None
+    if correction_enabled and fact_configuration:
+        if pgvector_store is None:
+            raise _ServiceWiringError(2, "fact correction requires canonical PostgreSQL")
+        from .fact_correction_coordinator import FactCorrectionCoordinator
+        try:
+            fact_coordinator = FactCorrectionCoordinator(store=pgvector_store,
+                git_reader=fact_configuration[0], policies=fact_configuration[1], target_search=fact_configuration[2])
+        except (ValueError, TypeError):
+            raise _ServiceWiringError(2, "invalid fact correction source configuration") from None
+
     return KnowledgeSearchService(
         ledger=ledger,
         retired_index_bridge=retired_index_bridge,
@@ -401,6 +431,9 @@ def _build_recall_service(
         allow_production_object_authority_writes=bool(
             getattr(args, "allow_object_authority_production_writes", False)
         ),
+        allow_evidence_backed_object_corrections=correction_enabled,
+        evidence_correction_policies=correction_policies,
+        fact_correction_coordinator=fact_coordinator,
         allow_permission_sensitive_audit_probe=audit_probe_enabled,
         permission_audit_token_reviewer=token_reviewer,
         permission_audit_store_append=store_append,
@@ -417,6 +450,9 @@ def _add_recall_service_arguments(parser) -> None:
     parser.add_argument("--state-db-recall", default="")
     parser.add_argument("--enable-graph", action="store_true")
     parser.add_argument("--graph-required", action="store_true")
+    parser.add_argument("--allow-evidence-backed-object-corrections", action="store_true")
+    parser.add_argument("--evidence-correction-policy-file", default="")
+    parser.add_argument("--fact-correction-policy-file", default="")
     parser.add_argument(
         "--allow-steward-proposals",
         action="store_true",
@@ -476,7 +512,7 @@ def _mcp_http_main(argv: list[str] | None = None) -> int:
     from . import mcp_http_server
 
     parser = argparse.ArgumentParser(prog="neuron-knowledge mcp-http")
-    parser.add_argument("--surface", choices=("agent", "admin"), default="agent")
+    parser.add_argument("--surface", choices=("agent", "admin", "correction"), default="agent")
     # 공통 인자: _mcp_stdio_main과 1:1 동일(service 구성 동일).
     _add_recall_service_arguments(parser)
     # HTTP transport 전용.
@@ -502,6 +538,7 @@ def _mcp_http_main(argv: list[str] | None = None) -> int:
             service,
             surface=args.surface,
             admin_token=os.environ.get("LLM_BRAIN_ADMIN_TOKEN") if args.surface == "admin" else None,
+            correction_token=os.environ.get("LLM_BRAIN_CORRECTION_TOKEN") if args.surface == "correction" else None,
             host=args.host,
             port=args.port,
             allow_non_loopback=args.allow_non_loopback,

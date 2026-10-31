@@ -841,8 +841,9 @@ def test_projection_field_sets_are_stable(isolated_pg_store, tmp_path):
     steward.candidate_create(source_span=_span(content_hash="sha256:proj"))
 
     auth_item = steward.authority_pack_read(project=PROJECT)["items"][0]
+    assert auth_item["brain_id"] == f"/project/{PROJECT}"
     assert set(auth_item) == {
-        "memory_id", "card_type", "scope", "project", "provider", "title", "summary",
+        "memory_id", "brain_id", "card_type", "scope", "project", "provider", "title", "summary",
         "lifecycle_state", "approval_state", "freshness", "currentness", "governance_tier",
         "confidence", "confidence_basis", "supersedes", "superseded_by",
         "source_ref_count", "evidence_hash_count",
@@ -852,11 +853,15 @@ def test_projection_field_sets_are_stable(isolated_pg_store, tmp_path):
         if i["proposal_kind"] == "candidate"
     )
     assert set(review_item) == {
-        "memory_id", "proposal_kind", "proposed_by", "target_memory_id", "card_type", "scope",
+        "memory_id", "brain_id", "proposal_kind", "proposed_by", "target_memory_id", "card_type", "scope",
         "project", "provider", "title", "summary", "lifecycle_state", "judgment_state",
         "approval_state", "currentness", "freshness", "governance_tier", "confidence", "reason",
         "supersedes", "source_ref_count", "evidence_hash_count",
+        "review_class", "review_flags", "conflicts_with_memory_id",
     }
+    assert review_item["review_class"] == "competes_with_current"
+    assert review_item["review_flags"] == ["same_subject_already_current"]
+    assert review_item["conflicts_with_memory_id"] == auth_item["memory_id"]
 
 
 def test_service_owns_source_span_selection_and_denial(isolated_pg_store, tmp_path):

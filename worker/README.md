@@ -29,6 +29,9 @@ best-effort로 받는다. `QDRANT_URL`이 없거나 mirror 구성·write가 실�
 
 ## PostgreSQL session-memory의 큰 입력과 격리
 
+근거 기반 MemoryCard 교정의 source/field 정책, 전용 MCP 권한과 실제 검증 기준은
+[LBrain 사실 교정 안내](../docs/lbrain-evidence-correction.md)를 따른다.
+
 PG projector는 UTF-8 본문이 8KiB를 넘으면 원문을 보존한 채 청크로 나눠
 임베딩한다. 청크 벡터의 바이트 수 가중 평균을 정규화해 기존 세션당 벡터 1개
 계약을 유지한다. 새 집계 방식은 별도 profile과 `embedding_revision=2`를 사용한다.

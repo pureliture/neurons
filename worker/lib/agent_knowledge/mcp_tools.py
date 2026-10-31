@@ -27,6 +27,8 @@ BRAIN_RUNTIME_BUILD_IDENTITY_TOOL_NAME = "brain_runtime_build_identity"
 BRAIN_PERMISSION_SENSITIVE_AUDIT_PROBE_TOOL_NAME = PERMISSION_AUDIT_TOOL_NAME
 BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME = "brain_object_proposal_create"
 BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME = "brain_object_decision_commit"
+BRAIN_OBJECT_CORRECT_TOOL_NAME = "brain_object_correct"
+BRAIN_SOURCE_OBSERVE_TOOL_NAME = "brain_source_observe"
 BRAIN_REVIEW_PROPOSALS_TOOL_NAME = "brain_review_proposals"
 
 # Brain Steward — agent-facing, proposal-only memory management surface.
@@ -136,6 +138,8 @@ _DISPATCH_OWNER_BY_TOOL_NAME = {
     BRAIN_PERMISSION_SENSITIVE_AUDIT_PROBE_TOOL_NAME: "jsonrpc_brain",
     BRAIN_OBJECT_PROPOSAL_CREATE_TOOL_NAME: "jsonrpc_brain",
     BRAIN_OBJECT_DECISION_COMMIT_TOOL_NAME: "jsonrpc_brain",
+    BRAIN_OBJECT_CORRECT_TOOL_NAME: "jsonrpc_brain",
+    BRAIN_SOURCE_OBSERVE_TOOL_NAME: "jsonrpc_brain",
     BRAIN_REVIEW_PROPOSALS_TOOL_NAME: "jsonrpc_brain",
     MEMORY_AUTHORITY_PACK_READ_TOOL_NAME: "brain_steward",
     MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME: "brain_steward",
@@ -270,6 +274,11 @@ def list_public_agent_tools() -> list[dict]:
                         "type": "boolean",
                         "default": False,
                         "description": "과거/폐기 레인 항목 포함 여부 (기본값: False)",
+                    },
+                    "min_fact_generation": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "이 fact generation보다 오래된 현재 조회는 명시적 오류로 반환한다.",
                     },
                     "max_age": {
                         "type": "integer",
@@ -1081,11 +1090,76 @@ def list_admin_tools() -> list[dict]:
 def list_tools(surface: str = "all") -> list[dict]:
     if surface in ("agent", "public"):
         return list_public_agent_tools()
+    if surface == "stdio":
+        return list_public_agent_tools() + [_evidence_correction_tool(), _source_observe_tool()]
+    if surface == "correction":
+        return [tool for tool in list_public_agent_tools() if tool["name"] == BRAIN_RESOLVE_TOOL_NAME] + [_evidence_correction_tool(), _source_observe_tool()]
     if surface == "admin":
         return list_admin_tools()
     if surface == "all":
-        return list_public_agent_tools() + list_admin_tools()
+        return list_public_agent_tools() + list_admin_tools() + [_evidence_correction_tool(), _source_observe_tool()]
     raise ValueError(f"unknown surface: {surface}")
+
+
+def _source_observe_tool() -> dict:
+    from .source_observation import SourceObservationRequest
+    return {"name": BRAIN_SOURCE_OBSERVE_TOOL_NAME,
+        "description": "등록 source를 독립 검증해 불변 관측 참조를 발급한다. 기존 기억을 승인/교정하지 않는다. 반환 evidence를 교정에 전달하거나 이후 native 세션 수집에서 같은 관측에 합류할 수 있다.",
+        "inputSchema": SourceObservationRequest.model_json_schema()}
+
+
+def _evidence_correction_tool() -> dict:
+    tool = {
+        "name": BRAIN_OBJECT_CORRECT_TOOL_NAME,
+        "description": (
+            "검증된 source에서 값을 읽어 기존 accepted/current MemoryCard를 교정한다. "
+            "v2 batch에는 기존 값·불일치 설명·제안 값·근거 revision을 함께 전달한다. 서버가 독립 검증한 값을 적용한다. "
+            "지연·충돌·장애 항목은 내구성 queue에서 자동 재검토한다. legacy 단건 입력도 유지한다. "
+            "적격한 사실 교정은 per-correction human approval 없이 successor로 기록한다."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "minLength": 1, "maxLength": 64},
+                "repository": {"type": "string", "minLength": 1, "maxLength": 240},
+                "target_object_id": {"type": "string", "minLength": 1, "maxLength": 180},
+                "target_memory_id": {"type": "string", "minLength": 1, "maxLength": 64},
+                "expected_content_hash": {"type": "string", "pattern": r"^sha256:[0-9a-f]{64}$"},
+                "policy_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 128},
+                "evidence_refs": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 5,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "source_ref_id": {"type": "string", "minLength": 1, "maxLength": 180},
+                            "source_content_hash": {"type": "string", "pattern": r"^sha256:[0-9a-f]{64}$"},
+                        },
+                        "required": ["source_ref_id", "source_content_hash"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": [
+                "project",
+                "repository",
+                "expected_content_hash",
+                "policy_id",
+                "idempotency_key",
+                "evidence_refs",
+            ],
+            "oneOf": [{"required": ["target_object_id"]}, {"required": ["target_memory_id"]}],
+            "additionalProperties": False,
+        },
+    }
+    from .fact_correction_coordinator import FactBatch
+    batch_schema = FactBatch.model_json_schema()
+    definitions = batch_schema.pop("$defs", {})
+    legacy = tool["inputSchema"]
+    tool["inputSchema"] = {"type": "object", "oneOf": [legacy, batch_schema], "$defs": definitions}
+    return tool
 
 
 def _build_tool_registry(surface: str = "all") -> dict[str, dict]:

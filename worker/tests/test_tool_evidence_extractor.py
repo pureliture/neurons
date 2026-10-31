@@ -230,3 +230,88 @@ def test_extractor_ids_are_content_addressed_and_stable(tmp_path):
     for record in first:
         assert record.evidence_id_hash.startswith("sha256:")
         assert record.content_hash == _sha256(record.redacted_summary)
+
+
+def test_native_observation_identity_does_not_depend_on_filtered_evidence_index(tmp_path):
+    source = tmp_path / "native.jsonl"
+    _write_codex_evidence_jsonl(source)
+    first = extract_codex_tool_evidence(source, project=PROJECT, source_locator_hash=SOURCE_LOCATOR_HASH)
+    original = next(r for r in first if r.category == "test_result" and r.outcome == "pass")
+    rows = [json.loads(line) for line in source.read_text().splitlines()]
+    rows[1:1] = [_fn_call("independent-earlier", "uv run pytest tests -q"), _fn_output("independent-earlier", "3 passed in 0.1s")]
+    source.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    second = extract_codex_tool_evidence(source, project=PROJECT, source_locator_hash=SOURCE_LOCATOR_HASH)
+    unchanged = next(r for r in second if r.source_event_id_hash == original.source_event_id_hash)
+    assert unchanged.evidence_index != original.evidence_index
+    assert unchanged.source_event_index != original.source_event_index
+    assert unchanged.observation_id_hash == original.observation_id_hash
+    assert unchanged.evidence_id_hash == original.evidence_id_hash
+    assert unchanged.source_content_hash == original.source_content_hash
+
+
+def test_changed_source_interpretation_is_versioned_without_becoming_an_independent_observation(tmp_path):
+    source = tmp_path / "native.jsonl"
+    _write_codex_evidence_jsonl(source)
+    first = extract_codex_tool_evidence(source, project=PROJECT, source_locator_hash=SOURCE_LOCATOR_HASH)
+    original = next(r for r in first if r.category == "test_result" and r.outcome == "pass")
+    rows = [json.loads(line) for line in source.read_text().splitlines()]
+    for row in rows:
+        if row.get("payload", {}).get("type") == "function_call_output" and row["payload"].get("call_id") == "c1":
+            row["payload"]["output"] = "1 failed, 11 passed in 1.0s"
+    source.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    revised = next(r for r in extract_codex_tool_evidence(source, project=PROJECT, source_locator_hash=SOURCE_LOCATOR_HASH)
+                   if r.source_event_id_hash == original.source_event_id_hash)
+    assert revised.observation_id_hash == original.observation_id_hash
+    assert revised.evidence_id_hash != original.evidence_id_hash
+    assert revised.source_content_hash != original.source_content_hash
+    assert revised.outcome == "fail"
+    from agent_knowledge.ledger import Ledger
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    for record in [original, revised]:
+        stored = ledger.upsert_tool_evidence_summary(record=record)
+        assert stored["observation_id_hash"] == record.observation_id_hash
+        assert stored["source_content_hash"] == record.source_content_hash
+    rows = ledger.list_tool_evidence_summaries(project=PROJECT, provider="codex")
+    assert len(rows) == 2 and len({r["observation_id_hash"] for r in rows}) == 1
+
+
+def test_identical_results_of_distinct_native_calls_are_independent(tmp_path):
+    source = tmp_path / "native.jsonl"
+    rows = [{"type": "session_meta", "payload": {"id": "independent-calls"}},
+        _fn_call("one", "uv run pytest tests -q"), _fn_output("one", "3 passed in 0.1s"),
+        _fn_call("two", "uv run pytest tests -q"), _fn_output("two", "3 passed in 0.1s")]
+    source.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    first, second = extract_codex_tool_evidence(source, project=PROJECT, source_locator_hash=SOURCE_LOCATOR_HASH)
+    assert first.source_content_hash == second.source_content_hash
+    assert first.content_hash == second.content_hash
+    assert first.observation_id_hash != second.observation_id_hash
+    assert first.evidence_id_hash != second.evidence_id_hash
+
+
+def test_project_reinterpretation_preserves_each_record_without_inventing_another_observation(tmp_path):
+    from agent_knowledge.ledger import Ledger
+    from dataclasses import replace
+    original = _extract(tmp_path)[0]
+    another_project = replace(original, project="other-project")
+    assert another_project.observation_id_hash == original.observation_id_hash
+    assert another_project.evidence_id_hash != original.evidence_id_hash
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    ledger.upsert_tool_evidence_summary(record=original)
+    ledger.upsert_tool_evidence_summary(record=another_project)
+    assert len(ledger.list_tool_evidence_summaries(project=PROJECT, provider="codex")) == 1
+    assert len(ledger.list_tool_evidence_summaries(project="other-project", provider="codex")) == 1
+
+
+def test_extractor_upgrade_creates_an_interpretation_version_not_another_observation(tmp_path):
+    from dataclasses import replace
+    from agent_knowledge.ledger import Ledger
+    original = _extract(tmp_path)[0]
+    assert original.extractor_version.endswith(".v2")
+    revised = replace(original, extractor_version="synthetic-extractor.v3")
+    assert revised.observation_id_hash == original.observation_id_hash
+    assert revised.evidence_id_hash != original.evidence_id_hash
+    ledger = Ledger(tmp_path / "versions.sqlite")
+    for record in (original, revised):
+        saved = ledger.upsert_tool_evidence_summary(record=record)
+        assert saved["extractor_version"] == record.extractor_version
+    assert len(ledger.list_tool_evidence_summaries(project=PROJECT, provider="codex")) == 2

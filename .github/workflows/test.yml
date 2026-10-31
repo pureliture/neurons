@@ -81,9 +81,24 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      couchdb:
+        image: couchdb:3.4
+        env:
+          COUCHDB_USER: neurons_test
+          COUCHDB_PASSWORD: neurons_test
+        ports:
+          - 5984:5984
+        options: >-
+          --health-cmd "curl -fsS http://127.0.0.1:5984/_up"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     env:
       ATLAS_QRET_SYNTHETIC_SQL: "1"
       LBRAIN_TEST_PG_DSN: postgresql://neurons_test:neurons_test@127.0.0.1:5432/neurons_test
+      LBRAIN_TEST_COUCHDB_URL: http://127.0.0.1:5984
+      COUCHDB_USER: neurons_test
+      COUCHDB_PASSWORD: neurons_test
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -105,6 +120,12 @@ jobs:
       - name: PG schema apply 계약 및 멱등 적용 검증
         working-directory: worker
         run: uv run --group dev --extra mcp-http pytest -q -rs tests/test_pg_schema_apply_cli.py
+      - name: 공통 교정 transaction과 일반 writer 우회 차단 검증
+        working-directory: worker
+        run: uv run --group dev --extra mcp-http pytest -q -rs tests/test_fact_resolution.py tests/test_fact_writer_guard.py tests/test_correction_semantic.py tests/test_fact_source_lifecycle.py tests/test_fact_policy_lifecycle.py tests/test_fact_policy_revision.py tests/test_fact_verification.py tests/test_fact_source_competition.py tests/test_recheck_scheduler.py tests/test_fact_concurrency.py tests/test_correction_target.py tests/test_correction_target_identity.py
+      - name: Native 원래 도구 응답과 source 버전의 실제 Couch·PG 검증
+        working-directory: worker
+        run: uv run --group dev --extra mcp-http pytest -q -rs tests/test_native_tool_receipts.py tests/test_observation_provenance.py tests/test_native_fact_intake.py tests/test_source_observation.py tests/test_couchdb_tool_evidence_and_materialize.py tests/test_active_source_revision_tool_evidence_bundler.py tests/test_couchdb_migration_cli.py
 
   worker-lbrain-pg-neo4j:
     name: worker LBrain PG + Neo4j live (uv)
@@ -154,7 +175,7 @@ jobs:
         run: test -n "$LBRAIN_TEST_PG_DSN" && test -n "$LBRAIN_TEST_NEO4J_URI"
       - name: Actual PG authority and Neo4j graph card round trip
         working-directory: worker
-        run: uv run --group dev --extra mcp-http pytest -q -rs tests/test_pg_neo4j_card_e2e.py
+        run: uv run --group dev --extra mcp-http pytest -q -rs tests/test_pg_neo4j_card_e2e.py tests/test_fact_resolution_graph.py tests/test_graph_replay.py tests/test_correction_capabilities.py
 
   worker-postgres-parity:
     name: worker PostgreSQL parity (uv)

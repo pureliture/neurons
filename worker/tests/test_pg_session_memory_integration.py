@@ -67,8 +67,11 @@ def lane(monkeypatch, tmp_path, capsys):
     yield dict(sql=sql, couch=couch, sid=sid, project=project, run=run, query=query, legacy=legacy, embeds=embeds)
     with sql.transaction() as conn:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM embedding_outbox WHERE target_id IN (SELECT chunk_id FROM session_memory_chunks WHERE project = %s)", (project,))
-            cur.execute("DELETE FROM session_memory_chunks WHERE project = %s", (project,))
+            # 이 fixture의 고유 session만 정리한다. project/provider 변조 검사에서
+            # 변경된 행도 포함하며 다른 fixture의 source 연결은 건드리지 않는다.
+            cur.execute("DELETE FROM embedding_outbox WHERE target_id IN (SELECT chunk_id FROM session_memory_chunks WHERE session_id_hash = %s)", (sid,))
+            cur.execute("DELETE FROM session_memory_chunk_sources WHERE chunk_id IN (SELECT chunk_id FROM session_memory_chunks WHERE session_id_hash = %s)", (sid,))
+            cur.execute("DELETE FROM session_memory_chunks WHERE session_id_hash = %s", (sid,))
 
 
 def test_cli_sql_archive_preserves_legacy_receipt_and_is_idempotent(lane):
@@ -486,6 +489,7 @@ def test_c2_all_stale_bounded_termination(c2_lane, count, expected_status):
     current = c2_lane["seed"]()
     _c2_stale_rows(c2_lane, current, count)
     with c2_lane["sql"].transaction() as conn:
+        conn.execute("DELETE FROM session_memory_chunk_sources WHERE chunk_id = %s", (current.chunk_id,))
         conn.execute("DELETE FROM session_memory_chunks WHERE chunk_id = %s", (current.chunk_id,))
     observed = {"search": [], "get": 0}
     search_code = PgVectorStore.search_session_chunks.__code__
@@ -512,11 +516,11 @@ def test_c2_all_stale_bounded_termination(c2_lane, count, expected_status):
 def test_c2_equal_distance_order_is_stable_after_stale_saturation(c2_lane):
     rows = [c2_lane["seed"](raw_id=f"tie-{i}") for i in range(7)]
     _c2_stale_rows(c2_lane, rows[0], 8)
-    # Reverse the heap insertion order so the expected sort is not incidental.
+    # 역순으로 새 heap tuple을 만들어 정렬이 물리적 행 순서에 의존하지 않음을
+    # 검사한다. 본문/벡터와 immutable source 연결은 그대로 보존한다.
     with c2_lane["sql"].transaction() as conn:
         for row in sorted(rows, key=lambda row: row.chunk_id, reverse=True):
-            conn.execute("DELETE FROM session_memory_chunks WHERE chunk_id = %s", (row.chunk_id,))
-            c2_lane["sql"].insert_chunk(row, conn=conn)
+            conn.execute("UPDATE session_memory_chunks SET content_markdown=content_markdown WHERE chunk_id = %s", (row.chunk_id,))
     expected = sorted(row.chunk_id for row in rows)[:5]
     for _ in range(3):
         assert [h["memory_id"] for h in c2_lane["query"]()["archive"]] == expected

@@ -29,7 +29,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
@@ -109,6 +111,7 @@ class ReplayCheckpoint:
     completed: set[str] = field(default_factory=set)
     retry_counts: dict[str, int] = field(default_factory=dict)
     dead_letter: set[str] = field(default_factory=set)
+    completed_hashes: dict[str, str] = field(default_factory=dict)
 
 
 def load_checkpoint(path: str | Path | None) -> ReplayCheckpoint:
@@ -122,6 +125,7 @@ def load_checkpoint(path: str | Path | None) -> ReplayCheckpoint:
         completed=set(data.get("completed", [])),
         retry_counts=dict(data.get("retry_counts", {})),
         dead_letter=set(data.get("dead_letter", [])),
+        completed_hashes=dict(data.get("completed_hashes", {})),
     )
 
 
@@ -135,8 +139,20 @@ def save_checkpoint(path: str | Path | None, state: ReplayCheckpoint) -> None:
         "completed": sorted(state.completed),
         "retry_counts": dict(state.retry_counts),
         "dead_letter": sorted(state.dead_letter),
+        "completed_hashes": dict(state.completed_hashes),
     }
-    p.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    # 부분 쓰기로 기존 checkpoint를 깨뜨리지 않도록 같은 디렉터리에서
+    # 완성한 파일을 교체한다. 여러 worker의 동시 사용은 보장하지 않는다.
+    fd, temporary = tempfile.mkstemp(prefix=".graph-replay-", dir=p.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, indent=2, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, p)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 # --- adapter seam ---
@@ -151,7 +167,8 @@ class GraphProjectionSeam(Protocol):
     def upsert_episode(self, episode: Any) -> Any: ...  # pragma: no cover
 
 
-def call_adapter_seam(adapter: Any, payload: Any, *, require_explicit_result: bool = False) -> str:
+def call_adapter_seam(adapter: Any, payload: Any, *, require_explicit_result: bool = False,
+                      require_nonempty_result: bool = False) -> str:
     """Deliver one redacted payload via the Graphiti adapter seam.
 
     Accepts (in order): ``upsert_episode`` (repo canonical seam),
@@ -171,7 +188,7 @@ def call_adapter_seam(adapter: Any, payload: Any, *, require_explicit_result: bo
     else:
         raise TypeError("unsupported_adapter_seam")
     if result is None:
-        return "failed" if require_explicit_result else "inserted"
+        return "failed" if require_explicit_result or require_nonempty_result else "inserted"
     text = str(result).strip().lower()
     if require_explicit_result:
         return text if text in {"inserted", "duplicate"} else "failed"
@@ -307,8 +324,18 @@ def run_graph_replay(
         digest = key_digest(source_type, source_id, source_revision, content_hash)
 
         # Idempotent skip: UNIQUE(source_type, source_id, source_revision).
-        if key in state.completed or key in state.dead_letter:
+        if key in state.completed:
+            saved_hash = state.completed_hashes.get(key)
+            if saved_hash != content_hash:
+                reason = "checkpoint_content_conflict" if saved_hash else "checkpoint_identity_unverified"
+                failures.append(ReplayFailure(digest, source_type, reason, "dead_letter"))
+                continue
             skipped_duplicate += 1
+            continue
+        if key in state.dead_letter:
+            # 이전에 실패한 작업은 재실행되지 않았어도 계속 실패로 표시한다.
+            # duplicate 성공에 합치면 빈 graph가 완료된 것으로 보인다.
+            failures.append(ReplayFailure(digest, source_type, "previous_dead_letter", "dead_letter"))
             continue
 
         try:
@@ -316,7 +343,9 @@ def run_graph_replay(
                 {**dict(item), "source_type": source_type, "source_id": source_id,
                  "source_revision": source_revision, "content_hash": content_hash}
             )
-            outcome = call_adapter_seam(adapter, payload)
+            # 실제 저장 또는 기존 동일 결과만 완료다. None, 비활성 adapter와
+            # 다른 암묵적 응답은 저장 증명이 아니므로 완료로 기록하지 않는다.
+            outcome = call_adapter_seam(adapter, payload, require_nonempty_result=True)
         except Exception as exc:
             reason_code = type(exc).__name__
             retries_used = state.retry_counts.get(key, 0)
@@ -328,11 +357,13 @@ def run_graph_replay(
             failures.append(ReplayFailure(digest, source_type, reason_code, disposition))
             continue
 
-        if outcome in {"duplicate", "skipped_disabled"}:
+        if outcome == "duplicate":
             state.completed.add(key)
+            state.completed_hashes[key] = content_hash
             skipped_duplicate += 1
         elif outcome == "inserted":
             state.completed.add(key)
+            state.completed_hashes[key] = content_hash
             projected += 1
         else:  # adapter-level "failed"
             retries_used = state.retry_counts.get(key, 0)
