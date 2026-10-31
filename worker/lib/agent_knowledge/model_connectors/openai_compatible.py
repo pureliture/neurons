@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .embedding_cache import CachedEmbedder, embedding_cache_enabled, embedding_cache_namespace
 from .policy import ModelConnectorConfigError, ModelPolicy
 from .reranker import GraphitiCrossEncoderAdapter, build_reranker_client
 from .session_headers import GRAPH_WORKER_SESSION_ID, opencode_session_headers
@@ -58,15 +59,28 @@ def build_openai_compatible_graphiti_components(
             return normalize_structured_response(data, response_model)
 
     llm_client = _NeuronStructuredClient(config=llm_config, client=_build_llm_client(llm_config))
-    embedder = OpenAIEmbedder(
+    embedding_model = config.embedding.model or (
+        "nomic-embed-text" if embedding_provider == "ollama" else None
+    )
+    raw_embedder = OpenAIEmbedder(
         config=OpenAIEmbedderConfig(
             api_key=embedding_api_key_value,
-            embedding_model=config.embedding.model or (
-                "nomic-embed-text" if embedding_provider == "ollama" else None
-            ),
+            embedding_model=embedding_model,
             embedding_dim=config.embedding.dim,
             base_url=embedding_base_url or None,
         )
+    )
+    embedder = CachedEmbedder(
+        raw_embedder,
+        namespace=embedding_cache_namespace(
+            provider=embedding_provider,
+            model=str(raw_embedder.config.embedding_model),
+            base_url=embedding_base_url,
+            embedding_dim=config.embedding.dim,
+            api_key=embedding_api_key_value,
+        ),
+        embedding_dim=config.embedding.dim,
+        enabled=embedding_cache_enabled(),
     )
     reranker = build_reranker_client(config, api_key=api_key, openai_client=llm_client.client, policy=validator)
     return llm_client, embedder, GraphitiCrossEncoderAdapter(reranker)

@@ -1173,6 +1173,69 @@ class PgVectorStore:
                 )
                 return cur.rowcount == 1
 
+    def skip_stale_outbox_embedding(
+        self,
+        *,
+        outbox_id: int,
+        target_type: str,
+        target_id: str,
+        content_hash: str,
+        worker_id: str,
+    ) -> bool:
+        """Retire an obsolete leased job before spending on its embedding."""
+
+        targets = {
+            "memory_card": ("memory_cards", "memory_id"),
+            "session_chunk": ("session_memory_chunks", "chunk_id"),
+        }
+        if target_type not in targets:
+            raise ValueError("unsupported outbox target type")
+        if not worker_id or not outbox_id or not target_id or not content_hash:
+            raise ValueError("invalid outbox stale-check arguments")
+        table, id_column = targets[target_type]
+
+        with self._scope(write=True) as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT outbox_id FROM embedding_outbox
+                     WHERE outbox_id = %s AND target_type = %s
+                       AND target_id = %s AND content_hash = %s
+                       AND status = 'processing' AND worker_id = %s
+                       AND lease_until > clock_timestamp()
+                     FOR UPDATE
+                    """,
+                    (outbox_id, target_type, target_id, content_hash, worker_id),
+                )
+                if cur.fetchone() is None:
+                    raise ValueError("outbox job not found or lease owner mismatch")
+
+                cur.execute(
+                    f"SELECT content_hash FROM {table} WHERE {id_column} = %s FOR UPDATE",
+                    (target_id,),
+                )
+                target = cur.fetchone()
+                if target is not None and _row_value(target, "content_hash", 0) == content_hash:
+                    return False
+
+                cur.execute(
+                    """
+                    UPDATE embedding_outbox
+                       SET status = 'cas_skipped',
+                           last_error = 'CAS skip: content_hash mismatch',
+                           lease_until = NULL,
+                           updated_at = NOW()
+                     WHERE outbox_id = %s
+                       AND status = 'processing'
+                       AND worker_id = %s
+                       AND lease_until > clock_timestamp()
+                    """,
+                    (outbox_id, worker_id),
+                )
+                if cur.rowcount != 1:
+                    raise ValueError("outbox job not found or lease owner mismatch")
+                return True
+
     def cas_update_embedding(
         self,
         outbox_id_or_target_type: int | str,

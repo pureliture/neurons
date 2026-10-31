@@ -88,8 +88,9 @@ def test_worker_requires_explicit_embedding_provider_without_database():
         OutboxWorker(store=store, worker_id="w-no-provider")
 
 
-def test_worker_rejects_misdimensioned_provider_output_without_database():
+def test_worker_rejects_misdimensioned_provider_output_without_database(monkeypatch):
     store = PgVectorStore(dsn=OFFLINE_DSN)
+    monkeypatch.setattr(store, "skip_stale_outbox_embedding", lambda **_kwargs: False)
     worker = OutboxWorker(
         store=store,
         worker_id="w-bad-dim",
@@ -104,6 +105,83 @@ def test_worker_rejects_misdimensioned_provider_output_without_database():
     )
     with pytest.raises(ValueError, match="invalid vector length"):
         worker.process_job(job)
+
+
+def test_worker_skips_stale_job_before_calling_embedding_provider():
+    class _StaleStore:
+        def __init__(self) -> None:
+            self.checked: list[tuple] = []
+
+        def skip_stale_outbox_embedding(self, **kwargs) -> bool:
+            self.checked.append(tuple(kwargs.values()))
+            return True
+
+    store = _StaleStore()
+    worker = OutboxWorker(
+        store=store,
+        worker_id="w-stale",
+        embedding_fn=lambda _text: pytest.fail("stale text must not be embedded"),
+    )
+    job = OutboxJob(
+        outbox_id=2,
+        target_type="memory_card",
+        target_id="t",
+        content_hash="sha256:stale",
+        payload_text="superseded text",
+    )
+
+    assert worker.process_job(job) is False
+    assert len(store.checked) == 1
+
+
+@pytest.mark.parametrize("target_hash, expected_skip", [("sha256:new", True), ("sha256:old", False)])
+def test_store_skips_only_outbox_jobs_with_obsolete_content_hash(target_hash, expected_skip):
+    class _Cursor:
+        def __init__(self, connection) -> None:
+            self.connection = connection
+            self.rowcount = 0
+            self._row = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, query, _params=()):
+            self.connection.queries.append(query)
+            if "SELECT outbox_id FROM embedding_outbox" in query:
+                self._row = (7,)
+            elif "SELECT content_hash FROM memory_cards" in query:
+                self._row = (self.connection.target_hash,)
+            elif "UPDATE embedding_outbox" in query:
+                self.rowcount = 1
+
+        def fetchone(self):
+            return self._row
+
+    class _Connection:
+        def __init__(self, current_hash) -> None:
+            self.target_hash = current_hash
+            self.queries: list[str] = []
+
+        def cursor(self):
+            return _Cursor(self)
+
+    connection = _Connection(target_hash)
+    store = PgVectorStore(connection=connection)
+
+    skipped = store.skip_stale_outbox_embedding(
+        outbox_id=7,
+        target_type="memory_card",
+        target_id="card-1",
+        content_hash="sha256:old",
+        worker_id="worker-1",
+    )
+
+    assert skipped is expected_skip
+    assert any("FOR UPDATE" in query for query in connection.queries)
+    assert any("UPDATE embedding_outbox" in query for query in connection.queries) is expected_skip
 
 
 def test_deterministic_embedding_helper_uses_shared_profile():

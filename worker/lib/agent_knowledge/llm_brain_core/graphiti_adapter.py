@@ -36,6 +36,11 @@ from ..model_connectors.structured_response import (
     normalize_structured_keys as _normalize_structured_keys,
     normalize_structured_response as _normalize_structured_response,
 )
+from ..model_connectors.embedding_cache import (
+    CachedEmbedder,
+    embedding_cache_enabled,
+    embedding_cache_namespace,
+)
 from ..model_connectors.env import DEFAULT_EMBEDDING_DIM, DEFAULT_EMBEDDING_MODEL
 
 _SYNTHETIC_CANARY_PROVIDER = "lbrain-temporal-canary"
@@ -1061,13 +1066,27 @@ def _build_graphiti(config: GraphitiNeo4jConfig):
         embedding_model = config.embedding_model or (
             "nomic-embed-text" if config.llm_provider == "ollama" else _DEFAULT_EMBEDDING_MODEL
         )
-        embedder = OpenAIEmbedder(
+        embedding_api_key = config.embedding_api_key or api_key
+        embedding_dim = _resolve_embedding_dim(embedding_model, config.embedding_dim)
+        raw_embedder = OpenAIEmbedder(
             config=OpenAIEmbedderConfig(
-                api_key=config.embedding_api_key or api_key,
+                api_key=embedding_api_key,
                 embedding_model=embedding_model,
-                embedding_dim=_resolve_embedding_dim(embedding_model, config.embedding_dim),
+                embedding_dim=embedding_dim,
                 base_url=config.embedding_base_url or base_url or None,
             )
+        )
+        embedder = CachedEmbedder(
+            raw_embedder,
+            namespace=embedding_cache_namespace(
+                provider=str(config.embedding_provider or config.llm_provider).strip().lower(),
+                model=str(raw_embedder.config.embedding_model),
+                base_url=config.embedding_base_url or base_url,
+                embedding_dim=embedding_dim,
+                api_key=embedding_api_key,
+            ),
+            embedding_dim=embedding_dim,
+            enabled=embedding_cache_enabled(),
         )
         if config.auth_disabled or not (config.password or "").strip():
             # Neo4j auth is disabled on the server: connect without credentials
