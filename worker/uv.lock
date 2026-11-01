@@ -219,6 +219,15 @@ wheels = [
 ]
 
 [[package]]
+name = "cloudpickle"
+version = "3.1.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/27/fb/576f067976d320f5f0114a8d9fa1215425441bb35627b1993e5afd8111e5/cloudpickle-3.1.2.tar.gz", hash = "sha256:7fda9eb655c9c230dab534f1983763de5835249750e85fbcef43aaa30a9a2414", size = 22330, upload-time = "2025-11-03T09:25:26.604Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/88/39/799be3f2f0f38cc727ee3b4f1445fe6d5e4133064ec2e4115069418a5bb6/cloudpickle-3.1.2-py3-none-any.whl", hash = "sha256:9acb47f6afd73f60dc1df93bb801b472f05ff42fa6c84167d25cb206be1fbf4a", size = 22228, upload-time = "2025-11-03T09:25:25.534Z" },
+]
+
+[[package]]
 name = "colorama"
 version = "0.4.6"
 source = { registry = "https://pypi.org/simple" }
@@ -575,24 +584,6 @@ wheels = [
 ]
 
 [[package]]
-name = "graphiti-core"
-version = "0.30.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "neo4j" },
-    { name = "numpy" },
-    { name = "openai" },
-    { name = "posthog" },
-    { name = "pydantic" },
-    { name = "python-dotenv" },
-    { name = "tenacity" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/a1/5f/c59bec30bae0bfd470baddadc15bd8af7ef92e020466c272933090453b53/graphiti_core-0.30.1.tar.gz", hash = "sha256:7391424ad1e4412e99d4e1f5751da27969c1f908c87c383cef6c933dc67d13fe", size = 6970562, upload-time = "2026-09-01T19:15:08.27Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/74/a7/94b06a98f7c0bbe03021316488ca55481e8d6500a0e67b21af17b9fb39b4/graphiti_core-0.30.1-py3-none-any.whl", hash = "sha256:d7fd59c6ca01cfda45fe8e2669d30272d3d083e3ed5d62f810a72310670cdec8", size = 361453, upload-time = "2026-09-01T19:15:05.775Z" },
-]
-
-[[package]]
 name = "greenlet"
 version = "3.5.1"
 source = { registry = "https://pypi.org/simple" }
@@ -890,6 +881,18 @@ wheels = [
 ]
 
 [[package]]
+name = "joblib"
+version = "1.6.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cloudpickle" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d5/1d/537ab090f302b838943a1b56497dd53059b9a9b46a074936470173a2e207/joblib-1.6.0.tar.gz", hash = "sha256:2ccc96785b12046c08fd6d55839c12857831b54a3c1673ffadd2f04bfc4eda03", size = 327903, upload-time = "2026-08-31T09:39:04.122Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/18/53/84099323c2ec4be98d935f63c033ac4151ee83836ca1050ede3b3aadf155/joblib-1.6.0-py3-none-any.whl", hash = "sha256:3dbbf9f6e4b592a2357b854608e980fe6390d131d7a82f011a377ef2ebef7aba", size = 306115, upload-time = "2026-08-31T09:39:02.298Z" },
+]
+
+[[package]]
 name = "jsonlines"
 version = "4.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1122,6 +1125,24 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d6/54/cfe61301667036ec958cb99bd3efefba235e65cdeb9c84d24a8293ba1d90/mdurl-0.1.2.tar.gz", hash = "sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba", size = 8729, upload-time = "2022-08-14T12:40:10.846Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b3/38/89ba8ad64ae25be8de66a6d463314cf1eb366222074cfda9ee839c56a4b4/mdurl-0.1.2-py3-none-any.whl", hash = "sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8", size = 9979, upload-time = "2022-08-14T12:40:09.779Z" },
+]
+
+[[package]]
+name = "model2vec"
+version = "0.10.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "huggingface-hub" },
+    { name = "jinja2" },
+    { name = "joblib" },
+    { name = "numpy" },
+    { name = "safetensors" },
+    { name = "tokenizers" },
+    { name = "tqdm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/04/48/2ceace43798ca7cb8c32c50c7956d7446d7f90a3b3f65b201fb7fd87344c/model2vec-0.10.0.tar.gz", hash = "sha256:47119ef1f917b4da7a0010bf10c587c923639a6af4ea51cb2d424fc329d09d2f", size = 4622501, upload-time = "2026-10-11T10:47:59.266Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/84/c5/2b1b5648195bfcada5de6a1164d560c968ded8fc68f2ddd6118b21cb26b7/model2vec-0.10.0-py3-none-any.whl", hash = "sha256:a39c40de4f82c5e0e50c14bbb87a935c1c62094f3f0f0d8fde8e24f4a4f35b16", size = 89504, upload-time = "2026-10-11T10:47:57.679Z" },
 ]
 
 [[package]]
@@ -2046,16 +2067,24 @@ name = "rag-ingress-worker"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "graphiti-core" },
     { name = "nats-py" },
+    { name = "neo4j" },
+    { name = "numpy" },
+    { name = "openai" },
+    { name = "posthog" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
+    { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "qdrant-client" },
     { name = "sqlalchemy" },
+    { name = "tenacity" },
 ]
 
 [package.optional-dependencies]
+local-embedding = [
+    { name = "model2vec" },
+]
 mcp-client = [
     { name = "mcp" },
 ]
@@ -2074,17 +2103,23 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "docling", marker = "extra == 'searchable-mirror'", specifier = ">=2" },
-    { name = "graphiti-core", specifier = "==0.30.1" },
     { name = "mcp", marker = "extra == 'mcp-client'", specifier = ">=1.28.0,<2" },
     { name = "mcp", marker = "extra == 'mcp-http'", specifier = ">=1.28.0,<2" },
+    { name = "model2vec", marker = "extra == 'local-embedding'", specifier = "==0.10.0" },
     { name = "nats-py", specifier = ">=2.6" },
+    { name = "neo4j", specifier = ">=5.26.0" },
+    { name = "numpy", specifier = ">=1.0.0" },
+    { name = "openai", specifier = ">=1.91.0" },
+    { name = "posthog", specifier = ">=3.0.0" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.4" },
     { name = "pydantic", specifier = ">=2.13,<3" },
+    { name = "python-dotenv", specifier = ">=1.0.1" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "qdrant-client", specifier = ">=1.10" },
     { name = "sqlalchemy", specifier = ">=2.0.51" },
+    { name = "tenacity", specifier = ">=9.0.0" },
 ]
-provides-extras = ["mcp-client", "mcp-http", "searchable-mirror"]
+provides-extras = ["mcp-client", "mcp-http", "searchable-mirror", "local-embedding"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=8" }]

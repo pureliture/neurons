@@ -12,12 +12,22 @@ import os
 import signal
 import threading
 from collections.abc import Mapping
+from typing import Any
 
-from ..model_connectors import DEFAULT_EMBEDDING_DIM, DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_PROFILE_ID, resolve_embedding_spec
+from ..model_connectors import (
+    DEFAULT_EMBEDDING_DIM,
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_EMBEDDING_PROFILE_ID,
+    LOCAL_EMBEDDING_DIM,
+    LOCAL_EMBEDDING_MODEL,
+    LOCAL_EMBEDDING_PROFILE_ID,
+    resolve_embedding_profile_id,
+    resolve_embedding_spec,
+)
 from ..rag_ingress.pg_backfill import validated_pg_embedding_profile
 from ..rag_ingress.pg_embedding_privacy import assert_pg_embedding_egress_safe
 from ..rag_ingress.qdrant_embedding import build_openai_embedding_provider
-from .outbox_worker import OutboxWorker
+from .outbox_worker import LocalEmbeddingOutboxWorker, OutboxWorker
 from .pgvector_store import PgVectorStore
 
 
@@ -46,9 +56,11 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
     parser.add_argument("--max-iterations", type=_positive_int, default=60)
     parser.add_argument("--lease-seconds", type=_positive_int, default=180)
     parser.add_argument("--poll-interval", type=_positive_seconds, default=5.0)
+    parser.add_argument("--profile", default="", help="Optional explicit embedding profile ID")
     args = parser.parse_args(argv)
     env = os.environ if environ is None else environ
-    report = {"schema_version": "lbrain_embedding_consumer.v1", "profile": DEFAULT_EMBEDDING_PROFILE_ID, "attempted": 0, "completed": 0, "failed": 0, "stale": 0, "model_calls": 0}
+    initial_profile = args.profile.strip() or DEFAULT_EMBEDDING_PROFILE_ID
+    report = {"schema_version": "lbrain_embedding_consumer.v1", "profile": initial_profile, "attempted": 0, "completed": 0, "failed": 0, "stale": 0, "model_calls": 0}
 
     def emit(status: str, **fields) -> None:
         print(json.dumps({**report, "status": status, **fields}, sort_keys=True))
@@ -63,8 +75,15 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
         timeout = float(env.get("LLM_BRAIN_EMBEDDING_TIMEOUT_SECONDS", "30"))
         if not dsn or not spec.base_url:
             raise ValueError("configuration_required")
-        if (spec.model, spec.dim) != (DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIM):
+        if (spec.model, spec.dim) == (DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIM):
+            resolved_profile = DEFAULT_EMBEDDING_PROFILE_ID
+        elif (spec.model, spec.dim) == (LOCAL_EMBEDDING_MODEL, LOCAL_EMBEDDING_DIM):
+            resolved_profile = LOCAL_EMBEDDING_PROFILE_ID
+        else:
             raise ValueError("unsupported_embedding_profile")
+        if args.profile.strip() and args.profile.strip() != resolved_profile:
+            raise ValueError("embedding_profile_mismatch")
+        report["profile"] = resolved_profile
         batch_bound = min(args.batch_size, args.max_jobs)
         # Every job is leased together but provider calls are serial. Reserve
         # the configured SDK attempts plus write/backoff margin for ALL jobs.
@@ -80,17 +99,38 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
     previous_sigterm = None
     try:
         provider = build_openai_embedding_provider(environ=env)
-        validated_pg_embedding_profile(provider)
+        profile = validated_pg_embedding_profile(provider)
+        if profile != report["profile"]:
+            raise ValueError("embedding_profile_mismatch")
 
         def embed(text: str) -> list[float]:
             assert_pg_embedding_egress_safe(text)
-            if len(text.encode("utf-8")) > 32768:
+            max_bytes = 524288 if profile == LOCAL_EMBEDDING_PROFILE_ID else 32768
+            if len(text.encode("utf-8")) > max_bytes:
                 raise ValueError("embedding_input_budget_exceeded")
             report["model_calls"] += 1
             return provider.embed(text)
 
         store = PgVectorStore(dsn=dsn)
-        worker = OutboxWorker(store=store, embedding_fn=embed, batch_size=min(args.batch_size, args.max_jobs), lease_seconds=args.lease_seconds, poll_interval_seconds=args.poll_interval)
+        if profile == LOCAL_EMBEDDING_PROFILE_ID and hasattr(store, "claim_local_outbox_leases"):
+            if hasattr(store, "embedding_profile"):
+                store.embedding_profile = LOCAL_EMBEDDING_PROFILE_ID
+            worker: Any = LocalEmbeddingOutboxWorker(
+                store=store,
+                embedding_fn=embed,
+                batch_size=min(args.batch_size, args.max_jobs),
+                lease_seconds=args.lease_seconds,
+                poll_interval_seconds=args.poll_interval,
+                embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
+            )
+        else:
+            worker = OutboxWorker(
+                store=store,
+                embedding_fn=embed,
+                batch_size=min(args.batch_size, args.max_jobs),
+                lease_seconds=args.lease_seconds,
+                poll_interval_seconds=args.poll_interval,
+            )
         if threading.current_thread() is threading.main_thread():
             previous_sigterm = signal.signal(signal.SIGTERM, lambda _signum, _frame: stop.set())
         for _ in range(1 if args.once else args.max_iterations):

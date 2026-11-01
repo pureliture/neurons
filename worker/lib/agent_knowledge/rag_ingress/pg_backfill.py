@@ -7,15 +7,20 @@ Validates ownership, content, and embedding profile before reuse.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import hashlib
 import json
 from typing import Any
 
 from ..couchdb_source.document_model import assert_index_target_allowed, sha256_hash
+from ..local_embedding.canonical import canonical_input_hash_v1, canonical_session_input_v1
 from ..model_connectors import (
     DEFAULT_EMBEDDING_DIM,
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_EMBEDDING_PROFILE_ID,
+    LOCAL_EMBEDDING_DIM,
+    LOCAL_EMBEDDING_MODEL,
+    LOCAL_EMBEDDING_PROFILE_ID,
 )
 from ..postgres_store.pgvector_store import PgVectorStore, SessionChunk, _as_optional_datetime
 from .pg_embedding_privacy import assert_pg_embedding_egress_safe
@@ -61,11 +66,12 @@ def _pg_identity_lock(*, session_id_hash: str, project: str, provider: str,
 
 
 def validated_pg_embedding_profile(provider: Any) -> str:
-    if (getattr(provider, "model", ""), getattr(provider, "size", 0)) != (
-        DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIM
-    ):
-        raise ValueError("unsupported PG embedding profile")
-    return DEFAULT_EMBEDDING_PROFILE_ID
+    model_and_size = (getattr(provider, "model", ""), getattr(provider, "size", 0))
+    if model_and_size == (DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIM):
+        return DEFAULT_EMBEDDING_PROFILE_ID
+    if model_and_size == (LOCAL_EMBEDDING_MODEL, LOCAL_EMBEDDING_DIM):
+        return LOCAL_EMBEDDING_PROFILE_ID
+    raise ValueError("unsupported PG embedding profile")
 
 
 def normalized_pg_halfvec(sql_store, vector) -> list[float]:
@@ -240,11 +246,25 @@ class PgSessionMemoryProjector:
     and verifies the stored chunk is ready after save.
     """
 
-    def __init__(self, store: PgVectorStore, embed_provider: Any, *, chunk_embedder=None) -> None:
+    def __init__(
+        self,
+        store: PgVectorStore,
+        embed_provider: Any,
+        *,
+        chunk_embedder=None,
+        allow_deferred_on_model_unavailable: bool = True,
+    ) -> None:
         self._profile = validated_pg_embedding_profile(embed_provider)
         self._store = store
         self._embed = embed_provider
         self._chunk_embedder = chunk_embedder
+        self._allow_deferred = bool(allow_deferred_on_model_unavailable)
+        self.last_local_representation_receipt: dict[str, Any] | None = None
+        self.last_local_identity_scheme: str | None = None
+
+    @property
+    def embedding_profile(self) -> str:
+        return self._profile
 
     def project(self, *, target_profile: str, document: dict[str, Any]) -> str:
         assert_index_target_allowed(target_profile)
@@ -266,6 +286,16 @@ class PgSessionMemoryProjector:
         )
         observed_at = _as_optional_datetime(observed_raw)
         assert_pg_text_safe(body, session_id_hash, project, provider, source_hash, content_hash)
+        if self._profile == LOCAL_EMBEDDING_PROFILE_ID:
+            return self._project_local_profile(
+                body=body,
+                content_hash=content_hash,
+                session_id_hash=session_id_hash,
+                project=project,
+                provider=provider,
+                source_hash=source_hash,
+                observed_at=observed_at,
+            )
         embedding_model = getattr(self._embed, "model", "")
         embedding_size = getattr(self._embed, "size", 0)
         # len(text) is a cheap lower bound; only small strings need a byte count.
@@ -388,6 +418,233 @@ class PgSessionMemoryProjector:
         if stored.embedding is None or len(stored.embedding) != embedding_size:
             raise ValueError("PG ready chunk vector mismatch")
         return chunk_id
+
+    def _project_local_profile(
+        self,
+        *,
+        body: str,
+        content_hash: str,
+        session_id_hash: str,
+        project: str,
+        provider: str,
+        source_hash: str,
+        observed_at: Any,
+    ) -> str:
+        from .pg_representation import (
+            LOCAL_SESSION_REPRESENTATION_KIND,
+            build_local_representation_receipt_v3,
+            derive_local_pg_chunk_id,
+        )
+
+        embedding_size = getattr(self._embed, "size", 0)
+        if embedding_size != LOCAL_EMBEDDING_DIM:
+            raise ValueError(f"local embedding provider has invalid size: {embedding_size}")
+
+        assert_pg_embedding_egress_safe(body)
+        input_text = canonical_session_input_v1(body)
+        input_hash = canonical_input_hash_v1(input_text)
+        body_bytes = len(body.encode("utf-8"))
+        is_over_8k = body_bytes > CHUNK_BYTES
+
+        legacy_v1_id = (
+            _derive_pg_chunk_id_impl(
+                project=project,
+                provider=provider,
+                session_id_hash=session_id_hash,
+                source_hash=source_hash,
+                content_hash=content_hash,
+                embedding_profile=DEFAULT_EMBEDDING_PROFILE_ID,
+            )
+            if source_hash
+            else ""
+        )
+        legacy_v2_id = (
+            _derive_pg_chunk_id_impl(
+                project=project,
+                provider=provider,
+                session_id_hash=session_id_hash,
+                source_hash=source_hash,
+                content_hash=content_hash,
+                embedding_profile=CHUNKED_PROFILE,
+            )
+            if source_hash
+            else ""
+        )
+        local_v1_id = (
+            derive_local_pg_chunk_id(
+                project=project,
+                provider=provider,
+                session_id_hash=session_id_hash,
+                source_hash=source_hash,
+                content_hash=content_hash,
+                embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
+            )
+            if source_hash
+            else ""
+        )
+
+        def _validate_row_scope_and_body(row: SessionChunk) -> None:
+            if (
+                row.session_id_hash,
+                row.project,
+                row.provider,
+                row.content_hash,
+                row.content_markdown,
+            ) != (
+                session_id_hash,
+                project,
+                provider,
+                content_hash,
+                body,
+            ):
+                raise ValueError("PG chunk identity conflict: row scope or body mismatch")
+
+        with self._store.transaction() as conn:
+            self._store.acquire_session_identity_lock(
+                conn,
+                project=project,
+                provider=provider,
+                session_id_hash=session_id_hash,
+                content_hash=content_hash,
+            )
+            scope_rows = self._store.find_session_chunks_by_natural_scope(
+                session_id_hash=session_id_hash,
+                project=project,
+                provider=provider,
+                content_hash=content_hash,
+                conn=conn,
+            )
+            for srow in scope_rows:
+                _validate_row_scope_and_body(srow)
+
+            by_id: dict[str, SessionChunk] = {srow.chunk_id: srow for srow in scope_rows}
+            for cand_id in (legacy_v1_id, legacy_v2_id, local_v1_id):
+                if cand_id and cand_id not in by_id:
+                    direct_row = self._store.get_chunk(cand_id, conn=conn)
+                    if direct_row is not None:
+                        _validate_row_scope_and_body(direct_row)
+                        by_id[cand_id] = direct_row
+
+            exact_legacy_matches = [
+                cid for cid in (legacy_v1_id, legacy_v2_id) if cid and cid in by_id
+            ]
+            if len(exact_legacy_matches) > 1:
+                raise ValueError(
+                    "PG chunk identity conflict: multiple exact legacy candidate rows exist"
+                )
+
+            if local_v1_id and local_v1_id in by_id:
+                if len(by_id) > 1:
+                    raise ValueError(
+                        "PG chunk identity conflict: local_v1 and legacy rows both exist"
+                    )
+                chosen_id = local_v1_id
+                identity_scheme = "local_v1"
+                existing_parent = True
+            elif exact_legacy_matches:
+                if len(by_id) > 1:
+                    raise ValueError(
+                        "PG chunk identity conflict: exact legacy row and additional natural scope row exist"
+                    )
+                chosen_id = exact_legacy_matches[0]
+                identity_scheme = "legacy_exact"
+                existing_parent = True
+            elif len(by_id) == 1:
+                single_row = next(iter(by_id.values()))
+                if is_over_8k:
+                    raise ValueError(
+                        "PG chunk identity conflict: >8KiB source-independent reuse forbidden"
+                    )
+                chosen_id = single_row.chunk_id
+                identity_scheme = "legacy_reuse"
+                existing_parent = True
+            elif len(by_id) > 1:
+                raise ValueError(
+                    "PG chunk identity conflict: multiple natural scope rows exist"
+                )
+            else:
+                if not source_hash or not local_v1_id:
+                    raise ValueError(
+                        "PG chunk identity conflict: source_hash is required to create a new local_v1 chunk"
+                    )
+                chosen_id = local_v1_id
+                identity_scheme = "local_v1"
+                existing_parent = False
+
+            if existing_parent:
+                outbox_id = self._store._enqueue_local_outbox_on(
+                    conn,
+                    target_type="session_chunk",
+                    target_id=chosen_id,
+                    embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
+                    content_hash=content_hash,
+                    input_hash=input_hash,
+                    payload_text=input_text,
+                    now=datetime.now(timezone.utc),
+                    lock_already_held=True,
+                )
+            else:
+                new_chunk = SessionChunk(
+                    chunk_id=chosen_id,
+                    session_id_hash=session_id_hash,
+                    project=project,
+                    provider=provider,
+                    chunk_index=0,
+                    content_markdown=body,
+                    content_hash=content_hash,
+                    embedding_state="pending",
+                    embedding=None,
+                    embedding_model=LOCAL_EMBEDDING_MODEL,
+                    embedding_revision=1,
+                    observed_at=observed_at,
+                )
+                _, outbox_id = self._store.insert_chunk_with_local_outbox(
+                    new_chunk,
+                    conn=conn,
+                    embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
+                    lock_already_held=True,
+                )
+
+        # Model call happens strictly outside the PG transaction.
+        # If the model service is temporarily unavailable and deferred mode is enabled,
+        # the parent row and durable local_embedding_outbox job remain committed.
+        if outbox_id is not None and callable(getattr(self._embed, "embed", None)):
+            from ..postgres_store.outbox_worker import LocalEmbeddingOutboxWorker
+
+            worker = LocalEmbeddingOutboxWorker(
+                store=self._store,
+                embedding_fn=self._embed.embed,
+                batch_size=1,
+                lease_seconds=60,
+                embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
+            )
+            worker.run_once()
+            if worker.last_batch_failed and not self._allow_deferred:
+                raise RuntimeError("local embedding model call failed during projection")
+
+        stored = self._store.get_chunk(chosen_id)
+        if stored is None:
+            raise RuntimeError(f"chunk {chosen_id} missing after local projection commit")
+        _validate_row_scope_and_body(stored)
+
+        self.last_local_identity_scheme = identity_scheme
+        if source_hash:
+            self.last_local_representation_receipt = build_local_representation_receipt_v3(
+                representation_kind=LOCAL_SESSION_REPRESENTATION_KIND,
+                project=project,
+                provider=provider,
+                session_id_hash=session_id_hash,
+                active_content_hash=content_hash,
+                projected_source_hash=source_hash,
+                representation_content_hash=content_hash,
+                session_memory_knowledge_id=chosen_id,
+                identity_scheme=identity_scheme,
+                embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
+                input_hash=input_hash,
+            )
+        else:
+            self.last_local_representation_receipt = None
+        return chosen_id
 
     def close(self) -> None:
         if self._chunk_embedder is not None:

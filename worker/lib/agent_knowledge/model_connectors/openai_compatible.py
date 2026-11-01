@@ -62,14 +62,46 @@ def build_openai_compatible_graphiti_components(
     embedding_model = config.embedding.model or (
         "nomic-embed-text" if embedding_provider == "ollama" else None
     )
-    raw_embedder = OpenAIEmbedder(
-        config=OpenAIEmbedderConfig(
-            api_key=embedding_api_key_value,
-            embedding_model=embedding_model,
-            embedding_dim=config.embedding.dim,
-            base_url=embedding_base_url or None,
+    if (
+        str(embedding_model or "").strip().lower()
+        in {"local-model2vec-256-v1", "minishlab/potion-multilingual-128m"}
+        or str(embedding_provider or "").strip().lower()
+        in {"model2vec", "local-model2vec", "local_model2vec"}
+    ):
+        from ..local_embedding.client import (
+            CanonicalLocalEmbeddingClient,
+            LocalModel2VecGraphitiEmbedder,
         )
-    )
+
+        if not str(embedding_base_url or "").strip():
+            raise ModelConnectorConfigError(
+                "model connector missing required config: LLM_BRAIN_EMBEDDING_BASE_URL"
+            )
+        from .policy import validate_local_embedding_write_or_query_policy
+
+        # Fail closed: local profile must never resolve to a paid endpoint/model.
+        validate_local_embedding_write_or_query_policy(
+            profile_id="lbrain-memory-model2vec-256-v1",
+            model="local-model2vec-256-v1",
+            base_url=str(embedding_base_url),
+            dimension=256,
+        )
+        raw_embedder = LocalModel2VecGraphitiEmbedder(
+            canonical_client=CanonicalLocalEmbeddingClient(
+                base_url=str(embedding_base_url),
+                api_key=embedding_api_key_value or "local-model2vec",
+                use_openai_sdk=True,
+            )
+        )
+    else:
+        raw_embedder = OpenAIEmbedder(
+            config=OpenAIEmbedderConfig(
+                api_key=embedding_api_key_value,
+                embedding_model=embedding_model,
+                embedding_dim=config.embedding.dim,
+                base_url=embedding_base_url or None,
+            )
+        )
     embedder = CachedEmbedder(
         raw_embedder,
         namespace=embedding_cache_namespace(

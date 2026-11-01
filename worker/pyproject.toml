@@ -10,13 +10,20 @@ name = "rag-ingress-worker"
 version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = [
-    "graphiti-core==0.30.1",
+    # Vendored graphiti_core 0.30.1 fork lives in worker/lib/graphiti_core;
+    # keep its direct runtime dependencies pinned here.
     "nats-py>=2.6",
+    "neo4j>=5.26.0",
+    "numpy>=1.0.0",
+    "openai>=1.91.0",
+    "posthog>=3.0.0",
     "psycopg[binary]>=3.3.4",
     "pydantic>=2.13,<3",
+    "python-dotenv>=1.0.1",
     "pyyaml>=6.0.3",
     "qdrant-client>=1.10",
     "sqlalchemy>=2.0.51",
+    "tenacity>=9.0.0",
 ]
 
 [project.optional-dependencies]
@@ -33,6 +40,10 @@ mcp-http = ["mcp>=1.28.0,<2"]
 # 검증에서만 명시적으로 설치한다. Qdrant client는 product marker와 중앙 write
 # gateway의 fail-closed runtime contract가 사용하므로 기본 dependency다.
 searchable-mirror = ["docling>=2"]
+# Local Model2Vec 256-dim embedding service (`minishlab/potion-multilingual-128M`).
+# 기본 worker 이미지에 모델 가중치나 라이브러리를 강제 포함하지 않으며,
+# Mac local embedding 서비스 및 검증 환경에서만 명시적으로 설치한다.
+local-embedding = ["model2vec==0.10.0"]
 
 [dependency-groups]
 # 테스트 러너는 런타임 의존성이 아니라 dev group으로 선언한다. CI의 clean
@@ -45,6 +56,7 @@ dev = [
 
 [project.scripts]
 neuron-knowledge = "agent_knowledge.cli:main"
+neuron-local-embedding = "agent_knowledge.local_embedding.cli:main"
 neurons-qdrant-write-gateway = "agent_knowledge.qdrant_write_gateway_server:main"
 product-marker-activation = "agent_knowledge.product_marker_activation_cli:main"
 rag-ingress-queue = "agent_knowledge.rag_ingress.server_runtime:main"

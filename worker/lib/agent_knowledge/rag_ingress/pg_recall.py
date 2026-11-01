@@ -136,7 +136,11 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
             pgvector_version=environ.get("LLM_BRAIN_PGVECTOR_VERSION", "0.8.0"),
         )
         embed_provider = build_openai_embedding_provider(environ=environ)
-        validated_pg_embedding_profile(embed_provider)
+        active_profile = validated_pg_embedding_profile(embed_provider)
+        from ..model_connectors import LOCAL_EMBEDDING_PROFILE_ID
+
+        if active_profile == LOCAL_EMBEDDING_PROFILE_ID and hasattr(pg_store, "embedding_profile"):
+            pg_store.embedding_profile = LOCAL_EMBEDDING_PROFILE_ID
     except Exception:
         closer = getattr(embed_provider, "close", None)
         if callable(closer):
@@ -178,16 +182,60 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
         )
 
         validated_hits: list[dict[str, Any]] = []
+        is_local_profile = active_profile == LOCAL_EMBEDDING_PROFILE_ID
         for candidate in raw_chunks[:_RECALL_CANDIDATE_LIMIT]:
             row = pg_store.get_chunk(candidate["chunk_id"])
+            if row is None or row.chunk_id != candidate["chunk_id"]:
+                continue
+            if is_local_profile:
+                from ..local_embedding.canonical import (
+                    canonical_input_hash_v1,
+                    canonical_session_input_v1,
+                )
+
+                local_emb = (
+                    pg_store.get_local_embedding_row(
+                        target_type="session_chunk",
+                        target_id=candidate["chunk_id"],
+                        embedding_profile=active_profile,
+                    )
+                    if hasattr(pg_store, "get_local_embedding_row")
+                    else None
+                )
+                try:
+                    expected_input_hash = canonical_input_hash_v1(
+                        canonical_session_input_v1(row.content_markdown)
+                    )
+                except ValueError:
+                    continue
+                if local_emb is not None:
+                    if (
+                        local_emb.get("embedding_state") != "ready"
+                        or local_emb.get("embedding_profile") != active_profile
+                        or local_emb.get("embedding_model") != embed_provider.model
+                        or local_emb.get("content_hash") != row.content_hash
+                        or local_emb.get("input_hash") != expected_input_hash
+                        or local_emb.get("embedding") is None
+                        or len(local_emb.get("embedding") or ()) != embed_provider.size
+                    ):
+                        continue
+                else:
+                    if (
+                        candidate.get("embedding_state", row.embedding_state) != "ready"
+                        or candidate.get("embedding_model", row.embedding_model) != embed_provider.model
+                        or candidate.get("embedding_profile", active_profile) != active_profile
+                    ):
+                        continue
+            else:
+                if (
+                    row.embedding_state != "ready"
+                    or row.embedding_model != embed_provider.model
+                    or row.embedding is None
+                    or len(row.embedding) != embed_provider.size
+                ):
+                    continue
             if (
-                row is None
-                or row.chunk_id != candidate["chunk_id"]
-                or row.embedding_state != "ready"
-                or row.embedding_model != embed_provider.model
-                or row.embedding is None
-                or len(row.embedding) != embed_provider.size
-                or row.project != project
+                row.project != project
                 or sha256_hash(row.content_markdown) != row.content_hash
                 or any(
                     getattr(row, key) != candidate[key]
@@ -219,7 +267,11 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
             authorized_hits = validated_hits
         else:
             resolver = CouchDBProjectionStateAuthorityResolver(
-                couch_store, filters={"project": project}, backend="postgres_pgvector"
+                couch_store,
+                filters={"project": project},
+                backend="postgres_pgvector_local" if is_local_profile else "postgres_pgvector",
+                embedding_profile=active_profile if is_local_profile else "",
+                pg_store=pg_store if is_local_profile else None,
             )
             authorized_hits = join_mirror_hits_to_authority(
                 validated_hits, resolver=resolver, drop_unresolved=True

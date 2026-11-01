@@ -1,0 +1,77 @@
+{
+  "added_files": {
+    "NOTICE": {
+      "fork_sha256": "5f9e94e6c8221a35221167b240b9377b529119bd3f1d53c7b6d128f461a319f8"
+    },
+    "local_profile.py": {
+      "fork_sha256": "d45cd056c14da0230571d537fed102655430376890a901a4c1f28e741c81bbac"
+    }
+  },
+  "license": "Apache-2.0",
+  "local_profile_id": "lbrain-memory-model2vec-256-v1",
+  "modified_files": {
+    "driver/neo4j/operations/community_node_ops.py": {
+      "fork_sha256": "c962452b6e98a134dc3d11fcc4443d3bcdea9679de764225283706bfd573773c",
+      "upstream_sha256": "e7a6bf00811ffe7954f6ab18db5978a35326722b704b3f50f017957ab69b7f89"
+    },
+    "driver/neo4j/operations/entity_edge_ops.py": {
+      "fork_sha256": "bf7cae363ac21b35a87ccd64c3a471d76d10268ed1ae54f89f0b57081e126e9d",
+      "upstream_sha256": "da032e328c5529d4e9b79f576be2128522f0c2aad778dc5db61c16549ba35e43"
+    },
+    "driver/neo4j/operations/entity_node_ops.py": {
+      "fork_sha256": "bea7264147252e8452d1213248afcc90e6c03d9a1402fb34b6efc9260bf48b57",
+      "upstream_sha256": "1dea990fed57e65929f752aecd1a7fb5f043f291e6a85a6d29d95b7f883e9b8f"
+    },
+    "driver/neo4j/operations/search_ops.py": {
+      "fork_sha256": "908199aa8c43df1d547403db100d25ef2a86076f8810bd73ed1a18870c777277",
+      "upstream_sha256": "715f9d3f6972a8d99cb76ee9629fc322aab2d730056e0954daaf2d5f084075ff"
+    },
+    "driver/record_parsers.py": {
+      "fork_sha256": "cb85b0bdbf918013360fae1eea15c8928da393fb3b1790ccfa95f920651c659f",
+      "upstream_sha256": "71c57fda49ac56856ab29b25d719947aee79625090233f09f6b6aac743cf2112"
+    },
+    "edges.py": {
+      "fork_sha256": "1a57b9944301446f6602dd492d4cdd2a4562b9f25fc94557f870969efb7ea2de",
+      "upstream_sha256": "0151d72ebfb057033c6d52a163e22f252f67b915722e14315b685c7831b3b1c6"
+    },
+    "embedder/openai.py": {
+      "fork_sha256": "40fed4453105170266092872f6e146dd3c6a0fe3e1923a73765af977c3b97e76",
+      "upstream_sha256": "707780f4a6b48ef304cf9463e6ef289d3f316d0c24009094a3f15b20010f8682"
+    },
+    "graphiti.py": {
+      "fork_sha256": "236cd32b32800315ac5befcefc572ce8ab925506389872deef71c5afe052b5b9",
+      "upstream_sha256": "7c65051a62982d8b510ebdbf37bae4d07020e74520e1f6d9bf8a0ffb26beeccb"
+    },
+    "models/edges/edge_db_queries.py": {
+      "fork_sha256": "47d245e340da9bd5d5d535991a6d9715097f6729be7451669c6c40d63c3089f0",
+      "upstream_sha256": "b967ffeae7da4cb7037e3ba1b14d099543c728e7004e176de81d4b34cf314d43"
+    },
+    "models/nodes/node_db_queries.py": {
+      "fork_sha256": "726ceb60e61b546b5134f7df520d8136188664ae5057c8e0be4502f6731cfb95",
+      "upstream_sha256": "1400e51df33fa4b10c49a4541b1dd3ab690b993a48fe01716e6b91a2356797db"
+    },
+    "nodes.py": {
+      "fork_sha256": "fbd60307c9e87ff3fea95b8552ac0587032d5e92c656a4ca47f0ebb6a7a60b8c",
+      "upstream_sha256": "529eb74b7c93e7551f6287b1a7bf6818d31fd045623b3260967dad573e4d801c"
+    },
+    "search/search.py": {
+      "fork_sha256": "4457ba5b4713a9c502288ad6321427dfe8beb091cd02ccbbaeff6cd72c94faa5",
+      "upstream_sha256": "9fe64da1825864950285b1733a4920001d70c780e3f0386837e98eedbfed7529"
+    },
+    "search/search_utils.py": {
+      "fork_sha256": "2bcad3b103a7457a57f035c0c5a0c0bd0f48b8100ed222f7ecef34864e9b4da4",
+      "upstream_sha256": "b55b39f1ec547d40e3c88042830020d8bc2c664bb0601f6996ec856cdcd40808"
+    },
+    "utils/bulk_utils.py": {
+      "fork_sha256": "4d2451480d0dbb4caf8bd98dd3f1d4569cdbf19710c61919383aef8a12bb8f8e",
+      "upstream_sha256": "6c7314f24801f0936454b3344788528500432ac5f12692eb36b7d3ef5269f601"
+    },
+    "utils/maintenance/community_operations.py": {
+      "fork_sha256": "b65ca277c8f13a8273ad4daea7f637b2cc32478d5c037464afd111153d54fb2b",
+      "upstream_sha256": "537ec6782ae32c830ec117a3834453e7b517aa7d648254db9eb10c67f38d3a38"
+    }
+  },
+  "package": "graphiti-core",
+  "upstream_version": "0.30.1",
+  "upstream_wheel_sha256": "e4810ed3f66e1455f4de0d712d1d86b273c1f2be5d20438aa8ca47f71734d4ca"
+}

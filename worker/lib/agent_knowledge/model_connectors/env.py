@@ -9,6 +9,13 @@ from .specs import EmbeddingSpec, ModelConnectionConfig, ModelEndpointSpec, Rera
 DEFAULT_EMBEDDING_MODEL = "gemini-embedding-2"
 DEFAULT_EMBEDDING_DIM = 3072
 DEFAULT_EMBEDDING_PROFILE_ID = "lbrain-memory-gemini-embedding-2-v1"
+LOCAL_EMBEDDING_MODEL = "local-model2vec-256-v1"
+LOCAL_EMBEDDING_DIM = 256
+LOCAL_EMBEDDING_PROFILE_ID = "lbrain-memory-model2vec-256-v1"
+_LOCAL_EMBEDDING_PROVIDERS = frozenset({"model2vec", "local-model2vec", "local_model2vec"})
+_LOCAL_EMBEDDING_MODELS = frozenset(
+    {"local-model2vec-256-v1", "minishlab/potion-multilingual-128m"}
+)
 _OLLAMA_DEFAULT_EMBEDDING_MODEL = "nomic-embed-text"
 _OLLAMA_DEFAULT_EMBEDDING_DIM = 768
 
@@ -117,15 +124,38 @@ def _has_value(env: Mapping[str, str], *names: str) -> bool:
 
 
 def _default_embedding_model(provider: str) -> str:
-    return _OLLAMA_DEFAULT_EMBEDDING_MODEL if provider == "ollama" else DEFAULT_EMBEDDING_MODEL
+    normalized = str(provider or "").strip().lower()
+    if normalized in _LOCAL_EMBEDDING_PROVIDERS:
+        return LOCAL_EMBEDDING_MODEL
+    return _OLLAMA_DEFAULT_EMBEDDING_MODEL if normalized == "ollama" else DEFAULT_EMBEDDING_MODEL
 
 
 def _default_embedding_dim(provider: str, model: str) -> int:
-    if provider == "ollama" and model.strip().lower() == _OLLAMA_DEFAULT_EMBEDDING_MODEL:
+    normalized_provider = str(provider or "").strip().lower()
+    normalized_model = str(model or "").strip().lower()
+    if normalized_provider in _LOCAL_EMBEDDING_PROVIDERS or normalized_model in _LOCAL_EMBEDDING_MODELS:
+        return LOCAL_EMBEDDING_DIM
+    if normalized_provider == "ollama" and normalized_model == _OLLAMA_DEFAULT_EMBEDDING_MODEL:
         return _OLLAMA_DEFAULT_EMBEDDING_DIM
-    if model.strip().lower() == DEFAULT_EMBEDDING_MODEL:
+    if normalized_model == DEFAULT_EMBEDDING_MODEL:
         return DEFAULT_EMBEDDING_DIM
     return DEFAULT_EMBEDDING_DIM
+
+
+def resolve_embedding_profile_id(environ: Mapping[str, str] | None = None) -> str:
+    """Resolve the active embedding profile ID from environment."""
+
+    env = os.environ if environ is None else environ
+    explicit = _value(env, "LLM_BRAIN_EMBEDDING_PROFILE_ID", "EMBEDDING_PROFILE_ID")
+    if explicit:
+        return explicit
+    spec = resolve_embedding_spec(env)
+    if (
+        spec.provider in _LOCAL_EMBEDDING_PROVIDERS
+        or spec.model.strip().lower() in _LOCAL_EMBEDDING_MODELS
+    ):
+        return LOCAL_EMBEDDING_PROFILE_ID
+    return DEFAULT_EMBEDDING_PROFILE_ID
 
 
 def _positive_int(value: str, *, default: int) -> int:

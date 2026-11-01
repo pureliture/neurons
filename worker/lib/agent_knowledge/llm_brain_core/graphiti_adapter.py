@@ -36,12 +36,19 @@ from ..model_connectors.structured_response import (
     normalize_structured_keys as _normalize_structured_keys,
     normalize_structured_response as _normalize_structured_response,
 )
+from ..local_embedding.profile import (
+    LOCAL_EMBEDDING_DIM,
+    LOCAL_EMBEDDING_MODEL_ALIAS,
+    LOCAL_EMBEDDING_PROFILE_ID,
+)
 from ..model_connectors.embedding_cache import (
     CachedEmbedder,
     embedding_cache_enabled,
     embedding_cache_namespace,
 )
 from ..model_connectors.env import DEFAULT_EMBEDDING_DIM, DEFAULT_EMBEDDING_MODEL
+from ..model_connectors.policy import validate_local_embedding_write_or_query_policy
+from .local_graph_safety import record_embedding_deletion_tombstone
 
 _SYNTHETIC_CANARY_PROVIDER = "lbrain-temporal-canary"
 _MAX_EDGE_PROVENANCE_IDS = 500
@@ -71,7 +78,27 @@ _DEFAULT_EMBEDDING_MODEL = DEFAULT_EMBEDDING_MODEL
 _KNOWN_EMBEDDING_DIMS = {
     "nomic-embed-text": 768,
     "gemini-embedding-2": 3072,
+    "local-model2vec-256-v1": LOCAL_EMBEDDING_DIM,
+    "minishlab/potion-multilingual-128m": LOCAL_EMBEDDING_DIM,
+    "lbrain-memory-model2vec-256-v1": LOCAL_EMBEDDING_DIM,
 }
+_LOCAL_EMBEDDING_MODEL_NAMES = frozenset(
+    {
+        "local-model2vec-256-v1",
+        "minishlab/potion-multilingual-128m",
+        "lbrain-memory-model2vec-256-v1",
+    }
+)
+
+
+def _is_local_embedding_config(
+    *,
+    embedding_profile: str = "",
+    embedding_model: str = "",
+) -> bool:
+    if str(embedding_profile or "").strip() == LOCAL_EMBEDDING_PROFILE_ID:
+        return True
+    return str(embedding_model or "").strip().lower() in _LOCAL_EMBEDDING_MODEL_NAMES
 
 
 @dataclass(frozen=True)
@@ -98,6 +125,7 @@ class GraphitiNeo4jConfig:
     embedding_base_url: str = ""
     embedding_api_key: str = field(default="", repr=False)
     embedding_dim: int = _DEFAULT_EMBEDDING_DIM
+    embedding_profile: str = ""
     store_raw_episode_content: bool = True
     extract_entities: bool = False
     force_reextract_entities: bool = False
@@ -126,24 +154,59 @@ class GraphitiNeo4jConfig:
         )
         for model in (llm_model, small_model, fallback_llm_model, fallback_small_model):
             _reject_forbidden_gemini_llm_model(model)
+        raw_profile = str(
+            env.get("NEURON_EMBEDDING_PROFILE")
+            or env.get("LLM_BRAIN_EMBEDDING_PROFILE")
+            or ""
+        ).strip()
+        raw_embedding_model = env.get(
+            "LLM_BRAIN_EMBEDDING_MODEL",
+            env.get("EMBEDDING_MODEL", ""),
+        )
+        is_local = _is_local_embedding_config(
+            embedding_profile=raw_profile,
+            embedding_model=raw_embedding_model,
+        )
         embedding_provider = env.get(
             "LLM_BRAIN_EMBEDDING_PROVIDER",
             env.get("EMBEDDING_PROVIDER", "openai"),
         ).lower()
-        embedding_base_url = env.get(
-            "LLM_BRAIN_EMBEDDING_BASE_URL",
-            env.get("OPENAI_BASE_URL", ""),
-        )
-        if (
-            "LLM_BRAIN_EMBEDDING_PROVIDER" not in env
-            and "EMBEDDING_PROVIDER" not in env
-            and not embedding_base_url
-        ):
-            embedding_provider = provider.lower()
-        embedding_model = env.get(
-            "LLM_BRAIN_EMBEDDING_MODEL",
-            env.get("EMBEDDING_MODEL", ""),
-        ) or ("nomic-embed-text" if embedding_provider == "ollama" else _DEFAULT_EMBEDDING_MODEL)
+        if is_local:
+            embedding_profile = LOCAL_EMBEDDING_PROFILE_ID
+            # Local embedding mode NEVER falls back to OPENAI_BASE_URL.
+            embedding_base_url = env.get(
+                "LLM_BRAIN_EMBEDDING_BASE_URL",
+                env.get("NEURON_LOCAL_EMBEDDING_BASE_URL", ""),
+            )
+            embedding_model = raw_embedding_model or LOCAL_EMBEDDING_MODEL_ALIAS
+            embedding_dim = _int_env(
+                env.get("LLM_BRAIN_EMBEDDING_DIM", ""),
+                default=LOCAL_EMBEDDING_DIM,
+            )
+            embedding_api_key = env.get(
+                "LLM_BRAIN_EMBEDDING_API_KEY",
+                env.get("NEURON_LOCAL_EMBEDDING_API_KEY", _NON_SECRET_PLACEHOLDER_API_KEY),
+            )
+        else:
+            embedding_profile = raw_profile
+            embedding_base_url = env.get(
+                "LLM_BRAIN_EMBEDDING_BASE_URL",
+                env.get("OPENAI_BASE_URL", ""),
+            )
+            if (
+                "LLM_BRAIN_EMBEDDING_PROVIDER" not in env
+                and "EMBEDDING_PROVIDER" not in env
+                and not embedding_base_url
+            ):
+                embedding_provider = provider.lower()
+            embedding_model = raw_embedding_model or (
+                "nomic-embed-text" if embedding_provider == "ollama" else _DEFAULT_EMBEDDING_MODEL
+            )
+            embedding_dim = _int_env(
+                env.get("LLM_BRAIN_EMBEDDING_DIM", ""),
+                default=_DEFAULT_EMBEDDING_DIM,
+            )
+            embedding_api_key = env.get("LLM_BRAIN_EMBEDDING_API_KEY", env.get("OPENAI_API_KEY", ""))
         return cls(
             uri=env.get("LLM_BRAIN_NEO4J_URI", env.get("NEO4J_URI", "bolt://localhost:7687")),
             user=env.get("LLM_BRAIN_NEO4J_USER", env.get("NEO4J_USER", "neo4j")),
@@ -164,8 +227,9 @@ class GraphitiNeo4jConfig:
             embedding_provider=embedding_provider,
             embedding_model=embedding_model,
             embedding_base_url=embedding_base_url,
-            embedding_api_key=env.get("LLM_BRAIN_EMBEDDING_API_KEY", env.get("OPENAI_API_KEY", "")),
-            embedding_dim=_int_env(env.get("LLM_BRAIN_EMBEDDING_DIM", ""), default=_DEFAULT_EMBEDDING_DIM),
+            embedding_api_key=embedding_api_key,
+            embedding_dim=embedding_dim,
+            embedding_profile=embedding_profile,
             store_raw_episode_content=env.get("LLM_BRAIN_GRAPH_STORE_EPISODE_CONTENT", "true").lower()
             not in {"0", "false", "no"},
             extract_entities=env.get("LLM_BRAIN_GRAPH_EXTRACT_ENTITIES", "false").lower() in {"1", "true", "yes"},
@@ -932,12 +996,31 @@ async def _delete_extracted_graph_elements(driver: Any, results: Any) -> None:
     if results is None:
         return
     for edge in _safe_iter(getattr(results, "edges", None)):
-        await _safe_delete_graph_element(edge, driver)
+        await _safe_delete_graph_element(edge, driver, target_kind="edge")
     for node in _safe_iter(getattr(results, "nodes", None)):
-        await _safe_delete_graph_element(node, driver)
+        await _safe_delete_graph_element(node, driver, target_kind="entity")
 
 
-async def _safe_delete_graph_element(element: Any, driver: Any) -> None:
+async def _safe_delete_graph_element(
+    element: Any,
+    driver: Any,
+    *,
+    target_kind: str = "entity",
+) -> None:
+    if getattr(driver, "local_embedding_profile", None) == LOCAL_EMBEDDING_PROFILE_ID:
+        target_uuid = str(getattr(element, "uuid", "") or "").strip()
+        group_id = str(getattr(element, "group_id", "") or "").strip()
+        if target_uuid and group_id:
+            try:
+                await record_embedding_deletion_tombstone(
+                    driver,
+                    target_uuid=target_uuid,
+                    target_kind="edge" if target_kind == "edge" else "entity",
+                    group_id=group_id,
+                    reason="unsafe_extraction_rejected",
+                )
+            except Exception:
+                pass
     delete = getattr(element, "delete", None)
     if not callable(delete):
         return
@@ -1043,8 +1126,26 @@ def _resolve_embedding_dim(embedding_model: str, configured_dim: int) -> int:
     return configured_dim
 
 
+def _stamp_local_embedding_profile(graphiti_instance: Any, *, is_local: bool) -> Any:
+    if not is_local:
+        return graphiti_instance
+    graphiti_instance.local_embedding_profile = LOCAL_EMBEDDING_PROFILE_ID
+    driver = getattr(graphiti_instance, "driver", None)
+    if driver is not None:
+        driver.local_embedding_profile = LOCAL_EMBEDDING_PROFILE_ID
+    embedder = getattr(graphiti_instance, "embedder", None)
+    if embedder is not None:
+        embedder.local_embedding_profile = LOCAL_EMBEDDING_PROFILE_ID
+    return graphiti_instance
+
+
 def _build_graphiti(config: GraphitiNeo4jConfig):
     from graphiti_core import Graphiti
+
+    is_local_embedding = _is_local_embedding_config(
+        embedding_profile=config.embedding_profile,
+        embedding_model=config.embedding_model,
+    )
 
     if _uses_configured_llm_client(config.llm_provider):
         from graphiti_core.cross_encoder.openai_reranker_client import OpenAIRerankerClient
@@ -1064,30 +1165,47 @@ def _build_graphiti(config: GraphitiNeo4jConfig):
             reasoning_effort=config.llm_reasoning_effort,
         )
         embedding_model = config.embedding_model or (
-            "nomic-embed-text" if config.llm_provider == "ollama" else _DEFAULT_EMBEDDING_MODEL
+            LOCAL_EMBEDDING_MODEL_ALIAS
+            if is_local_embedding
+            else ("nomic-embed-text" if config.llm_provider == "ollama" else _DEFAULT_EMBEDDING_MODEL)
         )
         embedding_api_key = config.embedding_api_key or api_key
         embedding_dim = _resolve_embedding_dim(embedding_model, config.embedding_dim)
+        if is_local_embedding:
+            # Local embedding mode NEVER falls back to config.llm_base_url.
+            resolved_embedding_base_url = config.embedding_base_url
+            validate_local_embedding_write_or_query_policy(
+                profile_id=LOCAL_EMBEDDING_PROFILE_ID,
+                model=embedding_model,
+                base_url=resolved_embedding_base_url,
+                dimension=embedding_dim,
+            )
+        else:
+            resolved_embedding_base_url = config.embedding_base_url or base_url
         raw_embedder = OpenAIEmbedder(
             config=OpenAIEmbedderConfig(
                 api_key=embedding_api_key,
                 embedding_model=embedding_model,
                 embedding_dim=embedding_dim,
-                base_url=config.embedding_base_url or base_url or None,
+                base_url=resolved_embedding_base_url or None,
             )
         )
+        if is_local_embedding:
+            raw_embedder.local_embedding_profile = LOCAL_EMBEDDING_PROFILE_ID
         embedder = CachedEmbedder(
             raw_embedder,
             namespace=embedding_cache_namespace(
                 provider=str(config.embedding_provider or config.llm_provider).strip().lower(),
                 model=str(raw_embedder.config.embedding_model),
-                base_url=config.embedding_base_url or base_url,
+                base_url=resolved_embedding_base_url,
                 embedding_dim=embedding_dim,
                 api_key=embedding_api_key,
             ),
             embedding_dim=embedding_dim,
             enabled=embedding_cache_enabled(),
         )
+        if is_local_embedding:
+            embedder.local_embedding_profile = LOCAL_EMBEDDING_PROFILE_ID
         if config.auth_disabled or not (config.password or "").strip():
             # Neo4j auth is disabled on the server: connect without credentials
             # instead of sending empty/invalid credentials that trigger
@@ -1102,6 +1220,8 @@ def _build_graphiti(config: GraphitiNeo4jConfig):
                     _GraphDriver.__init__(self)
                     self.client = _AsyncGraphDatabase.driver(uri, auth=None)
                     self._database = database
+                    if is_local_embedding:
+                        self.local_embedding_profile = LOCAL_EMBEDDING_PROFILE_ID
                     from graphiti_core.driver.neo4j_driver import (
                         Neo4jEntityNodeOperations,
                         Neo4jEpisodeNodeOperations,
@@ -1136,23 +1256,29 @@ def _build_graphiti(config: GraphitiNeo4jConfig):
                         pass
 
             _no_auth_driver = _NoAuthNeo4jDriver(config.uri)
-            return _Graphiti(
-                uri=config.uri,
-                graph_driver=_no_auth_driver,
+            return _stamp_local_embedding_profile(
+                _Graphiti(
+                    uri=config.uri,
+                    graph_driver=_no_auth_driver,
+                    llm_client=llm_client,
+                    embedder=embedder,
+                    cross_encoder=OpenAIRerankerClient(client=llm_client.client, config=llm_config),
+                    store_raw_episode_content=config.store_raw_episode_content,
+                ),
+                is_local=is_local_embedding,
+            )
+
+        return _stamp_local_embedding_profile(
+            Graphiti(
+                config.uri,
+                config.user,
+                config.password,
                 llm_client=llm_client,
                 embedder=embedder,
                 cross_encoder=OpenAIRerankerClient(client=llm_client.client, config=llm_config),
                 store_raw_episode_content=config.store_raw_episode_content,
-            )
-
-        return Graphiti(
-            config.uri,
-            config.user,
-            config.password,
-            llm_client=llm_client,
-            embedder=embedder,
-            cross_encoder=OpenAIRerankerClient(client=llm_client.client, config=llm_config),
-            store_raw_episode_content=config.store_raw_episode_content,
+            ),
+            is_local=is_local_embedding,
         )
 
     if config.auth_disabled or not (config.password or "").strip():
@@ -1166,6 +1292,8 @@ def _build_graphiti(config: GraphitiNeo4jConfig):
                 _GraphDriver.__init__(self)
                 self.client = _AsyncGraphDatabase.driver(uri, auth=None)
                 self._database = database
+                if is_local_embedding:
+                    self.local_embedding_profile = LOCAL_EMBEDDING_PROFILE_ID
                 from graphiti_core.driver.neo4j_driver import (
                     Neo4jEntityNodeOperations,
                     Neo4jEpisodeNodeOperations,
@@ -1200,17 +1328,23 @@ def _build_graphiti(config: GraphitiNeo4jConfig):
                     pass
 
         _no_auth_driver = _NoAuthNeo4jDriver(config.uri)
-        return _Graphiti(
-            uri=config.uri,
-            graph_driver=_no_auth_driver,
-            store_raw_episode_content=config.store_raw_episode_content,
+        return _stamp_local_embedding_profile(
+            _Graphiti(
+                uri=config.uri,
+                graph_driver=_no_auth_driver,
+                store_raw_episode_content=config.store_raw_episode_content,
+            ),
+            is_local=is_local_embedding,
         )
 
-    return Graphiti(
-        config.uri,
-        config.user,
-        config.password,
-        store_raw_episode_content=config.store_raw_episode_content,
+    return _stamp_local_embedding_profile(
+        Graphiti(
+            config.uri,
+            config.user,
+            config.password,
+            store_raw_episode_content=config.store_raw_episode_content,
+        ),
+        is_local=is_local_embedding,
     )
 
 

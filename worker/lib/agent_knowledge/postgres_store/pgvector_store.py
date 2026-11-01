@@ -17,14 +17,71 @@ import json
 import math
 import re
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Iterator, Mapping, Sequence
 
-from ..model_connectors import DEFAULT_EMBEDDING_DIM, DEFAULT_EMBEDDING_MODEL
+from ..local_embedding.canonical import card_input_v1, compute_input_hash
+from ..model_connectors import (
+    DEFAULT_EMBEDDING_DIM,
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_EMBEDDING_PROFILE_ID,
+    LOCAL_EMBEDDING_DIM,
+    LOCAL_EMBEDDING_MODEL,
+    LOCAL_EMBEDDING_PROFILE_ID,
+    resolve_embedding_profile_id,
+)
 
 # Gemini Embedding 2의 full output을 보존한다. 일반 ``vector`` 타입은 2,000
 # 차원 제한이 있으므로 DDL과 SQL cast는 ``halfvec(3072)``를 사용한다.
 VECTOR_DIMENSION = DEFAULT_EMBEDDING_DIM
+LOCAL_VECTOR_DIMENSION = LOCAL_EMBEDDING_DIM
 OUTBOX_RETRY_LIMIT = 5
+_TRANSIENT_LOCAL_OUTBOX_ERRORS = frozenset(
+    {
+        "model_unavailable",
+        "capacity_exceeded",
+        "TimeoutError",
+        "ConnectionError",
+        "LocalEmbeddingError:model_unavailable",
+        "LocalEmbeddingError:capacity_exceeded",
+        "transport_unavailable",
+        "sdk_transport_error",
+        "http_429",
+        "http_503",
+    }
+)
+
+
+def compute_identity_lock_id(identity_parts: Sequence[str]) -> int:
+    """Compute a deterministic signed int64 advisory lock key from canonical JSON array."""
+
+    parts: list[str] = []
+    for item in identity_parts:
+        value = str(item if item is not None else "")
+        if "\x00" in value:
+            raise ValueError("identity lock component must not contain NUL")
+        parts.append(value)
+    canonical = json.dumps(parts, ensure_ascii=False, separators=(",", ":"))
+    digest = hashlib.sha256(canonical.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=True)
+
+
+def card_identity_lock_id(memory_id: str) -> int:
+    return compute_identity_lock_id(["card", str(memory_id or "")])
+
+
+def session_identity_lock_id(
+    project: str,
+    provider: str,
+    session_id_hash: str,
+    content_hash: str,
+) -> int:
+    return compute_identity_lock_id(
+        ["session", str(project or ""), str(provider or ""), str(session_id_hash or ""), str(content_hash or "")]
+    )
+
+
+def target_advisory_lock_id(target_type: str, target_id: str) -> int:
+    return compute_identity_lock_id([str(target_type or ""), str(target_id or "")])
 
 
 def compute_cosine_similarity(vec1: list[float] | None, vec2: list[float] | None) -> float:
@@ -153,6 +210,44 @@ class GraphOutboxJob:
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+@dataclass
+class LocalOutboxJob:
+    outbox_id: int
+    target_type: str
+    target_id: str
+    profile_id: str
+    source_content_hash: str
+    input_hash: str
+    payload_text: str
+    incarnation: int = 1
+    status: str = "queued"
+    fencing_token: int = 0
+    worker_id: str | None = None
+    claimed_at: datetime | None = None
+    lease_until: datetime | None = None
+    retry_count: int = 0
+    next_attempt_at: datetime | None = None
+    last_error: str | None = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @property
+    def embedding_profile(self) -> str:
+        return self.profile_id
+
+    @property
+    def content_hash(self) -> str:
+        return self.source_content_hash
+
+    @property
+    def lease_epoch(self) -> int:
+        return self.fencing_token
+
+    @property
+    def target_incarnation(self) -> int:
+        return self.incarnation
+
+
 class PgVectorStore:
     """Real PostgreSQL store for cards, chunks, edges, and embedding jobs.
 
@@ -168,6 +263,7 @@ class PgVectorStore:
         connection: Any | None = None,
         pgvector_version: str = "0.8.0",
         use_in_memory: bool = False,
+        embedding_profile: str | None = None,
     ) -> None:
         if use_in_memory:
             raise ValueError(
@@ -180,6 +276,9 @@ class PgVectorStore:
         self.dsn = dsn
         self.connection = connection
         self.pgvector_version = str(pgvector_version)
+        self.embedding_profile = str(
+            embedding_profile if embedding_profile is not None else resolve_embedding_profile_id()
+        )
 
     @classmethod
     def schema_sql(cls) -> str:
@@ -290,13 +389,35 @@ class PgVectorStore:
 
         self._validate_card(card)
         with self._scope(conn=conn, write=conn is None and self.connection is None) as db:
+            if self.embedding_profile == LOCAL_EMBEDDING_PROFILE_ID:
+                self._acquire_local_locks_on(
+                    db,
+                    identity_parts_list=[["card", card.memory_id]],
+                    target_type="memory_card",
+                    target_id=card.memory_id,
+                )
             if not self._upsert_card_on(db, card):
                 # The SQL conflict predicate deliberately refuses to mutate an
                 # accepted authority row. Raising here also prevents an
                 # outbox row from being created for a proposal that did not
                 # become the stored card.
                 raise ValueError("cannot overwrite an accepted memory card")
-            if card.embedding_state == "pending" or card.embedding is None:
+            if self.embedding_profile == LOCAL_EMBEDDING_PROFILE_ID:
+                payload_text = card_input_v1(
+                    summary=card.summary,
+                    title=card.title,
+                    typed_payload=card.typed_payload,
+                )
+                self._enqueue_local_outbox_on(
+                    db,
+                    target_type="memory_card",
+                    target_id=card.memory_id,
+                    source_content_hash=card.content_hash,
+                    payload_text=payload_text,
+                    profile_id=LOCAL_EMBEDDING_PROFILE_ID,
+                    acquire_locks=False,
+                )
+            elif card.embedding_state == "pending" or card.embedding is None:
                 self._enqueue_outbox_on(
                     db,
                     target_type="memory_card",
@@ -706,8 +827,24 @@ class PgVectorStore:
                         # is not a stale proposal; demotions keep their embedding.
                         if (changed_currentness == 'current'
                                 and changed.get('steward_proposal_kind') != 'stale'):
-                            self._enqueue_outbox_on(db, target_type='memory_card', target_id=card_id,
-                                                    content_hash=changed['content_hash'], payload_text=str(changed.get('summary') or ''))
+                            if self.embedding_profile == LOCAL_EMBEDDING_PROFILE_ID:
+                                local_payload_text = card_input_v1(
+                                    summary=changed.get("summary"),
+                                    title=changed.get("title"),
+                                    typed_payload=changed.get("typed_payload"),
+                                )
+                                self._enqueue_local_outbox_on(
+                                    db,
+                                    target_type="memory_card",
+                                    target_id=card_id,
+                                    source_content_hash=str(changed["content_hash"]),
+                                    payload_text=local_payload_text,
+                                    profile_id=LOCAL_EMBEDDING_PROFILE_ID,
+                                    acquire_locks=True,
+                                )
+                            else:
+                                self._enqueue_outbox_on(db, target_type='memory_card', target_id=card_id,
+                                                        content_hash=changed['content_hash'], payload_text=str(changed.get('summary') or ''))
                         revision = f"{changed['content_hash']}:{changed['lifecycle_state']}:{changed_currentness}"
                         self._enqueue_graph_outbox_on(db, source_type='memory_card', source_id=card_id,
                             source_revision=revision,
@@ -752,6 +889,34 @@ class PgVectorStore:
 
         try:
             with self._scope(conn=conn, write=conn is None and self.connection is None) as db:
+                if self.embedding_profile == LOCAL_EMBEDDING_PROFILE_ID:
+                    self._delete_local_target_on(
+                        db,
+                        target_type="memory_card",
+                        target_id=memory_id,
+                        identity_parts_list=[["card", memory_id]],
+                        profile_id=LOCAL_EMBEDDING_PROFILE_ID,
+                    )
+                else:
+                    try:
+                        with db.cursor() as cur:
+                            cur.execute("SAVEPOINT delete_card_local_tombstone")
+                        self._delete_local_target_on(
+                            db,
+                            target_type="memory_card",
+                            target_id=memory_id,
+                            identity_parts_list=[["card", memory_id]],
+                            profile_id=LOCAL_EMBEDDING_PROFILE_ID,
+                        )
+                        with db.cursor() as cur:
+                            cur.execute("RELEASE SAVEPOINT delete_card_local_tombstone")
+                    except Exception:
+                        try:
+                            with db.cursor() as cur:
+                                cur.execute("ROLLBACK TO SAVEPOINT delete_card_local_tombstone")
+                                cur.execute("RELEASE SAVEPOINT delete_card_local_tombstone")
+                        except Exception:
+                            pass
                 with db.cursor() as cur:
                     cur.execute("DELETE FROM memory_cards WHERE memory_id = %s", (memory_id,))
         except Exception as exc:
@@ -991,8 +1156,23 @@ class PgVectorStore:
         project: str | None = None,
         limit: int = 5,
         conn: Any | None = None,
+        *,
+        profile_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Run vector similarity search over session_memory_chunks."""
+        effective_profile = str(profile_id or self.embedding_profile)
+        if effective_profile == LOCAL_EMBEDDING_PROFILE_ID or (
+            profile_id is None
+            and isinstance(query_vector, (list, tuple))
+            and len(query_vector) == LOCAL_VECTOR_DIMENSION
+        ):
+            return self.search_session_chunks_local(
+                query_vector,
+                project=project,
+                limit=limit,
+                conn=conn,
+                profile_id=LOCAL_EMBEDDING_PROFILE_ID,
+            )
         _validate_vector(query_vector)
         vector_literal = _vector_literal(query_vector)
         clauses = ["embedding IS NOT NULL"]
@@ -1641,6 +1821,24 @@ class PgVectorStore:
             raise ValueError("hybrid_search requires a query vector")
         if isinstance(actual_query_vector, str):
             raise ValueError("query vector must be a numeric sequence")
+        requested_profile = str(kwargs.get("profile_id") or self.embedding_profile)
+        if requested_profile == LOCAL_EMBEDDING_PROFILE_ID or (
+            "profile_id" not in kwargs
+            and isinstance(actual_query_vector, (list, tuple))
+            and len(actual_query_vector) == LOCAL_VECTOR_DIMENSION
+        ):
+            return self.hybrid_search_local(
+                project=actual_project,
+                query_vector=list(actual_query_vector),
+                limit=limit,
+                card_type=card_type,
+                authorization_status=authorization_status,
+                currentness=currentness,
+                as_of=as_of,
+                text_query=text_query,
+                steward_only=steward_only,
+                profile_id=LOCAL_EMBEDDING_PROFILE_ID,
+            )
         _validate_vector(actual_query_vector)
         if limit < 1:
             raise ValueError("limit must be positive")
@@ -2180,6 +2378,1572 @@ class PgVectorStore:
                 )
                 return cur.rowcount
 
+    # --- Local Model2Vec 256-dim Profile Operations (specs/model2vec-local-embedding D2/D3) ---
+
+    @staticmethod
+    def _acquire_local_locks_on(
+        conn: Any,
+        *,
+        identity_parts_list: Sequence[Sequence[str]],
+        target_type: str | None = None,
+        target_id: str | None = None,
+    ) -> None:
+        """Acquire identity advisory lock(s) in sorted order, then target advisory lock."""
+
+        canonical_identities = sorted(
+            {
+                json.dumps(list(parts), ensure_ascii=False, separators=(",", ":")): list(parts)
+                for parts in identity_parts_list
+            }.items(),
+            key=lambda item: item[0],
+        )
+        with conn.cursor() as cur:
+            for _canonical, parts in canonical_identities:
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(%s)",
+                    (compute_identity_lock_id(parts),),
+                )
+            if target_type and target_id:
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(%s)",
+                    (target_advisory_lock_id(target_type, target_id),),
+                )
+
+    def acquire_session_identity_lock(
+        self,
+        *,
+        project: str,
+        provider: str,
+        session_id_hash: str,
+        content_hash: str,
+        conn: Any,
+    ) -> int:
+        lock_id = session_identity_lock_id(project, provider, session_id_hash, content_hash)
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_xact_lock(%s)", (lock_id,))
+        return lock_id
+
+    def find_session_chunks_by_natural_scope(
+        self,
+        *,
+        project: str,
+        provider: str,
+        session_id_hash: str,
+        content_hash: str,
+        conn: Any | None = None,
+    ) -> list[SessionChunk]:
+        """Return all session_memory_chunks matching the natural scope regardless of state or ID scheme."""
+
+        with self._scope(conn=conn) as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT chunk_id, session_id_hash, project, provider, chunk_index,
+                           content_markdown, token_count, content_hash, embedding_model,
+                           embedding_state, embedding_revision, embedding,
+                           created_at, updated_at, observed_at
+                      FROM session_memory_chunks
+                     WHERE session_id_hash = %s
+                       AND project = %s
+                       AND provider = %s
+                       AND content_hash = %s
+                     ORDER BY chunk_id
+                    """,
+                    (session_id_hash, project, provider, content_hash),
+                )
+                rows = cur.fetchall()
+        return [_chunk_from_row(row) for row in rows]
+
+    def _resolve_target_identity_parts_on(
+        self,
+        conn: Any,
+        *,
+        target_type: str,
+        target_id: str,
+        fallback_content_hash: str = "",
+    ) -> list[str]:
+        if target_type == "memory_card":
+            return ["card", target_id]
+        if target_type != "session_chunk":
+            raise ValueError(f"unsupported local outbox target_type: {target_type}")
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT project, provider, session_id_hash, content_hash
+                  FROM session_memory_chunks
+                 WHERE chunk_id = %s
+                """,
+                (target_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return ["session", "", "", "", fallback_content_hash]
+        return [
+            "session",
+            str(_row_value(row, "project", 0) or ""),
+            str(_row_value(row, "provider", 1) or ""),
+            str(_row_value(row, "session_id_hash", 2) or ""),
+            str(_row_value(row, "content_hash", 3) or fallback_content_hash),
+        ]
+
+    def _enqueue_local_outbox_on(
+        self,
+        conn: Any,
+        *,
+        target_type: str,
+        target_id: str,
+        source_content_hash: str,
+        payload_text: str,
+        profile_id: str = LOCAL_EMBEDDING_PROFILE_ID,
+        acquire_locks: bool = True,
+    ) -> int:
+        if target_type not in {"memory_card", "session_chunk"}:
+            raise ValueError("unsupported local outbox target type")
+        if profile_id != LOCAL_EMBEDDING_PROFILE_ID:
+            raise ValueError(f"unsupported local embedding profile_id: {profile_id}")
+        if not target_id or not source_content_hash:
+            raise ValueError("target_id and source_content_hash are required")
+        input_hash = compute_input_hash(payload_text)
+        if acquire_locks:
+            identity_parts = self._resolve_target_identity_parts_on(
+                conn,
+                target_type=target_type,
+                target_id=target_id,
+                fallback_content_hash=source_content_hash,
+            )
+            self._acquire_local_locks_on(
+                conn,
+                identity_parts_list=[identity_parts],
+                target_type=target_type,
+                target_id=target_id,
+            )
+
+        parent_table = "memory_cards" if target_type == "memory_card" else "session_memory_chunks"
+        parent_id_col = "memory_id" if target_type == "memory_card" else "chunk_id"
+        derived_table = "card_local_embeddings" if target_type == "memory_card" else "session_local_embeddings"
+
+        with conn.cursor() as cur:
+            # Lock order: queue -> parent -> derived (after identity -> target advisory locks)
+            cur.execute(
+                """
+                UPDATE local_embedding_outbox
+                   SET status = 'cancelled',
+                       lease_until = NULL,
+                       updated_at = NOW()
+                 WHERE target_type = %s
+                   AND target_id = %s
+                   AND profile_id = %s
+                   AND status IN ('queued', 'processing', 'failed')
+                   AND (source_content_hash <> %s OR input_hash <> %s)
+                """,
+                (target_type, target_id, profile_id, source_content_hash, input_hash),
+            )
+            cur.execute(
+                f"""
+                SELECT content_hash
+                  FROM {parent_table}
+                 WHERE {parent_id_col} = %s
+                 FOR KEY SHARE
+                """,
+                (target_id,),
+            )
+            parent_row = cur.fetchone()
+            if parent_row is None:
+                raise ValueError(f"local outbox parent {target_type}:{target_id} does not exist")
+            parent_hash = str(_row_value(parent_row, "content_hash", 0) or "")
+            if parent_hash != source_content_hash:
+                raise ValueError("local outbox source_content_hash does not match parent row")
+
+            cur.execute(
+                """
+                INSERT INTO local_embedding_tombstones (
+                    target_type, target_id, profile_id, incarnation, deleted_at, updated_at
+                ) VALUES (%s, %s, %s, 1, NULL, NOW())
+                ON CONFLICT (target_type, target_id, profile_id) DO UPDATE SET
+                    deleted_at = NULL,
+                    updated_at = NOW()
+                RETURNING incarnation
+                """,
+                (target_type, target_id, profile_id),
+            )
+            tomb_row = cur.fetchone()
+            incarnation = int(_row_value(tomb_row, "incarnation", 0) or 1)
+
+            cur.execute(
+                f"""
+                INSERT INTO {derived_table} (
+                    {parent_id_col}, profile_id, source_content_hash, input_hash, vector, state, updated_at
+                ) VALUES (%s, %s, %s, %s, NULL, 'pending', NOW())
+                ON CONFLICT ({parent_id_col}, profile_id) DO UPDATE SET
+                    source_content_hash = EXCLUDED.source_content_hash,
+                    input_hash = EXCLUDED.input_hash,
+                    vector = CASE
+                        WHEN {derived_table}.source_content_hash = EXCLUDED.source_content_hash
+                         AND {derived_table}.input_hash = EXCLUDED.input_hash
+                         AND {derived_table}.state = 'ready'
+                        THEN {derived_table}.vector
+                        ELSE NULL
+                    END,
+                    state = CASE
+                        WHEN {derived_table}.source_content_hash = EXCLUDED.source_content_hash
+                         AND {derived_table}.input_hash = EXCLUDED.input_hash
+                         AND {derived_table}.state = 'ready'
+                        THEN 'ready'
+                        ELSE 'pending'
+                    END,
+                    updated_at = NOW()
+                """,
+                (target_id, profile_id, source_content_hash, input_hash),
+            )
+
+            cur.execute(
+                """
+                SELECT outbox_id
+                  FROM local_embedding_outbox
+                 WHERE target_type = %s
+                   AND target_id = %s
+                   AND profile_id = %s
+                   AND source_content_hash = %s
+                   AND input_hash = %s
+                   AND incarnation = %s
+                   AND status IN ('queued', 'processing', 'failed')
+                 ORDER BY outbox_id
+                 LIMIT 1
+                """,
+                (target_type, target_id, profile_id, source_content_hash, input_hash, incarnation),
+            )
+            existing = cur.fetchone()
+            if existing is not None:
+                return int(_row_value(existing, "outbox_id", 0))
+
+            row = None
+            try:
+                cur.execute("SAVEPOINT local_embedding_outbox_enqueue")
+                cur.execute(
+                    """
+                    INSERT INTO local_embedding_outbox (
+                        target_type, target_id, profile_id, source_content_hash,
+                        input_hash, payload_text, incarnation, status
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, 'queued')
+                    RETURNING outbox_id
+                    """,
+                    (
+                        target_type,
+                        target_id,
+                        profile_id,
+                        source_content_hash,
+                        input_hash,
+                        payload_text,
+                        incarnation,
+                    ),
+                )
+                row = cur.fetchone()
+            except Exception as exc:
+                if "UniqueViolation" not in type(exc).__name__:
+                    raise
+                cur.execute("ROLLBACK TO SAVEPOINT local_embedding_outbox_enqueue")
+                cur.execute(
+                    """
+                    SELECT outbox_id
+                      FROM local_embedding_outbox
+                     WHERE target_type = %s
+                       AND target_id = %s
+                       AND profile_id = %s
+                       AND source_content_hash = %s
+                       AND input_hash = %s
+                       AND incarnation = %s
+                       AND status IN ('queued', 'processing', 'failed')
+                     ORDER BY outbox_id
+                     LIMIT 1
+                    """,
+                    (target_type, target_id, profile_id, source_content_hash, input_hash, incarnation),
+                )
+                row = cur.fetchone()
+            finally:
+                cur.execute("RELEASE SAVEPOINT local_embedding_outbox_enqueue")
+        if row is None:
+            raise RuntimeError("local embedding outbox insert returned no id")
+        return int(_row_value(row, "outbox_id", 0))
+
+    def enqueue_local_outbox(
+        self,
+        target_type: str,
+        target_id: str,
+        source_content_hash: str,
+        payload_text: str,
+        *,
+        profile_id: str = LOCAL_EMBEDDING_PROFILE_ID,
+        conn: Any | None = None,
+    ) -> int:
+        with self._scope(conn=conn, write=conn is None and self.connection is None) as db:
+            return self._enqueue_local_outbox_on(
+                db,
+                target_type=target_type,
+                target_id=target_id,
+                source_content_hash=source_content_hash,
+                payload_text=payload_text,
+                profile_id=profile_id,
+                acquire_locks=True,
+            )
+
+    def insert_chunk_with_local_outbox(
+        self,
+        chunk: SessionChunk,
+        *,
+        profile_id: str = LOCAL_EMBEDDING_PROFILE_ID,
+        conn: Any | None = None,
+        insert_only: bool = False,
+        already_locked_identity: bool = False,
+    ) -> tuple[str, int]:
+        """Atomically persist session_memory_chunks metadata/body (without mutating Gemini vector) and enqueue local outbox."""
+
+        normalized = self._normalize_chunk(chunk)
+        identity_parts = [
+            "session",
+            normalized.project,
+            normalized.provider,
+            normalized.session_id_hash,
+            normalized.content_hash,
+        ]
+        conflict_clause = (
+            ""
+            if insert_only
+            else """
+            ON CONFLICT (chunk_id) DO UPDATE SET
+                session_id_hash = EXCLUDED.session_id_hash,
+                project = EXCLUDED.project,
+                provider = EXCLUDED.provider,
+                chunk_index = EXCLUDED.chunk_index,
+                content_markdown = EXCLUDED.content_markdown,
+                token_count = EXCLUDED.token_count,
+                content_hash = EXCLUDED.content_hash,
+                updated_at = EXCLUDED.updated_at,
+                observed_at = COALESCE(EXCLUDED.observed_at, session_memory_chunks.observed_at)
+            """
+        )
+        values = (
+            normalized.chunk_id,
+            normalized.session_id_hash,
+            normalized.project,
+            normalized.provider,
+            normalized.chunk_index,
+            normalized.content_markdown,
+            normalized.token_count,
+            normalized.content_hash,
+            normalized.embedding_model,
+            normalized.embedding_state,
+            normalized.embedding_revision,
+            _vector_literal(normalized.embedding),
+            normalized.created_at,
+            normalized.updated_at,
+            normalized.observed_at,
+        )
+        with self._scope(conn=conn, write=conn is None and self.connection is None) as db:
+            if already_locked_identity:
+                with db.cursor() as cur:
+                    cur.execute(
+                        "SELECT pg_advisory_xact_lock(%s)",
+                        (target_advisory_lock_id("session_chunk", normalized.chunk_id),),
+                    )
+            else:
+                self._acquire_local_locks_on(
+                    db,
+                    identity_parts_list=[identity_parts],
+                    target_type="session_chunk",
+                    target_id=normalized.chunk_id,
+                )
+            with db.cursor() as cur:
+                cur.execute(
+                    f"""
+                    INSERT INTO session_memory_chunks (
+                        chunk_id, session_id_hash, project, provider, chunk_index,
+                        content_markdown, token_count, content_hash, embedding_model,
+                        embedding_state, embedding_revision, embedding, created_at, updated_at,
+                        observed_at
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s::halfvec, %s, %s, %s
+                    )
+                    {conflict_clause}
+                    """,
+                    values,
+                )
+            outbox_id = self._enqueue_local_outbox_on(
+                db,
+                target_type="session_chunk",
+                target_id=normalized.chunk_id,
+                source_content_hash=normalized.content_hash,
+                payload_text=normalized.content_markdown,
+                profile_id=profile_id,
+                acquire_locks=False,
+            )
+        return normalized.chunk_id, outbox_id
+
+    def claim_local_outbox_leases(
+        self,
+        worker_id: str,
+        batch_size: int = 10,
+        lease_seconds: int = 30,
+        *,
+        profile_id: str = LOCAL_EMBEDDING_PROFILE_ID,
+    ) -> list[LocalOutboxJob]:
+        """Claim local embedding jobs using unlocked candidate scan + ordered advisory & row locks."""
+
+        if not worker_id or batch_size < 1 or lease_seconds < 1:
+            raise ValueError("invalid local outbox lease arguments")
+        claimed: list[LocalOutboxJob] = []
+        scan_limit = max(int(batch_size) * 4, 16)
+        with self._scope(write=True) as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT outbox_id, target_type, target_id, profile_id,
+                           source_content_hash, input_hash, incarnation
+                      FROM local_embedding_outbox
+                     WHERE profile_id = %s
+                       AND (
+                            status = 'queued'
+                            OR (
+                                status = 'failed'
+                                AND retry_count < %s
+                                AND (next_attempt_at IS NULL OR next_attempt_at <= clock_timestamp())
+                            )
+                            OR (
+                                status = 'processing'
+                                AND retry_count < %s
+                                AND lease_until IS NOT NULL
+                                AND lease_until < clock_timestamp()
+                            )
+                           )
+                     ORDER BY created_at ASC, outbox_id ASC
+                     LIMIT %s
+                    """,
+                    (profile_id, OUTBOX_RETRY_LIMIT, OUTBOX_RETRY_LIMIT, scan_limit),
+                )
+                candidates = cur.fetchall()
+
+            for cand in candidates:
+                if len(claimed) >= int(batch_size):
+                    break
+                cand_outbox_id = int(_row_value(cand, "outbox_id", 0))
+                cand_target_type = str(_row_value(cand, "target_type", 1))
+                cand_target_id = str(_row_value(cand, "target_id", 2))
+                cand_source_hash = str(_row_value(cand, "source_content_hash", 4))
+                cand_incarnation = int(_row_value(cand, "incarnation", 6))
+
+                identity_parts = self._resolve_target_identity_parts_on(
+                    db,
+                    target_type=cand_target_type,
+                    target_id=cand_target_id,
+                    fallback_content_hash=cand_source_hash,
+                )
+                id_lock = compute_identity_lock_id(identity_parts)
+                tgt_lock = target_advisory_lock_id(cand_target_type, cand_target_id)
+
+                with db.cursor() as cur:
+                    cur.execute("SAVEPOINT local_claim_candidate")
+                    cur.execute("SELECT pg_try_advisory_xact_lock(%s) AS locked", (id_lock,))
+                    id_ok = bool(_row_value(cur.fetchone(), "locked", 0))
+                    if not id_ok:
+                        cur.execute("ROLLBACK TO SAVEPOINT local_claim_candidate")
+                        cur.execute("RELEASE SAVEPOINT local_claim_candidate")
+                        continue
+                    cur.execute("SELECT pg_try_advisory_xact_lock(%s) AS locked", (tgt_lock,))
+                    tgt_ok = bool(_row_value(cur.fetchone(), "locked", 0))
+                    if not tgt_ok:
+                        cur.execute("ROLLBACK TO SAVEPOINT local_claim_candidate")
+                        cur.execute("RELEASE SAVEPOINT local_claim_candidate")
+                        continue
+
+                    cur.execute(
+                        """
+                        SELECT outbox_id, target_type, target_id, profile_id,
+                               source_content_hash, input_hash, payload_text, incarnation,
+                               status, fencing_token, worker_id, claimed_at, lease_until,
+                               retry_count, next_attempt_at, last_error, created_at, updated_at
+                          FROM local_embedding_outbox
+                         WHERE outbox_id = %s
+                           AND profile_id = %s
+                           AND (
+                                status = 'queued'
+                                OR (
+                                    status = 'failed'
+                                    AND retry_count < %s
+                                    AND (next_attempt_at IS NULL OR next_attempt_at <= clock_timestamp())
+                                )
+                                OR (
+                                    status = 'processing'
+                                    AND retry_count < %s
+                                    AND lease_until IS NOT NULL
+                                    AND lease_until < clock_timestamp()
+                                )
+                               )
+                         FOR UPDATE SKIP LOCKED
+                        """,
+                        (cand_outbox_id, profile_id, OUTBOX_RETRY_LIMIT, OUTBOX_RETRY_LIMIT),
+                    )
+                    locked_job = cur.fetchone()
+                    if locked_job is None:
+                        cur.execute("ROLLBACK TO SAVEPOINT local_claim_candidate")
+                        cur.execute("RELEASE SAVEPOINT local_claim_candidate")
+                        continue
+
+                    # Verify tombstone and parent still match before leasing
+                    cur.execute(
+                        """
+                        SELECT incarnation, deleted_at
+                          FROM local_embedding_tombstones
+                         WHERE target_type = %s AND target_id = %s AND profile_id = %s
+                        """,
+                        (cand_target_type, cand_target_id, profile_id),
+                    )
+                    tomb = cur.fetchone()
+                    if tomb is not None and (
+                        _row_value(tomb, "deleted_at", 1) is not None
+                        or int(_row_value(tomb, "incarnation", 0) or 1) != cand_incarnation
+                    ):
+                        cur.execute(
+                            """
+                            UPDATE local_embedding_outbox
+                               SET status = 'cancelled',
+                                   lease_until = NULL,
+                                   last_error = 'cancelled: target deleted or incarnation changed',
+                                   updated_at = NOW()
+                             WHERE outbox_id = %s
+                            """,
+                            (cand_outbox_id,),
+                        )
+                        cur.execute("RELEASE SAVEPOINT local_claim_candidate")
+                        continue
+
+                    parent_table = (
+                        "memory_cards" if cand_target_type == "memory_card" else "session_memory_chunks"
+                    )
+                    parent_id_col = "memory_id" if cand_target_type == "memory_card" else "chunk_id"
+                    cur.execute(
+                        f"SELECT content_hash FROM {parent_table} WHERE {parent_id_col} = %s FOR KEY SHARE",
+                        (cand_target_id,),
+                    )
+                    parent_row = cur.fetchone()
+                    if (
+                        parent_row is None
+                        or str(_row_value(parent_row, "content_hash", 0) or "") != cand_source_hash
+                    ):
+                        cur.execute(
+                            """
+                            UPDATE local_embedding_outbox
+                               SET status = 'cas_skipped',
+                                   lease_until = NULL,
+                                   last_error = 'CAS skip: parent missing or content_hash changed',
+                                   updated_at = NOW()
+                             WHERE outbox_id = %s
+                            """,
+                            (cand_outbox_id,),
+                        )
+                        cur.execute("RELEASE SAVEPOINT local_claim_candidate")
+                        continue
+
+                    cur.execute(
+                        """
+                        UPDATE local_embedding_outbox
+                           SET status = 'processing',
+                               fencing_token = fencing_token + 1,
+                               worker_id = %s,
+                               claimed_at = clock_timestamp(),
+                               lease_until = clock_timestamp() + (%s * INTERVAL '1 second'),
+                               updated_at = clock_timestamp()
+                         WHERE outbox_id = %s
+                        RETURNING outbox_id, target_type, target_id, profile_id,
+                                  source_content_hash, input_hash, payload_text, incarnation,
+                                  status, fencing_token, worker_id, claimed_at, lease_until,
+                                  retry_count, next_attempt_at, last_error, created_at, updated_at
+                        """,
+                        (worker_id, int(lease_seconds), cand_outbox_id),
+                    )
+                    updated_row = cur.fetchone()
+                    cur.execute("RELEASE SAVEPOINT local_claim_candidate")
+                    if updated_row is not None:
+                        claimed.append(_local_outbox_from_row(updated_row))
+        return claimed
+
+    def renew_local_outbox_lease(
+        self,
+        outbox_id: int,
+        worker_id: str,
+        fencing_token: int,
+        lease_seconds: int = 30,
+    ) -> bool:
+        if not worker_id or lease_seconds < 1 or fencing_token < 1:
+            raise ValueError("invalid local outbox lease renewal arguments")
+        with self._scope(write=True) as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE local_embedding_outbox
+                       SET lease_until = clock_timestamp() + (%s * INTERVAL '1 second'),
+                           updated_at = clock_timestamp()
+                     WHERE outbox_id = %s
+                       AND status = 'processing'
+                       AND worker_id = %s
+                       AND fencing_token = %s
+                       AND lease_until > clock_timestamp()
+                    """,
+                    (int(lease_seconds), int(outbox_id), worker_id, int(fencing_token)),
+                )
+                return cur.rowcount == 1
+
+    def complete_local_outbox_cas(
+        self,
+        *,
+        outbox_id: int,
+        worker_id: str,
+        fencing_token: int,
+        vector: list[float],
+        profile_id: str = LOCAL_EMBEDDING_PROFILE_ID,
+    ) -> bool:
+        """CAS-write a 256-dim local vector and complete the outbox job in global lock order."""
+
+        if not worker_id or outbox_id < 1 or fencing_token < 1:
+            raise ValueError("local embedding write-back requires outbox_id, worker_id, and fencing_token")
+        if profile_id != LOCAL_EMBEDDING_PROFILE_ID:
+            raise ValueError(f"unsupported local embedding profile_id: {profile_id}")
+        vector_literal = _local_vector_literal(vector)
+
+        with self._scope(write=True) as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT target_type, target_id, source_content_hash
+                      FROM local_embedding_outbox
+                     WHERE outbox_id = %s
+                    """,
+                    (int(outbox_id),),
+                )
+                meta = cur.fetchone()
+            if meta is None:
+                raise ValueError("local outbox job not found")
+            target_type = str(_row_value(meta, "target_type", 0))
+            target_id = str(_row_value(meta, "target_id", 1))
+            source_hash_hint = str(_row_value(meta, "source_content_hash", 2))
+            identity_parts = self._resolve_target_identity_parts_on(
+                db,
+                target_type=target_type,
+                target_id=target_id,
+                fallback_content_hash=source_hash_hint,
+            )
+            self._acquire_local_locks_on(
+                db,
+                identity_parts_list=[identity_parts],
+                target_type=target_type,
+                target_id=target_id,
+            )
+
+            with db.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT outbox_id, target_type, target_id, profile_id,
+                           source_content_hash, input_hash, incarnation,
+                           status, fencing_token, worker_id, lease_until
+                      FROM local_embedding_outbox
+                     WHERE outbox_id = %s
+                       AND profile_id = %s
+                       AND status = 'processing'
+                       AND worker_id = %s
+                       AND fencing_token = %s
+                       AND lease_until > clock_timestamp()
+                     FOR UPDATE
+                    """,
+                    (int(outbox_id), profile_id, worker_id, int(fencing_token)),
+                )
+                job_row = cur.fetchone()
+                if job_row is None:
+                    raise ValueError("local outbox job not found or lease/fencing_token mismatch")
+
+                job_source_hash = str(_row_value(job_row, "source_content_hash", 4))
+                job_input_hash = str(_row_value(job_row, "input_hash", 5))
+                job_incarnation = int(_row_value(job_row, "incarnation", 6))
+
+                cur.execute(
+                    """
+                    SELECT incarnation, deleted_at
+                      FROM local_embedding_tombstones
+                     WHERE target_type = %s AND target_id = %s AND profile_id = %s
+                    """,
+                    (target_type, target_id, profile_id),
+                )
+                tomb = cur.fetchone()
+                if tomb is not None and (
+                    _row_value(tomb, "deleted_at", 1) is not None
+                    or int(_row_value(tomb, "incarnation", 0) or 1) != job_incarnation
+                ):
+                    cur.execute(
+                        """
+                        UPDATE local_embedding_outbox
+                           SET status = 'cancelled',
+                               last_error = 'CAS skip: target deleted or incarnation changed',
+                               lease_until = NULL,
+                               updated_at = NOW()
+                         WHERE outbox_id = %s
+                        """,
+                        (int(outbox_id),),
+                    )
+                    return False
+
+                if target_type == "memory_card":
+                    cur.execute(
+                        """
+                        SELECT content_hash, summary, title, typed_payload
+                          FROM memory_cards
+                         WHERE memory_id = %s
+                         FOR KEY SHARE
+                        """,
+                        (target_id,),
+                    )
+                    parent = cur.fetchone()
+                    if parent is None:
+                        cur.execute(
+                            """
+                            UPDATE local_embedding_outbox
+                               SET status = 'cancelled',
+                                   last_error = 'CAS skip: parent card deleted',
+                                   lease_until = NULL,
+                                   updated_at = NOW()
+                             WHERE outbox_id = %s
+                            """,
+                            (int(outbox_id),),
+                        )
+                        return False
+                    current_source_hash = str(_row_value(parent, "content_hash", 0) or "")
+                    try:
+                        current_input = card_input_v1(
+                            summary=_row_value(parent, "summary", 1),
+                            title=_row_value(parent, "title", 2),
+                            typed_payload=_json_value(_row_value(parent, "typed_payload", 3)),
+                        )
+                        current_input_hash = compute_input_hash(current_input)
+                    except Exception:
+                        current_input_hash = ""
+                    derived_table = "card_local_embeddings"
+                    parent_id_col = "memory_id"
+                else:
+                    cur.execute(
+                        """
+                        SELECT content_hash, content_markdown
+                          FROM session_memory_chunks
+                         WHERE chunk_id = %s
+                         FOR KEY SHARE
+                        """,
+                        (target_id,),
+                    )
+                    parent = cur.fetchone()
+                    if parent is None:
+                        cur.execute(
+                            """
+                            UPDATE local_embedding_outbox
+                               SET status = 'cancelled',
+                                   last_error = 'CAS skip: parent chunk deleted',
+                                   lease_until = NULL,
+                                   updated_at = NOW()
+                             WHERE outbox_id = %s
+                            """,
+                            (int(outbox_id),),
+                        )
+                        return False
+                    current_source_hash = str(_row_value(parent, "content_hash", 0) or "")
+                    try:
+                        current_input_hash = compute_input_hash(
+                            str(_row_value(parent, "content_markdown", 1) or "")
+                        )
+                    except Exception:
+                        current_input_hash = ""
+                    derived_table = "session_local_embeddings"
+                    parent_id_col = "chunk_id"
+
+                if current_source_hash != job_source_hash or current_input_hash != job_input_hash:
+                    cur.execute(
+                        """
+                        UPDATE local_embedding_outbox
+                           SET status = 'cas_skipped',
+                               last_error = 'CAS skip: source or input hash mismatch',
+                               lease_until = NULL,
+                               updated_at = NOW()
+                         WHERE outbox_id = %s
+                        """,
+                        (int(outbox_id),),
+                    )
+                    return False
+
+                cur.execute(
+                    f"""
+                    INSERT INTO {derived_table} (
+                        {parent_id_col}, profile_id, source_content_hash, input_hash,
+                        vector, state, updated_at
+                    ) VALUES (%s, %s, %s, %s, %s::vector(256), 'ready', NOW())
+                    ON CONFLICT ({parent_id_col}, profile_id) DO UPDATE SET
+                        source_content_hash = EXCLUDED.source_content_hash,
+                        input_hash = EXCLUDED.input_hash,
+                        vector = EXCLUDED.vector,
+                        state = 'ready',
+                        updated_at = NOW()
+                    """,
+                    (target_id, profile_id, job_source_hash, job_input_hash, vector_literal),
+                )
+                cur.execute(
+                    """
+                    UPDATE local_embedding_outbox
+                       SET status = 'completed',
+                           last_error = NULL,
+                           lease_until = NULL,
+                           updated_at = NOW()
+                     WHERE outbox_id = %s
+                       AND status = 'processing'
+                       AND worker_id = %s
+                       AND fencing_token = %s
+                    """,
+                    (int(outbox_id), worker_id, int(fencing_token)),
+                )
+                if cur.rowcount != 1:
+                    raise ValueError("local outbox completion failed fence verification")
+                return True
+
+    def mark_local_outbox_failed(
+        self,
+        *,
+        outbox_id: int,
+        worker_id: str,
+        fencing_token: int,
+        error_code: str,
+        retryable: bool = True,
+        max_retries: int = OUTBOX_RETRY_LIMIT,
+        profile_id: str = LOCAL_EMBEDDING_PROFILE_ID,
+    ) -> str:
+        """Record failure on a local embedding job with bounded retry or dead-letter transition."""
+
+        if max_retries < 1:
+            raise ValueError("max_retries must be positive")
+        if not worker_id or outbox_id < 1 or fencing_token < 1:
+            raise ValueError("local outbox failure requires outbox_id, worker_id, and fencing_token")
+        safe_error = str(error_code or "unknown_error")[:200]
+
+        with self._scope(write=True) as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT target_type, target_id, source_content_hash
+                      FROM local_embedding_outbox
+                     WHERE outbox_id = %s
+                    """,
+                    (int(outbox_id),),
+                )
+                meta = cur.fetchone()
+            if meta is None:
+                raise ValueError("local outbox job not found")
+            target_type = str(_row_value(meta, "target_type", 0))
+            target_id = str(_row_value(meta, "target_id", 1))
+            source_hash_hint = str(_row_value(meta, "source_content_hash", 2))
+            identity_parts = self._resolve_target_identity_parts_on(
+                db,
+                target_type=target_type,
+                target_id=target_id,
+                fallback_content_hash=source_hash_hint,
+            )
+            self._acquire_local_locks_on(
+                db,
+                identity_parts_list=[identity_parts],
+                target_type=target_type,
+                target_id=target_id,
+            )
+            with db.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE local_embedding_outbox
+                       SET retry_count = retry_count + 1,
+                           last_error = %s,
+                           status = CASE
+                               WHEN NOT %s OR retry_count + 1 >= %s THEN 'dead_letter'
+                               ELSE 'failed'
+                           END,
+                           lease_until = NULL,
+                           next_attempt_at = CASE
+                               WHEN NOT %s OR retry_count + 1 >= %s THEN NULL
+                               ELSE clock_timestamp() + (LEAST(60, POWER(2, retry_count + 1)) * INTERVAL '1 second')
+                           END,
+                           updated_at = clock_timestamp()
+                     WHERE outbox_id = %s
+                       AND profile_id = %s
+                       AND status = 'processing'
+                       AND worker_id = %s
+                       AND fencing_token = %s
+                       AND lease_until > clock_timestamp()
+                    RETURNING status, source_content_hash, input_hash
+                    """,
+                    (
+                        safe_error,
+                        bool(retryable),
+                        int(max_retries),
+                        bool(retryable),
+                        int(max_retries),
+                        int(outbox_id),
+                        profile_id,
+                        worker_id,
+                        int(fencing_token),
+                    ),
+                )
+                updated = cur.fetchone()
+                if updated is None:
+                    raise ValueError("local outbox job not found or lease/fencing_token mismatch")
+                new_status = str(_row_value(updated, "status", 0))
+                if new_status == "dead_letter":
+                    derived_table = (
+                        "card_local_embeddings"
+                        if target_type == "memory_card"
+                        else "session_local_embeddings"
+                    )
+                    parent_id_col = "memory_id" if target_type == "memory_card" else "chunk_id"
+                    cur.execute(
+                        f"""
+                        UPDATE {derived_table}
+                           SET state = 'failed',
+                               updated_at = NOW()
+                         WHERE {parent_id_col} = %s
+                           AND profile_id = %s
+                           AND source_content_hash = %s
+                           AND input_hash = %s
+                           AND state <> 'ready'
+                        """,
+                        (
+                            target_id,
+                            profile_id,
+                            str(_row_value(updated, "source_content_hash", 1)),
+                            str(_row_value(updated, "input_hash", 2)),
+                        ),
+                    )
+                return new_status
+
+    def requeue_local_dead_letters(
+        self,
+        *,
+        target_ids: Sequence[str] | None = None,
+        allowed_error_codes: Sequence[str] = tuple(_TRANSIENT_LOCAL_OUTBOX_ERRORS),
+        profile_id: str = LOCAL_EMBEDDING_PROFILE_ID,
+    ) -> int:
+        """Bounded, idempotent requeue of transient dead-lettered local embedding jobs."""
+
+        allowed = [str(code) for code in allowed_error_codes if str(code)]
+        if not allowed:
+            return 0
+        requeued = 0
+        with self._scope(write=True) as db:
+            params: list[Any] = [profile_id, allowed]
+            target_clause = ""
+            if target_ids is not None:
+                ids = [str(item) for item in target_ids if str(item)]
+                if not ids:
+                    return 0
+                target_clause = " AND target_id = ANY(%s)"
+                params.append(ids)
+            with db.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT outbox_id, target_type, target_id, source_content_hash, input_hash, incarnation
+                      FROM local_embedding_outbox
+                     WHERE profile_id = %s
+                       AND status = 'dead_letter'
+                       AND regexp_replace(last_error, '^retryable_error:', '') = ANY(%s)
+                       {target_clause}
+                     ORDER BY outbox_id ASC
+                    """,
+                    params,
+                )
+                candidates = cur.fetchall()
+
+            for row in candidates:
+                outbox_id = int(_row_value(row, "outbox_id", 0))
+                target_type = str(_row_value(row, "target_type", 1))
+                target_id = str(_row_value(row, "target_id", 2))
+                source_hash = str(_row_value(row, "source_content_hash", 3))
+                input_hash = str(_row_value(row, "input_hash", 4))
+                incarnation = int(_row_value(row, "incarnation", 5))
+
+                identity_parts = self._resolve_target_identity_parts_on(
+                    db,
+                    target_type=target_type,
+                    target_id=target_id,
+                    fallback_content_hash=source_hash,
+                )
+                self._acquire_local_locks_on(
+                    db,
+                    identity_parts_list=[identity_parts],
+                    target_type=target_type,
+                    target_id=target_id,
+                )
+                with db.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT incarnation, deleted_at
+                          FROM local_embedding_tombstones
+                         WHERE target_type = %s AND target_id = %s AND profile_id = %s
+                        """,
+                        (target_type, target_id, profile_id),
+                    )
+                    tomb = cur.fetchone()
+                    if tomb is not None and (
+                        _row_value(tomb, "deleted_at", 1) is not None
+                        or int(_row_value(tomb, "incarnation", 0) or 1) != incarnation
+                    ):
+                        continue
+                    parent_table = (
+                        "memory_cards" if target_type == "memory_card" else "session_memory_chunks"
+                    )
+                    parent_id_col = "memory_id" if target_type == "memory_card" else "chunk_id"
+                    cur.execute(
+                        f"SELECT content_hash FROM {parent_table} WHERE {parent_id_col} = %s FOR KEY SHARE",
+                        (target_id,),
+                    )
+                    parent = cur.fetchone()
+                    if parent is None or str(_row_value(parent, "content_hash", 0) or "") != source_hash:
+                        continue
+                    cur.execute(
+                        """
+                        SELECT 1
+                          FROM local_embedding_outbox
+                         WHERE target_type = %s
+                           AND target_id = %s
+                           AND profile_id = %s
+                           AND source_content_hash = %s
+                           AND input_hash = %s
+                           AND incarnation = %s
+                           AND status IN ('queued', 'processing', 'failed', 'completed')
+                         LIMIT 1
+                        """,
+                        (target_type, target_id, profile_id, source_hash, input_hash, incarnation),
+                    )
+                    if cur.fetchone() is not None:
+                        continue
+                    cur.execute(
+                        """
+                        UPDATE local_embedding_outbox
+                           SET status = 'queued',
+                               retry_count = 0,
+                               next_attempt_at = NULL,
+                               lease_until = NULL,
+                               worker_id = NULL,
+                               claimed_at = NULL,
+                               updated_at = NOW()
+                         WHERE outbox_id = %s
+                           AND status = 'dead_letter'
+                        """,
+                        (outbox_id,),
+                    )
+                    if cur.rowcount == 1:
+                        derived_table = (
+                            "card_local_embeddings"
+                            if target_type == "memory_card"
+                            else "session_local_embeddings"
+                        )
+                        cur.execute(
+                            f"""
+                            UPDATE {derived_table}
+                               SET state = 'pending',
+                                   updated_at = NOW()
+                             WHERE {parent_id_col} = %s
+                               AND profile_id = %s
+                               AND source_content_hash = %s
+                               AND state <> 'ready'
+                            """,
+                            (target_id, profile_id, source_hash),
+                        )
+                        requeued += 1
+        return requeued
+
+    def _delete_local_target_on(
+        self,
+        conn: Any,
+        *,
+        target_type: str,
+        target_id: str,
+        identity_parts_list: Sequence[Sequence[str]],
+        profile_id: str = LOCAL_EMBEDDING_PROFILE_ID,
+    ) -> int:
+        self._acquire_local_locks_on(
+            conn,
+            identity_parts_list=identity_parts_list,
+            target_type=target_type,
+            target_id=target_id,
+        )
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE local_embedding_outbox
+                   SET status = 'cancelled',
+                       lease_until = NULL,
+                       last_error = 'cancelled: parent deleted',
+                       updated_at = NOW()
+                 WHERE target_type = %s
+                   AND target_id = %s
+                   AND profile_id = %s
+                   AND status IN ('queued', 'processing', 'failed')
+                """,
+                (target_type, target_id, profile_id),
+            )
+            cur.execute(
+                """
+                INSERT INTO local_embedding_tombstones (
+                    target_type, target_id, profile_id, incarnation, deleted_at, updated_at
+                ) VALUES (%s, %s, %s, 2, NOW(), NOW())
+                ON CONFLICT (target_type, target_id, profile_id) DO UPDATE SET
+                    incarnation = local_embedding_tombstones.incarnation + 1,
+                    deleted_at = NOW(),
+                    updated_at = NOW()
+                RETURNING incarnation
+                """,
+                (target_type, target_id, profile_id),
+            )
+            row = cur.fetchone()
+            return int(_row_value(row, "incarnation", 0) or 2)
+
+    def delete_session_chunk(
+        self,
+        chunk_id: str,
+        *,
+        conn: Any | None = None,
+        profile_id: str = LOCAL_EMBEDDING_PROFILE_ID,
+    ) -> None:
+        """Delete a session chunk in global lock order with tombstone incarnation increment."""
+
+        with self._scope(conn=conn, write=conn is None and self.connection is None) as db:
+            identity_parts = self._resolve_target_identity_parts_on(
+                db,
+                target_type="session_chunk",
+                target_id=chunk_id,
+            )
+            self._delete_local_target_on(
+                db,
+                target_type="session_chunk",
+                target_id=chunk_id,
+                identity_parts_list=[identity_parts],
+                profile_id=profile_id,
+            )
+            with db.cursor() as cur:
+                cur.execute("DELETE FROM session_memory_chunks WHERE chunk_id = %s", (chunk_id,))
+
+    def hybrid_search_local(
+        self,
+        project: str = "",
+        query_vector: list[float] | None = None,
+        limit: int = 5,
+        card_type: str | None = None,
+        authorization_status: str | None = "active",
+        currentness: str | None = "current",
+        as_of: datetime | date | str | None = None,
+        text_query: str | None = None,
+        steward_only: bool = False,
+        *,
+        profile_id: str = LOCAL_EMBEDDING_PROFILE_ID,
+    ) -> list[dict[str, Any]]:
+        """Run filtered pgvector search over card_local_embeddings (256-dim cosine) without mixing 3072 vectors."""
+
+        if query_vector is None:
+            raise ValueError("hybrid_search_local requires a query vector")
+        if profile_id != LOCAL_EMBEDDING_PROFILE_ID:
+            raise ValueError(f"unsupported local embedding profile_id: {profile_id}")
+        _validate_local_vector(query_vector)
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        vector_literal = _local_vector_literal(query_vector)
+
+        clauses = [
+            "cle.profile_id = %s",
+            "cle.state = 'ready'",
+            "cle.vector IS NOT NULL",
+            "cle.source_content_hash = mc.content_hash",
+        ]
+        params: list[Any] = [profile_id]
+        if project:
+            clauses.append("mc.project = %s")
+            params.append(project)
+        if steward_only:
+            clauses.extend(
+                (
+                    "mc.steward_envelope IS NOT NULL",
+                    "mc.steward_envelope->>'approval_state' IN ('approved', 'auto_accepted')",
+                    "coalesce(mc.steward_envelope->>'steward_proposal_kind', '') <> 'stale'",
+                )
+            )
+        if authorization_status:
+            clauses.append("mc.authorization_status = %s")
+            params.append(authorization_status)
+        if currentness == "current" and as_of:
+            clauses.append("mc.currentness IN ('current', 'superseded')")
+        elif currentness:
+            clauses.append("mc.currentness = %s")
+            params.append(currentness)
+        if card_type:
+            clauses.append("mc.card_type = %s")
+            params.append(card_type)
+        clauses.append("mc.lifecycle_state IN ('accepted', 'human_accepted', 'auto_accepted')")
+        as_of_dt = _parse_as_of(as_of) or datetime.now(timezone.utc)
+        clauses.append("mc.valid_from <= %s AND (mc.valid_to IS NULL OR mc.valid_to > %s)")
+        params.extend((as_of_dt, as_of_dt))
+        clauses.append(
+            _STATUS_EXPIRY_FILTER.replace("card_type", "mc.card_type").replace(
+                "typed_payload", "mc.typed_payload"
+            )
+        )
+        params.append(as_of_dt)
+
+        score_expression = "1.0 - distance"
+        query_params: list[Any] = [vector_literal, *params, vector_literal, max(50, int(limit) * 5)]
+        if text_query and text_query.strip():
+            score_expression = (
+                "(0.8 * (1.0 - distance) + "
+                "0.2 * ts_rank_cd(to_tsvector('simple', coalesce(title, '') || ' ' || coalesce(summary, '')), "
+                "plainto_tsquery('simple', %s)))"
+            )
+            query_params.append(text_query)
+        query_params.append(int(limit))
+
+        with self._scope(write=False) as db:
+            self.set_guc_relaxed_order(conn=db)
+            with db.cursor() as cur:
+                cur.execute(
+                    f"""
+                    WITH candidates AS MATERIALIZED (
+                        SELECT mc.memory_id, mc.card_type, mc.title, mc.summary, mc.typed_payload,
+                               mc.currentness, mc.confidence, mc.content_hash,
+                               mc.valid_from, mc.valid_to,
+                               mc.freshness_state, mc.freshness_checked_at,
+                               mc.freshness_next_check_after, mc.source_hash,
+                               cle.input_hash AS local_input_hash,
+                               cle.vector <=> %s::vector(256) AS distance
+                          FROM memory_cards AS mc
+                          JOIN card_local_embeddings AS cle
+                            ON cle.memory_id = mc.memory_id
+                         WHERE {' AND '.join(clauses)}
+                         ORDER BY cle.vector <=> %s::vector(256)
+                         LIMIT %s
+                    )
+                    SELECT memory_id, card_type, title, summary, typed_payload,
+                           currentness, confidence, content_hash,
+                           {score_expression} AS similarity_score,
+                           1.0 - distance AS semantic_score,
+                           valid_from, valid_to,
+                           freshness_state, freshness_checked_at, freshness_next_check_after, source_hash,
+                           local_input_hash
+                      FROM candidates
+                     ORDER BY similarity_score DESC, memory_id
+                     LIMIT %s
+                    """,
+                    query_params,
+                )
+                rows = cur.fetchall()
+
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            summary_val = str(_row_value(row, "summary", 3))
+            title_val = str(_row_value(row, "title", 2))
+            typed_payload_val = _json_value(_row_value(row, "typed_payload", 4))
+            local_input_hash = str(_row_value(row, "local_input_hash", 16) or "")
+            try:
+                expected_input_hash = compute_input_hash(
+                    card_input_v1(
+                        summary=summary_val,
+                        title=title_val,
+                        typed_payload=typed_payload_val,
+                    )
+                )
+            except Exception:
+                continue
+            if local_input_hash != expected_input_hash:
+                continue
+            results.append(
+                {
+                    "memory_id": str(_row_value(row, "memory_id", 0)),
+                    "card_type": str(_row_value(row, "card_type", 1)),
+                    "title": title_val,
+                    "summary": summary_val,
+                    "typed_payload": typed_payload_val,
+                    "currentness": str(_row_value(row, "currentness", 5)),
+                    "confidence": float(_row_value(row, "confidence", 6)),
+                    "content_hash": str(_row_value(row, "content_hash", 7)),
+                    "similarity_score": round(float(_row_value(row, "similarity_score", 8)), 6),
+                    "semantic_score": round(float(_row_value(row, "semantic_score", 9)), 6),
+                    "valid_from": _row_value(row, "valid_from", 10),
+                    "valid_to": _row_value(row, "valid_to", 11),
+                    "freshness_state": str(
+                        _row_value(row, "freshness_state", 12, default="unchecked") or "unchecked"
+                    ),
+                    "freshness_checked_at": _row_value(row, "freshness_checked_at", 13),
+                    "freshness_next_check_after": _row_value(row, "freshness_next_check_after", 14),
+                    "source_hash": _row_value(row, "source_hash", 15),
+                }
+            )
+        return results
+
+    def search_session_chunks_local(
+        self,
+        query_vector: list[float],
+        project: str | None = None,
+        limit: int = 5,
+        conn: Any | None = None,
+        *,
+        profile_id: str = LOCAL_EMBEDDING_PROFILE_ID,
+    ) -> list[dict[str, Any]]:
+        """Run vector similarity search over session_local_embeddings joined to session_memory_chunks."""
+
+        if profile_id != LOCAL_EMBEDDING_PROFILE_ID:
+            raise ValueError(f"unsupported local embedding profile_id: {profile_id}")
+        _validate_local_vector(query_vector)
+        vector_literal = _local_vector_literal(query_vector)
+        clauses = [
+            "sle.profile_id = %s",
+            "sle.state = 'ready'",
+            "sle.vector IS NOT NULL",
+            "sle.source_content_hash = smc.content_hash",
+        ]
+        params: list[Any] = [vector_literal, profile_id]
+        if project:
+            clauses.append("smc.project = %s")
+            params.append(project)
+        params.extend([vector_literal, int(limit)])
+        with self._scope(conn=conn) as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT smc.chunk_id, smc.session_id_hash, smc.project, smc.provider,
+                           smc.chunk_index, smc.content_markdown, smc.token_count,
+                           smc.content_hash, smc.created_at, smc.observed_at,
+                           sle.input_hash AS local_input_hash,
+                           sle.profile_id AS local_profile_id,
+                           sle.vector <=> %s::vector(256) AS distance
+                      FROM session_memory_chunks AS smc
+                      JOIN session_local_embeddings AS sle
+                        ON sle.chunk_id = smc.chunk_id
+                     WHERE {' AND '.join(clauses)}
+                     ORDER BY sle.vector <=> %s::vector(256), smc.chunk_id
+                     LIMIT %s
+                    """,
+                    params,
+                )
+                names = [col.name for col in cur.description]
+                raw_rows = [
+                    dict(row) if isinstance(row, Mapping) else dict(zip(names, row))
+                    for row in cur.fetchall()
+                ]
+        verified: list[dict[str, Any]] = []
+        for row in raw_rows:
+            body_text = str(row.get("content_markdown") or "")
+            try:
+                expected_input_hash = compute_input_hash(body_text)
+            except Exception:
+                continue
+            if str(row.get("local_input_hash") or "") != expected_input_hash:
+                continue
+            verified.append(row)
+        return verified
+
+    def list_local_outbox_jobs(
+        self,
+        *,
+        status: str | None = None,
+        profile_id: str = LOCAL_EMBEDDING_PROFILE_ID,
+        conn: Any | None = None,
+    ) -> list[LocalOutboxJob]:
+        params: list[Any] = [profile_id]
+        where = " WHERE profile_id = %s"
+        if status:
+            where += " AND status = %s"
+            params.append(status)
+        with self._scope(conn=conn) as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT outbox_id, target_type, target_id, profile_id,
+                           source_content_hash, input_hash, payload_text, incarnation,
+                           status, fencing_token, worker_id, claimed_at, lease_until,
+                           retry_count, next_attempt_at, last_error, created_at, updated_at
+                      FROM local_embedding_outbox
+                    """
+                    + where
+                    + " ORDER BY outbox_id",
+                    params,
+                )
+                rows = cur.fetchall()
+        return [_local_outbox_from_row(row) for row in rows]
+
+    def get_local_embedding_row(
+        self,
+        *,
+        target_type: str,
+        target_id: str,
+        profile_id: str = LOCAL_EMBEDDING_PROFILE_ID,
+        embedding_profile: str | None = None,
+        conn: Any | None = None,
+    ) -> dict[str, Any] | None:
+        resolved_profile = str(embedding_profile or profile_id or LOCAL_EMBEDDING_PROFILE_ID)
+        if target_type in ("memory_card", "card"):
+            table, id_col = "card_local_embeddings", "memory_id"
+        elif target_type in ("session_chunk", "session"):
+            table, id_col = "session_local_embeddings", "chunk_id"
+        else:
+            raise ValueError(f"unsupported target_type: {target_type}")
+        with self._scope(conn=conn) as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT {id_col} AS target_id, profile_id, source_content_hash,
+                           input_hash, vector, state, updated_at
+                      FROM {table}
+                     WHERE {id_col} = %s AND profile_id = %s
+                    """,
+                    (target_id, resolved_profile),
+                )
+                row = cur.fetchone()
+        if row is None:
+            return None
+        parsed_vec = _parse_vector(_row_value(row, "vector", 4))
+        src_hash = str(_row_value(row, "source_content_hash", 2))
+        state_val = str(_row_value(row, "state", 5))
+        prof_val = str(_row_value(row, "profile_id", 1))
+        return {
+            "target_id": str(_row_value(row, "target_id", 0)),
+            "profile_id": prof_val,
+            "embedding_profile": prof_val,
+            "source_content_hash": src_hash,
+            "content_hash": src_hash,
+            "input_hash": str(_row_value(row, "input_hash", 3)),
+            "vector": parsed_vec,
+            "embedding": parsed_vec,
+            "state": state_val,
+            "embedding_state": state_val,
+            "updated_at": _as_aware_datetime(_row_value(row, "updated_at", 6)),
+        }
+
+    def upsert_graph_operation_journal(
+        self,
+        *,
+        operation_id: str,
+        outbox_id: int | None,
+        group_id: str,
+        episode_uuid: str,
+        source_type: str,
+        source_id: str,
+        source_revision: str,
+        content_hash: str,
+        profile_id: str = LOCAL_EMBEDDING_PROFILE_ID,
+        fence_epoch: int = 0,
+        state: str = "claimed",
+        execution_plan: Mapping[str, Any] | None = None,
+        step_receipts: Mapping[str, Any] | None = None,
+        last_error: str | None = None,
+        conn: Any | None = None,
+    ) -> dict[str, Any]:
+        """Create or update a durable graph_operation_journal record in PostgreSQL."""
+
+        with self._scope(conn=conn, write=conn is None and self.connection is None) as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO graph_operation_journal (
+                        operation_id, outbox_id, group_id, episode_uuid,
+                        source_type, source_id, source_revision, content_hash,
+                        profile_id, fence_epoch, state, execution_plan, step_receipts,
+                        last_error, created_at, updated_at
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s::jsonb, %s::jsonb, %s, NOW(), NOW()
+                    )
+                    ON CONFLICT (operation_id) DO UPDATE SET
+                        outbox_id = COALESCE(EXCLUDED.outbox_id, graph_operation_journal.outbox_id),
+                        fence_epoch = GREATEST(graph_operation_journal.fence_epoch, EXCLUDED.fence_epoch),
+                        state = EXCLUDED.state,
+                        execution_plan = CASE
+                            WHEN graph_operation_journal.execution_plan = '{}'::jsonb
+                            THEN EXCLUDED.execution_plan
+                            ELSE graph_operation_journal.execution_plan
+                        END,
+                        step_receipts = graph_operation_journal.step_receipts || EXCLUDED.step_receipts,
+                        last_error = EXCLUDED.last_error,
+                        updated_at = NOW()
+                    RETURNING operation_id, outbox_id, group_id, episode_uuid,
+                              source_type, source_id, source_revision, content_hash,
+                              profile_id, fence_epoch, state, execution_plan,
+                              step_receipts, last_error
+                    """,
+                    (
+                        operation_id,
+                        outbox_id,
+                        group_id,
+                        episode_uuid,
+                        source_type,
+                        source_id,
+                        source_revision,
+                        content_hash,
+                        profile_id,
+                        int(fence_epoch),
+                        state,
+                        _json_text(dict(execution_plan or {})),
+                        _json_text(dict(step_receipts or {})),
+                        last_error,
+                    ),
+                )
+                row = cur.fetchone()
+        return {
+            "operation_id": str(_row_value(row, "operation_id", 0)),
+            "outbox_id": _row_value(row, "outbox_id", 1),
+            "group_id": str(_row_value(row, "group_id", 2)),
+            "episode_uuid": str(_row_value(row, "episode_uuid", 3)),
+            "source_type": str(_row_value(row, "source_type", 4)),
+            "source_id": str(_row_value(row, "source_id", 5)),
+            "source_revision": str(_row_value(row, "source_revision", 6)),
+            "content_hash": str(_row_value(row, "content_hash", 7)),
+            "profile_id": str(_row_value(row, "profile_id", 8)),
+            "fence_epoch": int(_row_value(row, "fence_epoch", 9) or 0),
+            "state": str(_row_value(row, "state", 10)),
+            "execution_plan": _json_value(_row_value(row, "execution_plan", 11)),
+            "step_receipts": _json_value(_row_value(row, "step_receipts", 12)),
+            "last_error": _optional_str(_row_value(row, "last_error", 13)),
+        }
+
+    def get_graph_operation_journal(
+        self,
+        operation_id: str,
+        *,
+        conn: Any | None = None,
+    ) -> dict[str, Any] | None:
+        with self._scope(conn=conn) as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT operation_id, outbox_id, group_id, episode_uuid,
+                           source_type, source_id, source_revision, content_hash,
+                           profile_id, fence_epoch, state, execution_plan,
+                           step_receipts, last_error
+                      FROM graph_operation_journal
+                     WHERE operation_id = %s
+                    """,
+                    (operation_id,),
+                )
+                row = cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "operation_id": str(_row_value(row, "operation_id", 0)),
+            "outbox_id": _row_value(row, "outbox_id", 1),
+            "group_id": str(_row_value(row, "group_id", 2)),
+            "episode_uuid": str(_row_value(row, "episode_uuid", 3)),
+            "source_type": str(_row_value(row, "source_type", 4)),
+            "source_id": str(_row_value(row, "source_id", 5)),
+            "source_revision": str(_row_value(row, "source_revision", 6)),
+            "content_hash": str(_row_value(row, "content_hash", 7)),
+            "profile_id": str(_row_value(row, "profile_id", 8)),
+            "fence_epoch": int(_row_value(row, "fence_epoch", 9) or 0),
+            "state": str(_row_value(row, "state", 10)),
+            "execution_plan": _json_value(_row_value(row, "execution_plan", 11)),
+            "step_receipts": _json_value(_row_value(row, "step_receipts", 12)),
+            "last_error": _optional_str(_row_value(row, "last_error", 13)),
+        }
+
     @staticmethod
     def _validate_card(card: MemoryCard) -> None:
         if not card.memory_id or not card.project or not card.card_type:
@@ -2436,6 +4200,13 @@ def _vector_literal(vector: list[float] | tuple[float, ...] | None) -> str | Non
     return "[" + ",".join(format(float(value), ".17g") for value in vector) + "]"
 
 
+def _local_vector_literal(vector: list[float] | tuple[float, ...] | None) -> str:
+    if vector is None:
+        raise ValueError("local embedding vector must not be None")
+    _validate_local_vector(vector)
+    return "[" + ",".join(format(float(value), ".17g") for value in vector) + "]"
+
+
 def _validate_vector(vector: Any) -> None:
     if not isinstance(vector, (list, tuple)) or len(vector) != VECTOR_DIMENSION:
         length = len(vector) if isinstance(vector, (list, tuple)) else "unknown"
@@ -2443,6 +4214,22 @@ def _validate_vector(vector: Any) -> None:
     for value in vector:
         if not math.isfinite(float(value)):
             raise ValueError("vector values must be finite numbers")
+
+
+def _validate_local_vector(vector: Any) -> None:
+    if not isinstance(vector, (list, tuple)) or len(vector) != LOCAL_VECTOR_DIMENSION:
+        length = len(vector) if isinstance(vector, (list, tuple)) else "unknown"
+        raise ValueError(
+            f"Local vector dimension mismatch: expected {LOCAL_VECTOR_DIMENSION}, got {length}"
+        )
+    norm_sq = 0.0
+    for value in vector:
+        fval = float(value)
+        if not math.isfinite(fval):
+            raise ValueError("local vector values must be finite numbers")
+        norm_sq += fval * fval
+    if math.sqrt(norm_sq) <= 0.0:
+        raise ValueError("local vector norm must be positive")
 
 
 def _parse_vector(value: Any) -> list[float] | None:
@@ -2557,6 +4344,29 @@ def _outbox_from_row(row: Any) -> OutboxJob:
     )
 
 
+def _local_outbox_from_row(row: Any) -> LocalOutboxJob:
+    return LocalOutboxJob(
+        outbox_id=int(_row_value(row, "outbox_id", 0)),
+        target_type=str(_row_value(row, "target_type", 1)),
+        target_id=str(_row_value(row, "target_id", 2)),
+        profile_id=str(_row_value(row, "profile_id", 3)),
+        source_content_hash=str(_row_value(row, "source_content_hash", 4)),
+        input_hash=str(_row_value(row, "input_hash", 5)),
+        payload_text=str(_row_value(row, "payload_text", 6)),
+        incarnation=int(_row_value(row, "incarnation", 7, default=1)),
+        status=str(_row_value(row, "status", 8)),
+        fencing_token=int(_row_value(row, "fencing_token", 9, default=0)),
+        worker_id=_optional_str(_row_value(row, "worker_id", 10)),
+        claimed_at=_as_optional_datetime(_row_value(row, "claimed_at", 11)),
+        lease_until=_as_optional_datetime(_row_value(row, "lease_until", 12)),
+        retry_count=int(_row_value(row, "retry_count", 13, default=0)),
+        next_attempt_at=_as_optional_datetime(_row_value(row, "next_attempt_at", 14)),
+        last_error=_optional_str(_row_value(row, "last_error", 15)),
+        created_at=_as_aware_datetime(_row_value(row, "created_at", 16)),
+        updated_at=_as_aware_datetime(_row_value(row, "updated_at", 17)),
+    )
+
+
 def _graph_outbox_from_row(row: Any) -> GraphOutboxJob:
     payload = _row_value(row, "episode_payload", 5)
     if isinstance(payload, str):
@@ -2638,7 +4448,12 @@ __all__ = [
     "MemoryEdge",
     "SessionChunk",
     "OutboxJob",
+    "LocalOutboxJob",
     "PgVectorStore",
     "compute_cosine_similarity",
     "make_dummy_vector",
+    "compute_identity_lock_id",
+    "card_identity_lock_id",
+    "session_identity_lock_id",
+    "target_advisory_lock_id",
 ]

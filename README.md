@@ -736,6 +736,8 @@ neuron-knowledge --show-boundary        # 서버 경계 자기기술 출력
 neuron-knowledge mcp-stdio              # Agent 도구 2개
 neuron-knowledge mcp-http               # 동일한 Agent 도구, 기본 loopback
 neuron-knowledge mcp-http --surface admin --port 8766  # 별도 secret 주입 필요
+neuron-knowledge local-embedding verify --model-dir /path/to/model  # 로컬 Model2Vec 무결성 검증
+neuron-knowledge local-embedding serve --host 127.0.0.1 --port 18120  # 로컬 Model2Vec loopback 서버
 ```
 
 > 🔐 **credential 규칙.** 은퇴한 external index bridge의 credential은 **활성 runtime

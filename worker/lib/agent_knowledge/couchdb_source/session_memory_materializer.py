@@ -478,7 +478,33 @@ def _projection_state_for_materialization(
     failure_source_hash: str = "",
     ref: str = "",
     backend: str = "qdrant",
+    embedding_profile: str = "",
 ) -> dict:
+    if backend == "postgres_pgvector_local":
+        from ..model_connectors import LOCAL_EMBEDDING_PROFILE_ID
+
+        profile_key = embedding_profile or LOCAL_EMBEDDING_PROFILE_ID
+        doc = dict(existing) if existing else build_projection_state_document(
+            session_id_hash=materialized.session_id_hash,
+            provider=materialized.provider,
+            project=materialized.project,
+            projection_status=ProjectionStatus.PENDING,
+        )
+        receipts = dict(doc.get("backend_receipts") or {})
+        local_map = dict(receipts.get("postgres_pgvector_local") or {})
+        local_map[profile_key] = {
+            "projection_status": projection_status,
+            "projected_source_hash": materialized.source_hash if projection_status == ProjectionStatus.PROJECTED else "",
+            "active_content_hash": materialized.content_hash if projection_status == ProjectionStatus.PROJECTED else "",
+            "session_memory_knowledge_id": ref,
+            "provider": materialized.provider,
+            "project": materialized.project,
+            "materialized_at": materialized.materialized_at,
+            "failure_reason": failure_reason,
+        }
+        receipts["postgres_pgvector_local"] = local_map
+        doc["backend_receipts"] = receipts
+        return doc
     if backend == "postgres_pgvector":
         doc = dict(existing) if existing else build_projection_state_document(
             session_id_hash=materialized.session_id_hash,
@@ -564,7 +590,7 @@ def _with_projection_attempt(
     merging ``backend_receipts``. Keeping it separate from the receipt is what
     makes a failed refresh on an already-projected session observable.
     """
-    if backend != "postgres_pgvector":
+    if backend not in ("postgres_pgvector", "postgres_pgvector_local"):
         return document
     updated = dict(document)
     attempts = dict(updated.get(PROJECTION_ATTEMPT_FIELD) or {})
@@ -576,15 +602,16 @@ def _with_projection_attempt(
         "policy_version": PG_INPUT_POLICY_VERSION,
     }
     updated[PROJECTION_ATTEMPT_FIELD] = attempts
-    if status == ProjectionStatus.FAILED and reason in TERMINAL_INPUT_REASONS:
-        # Top-level summary for the one-time policy-version recovery query. The
-        # full attempt remains the per-backend source of truth.
-        updated["terminal_failure_policy_version"] = PG_INPUT_POLICY_VERSION
-        updated["terminal_failure_source_hash"] = source_hash
-        updated["terminal_failure_reason"] = reason
-    elif status == ProjectionStatus.PROJECTED:
-        for key in _TERMINAL_FAILURE_FIELDS:
-            updated.pop(key, None)
+    if backend == "postgres_pgvector":
+        if status == ProjectionStatus.FAILED and reason in TERMINAL_INPUT_REASONS:
+            # Top-level summary for the one-time policy-version recovery query. The
+            # full attempt remains the per-backend source of truth.
+            updated["terminal_failure_policy_version"] = PG_INPUT_POLICY_VERSION
+            updated["terminal_failure_source_hash"] = source_hash
+            updated["terminal_failure_reason"] = reason
+        elif status == ProjectionStatus.PROJECTED:
+            for key in _TERMINAL_FAILURE_FIELDS:
+                updated.pop(key, None)
     return updated
 
 
@@ -603,7 +630,7 @@ def _persist_projection_attempt(
     disappear from observability. This writes only the additive attempt field
     and retries the projection_state CAS a small bounded number of times.
     """
-    if backend != "postgres_pgvector" or not isinstance(state, dict) or not state.get("_id"):
+    if backend not in ("postgres_pgvector", "postgres_pgvector_local") or not isinstance(state, dict) or not state.get("_id"):
         return state or {}
     doc_id = str(state["_id"])
     for _attempt in range(3):
@@ -642,20 +669,58 @@ def _commit_projection_state_if_source_current(
     ref: str = "",
     backend: str = "qdrant",
     representation_receipt: dict | None = None,
+    embedding_profile: str = "",
 ) -> tuple[str, dict]:
+    from ..model_connectors import LOCAL_EMBEDDING_PROFILE_ID
+
+    profile_key = embedding_profile or (
+        str(representation_receipt.get("embedding_profile") or "")
+        if isinstance(representation_receipt, dict)
+        else ""
+    ) or LOCAL_EMBEDDING_PROFILE_ID
     if representation_receipt is not None:
-        from ..rag_ingress.pg_representation import valid_pg_receipt_metadata
-        if (backend != "postgres_pgvector" or projection_status != ProjectionStatus.PROJECTED
-            or not valid_pg_receipt_metadata(representation_receipt)
-            or representation_receipt.get("receipt_version") != 2
-            or any(representation_receipt.get(key) != value for key, value in {
-                "session_id_hash": materialized.session_id_hash,
-                "provider": materialized.provider, "project": materialized.project,
-                "active_content_hash": materialized.content_hash,
-                "projected_source_hash": materialized.source_hash,
-                "session_memory_knowledge_id": ref,
-            }.items())):
-            raise ValueError("PG representation receipt mismatch")
+        if backend == "postgres_pgvector_local":
+            from ..rag_ingress.pg_representation import valid_local_pg_receipt_metadata
+
+            if (
+                projection_status != ProjectionStatus.PROJECTED
+                or not valid_local_pg_receipt_metadata(representation_receipt)
+                or representation_receipt.get("receipt_version") != 3
+                or representation_receipt.get("embedding_profile") != profile_key
+                or any(
+                    representation_receipt.get(key) != value
+                    for key, value in {
+                        "session_id_hash": materialized.session_id_hash,
+                        "provider": materialized.provider,
+                        "project": materialized.project,
+                        "active_content_hash": materialized.content_hash,
+                        "projected_source_hash": materialized.source_hash,
+                        "session_memory_knowledge_id": ref,
+                    }.items()
+                )
+            ):
+                raise ValueError("PG local representation receipt v3 mismatch")
+        else:
+            from ..rag_ingress.pg_representation import valid_pg_receipt_metadata
+
+            if (
+                backend != "postgres_pgvector"
+                or projection_status != ProjectionStatus.PROJECTED
+                or not valid_pg_receipt_metadata(representation_receipt)
+                or representation_receipt.get("receipt_version") != 2
+                or any(
+                    representation_receipt.get(key) != value
+                    for key, value in {
+                        "session_id_hash": materialized.session_id_hash,
+                        "provider": materialized.provider,
+                        "project": materialized.project,
+                        "active_content_hash": materialized.content_hash,
+                        "projected_source_hash": materialized.source_hash,
+                        "session_memory_knowledge_id": ref,
+                    }.items()
+                )
+            ):
+                raise ValueError("PG representation receipt mismatch")
     state_id = projection_state_doc_id(materialized.session_id_hash)
     for _attempt in range(3):
         if (
@@ -675,9 +740,17 @@ def _commit_projection_state_if_source_current(
             )
             return "source_revision_changed", existing
         existing = store.get(state_id) or {}
-        receipt = (existing.get("backend_receipts") or {}).get(backend, {}) if backend == "postgres_pgvector" else existing
-        if (backend == "postgres_pgvector" and projection_status != ProjectionStatus.PROJECTED
-            and receipt.get("projection_status") == ProjectionStatus.PROJECTED):
+        if backend == "postgres_pgvector":
+            receipt = (existing.get("backend_receipts") or {}).get(backend, {})
+        elif backend == "postgres_pgvector_local":
+            receipt = ((existing.get("backend_receipts") or {}).get("postgres_pgvector_local") or {}).get(profile_key, {})
+        else:
+            receipt = existing
+        if (
+            backend in ("postgres_pgvector", "postgres_pgvector_local")
+            and projection_status != ProjectionStatus.PROJECTED
+            and receipt.get("projection_status") == ProjectionStatus.PROJECTED
+        ):
             # Failed refresh must not destroy the last successful mapping.
             existing = _persist_projection_attempt(
                 store,
@@ -691,25 +764,40 @@ def _commit_projection_state_if_source_current(
         pg_metadata_valid = True
         if backend == "postgres_pgvector":
             from ..rag_ingress.pg_representation import valid_pg_receipt_metadata
+
             pg_metadata_valid = valid_pg_receipt_metadata(receipt)
+        elif backend == "postgres_pgvector_local":
+            from ..rag_ingress.pg_representation import valid_local_pg_receipt_metadata
+
+            pg_metadata_valid = valid_local_pg_receipt_metadata(receipt)
         if (
             str(receipt.get("projection_status") or "") == ProjectionStatus.PROJECTED
             and str(receipt.get("projected_source_hash") or "")
             == materialized.source_hash
             and pg_metadata_valid
-            and (backend != "postgres_pgvector" or (
-                projection_status == ProjectionStatus.PROJECTED
-                and all(receipt.get(key) == value for key, value in (
-                    representation_receipt or {
-                        "active_content_hash": materialized.content_hash,
-                        "projected_source_hash": materialized.source_hash,
-                        "session_memory_knowledge_id": ref,
-                        "provider": materialized.provider,
-                        "project": materialized.project,
-                    }
-                ).items())
-                and (representation_receipt is not None or "representation_content_hash" not in receipt)
-            ))
+            and (
+                backend not in ("postgres_pgvector", "postgres_pgvector_local")
+                or (
+                    projection_status == ProjectionStatus.PROJECTED
+                    and all(
+                        receipt.get(key) == value
+                        for key, value in (
+                            representation_receipt
+                            or {
+                                "active_content_hash": materialized.content_hash,
+                                "projected_source_hash": materialized.source_hash,
+                                "session_memory_knowledge_id": ref,
+                                "provider": materialized.provider,
+                                "project": materialized.project,
+                            }
+                        ).items()
+                    )
+                    and (
+                        representation_receipt is not None
+                        or "representation_content_hash" not in receipt
+                    )
+                )
+            )
         ):
             attempt = (existing.get(PROJECTION_ATTEMPT_FIELD) or {}).get(backend) or {}
             if attempt and attempt.get("status") != ProjectionStatus.PROJECTED:
@@ -730,6 +818,7 @@ def _commit_projection_state_if_source_current(
             failure_source_hash=failure_source_hash,
             ref=ref,
             backend=backend,
+            embedding_profile=profile_key,
         )
         state = _with_projection_attempt(
             state,
@@ -739,7 +828,12 @@ def _commit_projection_state_if_source_current(
             source_hash=failure_source_hash or materialized.source_hash,
         )
         if representation_receipt is not None:
-            state["backend_receipts"][backend].update(representation_receipt)
+            if backend == "postgres_pgvector_local":
+                state["backend_receipts"]["postgres_pgvector_local"][profile_key].update(
+                    representation_receipt
+                )
+            else:
+                state["backend_receipts"][backend].update(representation_receipt)
         try:
             store.put_if_revision(
                 state,
@@ -748,7 +842,7 @@ def _commit_projection_state_if_source_current(
         except SourceStoreConflict:
             continue
         persisted = store.get(state_id)
-        if backend == "postgres_pgvector":
+        if backend in ("postgres_pgvector", "postgres_pgvector_local"):
             if _current_session_source_hash(session_id_hash=materialized.session_id_hash, store=store) != materialized.source_hash:
                 return "source_revision_changed", persisted or {}
             if persisted is None or persisted.get("backend_receipts") != state.get("backend_receipts"):
@@ -833,13 +927,23 @@ def project_session_memory(
     projection.
     """
 
+    from ..model_connectors import LOCAL_EMBEDDING_PROFILE_ID
+
+    projector_profile = str(getattr(projector, "embedding_profile", "") or "")
+    effective_backend = (
+        "postgres_pgvector_local"
+        if backend == "postgres_pgvector" and projector_profile == LOCAL_EMBEDDING_PROFILE_ID
+        else backend
+    )
+
     if not materialized.fully_materialized:
         commit_status, _state = _commit_projection_state_if_source_current(
             materialized=materialized,
             store=store,
             projection_status=ProjectionStatus.FAILED,
             failure_reason="materialization_loss",
-            backend=backend,
+            backend=effective_backend,
+            embedding_profile=projector_profile,
         )
         result = {
             "status": ProjectionStatus.FAILED,
@@ -874,7 +978,8 @@ def project_session_memory(
             commit_status, _state = _commit_projection_state_if_source_current(
                 materialized=materialized, store=store,
                 projection_status=ProjectionStatus.PENDING,
-                failure_reason="embedding_chunks_pending", backend=backend,
+                failure_reason="embedding_chunks_pending", backend=effective_backend,
+                embedding_profile=projector_profile,
             )
             result = {"status": ProjectionStatus.PENDING,
                       "reason": "embedding_chunks_pending", "ref": ""}
@@ -901,7 +1006,8 @@ def project_session_memory(
             projection_status=ProjectionStatus.FAILED,
             failure_reason=failure_reason,
             failure_source_hash=materialized.source_hash,
-            backend=backend,
+            backend=effective_backend,
+            embedding_profile=projector_profile,
         )
         result = {
             "status": ProjectionStatus.FAILED,
@@ -912,12 +1018,19 @@ def project_session_memory(
             result["state_write_skipped"] = commit_status
         return result
 
+    local_receipt = (
+        getattr(projector, "last_local_representation_receipt", None)
+        if effective_backend == "postgres_pgvector_local"
+        else None
+    )
     commit_status, _state = _commit_projection_state_if_source_current(
         materialized=materialized,
         store=store,
         projection_status=ProjectionStatus.PROJECTED,
         ref=ref,
-        backend=backend,
+        backend=effective_backend,
+        representation_receipt=local_receipt,
+        embedding_profile=projector_profile,
     )
     if commit_status == "source_revision_changed":
         return {

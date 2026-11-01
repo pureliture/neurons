@@ -5,11 +5,20 @@ from .pgvector_store import (
     MemoryEdge,
     SessionChunk,
     OutboxJob,
+    LocalOutboxJob,
     PgVectorStore,
     compute_cosine_similarity,
     make_dummy_vector,
+    compute_identity_lock_id,
+    card_identity_lock_id,
+    session_identity_lock_id,
+    target_advisory_lock_id,
 )
-from .outbox_worker import OutboxWorker, generate_deterministic_embedding
+from .outbox_worker import (
+    OutboxWorker,
+    LocalEmbeddingOutboxWorker,
+    generate_deterministic_embedding,
+)
 from .migration_qdrant_to_postgres import (
     QdrantToPostgresMigrator,
     MigrationResult,
@@ -27,10 +36,16 @@ __all__ = [
     "MemoryEdge",
     "SessionChunk",
     "OutboxJob",
+    "LocalOutboxJob",
     "PgVectorStore",
     "OutboxWorker",
+    "LocalEmbeddingOutboxWorker",
     "compute_cosine_similarity",
     "make_dummy_vector",
+    "compute_identity_lock_id",
+    "card_identity_lock_id",
+    "session_identity_lock_id",
+    "target_advisory_lock_id",
     "generate_deterministic_embedding",
     "QdrantToPostgresMigrator",
     "MigrationResult",
