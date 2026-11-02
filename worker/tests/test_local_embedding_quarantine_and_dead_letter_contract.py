@@ -128,6 +128,16 @@ def test_ensure_local_group_resolution_ready_blocks_quarantined_and_uncovered() 
         # Should not raise
         await ensure_local_group_resolution_ready(mock_driver, "group_ok")
 
+        # Case 5: Expired backfill lease reclaimed and covered -> should not raise
+        mock_driver.execute_query = AsyncMock(
+            return_value=([{"fence_status": "idle", "raw_status": "backfill_in_progress", "quarantine_reason": None, "missing_or_dirty": 0}], None, None)
+        )
+        await ensure_local_group_resolution_ready(mock_driver, "group_expired_reclaimed")
+        # Ensure query passes now_iso parameter for lease expiration check
+        kwargs = mock_driver.execute_query.call_args.kwargs
+        assert "now_iso" in kwargs, "ensure_local_group_resolution_ready must pass now_iso to execute_query"
+        assert kwargs["group_id"] == "group_expired_reclaimed"
+
     asyncio.run(_run())
 
 

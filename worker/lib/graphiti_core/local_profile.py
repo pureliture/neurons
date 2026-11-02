@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
+from datetime import datetime, timezone
 import hashlib
 import os
 import re
@@ -272,15 +273,40 @@ async def ensure_local_group_resolution_ready(driver: Any, group_id: str) -> Non
     if not group_id or not hasattr(driver, "execute_query"):
         return
 
+    now_iso = datetime.now(timezone.utc).isoformat()
     records, _, _ = await driver.execute_query(
         """
         OPTIONAL MATCH (f:EmbeddingGroupFence {group_id: $group_id})
-        WITH coalesce(f.status, 'idle') AS fence_status, f.quarantine_reason AS quarantine_reason
+        WITH f,
+             coalesce(f.status, 'idle') AS raw_status,
+             f.quarantine_reason AS quarantine_reason,
+             CASE
+                 WHEN coalesce(f.status, 'idle') = 'quarantined' THEN 'quarantined'
+                 WHEN coalesce(f.status, 'idle') IN ['backfill_in_progress', 'reconciling']
+                      AND f.lease_until IS NOT NULL
+                      AND f.lease_until > datetime($now_iso)
+                 THEN 'busy'
+                 WHEN coalesce(f.status, 'idle') IN ['backfill_in_progress', 'reconciling']
+                 THEN 'expired'
+                 ELSE 'idle'
+             END AS outcome
+        FOREACH (_ IN CASE WHEN outcome = 'expired' THEN [1] ELSE [] END |
+            SET f.status = 'idle',
+                f.lease_owner = null,
+                f.lease_until = null,
+                f.active_operation_id = null,
+                f.updated_at = datetime($now_iso)
+        )
+        WITH outcome, raw_status, quarantine_reason
         OPTIONAL MATCH (n:Entity {group_id: $group_id})
         WHERE n.name_embedding_model2vec_v1 IS NULL OR coalesce(n.embedding_dirty, false) = true
-        RETURN fence_status, quarantine_reason, count(n) AS missing_or_dirty
+        RETURN CASE WHEN outcome = 'expired' THEN 'idle' ELSE outcome END AS fence_status,
+               raw_status,
+               quarantine_reason,
+               count(n) AS missing_or_dirty
         """,
         group_id=group_id,
+        now_iso=now_iso,
     )
     if records:
         rec = records[0]
@@ -290,9 +316,10 @@ async def ensure_local_group_resolution_ready(driver: Any, group_id: str) -> Non
             raise LocalGroupResolutionBlockedError(
                 f"group_id={group_id} is quarantined ({reason}); entity resolution blocked"
             )
-        if fence_status in ("backfill_in_progress", "reconciling"):
+        if fence_status in ("busy", "backfill_in_progress", "reconciling"):
+            raw_status = rec.get("raw_status") or fence_status
             raise LocalGroupResolutionBlockedError(
-                f"group_id={group_id} fence is busy ({fence_status}); entity resolution deferred"
+                f"group_id={group_id} fence is busy ({raw_status}); entity resolution deferred"
             )
         missing_count = int(rec.get("missing_or_dirty") or 0)
         if missing_count > 0:
