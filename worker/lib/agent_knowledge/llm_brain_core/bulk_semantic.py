@@ -222,6 +222,7 @@ class OpenAICompatibleEmbeddingBatcher:
                 base_url=self._base_url,
                 dimension=LOCAL_EMBEDDING_DIM,
             )
+            self._model = LOCAL_EMBEDDING_MODEL_ALIAS
         self._timeout_seconds = max(1, int(timeout_seconds))
         self._max_batch_size = max(1, int(max_batch_size))
         self._post_fn = post_fn or _urllib_post
@@ -241,12 +242,16 @@ class OpenAICompatibleEmbeddingBatcher:
             or ""
         ).strip()
         raw_model = env.get("LLM_BRAIN_EMBEDDING_MODEL", env.get("EMBEDDING_MODEL", ""))
+        raw_provider = env.get(
+            "LLM_BRAIN_EMBEDDING_PROVIDER",
+            env.get("EMBEDDING_PROVIDER", ""),
+        ).lower()
         is_local = _is_local_embedding_config(
             embedding_profile=raw_profile,
             embedding_model=raw_model,
+            embedding_provider=raw_provider,
         )
         if is_local:
-            model = raw_model or LOCAL_EMBEDDING_MODEL_ALIAS
             # Local embedding mode NEVER falls back to OPENAI_BASE_URL.
             base_url = env.get(
                 "LLM_BRAIN_EMBEDDING_BASE_URL",
@@ -254,10 +259,11 @@ class OpenAICompatibleEmbeddingBatcher:
             )
             validate_local_embedding_write_or_query_policy(
                 profile_id=LOCAL_EMBEDDING_PROFILE_ID,
-                model=model,
+                model=raw_model or LOCAL_EMBEDDING_MODEL_ALIAS,
                 base_url=base_url,
                 dimension=LOCAL_EMBEDDING_DIM,
             )
+            model = LOCAL_EMBEDDING_MODEL_ALIAS
             api_key = env.get(
                 "LLM_BRAIN_EMBEDDING_API_KEY",
                 env.get("NEURON_LOCAL_EMBEDDING_API_KEY", ""),
@@ -427,7 +433,15 @@ class DeterministicGraphitiSemanticWriter:
             or ""
         ).strip()
         raw_model = env.get("LLM_BRAIN_EMBEDDING_MODEL", env.get("EMBEDDING_MODEL", ""))
-        if _is_local_embedding_config(embedding_profile=raw_profile, embedding_model=raw_model):
+        raw_provider = env.get(
+            "LLM_BRAIN_EMBEDDING_PROVIDER",
+            env.get("EMBEDDING_PROVIDER", ""),
+        ).lower()
+        if _is_local_embedding_config(
+            embedding_profile=raw_profile,
+            embedding_model=raw_model,
+            embedding_provider=raw_provider,
+        ):
             driver.local_embedding_profile = LOCAL_EMBEDDING_PROFILE_ID
         return cls(
             driver,

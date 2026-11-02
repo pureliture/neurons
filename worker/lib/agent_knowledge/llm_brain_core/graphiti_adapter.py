@@ -95,8 +95,11 @@ def _is_local_embedding_config(
     *,
     embedding_profile: str = "",
     embedding_model: str = "",
+    embedding_provider: str = "",
 ) -> bool:
     if str(embedding_profile or "").strip() == LOCAL_EMBEDDING_PROFILE_ID:
+        return True
+    if str(embedding_provider or "").strip().lower() in ("model2vec", "local"):
         return True
     return str(embedding_model or "").strip().lower() in _LOCAL_EMBEDDING_MODEL_NAMES
 
@@ -163,14 +166,15 @@ class GraphitiNeo4jConfig:
             "LLM_BRAIN_EMBEDDING_MODEL",
             env.get("EMBEDDING_MODEL", ""),
         )
-        is_local = _is_local_embedding_config(
-            embedding_profile=raw_profile,
-            embedding_model=raw_embedding_model,
-        )
         embedding_provider = env.get(
             "LLM_BRAIN_EMBEDDING_PROVIDER",
             env.get("EMBEDDING_PROVIDER", "openai"),
         ).lower()
+        is_local = _is_local_embedding_config(
+            embedding_profile=raw_profile,
+            embedding_model=raw_embedding_model,
+            embedding_provider=embedding_provider,
+        )
         if is_local:
             embedding_profile = LOCAL_EMBEDDING_PROFILE_ID
             # Local embedding mode NEVER falls back to OPENAI_BASE_URL.
@@ -178,7 +182,8 @@ class GraphitiNeo4jConfig:
                 "LLM_BRAIN_EMBEDDING_BASE_URL",
                 env.get("NEURON_LOCAL_EMBEDDING_BASE_URL", ""),
             )
-            embedding_model = raw_embedding_model or LOCAL_EMBEDDING_MODEL_ALIAS
+            # Service application strictly expects canonical alias 'local-model2vec-256-v1'
+            embedding_model = LOCAL_EMBEDDING_MODEL_ALIAS
             embedding_dim = _int_env(
                 env.get("LLM_BRAIN_EMBEDDING_DIM", ""),
                 default=LOCAL_EMBEDDING_DIM,
@@ -1145,6 +1150,7 @@ def _build_graphiti(config: GraphitiNeo4jConfig):
     is_local_embedding = _is_local_embedding_config(
         embedding_profile=config.embedding_profile,
         embedding_model=config.embedding_model,
+        embedding_provider=config.embedding_provider,
     )
 
     if _uses_configured_llm_client(config.llm_provider):
@@ -1180,6 +1186,8 @@ def _build_graphiti(config: GraphitiNeo4jConfig):
                 base_url=resolved_embedding_base_url,
                 dimension=embedding_dim,
             )
+            # Service application strictly expects canonical alias 'local-model2vec-256-v1'
+            embedding_model = LOCAL_EMBEDDING_MODEL_ALIAS
         else:
             resolved_embedding_base_url = config.embedding_base_url or base_url
         raw_embedder = OpenAIEmbedder(

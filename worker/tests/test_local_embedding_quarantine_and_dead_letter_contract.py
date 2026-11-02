@@ -385,6 +385,47 @@ def test_no_private_hermes_paths_in_local_embedding_tests() -> None:
         assert ".hermes" not in text, f"Found private path in {py_file.name}"
 
 
+def test_graphiti_config_resolves_local_profile_from_provider_and_normalizes_model() -> None:
+    """Verify GraphitiNeo4jConfig detects local profile from provider and normalizes model to canonical alias."""
+    from agent_knowledge.llm_brain_core.graphiti_adapter import GraphitiNeo4jConfig
+
+    # 1. From provider=model2vec alone (without model name)
+    cfg1 = GraphitiNeo4jConfig.from_env(
+        {
+            "LLM_BRAIN_EMBEDDING_PROVIDER": "model2vec",
+            "LLM_BRAIN_EMBEDDING_BASE_URL": "http://127.0.0.1:18120/v1",
+        }
+    )
+    assert cfg1.embedding_profile == "lbrain-memory-model2vec-256-v1"
+    assert cfg1.embedding_dim == 256
+    assert cfg1.embedding_model == "local-model2vec-256-v1"
+
+    # 2. From model=minishlab/potion-multilingual-128M
+    cfg2 = GraphitiNeo4jConfig.from_env(
+        {
+            "LLM_BRAIN_EMBEDDING_MODEL": "minishlab/potion-multilingual-128M",
+            "LLM_BRAIN_EMBEDDING_BASE_URL": "http://127.0.0.1:18120/v1",
+        }
+    )
+    assert cfg2.embedding_profile == "lbrain-memory-model2vec-256-v1"
+    assert cfg2.embedding_dim == 256
+    assert cfg2.embedding_model == "local-model2vec-256-v1"
+
+
+def test_bulk_semantic_batcher_normalizes_model_to_canonical_alias() -> None:
+    """Verify OpenAICompatibleEmbeddingBatcher normalizes local model to local-model2vec-256-v1."""
+    from agent_knowledge.llm_brain_core.bulk_semantic import OpenAICompatibleEmbeddingBatcher
+
+    batcher = OpenAICompatibleEmbeddingBatcher(
+        base_url="http://127.0.0.1:18120/v1",
+        model="minishlab/potion-multilingual-128M",
+        embedding_profile="lbrain-memory-model2vec-256-v1",
+    )
+    assert batcher.is_local_profile
+    assert batcher._model == "local-model2vec-256-v1"
+
+
+
 
 
 
