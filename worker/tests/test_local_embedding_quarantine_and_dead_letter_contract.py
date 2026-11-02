@@ -165,4 +165,32 @@ def test_bulk_semantic_local_profile_uses_canonical_planner_and_utf8_weights() -
     assert "chunk_byte_lengths=" in embed_many_src
 
 
+def test_pg_session_projector_store_call_contracts() -> None:
+    """Verify PgSessionMemoryProjector matches PgVectorStore contracts for local projection."""
+    from agent_knowledge.rag_ingress.pg_backfill import PgSessionMemoryProjector
+
+    proj_src = inspect.getsource(PgSessionMemoryProjector._project_local_profile)
+    # New chunk path: insert_chunk_with_local_outbox
+    assert "insert_chunk_with_local_outbox(" in proj_src
+    assert "profile_id=LOCAL_EMBEDDING_PROFILE_ID" in proj_src
+    assert "already_locked_identity=True" in proj_src
+
+    # Existing chunk reuse path: _enqueue_local_outbox_on
+    assert "_enqueue_local_outbox_on(" in proj_src
+    assert "source_content_hash=content_hash" in proj_src
+    assert "acquire_locks=False" in proj_src
+    assert "lock_already_held=" not in proj_src
+
+
+def test_bulk_semantic_post_uses_canonical_serializer() -> None:
+    """Verify OpenAICompatibleEmbeddingBatcher uses serialize_embedding_request_body in _post_embeddings_chunk."""
+    from agent_knowledge.llm_brain_core.bulk_semantic import (
+        OpenAICompatibleEmbeddingBatcher,
+    )
+
+    post_src = inspect.getsource(OpenAICompatibleEmbeddingBatcher._post_embeddings_chunk)
+    assert "serialize_embedding_request_body(" in post_src
+
+
+
 

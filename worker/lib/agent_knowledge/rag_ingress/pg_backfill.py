@@ -576,12 +576,10 @@ class PgSessionMemoryProjector:
                     conn,
                     target_type="session_chunk",
                     target_id=chosen_id,
-                    embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
-                    content_hash=content_hash,
-                    input_hash=input_hash,
+                    source_content_hash=content_hash,
                     payload_text=input_text,
-                    now=datetime.now(timezone.utc),
-                    lock_already_held=True,
+                    profile_id=LOCAL_EMBEDDING_PROFILE_ID,
+                    acquire_locks=False,
                 )
             else:
                 new_chunk = SessionChunk(
@@ -601,8 +599,8 @@ class PgSessionMemoryProjector:
                 _, outbox_id = self._store.insert_chunk_with_local_outbox(
                     new_chunk,
                     conn=conn,
-                    embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
-                    lock_already_held=True,
+                    profile_id=LOCAL_EMBEDDING_PROFILE_ID,
+                    already_locked_identity=True,
                 )
 
         # Model call happens strictly outside the PG transaction.

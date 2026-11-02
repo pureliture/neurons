@@ -24,6 +24,7 @@ from ..local_embedding.canonical import (
     decode_base64_f32_le,
     normalize_canonical_text,
     plan_request_batches_v1,
+    serialize_embedding_request_body,
     split_into_canonical_chunks,
 )
 from ..local_embedding.profile import (
@@ -370,7 +371,15 @@ class OpenAICompatibleEmbeddingBatcher:
         return aggregated
 
     def _post_embeddings_chunk(self, *, headers: dict[str, str], chunk: list[str]) -> str:
-        body = json.dumps({"model": self._model, "input": chunk}, ensure_ascii=True)
+        if self._is_local_profile:
+            body = serialize_embedding_request_body(
+                chunk,
+                model=self._model,
+                encoding_format=None,
+                dimensions=None,
+            ).decode("utf-8")
+        else:
+            body = json.dumps({"model": self._model, "input": chunk}, ensure_ascii=True)
         for attempt in range(3):
             try:
                 return self._post_fn(
