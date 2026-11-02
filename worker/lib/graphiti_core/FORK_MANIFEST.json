@@ -35,7 +35,7 @@
       "upstream_sha256": "0151d72ebfb057033c6d52a163e22f252f67b915722e14315b685c7831b3b1c6"
     },
     "embedder/openai.py": {
-      "fork_sha256": "40fed4453105170266092872f6e146dd3c6a0fe3e1923a73765af977c3b97e76",
+      "fork_sha256": "8d056d47806696c5d262d1bb847a9db540107e8c0867bf5f16f582e14786b05f",
       "upstream_sha256": "707780f4a6b48ef304cf9463e6ef289d3f316d0c24009094a3f15b20010f8682"
     },
     "graphiti.py": {
