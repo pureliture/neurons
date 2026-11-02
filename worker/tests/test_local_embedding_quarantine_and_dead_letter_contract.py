@@ -267,6 +267,73 @@ def test_backfill_session_receipts_uses_materialized_source_hash_and_legacy_sche
     assert "valid_local_representation_receipt_v3(" in backfill_src
 
 
+def test_quarantined_rejected_node_and_edge_writes_raise_local_group_write_blocked_error() -> None:
+    """Verify node and edge saves raise LocalGroupWriteBlockedError when rejected by quarantined fence."""
+    from graphiti_core.local_profile import LocalGroupWriteBlockedError
+    from graphiti_core.nodes import EntityNode
+    from graphiti_core.edges import EntityEdge
+    from graphiti_core.driver.neo4j.operations.entity_node_ops import Neo4jEntityNodeOperations
+    from graphiti_core.driver.neo4j.operations.entity_edge_ops import Neo4jEntityEdgeOperations
+    from agent_knowledge.llm_brain_core.bulk_semantic import (
+        _save_entity_node_without_embedding,
+        _save_entity_edge_without_embedding,
+    )
+    from datetime import datetime, timezone
+    import asyncio
+    from unittest.mock import AsyncMock
+    import pytest
+
+    async def _run() -> None:
+        mock_driver = MagicMock()
+        mock_driver.local_embedding_profile = "lbrain-memory-model2vec-256-v1"
+        mock_driver.graph_operations_interface = None
+        mock_driver.provider = GraphProvider.NEO4J
+        mock_driver.execute_query = AsyncMock(return_value=([], None, None))
+
+        node = EntityNode(
+            uuid="node-q-1",
+            name="test node",
+            group_id="group_quarantined",
+            name_embedding=[0.1] * 256,
+        )
+        with pytest.raises(LocalGroupWriteBlockedError, match="save was rejected"):
+            await node.save(mock_driver)
+
+        edge = EntityEdge(
+            uuid="edge-q-1",
+            source_node_uuid="node-q-1",
+            target_node_uuid="node-q-2",
+            name="REL",
+            fact="test fact",
+            group_id="group_quarantined",
+            fact_embedding=[0.1] * 256,
+            created_at=datetime.now(timezone.utc),
+        )
+        with pytest.raises(LocalGroupWriteBlockedError, match="save was rejected"):
+            await edge.save(mock_driver)
+
+        # Test ops classes
+        node_ops = Neo4jEntityNodeOperations()
+        with pytest.raises(LocalGroupWriteBlockedError, match="save was rejected"):
+            await node_ops.save(mock_driver, node)
+        with pytest.raises(LocalGroupWriteBlockedError, match="bulk save rejected"):
+            await node_ops.save_bulk(mock_driver, [node])
+
+        edge_ops = Neo4jEntityEdgeOperations()
+        with pytest.raises(LocalGroupWriteBlockedError, match="save was rejected"):
+            await edge_ops.save(mock_driver, edge)
+        with pytest.raises(LocalGroupWriteBlockedError, match="bulk save rejected"):
+            await edge_ops.save_bulk(mock_driver, [edge])
+
+        # Test bulk_semantic helper functions
+        with pytest.raises(LocalGroupWriteBlockedError, match="save rejected"):
+            await _save_entity_node_without_embedding(mock_driver, node)
+        with pytest.raises(LocalGroupWriteBlockedError, match="save rejected"):
+            await _save_entity_edge_without_embedding(mock_driver, edge)
+
+    asyncio.run(_run())
+
+
 
 
 

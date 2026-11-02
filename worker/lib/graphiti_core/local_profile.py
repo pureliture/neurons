@@ -268,6 +268,10 @@ class LocalGroupResolutionBlockedError(RuntimeError):
     """Raised when entity resolution is attempted on a group with incomplete local coverage or active fence."""
 
 
+class LocalGroupWriteBlockedError(RuntimeError):
+    """Raised when entity node or edge save is rejected by an active or quarantined EmbeddingGroupFence."""
+
+
 async def ensure_local_group_resolution_ready(driver: Any, group_id: str) -> None:
     """Validate that group_id has full local embedding coverage and is not quarantined or busy."""
     if not group_id or not hasattr(driver, "execute_query"):

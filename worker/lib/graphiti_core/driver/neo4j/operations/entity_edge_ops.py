@@ -65,9 +65,17 @@ class Neo4jEntityEdgeOperations(EntityEdgeOperations):
 
         query = get_entity_edge_save_query(GraphProvider.NEO4J, local_mode=local_mode)
         if tx is not None:
-            await tx.run(query, edge_data=edge_data)
+            res = await tx.run(query, edge_data=edge_data)
+            records = [rec async for rec in res] if hasattr(res, "__aiter__") else []
         else:
-            await executor.execute_query(query, edge_data=edge_data)
+            res = await executor.execute_query(query, edge_data=edge_data)
+            records = res[0] if res else []
+
+        if local_mode and not records:
+            from graphiti_core.local_profile import LocalGroupWriteBlockedError
+            raise LocalGroupWriteBlockedError(
+                f"Neo4j entity edge {edge.uuid} save was rejected: group {edge.group_id} may be quarantined or fence check failed"
+            )
 
         logger.debug(f'Saved Edge to Graph: {edge.uuid}')
 
@@ -100,9 +108,18 @@ class Neo4jEntityEdgeOperations(EntityEdgeOperations):
 
         query = get_entity_edge_save_bulk_query(GraphProvider.NEO4J, local_mode=local_mode)
         if tx is not None:
-            await tx.run(query, entity_edges=prepared)
+            res = await tx.run(query, entity_edges=prepared)
+            records = [rec async for rec in res] if hasattr(res, "__aiter__") else []
         else:
-            await executor.execute_query(query, entity_edges=prepared)
+            res = await executor.execute_query(query, entity_edges=prepared)
+            records = res[0] if res else []
+
+        if local_mode and len(records) != len(prepared):
+            from graphiti_core.local_profile import LocalGroupWriteBlockedError
+            raise LocalGroupWriteBlockedError(
+                f"Neo4j entity edges bulk save rejected {len(prepared) - len(records)} of {len(prepared)} edges: "
+                f"group may be quarantined or fence check failed"
+            )
 
     async def delete(
         self,

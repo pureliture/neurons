@@ -436,6 +436,11 @@ class EntityEdge(Edge):
                 get_entity_edge_save_query(driver.provider, local_mode=local_mode),
                 edge_data=edge_data,
             )
+            if local_mode and (result is None or not result[0]):
+                from graphiti_core.local_profile import LocalGroupWriteBlockedError
+                raise LocalGroupWriteBlockedError(
+                    f"EntityEdge {self.uuid} save was rejected: group {self.group_id} may be quarantined or fence check failed"
+                )
 
         logger.debug(f'Saved edge to Graph: {self.uuid}')
 

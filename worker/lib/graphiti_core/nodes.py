@@ -681,6 +681,11 @@ class EntityNode(Node):
                 get_entity_node_save_query(driver.provider, labels, local_mode=local_mode),
                 entity_data=entity_data,
             )
+            if local_mode and (result is None or not result[0]):
+                from graphiti_core.local_profile import LocalGroupWriteBlockedError
+                raise LocalGroupWriteBlockedError(
+                    f"EntityNode {self.uuid} save was rejected: group {self.group_id} may be quarantined or fence check failed"
+                )
 
         logger.debug(f'Saved Node to Graph: {self.uuid}')
 

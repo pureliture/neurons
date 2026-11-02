@@ -798,21 +798,47 @@ async def _save_entity_node_without_embedding(driver: Any, node: Any) -> None:
         "created_at": node.created_at,
         **dict(node.attributes or {}),
     }
-    if is_local_embedding_enabled(driver):
+    local_mode = is_local_embedding_enabled(driver)
+    if local_mode:
         data["name_embedding_model2vec_v1_input_hash"] = (
             compute_graph_node_embedding_input_hash(node.name)
         )
         data["embedding_dirty"] = True
         data["embedding_updated_at"] = datetime.now(timezone.utc)
-    await driver.execute_query(
-        """
-        MERGE (n:Entity {uuid: $entity_data.uuid})
-        SET n:Entity
-        SET n += $entity_data
-        RETURN n.uuid AS uuid
-        """,
-        entity_data=data,
-    )
+        records, _, _ = await driver.execute_query(
+            """
+            OPTIONAL MATCH (fence_check:EmbeddingGroupFence {group_id: coalesce($entity_data.group_id, '')})
+            WITH fence_check
+            WHERE fence_check IS NULL OR fence_check.status <> 'quarantined'
+            MERGE (n:Entity {uuid: $entity_data.uuid})
+            SET n:Entity
+            SET n += $entity_data
+            FOREACH (_ IN CASE WHEN $entity_data.embedding_dirty = true AND $entity_data.group_id IS NOT NULL AND $entity_data.group_id <> '' THEN [1] ELSE [] END |
+                MERGE (fence:EmbeddingGroupFence {group_id: $entity_data.group_id})
+                ON CREATE SET fence.epoch = 1, fence.status = 'pending', fence.updated_at = datetime()
+                ON MATCH SET fence.epoch = coalesce(fence.epoch, 0) + 1,
+                             fence.status = CASE WHEN fence.status = 'quarantined' THEN 'quarantined' ELSE 'pending' END,
+                             fence.updated_at = datetime()
+            )
+            RETURN n.uuid AS uuid
+            """,
+            entity_data=data,
+        )
+        if not records:
+            from graphiti_core.local_profile import LocalGroupWriteBlockedError
+            raise LocalGroupWriteBlockedError(
+                f"EntityNode {node.uuid} save rejected: group {node.group_id} is quarantined"
+            )
+    else:
+        await driver.execute_query(
+            """
+            MERGE (n:Entity {uuid: $entity_data.uuid})
+            SET n:Entity
+            SET n += $entity_data
+            RETURN n.uuid AS uuid
+            """,
+            entity_data=data,
+        )
 
 
 async def _save_entity_edge_without_embedding(driver: Any, edge: Any) -> None:
@@ -831,22 +857,49 @@ async def _save_entity_edge_without_embedding(driver: Any, edge: Any) -> None:
         "reference_time": edge.reference_time,
         **dict(edge.attributes or {}),
     }
-    if is_local_embedding_enabled(driver):
+    local_mode = is_local_embedding_enabled(driver)
+    if local_mode:
         data["fact_embedding_model2vec_v1_input_hash"] = (
             compute_graph_edge_embedding_input_hash(edge.fact)
         )
         data["embedding_dirty"] = True
         data["embedding_updated_at"] = datetime.now(timezone.utc)
-    await driver.execute_query(
-        """
-        MATCH (source:Entity {uuid: $edge_data.source_uuid})
-        MATCH (target:Entity {uuid: $edge_data.target_uuid})
-        MERGE (source)-[e:RELATES_TO {uuid: $edge_data.uuid}]->(target)
-        SET e += $edge_data
-        RETURN e.uuid AS uuid
-        """,
-        edge_data=data,
-    )
+        records, _, _ = await driver.execute_query(
+            """
+            OPTIONAL MATCH (fence_check:EmbeddingGroupFence {group_id: coalesce($edge_data.group_id, '')})
+            WITH fence_check
+            WHERE fence_check IS NULL OR fence_check.status <> 'quarantined'
+            MATCH (source:Entity {uuid: $edge_data.source_uuid})
+            MATCH (target:Entity {uuid: $edge_data.target_uuid})
+            MERGE (source)-[e:RELATES_TO {uuid: $edge_data.uuid}]->(target)
+            SET e += $edge_data
+            FOREACH (_ IN CASE WHEN $edge_data.embedding_dirty = true AND $edge_data.group_id IS NOT NULL AND $edge_data.group_id <> '' THEN [1] ELSE [] END |
+                MERGE (fence:EmbeddingGroupFence {group_id: $edge_data.group_id})
+                ON CREATE SET fence.epoch = 1, fence.status = 'pending', fence.updated_at = datetime()
+                ON MATCH SET fence.epoch = coalesce(fence.epoch, 0) + 1,
+                             fence.status = CASE WHEN fence.status = 'quarantined' THEN 'quarantined' ELSE 'pending' END,
+                             fence.updated_at = datetime()
+            )
+            RETURN e.uuid AS uuid
+            """,
+            edge_data=data,
+        )
+        if not records:
+            from graphiti_core.local_profile import LocalGroupWriteBlockedError
+            raise LocalGroupWriteBlockedError(
+                f"EntityEdge {edge.uuid} save rejected: group {edge.group_id} is quarantined"
+            )
+    else:
+        await driver.execute_query(
+            """
+            MATCH (source:Entity {uuid: $edge_data.source_uuid})
+            MATCH (target:Entity {uuid: $edge_data.target_uuid})
+            MERGE (source)-[e:RELATES_TO {uuid: $edge_data.uuid}]->(target)
+            SET e += $edge_data
+            RETURN e.uuid AS uuid
+            """,
+            edge_data=data,
+        )
 
 
 def _strip_code_fences(value: str) -> str:
