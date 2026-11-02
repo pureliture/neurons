@@ -607,6 +607,8 @@ def backfill_neo4j_local_embeddings(
             groups_fenced_busy += 1
             continue
 
+        embedded_entity_uuids: list[str] = []
+        embedded_edge_uuids: list[str] = []
         try:
             for _batch_idx in range(bounded_max_batches):
                 ent_rows = session.run(
@@ -687,6 +689,7 @@ def backfill_neo4j_local_embeddings(
                         )
                         if cas.applied:
                             entities_embedded += 1
+                            embedded_entity_uuids.append(str(cand["uuid"]))
                         else:
                             entities_fenced_stale += 1
 
@@ -715,21 +718,22 @@ def backfill_neo4j_local_embeddings(
                         )
                         if cas.applied:
                             edges_embedded += 1
+                            embedded_edge_uuids.append(str(cand["uuid"]))
                         else:
                             edges_fenced_stale += 1
 
-                if journal_coordinator is not None:
-                    journal_coordinator.run_step(
-                        session,
-                        operation_id=operation_id,
-                        group_id=group_id,
-                        step_id="embeddings_committed",
-                        effect_payload={
-                            "entities": [c["uuid"] for c in entity_candidates],
-                            "edges": [c["uuid"] for c in edge_candidates],
-                        },
-                        action=lambda: True,
-                    )
+            if journal_coordinator is not None and (embedded_entity_uuids or embedded_edge_uuids):
+                journal_coordinator.run_step(
+                    session,
+                    operation_id=operation_id,
+                    group_id=group_id,
+                    step_id="embeddings_committed",
+                    effect_payload={
+                        "entities": sorted(embedded_entity_uuids),
+                        "edges": sorted(embedded_edge_uuids),
+                    },
+                    action=lambda: True,
+                )
         finally:
             if journal_coordinator is not None:
                 journal_coordinator.complete_operation(session, lease=lease)
@@ -771,7 +775,11 @@ def _invoke_embedder_batch(embedder: Any, texts: list[str]) -> list[list[float]]
             for item in result
         ]
     if hasattr(embedder, "embed_documents"):
-        return [list(vec) for vec in embedder.embed_documents(texts)]
+        result = embedder.embed_documents(texts)
+        return [
+            list(item.vector) if hasattr(item, "vector") else list(item)
+            for item in result
+        ]
     if hasattr(embedder, "embed_many"):
         raw = embedder.embed_many(texts)
         if any(vec is None for vec in raw):

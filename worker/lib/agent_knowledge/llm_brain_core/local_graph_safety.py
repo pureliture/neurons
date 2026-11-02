@@ -556,12 +556,19 @@ class GraphOperationJournalCoordinator:
         )
         if self._pg_store is not None:
             existing = self._pg_store.get_graph_operation_journal(operation_id)
-            if existing is not None and existing.get("status") == "quarantined":
+            if existing is not None and (
+                existing.get("state") in ("quarantine", "quarantined")
+                or existing.get("status") in ("quarantine", "quarantined")
+            ):
                 quarantine_group_fence(
                     session,
                     group_id,
                     operation_id=operation_id,
-                    reason=str(existing.get("quarantine_reason") or "pg_journal_quarantined"),
+                    reason=str(
+                        existing.get("last_error")
+                        or existing.get("quarantine_reason")
+                        or "pg_journal_quarantined"
+                    ),
                 )
                 raise GroupQuarantinedError(
                     f"Operation {operation_id} is quarantined in graph_operation_journal"
@@ -569,13 +576,13 @@ class GraphOperationJournalCoordinator:
             self._pg_store.upsert_graph_operation_journal(
                 operation_id=operation_id,
                 group_id=group_id,
+                state="neo4j_fenced",
+                fence_epoch=lease.epoch,
+                execution_plan=payload or (existing.get("execution_plan") if existing else {}) or {},
+                step_receipts=(existing.get("step_receipts") if existing else {}) or {},
                 operation_type=operation_type,
-                status="in_progress",
-                step_cursor=(existing.get("step_cursor") if existing else "init") or "init",
-                expected_epoch=lease.epoch,
                 lease_owner=lease_owner,
                 lease_seconds=lease_seconds,
-                payload=payload or (existing.get("payload_json") if existing else {}),
             )
         return lease
 
@@ -605,12 +612,13 @@ class GraphOperationJournalCoordinator:
         if self._pg_store is not None:
             journal = self._pg_store.get_graph_operation_journal(operation_id)
             if journal is not None:
-                if journal.get("status") == "quarantined":
+                state_val = journal.get("state") or journal.get("status")
+                if state_val in ("quarantine", "quarantined"):
                     raise GroupQuarantinedError(
                         f"Operation {operation_id} is already quarantined: "
-                        f"{journal.get('quarantine_reason')}"
+                        f"{journal.get('last_error') or journal.get('quarantine_reason')}"
                     )
-                receipts = journal.get("step_receipts_json") or {}
+                receipts = journal.get("step_receipts") or journal.get("step_receipts_json") or {}
                 if isinstance(receipts, dict) and step_id in receipts:
                     entry = receipts[step_id]
                     if isinstance(entry, dict):
@@ -651,6 +659,8 @@ class GraphOperationJournalCoordinator:
                             operation_id=operation_id,
                             step_id=step_id,
                             effect_hash=effect_hash,
+                            status="quarantine",
+                            error=reason,
                         )
                     raise GraphOperationConflictQuarantinedError(reason)
 

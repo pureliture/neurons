@@ -3823,13 +3823,13 @@ class PgVectorStore:
         self,
         *,
         operation_id: str,
-        outbox_id: int | None,
         group_id: str,
-        episode_uuid: str,
-        source_type: str,
-        source_id: str,
-        source_revision: str,
-        content_hash: str,
+        outbox_id: int | None = None,
+        episode_uuid: str = "",
+        source_type: str = "graph_operation",
+        source_id: str = "",
+        source_revision: str = "",
+        content_hash: str = "",
         profile_id: str = LOCAL_EMBEDDING_PROFILE_ID,
         fence_epoch: int = 0,
         state: str = "claimed",
@@ -3837,8 +3837,31 @@ class PgVectorStore:
         step_receipts: Mapping[str, Any] | None = None,
         last_error: str | None = None,
         conn: Any | None = None,
+        operation_type: str | None = None,
+        status: str | None = None,
+        step_cursor: str | None = None,
+        expected_epoch: int | None = None,
+        lease_owner: str | None = None,
+        lease_seconds: int | None = None,
+        payload: Mapping[str, Any] | None = None,
+        **extra_kwargs: Any,
     ) -> dict[str, Any]:
         """Create or update a durable graph_operation_journal record in PostgreSQL."""
+        if status is not None and state == "claimed":
+            if status in ("quarantine", "quarantined"):
+                state = "quarantine"
+            elif status in ("neo4j_fenced", "planned", "episode_written", "entities_resolved", "edges_resolved", "completed"):
+                state = status
+            elif status in ("in_progress", "claimed"):
+                state = "claimed"
+        if expected_epoch is not None and fence_epoch == 0:
+            fence_epoch = int(expected_epoch)
+        if payload is not None and execution_plan is None:
+            execution_plan = dict(payload)
+        if operation_type is not None and source_type == "graph_operation":
+            source_type = str(operation_type)
+        if step_cursor is not None:
+            execution_plan = {**dict(execution_plan or {}), "step_cursor": step_cursor}
 
         with self._scope(conn=conn, write=conn is None and self.connection is None) as db:
             with db.cursor() as cur:
@@ -3903,7 +3926,105 @@ class PgVectorStore:
             "execution_plan": _json_value(_row_value(row, "execution_plan", 11)),
             "step_receipts": _json_value(_row_value(row, "step_receipts", 12)),
             "last_error": _optional_str(_row_value(row, "last_error", 13)),
+            "status": str(_row_value(row, "state", 10)),
+            "step_receipts_json": _json_value(_row_value(row, "step_receipts", 12)),
+            "quarantine_reason": _optional_str(_row_value(row, "last_error", 13)),
         }
+
+    def record_graph_operation_step(
+        self,
+        *,
+        operation_id: str,
+        step_id: str,
+        effect_hash: str,
+        completed: bool = False,
+        status: str | None = None,
+        error: str | None = None,
+        conn: Any | None = None,
+    ) -> str:
+        """Record or verify a step receipt in graph_operation_journal.
+
+        Returns:
+            'noop' if receipt already exists with same effect_hash,
+            'quarantined' if receipt exists with mismatched effect_hash or explicitly quarantined,
+            'executed' if receipt was newly recorded.
+        """
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._scope(conn=conn, write=conn is None and self.connection is None) as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT state, step_receipts, fence_epoch, last_error
+                      FROM graph_operation_journal
+                     WHERE operation_id = %s
+                       FOR UPDATE
+                    """,
+                    (operation_id,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    self.upsert_graph_operation_journal(
+                        operation_id=operation_id,
+                        group_id="unknown",
+                        state="claimed",
+                        conn=db,
+                    )
+                    receipts: dict[str, Any] = {}
+                    current_state = "claimed"
+                else:
+                    current_state = str(_row_value(row, "state", 0))
+                    raw_rcpts = _json_value(_row_value(row, "step_receipts", 1))
+                    receipts = dict(raw_rcpts) if isinstance(raw_rcpts, dict) else {}
+
+                if status in ("quarantine", "quarantined"):
+                    cur.execute(
+                        """
+                        UPDATE graph_operation_journal
+                           SET state = 'quarantine',
+                               last_error = COALESCE(%s, last_error),
+                               updated_at = NOW()
+                         WHERE operation_id = %s
+                        """,
+                        (error or "step_quarantined", operation_id),
+                    )
+                    return "quarantined"
+
+                if step_id in receipts:
+                    entry = receipts[step_id]
+                    recorded_hash = str(entry.get("effect_hash") or "") if isinstance(entry, dict) else str(entry)
+                    if recorded_hash != effect_hash:
+                        reason = error or f"step={step_id} effect_hash mismatch: recorded={recorded_hash} vs current={effect_hash}"
+                        cur.execute(
+                            """
+                            UPDATE graph_operation_journal
+                               SET state = 'quarantine',
+                                   last_error = %s,
+                                   updated_at = NOW()
+                             WHERE operation_id = %s
+                            """,
+                            (reason, operation_id),
+                        )
+                        return "quarantined"
+                    return "noop"
+
+                receipts[step_id] = {
+                    "effect_hash": effect_hash,
+                    "recorded_at": now_iso,
+                }
+                new_state = "completed" if completed else (
+                    current_state if current_state not in ("claimed", "planned") else "entities_resolved"
+                )
+                cur.execute(
+                    """
+                    UPDATE graph_operation_journal
+                       SET step_receipts = %s::jsonb,
+                           state = %s,
+                           updated_at = NOW()
+                     WHERE operation_id = %s
+                    """,
+                    (_json_text(receipts), new_state, operation_id),
+                )
+                return "executed"
 
     def get_graph_operation_journal(
         self,
@@ -3942,6 +4063,9 @@ class PgVectorStore:
             "execution_plan": _json_value(_row_value(row, "execution_plan", 11)),
             "step_receipts": _json_value(_row_value(row, "step_receipts", 12)),
             "last_error": _optional_str(_row_value(row, "last_error", 13)),
+            "status": str(_row_value(row, "state", 10)),
+            "step_receipts_json": _json_value(_row_value(row, "step_receipts", 12)),
+            "quarantine_reason": _optional_str(_row_value(row, "last_error", 13)),
         }
 
     @staticmethod
