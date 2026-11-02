@@ -212,7 +212,6 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
                     if (
                         local_emb.get("embedding_state") != "ready"
                         or local_emb.get("embedding_profile") != active_profile
-                        or local_emb.get("embedding_model") != embed_provider.model
                         or local_emb.get("content_hash") != row.content_hash
                         or local_emb.get("input_hash") != expected_input_hash
                         or local_emb.get("embedding") is None

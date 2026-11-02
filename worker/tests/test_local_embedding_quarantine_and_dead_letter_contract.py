@@ -71,3 +71,10 @@ def test_enqueue_local_outbox_preserves_dead_letter_sql() -> None:
     assert "THEN 'dead_letter'" in code
     assert "'dead_letter'" in code
     assert "status IN ('queued', 'processing', 'failed', 'dead_letter')" in code
+
+
+def test_pg_recall_local_embedding_contract_does_not_require_embedding_model() -> None:
+    """Verify pg_recall validates local_emb without requiring embedding_model match."""
+    from agent_knowledge.rag_ingress import pg_recall
+    recall_source = inspect.getsource(pg_recall)
+    assert "local_emb.get(\"embedding_model\")" not in recall_source

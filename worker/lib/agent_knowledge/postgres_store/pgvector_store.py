@@ -3814,6 +3814,7 @@ class PgVectorStore:
             "target_id": str(_row_value(row, "target_id", 0)),
             "profile_id": prof_val,
             "embedding_profile": prof_val,
+            "embedding_model": LOCAL_EMBEDDING_MODEL,
             "source_content_hash": src_hash,
             "content_hash": src_hash,
             "input_hash": str(_row_value(row, "input_hash", 3)),
