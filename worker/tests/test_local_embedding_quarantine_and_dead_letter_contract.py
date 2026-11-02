@@ -130,3 +130,16 @@ def test_ensure_local_group_resolution_ready_blocks_quarantined_and_uncovered() 
 
     asyncio.run(_run())
 
+
+def test_steward_decision_acquires_local_locks_before_parent_row_lock() -> None:
+    """Verify steward_decision acquires local advisory locks before memory_cards FOR UPDATE."""
+    source = inspect.getsource(PgVectorStore.steward_decision)
+    # Check that _acquire_local_locks_on occurs before FOR UPDATE
+    lock_pos = source.find("self._acquire_local_locks_on")
+    update_pos = source.find("ORDER BY memory_id FOR UPDATE")
+    assert lock_pos != -1, "self._acquire_local_locks_on not found in steward_decision"
+    assert update_pos != -1, "ORDER BY memory_id FOR UPDATE not found in steward_decision"
+    assert lock_pos < update_pos, "Local advisory lock must be acquired BEFORE memory_cards FOR UPDATE"
+    assert "acquire_locks=False" in source, "steward_decision should pass acquire_locks=False to _enqueue_local_outbox_on"
+
+

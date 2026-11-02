@@ -773,6 +773,19 @@ class PgVectorStore:
                 ids = sorted({memory_id, *([target_memory_id] if target_memory_id else [])})
                 for card_id in ids:
                     cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (card_id,))
+                if self.embedding_profile == LOCAL_EMBEDDING_PROFILE_ID:
+                    for card_id in ids:
+                        identity_parts = self._resolve_target_identity_parts_on(
+                            db,
+                            target_type="memory_card",
+                            target_id=card_id,
+                        )
+                        self._acquire_local_locks_on(
+                            db,
+                            identity_parts_list=[identity_parts],
+                            target_type="memory_card",
+                            target_id=card_id,
+                        )
                 cur.execute("SELECT memory_id, steward_envelope, content_hash FROM memory_cards WHERE memory_id = ANY(%s) ORDER BY memory_id FOR UPDATE", (ids,))
                 rows = {str(_row_value(row, 'memory_id', 0)): row for row in cur.fetchall()}
                 if len(rows) != len(ids) or any(_row_value(row, 'steward_envelope', 1) is None for row in rows.values()):
@@ -840,7 +853,7 @@ class PgVectorStore:
                                     source_content_hash=str(changed["content_hash"]),
                                     payload_text=local_payload_text,
                                     profile_id=LOCAL_EMBEDDING_PROFILE_ID,
-                                    acquire_locks=True,
+                                    acquire_locks=False,
                                 )
                             else:
                                 self._enqueue_outbox_on(db, target_type='memory_card', target_id=card_id,
