@@ -78,3 +78,55 @@ def test_pg_recall_local_embedding_contract_does_not_require_embedding_model() -
     from agent_knowledge.rag_ingress import pg_recall
     recall_source = inspect.getsource(pg_recall)
     assert "local_emb.get(\"embedding_model\")" not in recall_source
+
+
+def test_transition_supports_historical_superseded_cards() -> None:
+    """Verify backfill and cutover inspect queries include superseded cards."""
+    from agent_knowledge.local_embedding import transition
+    trans_source = inspect.getsource(transition)
+    assert "currentness IN ('current', 'superseded')" in trans_source
+
+
+def test_ensure_local_group_resolution_ready_blocks_quarantined_and_uncovered() -> None:
+    """Verify local entity resolution is blocked when group is quarantined, busy, or has missing embeddings."""
+    import asyncio
+    from unittest.mock import AsyncMock
+    import pytest
+    from graphiti_core.local_profile import (
+        LocalGroupResolutionBlockedError,
+        ensure_local_group_resolution_ready,
+    )
+
+    async def _run() -> None:
+        mock_driver = MagicMock()
+
+        # Case 1: Quarantined
+        mock_driver.execute_query = AsyncMock(
+            return_value=([{"fence_status": "quarantined", "quarantine_reason": "conflict", "missing_or_dirty": 0}], None, None)
+        )
+        with pytest.raises(LocalGroupResolutionBlockedError, match="quarantined"):
+            await ensure_local_group_resolution_ready(mock_driver, "group_q")
+
+        # Case 2: Busy
+        mock_driver.execute_query = AsyncMock(
+            return_value=([{"fence_status": "backfill_in_progress", "quarantine_reason": None, "missing_or_dirty": 0}], None, None)
+        )
+        with pytest.raises(LocalGroupResolutionBlockedError, match="busy"):
+            await ensure_local_group_resolution_ready(mock_driver, "group_busy")
+
+        # Case 3: Missing local embeddings
+        mock_driver.execute_query = AsyncMock(
+            return_value=([{"fence_status": "idle", "quarantine_reason": None, "missing_or_dirty": 3}], None, None)
+        )
+        with pytest.raises(LocalGroupResolutionBlockedError, match="without ready local embeddings"):
+            await ensure_local_group_resolution_ready(mock_driver, "group_missing")
+
+        # Case 4: Fully covered and idle
+        mock_driver.execute_query = AsyncMock(
+            return_value=([{"fence_status": "idle", "quarantine_reason": None, "missing_or_dirty": 0}], None, None)
+        )
+        # Should not raise
+        await ensure_local_group_resolution_ready(mock_driver, "group_ok")
+
+    asyncio.run(_run())
+

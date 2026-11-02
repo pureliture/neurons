@@ -142,7 +142,7 @@ def inspect_pg_local_embedding_state(
                   FROM memory_cards
                  WHERE lifecycle_state IN ('accepted', 'human_accepted', 'auto_accepted')
                    AND authorization_status = 'active'
-                   AND currentness = 'current'
+                   AND currentness IN ('current', 'superseded')
                 """
             )
             eligible_cards = _scalar_count(cur.fetchone())
@@ -158,7 +158,7 @@ def inspect_pg_local_embedding_state(
                    AND cle.state = 'ready'
                  WHERE mc.lifecycle_state IN ('accepted', 'human_accepted', 'auto_accepted')
                    AND mc.authorization_status = 'active'
-                   AND mc.currentness = 'current'
+                   AND mc.currentness IN ('current', 'superseded')
                 """,
                 (profile_id,),
             )
@@ -258,7 +258,7 @@ def enqueue_missing_pg_local_embeddings(
                        AND t.deleted_at IS NOT NULL
                      WHERE mc.lifecycle_state IN ('accepted', 'human_accepted', 'auto_accepted')
                        AND mc.authorization_status = 'active'
-                       AND mc.currentness = 'current'
+                       AND mc.currentness IN ('current', 'superseded')
                        AND cle.memory_id IS NULL
                        AND t.target_id IS NULL
                        AND NOT EXISTS (

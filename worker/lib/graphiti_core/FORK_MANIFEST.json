@@ -4,7 +4,7 @@
       "fork_sha256": "5f9e94e6c8221a35221167b240b9377b529119bd3f1d53c7b6d128f461a319f8"
     },
     "local_profile.py": {
-      "fork_sha256": "d45cd056c14da0230571d537fed102655430376890a901a4c1f28e741c81bbac"
+      "fork_sha256": "4357f371694c51c8ff32a3e62fc412a742b9fb940708c3d4ba51b93ab81579e6"
     }
   },
   "license": "Apache-2.0",
@@ -39,7 +39,7 @@
       "upstream_sha256": "707780f4a6b48ef304cf9463e6ef289d3f316d0c24009094a3f15b20010f8682"
     },
     "graphiti.py": {
-      "fork_sha256": "236cd32b32800315ac5befcefc572ce8ab925506389872deef71c5afe052b5b9",
+      "fork_sha256": "e485e7af0532878a87ddf263c5c276b1679bc1f6e5ae3855f769b5a490e4be0d",
       "upstream_sha256": "7c65051a62982d8b510ebdbf37bae4d07020e74520e1f6d9bf8a0ffb26beeccb"
     },
     "models/edges/edge_db_queries.py": {

@@ -261,3 +261,42 @@ def prepare_entity_edge_save_data(
         )
         prepared[GRAPH_EMBEDDING_DIRTY_PROP] = True
     return prepared
+
+
+class LocalGroupResolutionBlockedError(RuntimeError):
+    """Raised when entity resolution is attempted on a group with incomplete local coverage or active fence."""
+
+
+async def ensure_local_group_resolution_ready(driver: Any, group_id: str) -> None:
+    """Validate that group_id has full local embedding coverage and is not quarantined or busy."""
+    if not group_id or not hasattr(driver, "execute_query"):
+        return
+
+    records, _, _ = await driver.execute_query(
+        """
+        OPTIONAL MATCH (f:EmbeddingGroupFence {group_id: $group_id})
+        WITH coalesce(f.status, 'idle') AS fence_status, f.quarantine_reason AS quarantine_reason
+        OPTIONAL MATCH (n:Entity {group_id: $group_id})
+        WHERE n.name_embedding_model2vec_v1 IS NULL OR coalesce(n.embedding_dirty, false) = true
+        RETURN fence_status, quarantine_reason, count(n) AS missing_or_dirty
+        """,
+        group_id=group_id,
+    )
+    if records:
+        rec = records[0]
+        fence_status = str(rec.get("fence_status") or "idle")
+        if fence_status == "quarantined":
+            reason = rec.get("quarantine_reason") or "conflict"
+            raise LocalGroupResolutionBlockedError(
+                f"group_id={group_id} is quarantined ({reason}); entity resolution blocked"
+            )
+        if fence_status in ("backfill_in_progress", "reconciling"):
+            raise LocalGroupResolutionBlockedError(
+                f"group_id={group_id} fence is busy ({fence_status}); entity resolution deferred"
+            )
+        missing_count = int(rec.get("missing_or_dirty") or 0)
+        if missing_count > 0:
+            raise LocalGroupResolutionBlockedError(
+                f"group_id={group_id} has {missing_count} entities without ready local embeddings; "
+                f"entity resolution deferred to prevent duplicate entities"
+            )

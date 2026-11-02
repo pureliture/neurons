@@ -50,6 +50,7 @@ from graphiti_core.llm_client import LLMClient, OpenAIClient
 from graphiti_core.local_profile import (
     LOCAL_GRAPH_PROFILE_ID,
     ensure_community_allowed,
+    ensure_local_group_resolution_ready,
     is_local_embedding_mode,
 )
 from graphiti_core.namespaces import EdgeNamespace, NodeNamespace
@@ -627,6 +628,9 @@ class Graphiti:
             self.clients, episode, previous_episodes, entity_types, excluded_entity_types
         )
 
+        if is_local_embedding_mode(self.driver, self.embedder) and primary_episode.group_id:
+            await ensure_local_group_resolution_ready(self.driver, primary_episode.group_id)
+
         nodes, uuid_map, duplicates = await resolve_extracted_nodes(
             self.clients,
             extracted_nodes,
@@ -1139,6 +1143,9 @@ class Graphiti:
                     excluded_entity_types,
                     custom_extraction_instructions,
                 )
+
+                if is_local_embedding_mode(self.driver, self.embedder) and group_id:
+                    await ensure_local_group_resolution_ready(self.driver, group_id)
 
                 nodes, uuid_map, _ = await resolve_extracted_nodes(
                     self.clients,
