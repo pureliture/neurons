@@ -320,7 +320,7 @@ def enqueue_missing_pg_local_embeddings(
                         ON cle.memory_id = mc.memory_id
                        AND cle.profile_id = %s
                        AND cle.source_content_hash = mc.content_hash
-                       AND cle.state IN ('ready', 'dead_letter')
+                       AND cle.state IN ('ready', 'failed')
                       LEFT JOIN local_embedding_tombstones t
                         ON t.target_type = 'memory_card'
                        AND t.target_id = mc.memory_id
@@ -357,7 +357,7 @@ def enqueue_missing_pg_local_embeddings(
                         ON sle.chunk_id = smc.chunk_id
                        AND sle.profile_id = %s
                        AND sle.source_content_hash = smc.content_hash
-                       AND sle.state IN ('ready', 'dead_letter')
+                       AND sle.state IN ('ready', 'failed')
                       LEFT JOIN local_embedding_tombstones t
                         ON t.target_type = 'session_chunk'
                        AND t.target_id = smc.chunk_id

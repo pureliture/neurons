@@ -64,13 +64,19 @@ def test_claim_local_outbox_leases_signature_and_worker_propagation() -> None:
     )
 
 
-def test_enqueue_local_outbox_preserves_dead_letter_sql() -> None:
-    """Verify _enqueue_local_outbox_on SQL preserves existing dead_letter state."""
-    # Check that _enqueue_local_outbox_on implementation checks dead_letter
+def test_enqueue_local_outbox_preserves_failed_state_and_checks_dead_letter_outbox() -> None:
+    """Verify _enqueue_local_outbox_on preserves failed state and checks dead_letter outbox."""
     code = inspect.getsource(PgVectorStore._enqueue_local_outbox_on)
-    assert "THEN 'dead_letter'" in code
-    assert "'dead_letter'" in code
+    assert "THEN 'failed'" in code
     assert "status IN ('queued', 'processing', 'failed', 'dead_letter')" in code
+
+
+def test_claim_expired_processing_reclaims_with_failed_derived_state() -> None:
+    """Verify expired processing jobs that exhaust retries transition derived state to failed, not dead_letter."""
+    code = inspect.getsource(PgVectorStore.claim_local_outbox_leases)
+    assert "status = 'dead_letter'" in code
+    assert "state = 'failed'" in code
+    assert "state = 'dead_letter'" not in code
 
 
 def test_pg_recall_local_embedding_contract_does_not_require_embedding_model() -> None:

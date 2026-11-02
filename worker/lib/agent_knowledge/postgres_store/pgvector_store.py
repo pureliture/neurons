@@ -2604,8 +2604,8 @@ class PgVectorStore:
                         THEN 'ready'
                         WHEN {derived_table}.source_content_hash = EXCLUDED.source_content_hash
                          AND {derived_table}.input_hash = EXCLUDED.input_hash
-                         AND {derived_table}.state = 'dead_letter'
-                        THEN 'dead_letter'
+                         AND {derived_table}.state = 'failed'
+                        THEN 'failed'
                         ELSE 'pending'
                     END,
                     updated_at = NOW()
@@ -2935,12 +2935,12 @@ class PgVectorStore:
                             INSERT INTO {derived_table} (
                                 {parent_id_col}, profile_id, source_content_hash, input_hash,
                                 vector, state, updated_at
-                            ) VALUES (%s, %s, %s, %s, NULL, 'dead_letter', NOW())
+                            ) VALUES (%s, %s, %s, %s, NULL, 'failed', NOW())
                             ON CONFLICT ({parent_id_col}, profile_id) DO UPDATE SET
                                 source_content_hash = EXCLUDED.source_content_hash,
                                 input_hash = EXCLUDED.input_hash,
                                 vector = NULL,
-                                state = 'dead_letter',
+                                state = 'failed',
                                 updated_at = NOW()
                             """,
                             (cand_target_id, profile_id, cand_source_hash, cand_input_hash),
