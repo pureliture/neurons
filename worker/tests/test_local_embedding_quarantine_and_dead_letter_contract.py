@@ -334,6 +334,25 @@ def test_quarantined_rejected_node_and_edge_writes_raise_local_group_write_block
     asyncio.run(_run())
 
 
+def test_pg_backfill_get_local_embedding_row_keyword_args_contract() -> None:
+    """Verify PostgresSessionChunkBackfillWriter calls get_local_embedding_row with keyword-only arguments."""
+    import inspect
+    from agent_knowledge.postgres_store.pgvector_store import PgVectorStore
+
+    # Verify PgVectorStore signature requires keyword-only arguments
+    sig = inspect.signature(PgVectorStore.get_local_embedding_row)
+    assert "target_type" in sig.parameters
+    assert sig.parameters["target_type"].kind == inspect.Parameter.KEYWORD_ONLY
+    assert sig.parameters["target_id"].kind == inspect.Parameter.KEYWORD_ONLY
+
+    # Verify the call in pg_backfill.py source code uses target_type and target_id keywords
+    with open("lib/agent_knowledge/rag_ingress/pg_backfill.py", "r", encoding="utf-8") as f:
+        src = f.read()
+    assert 'target_type="session_chunk"' in src
+    assert 'target_id=chosen_id' in src
+
+
+
 
 
 

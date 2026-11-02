@@ -626,7 +626,9 @@ class PgSessionMemoryProjector:
         _validate_row_scope_and_body(stored)
 
         local_row = self._store.get_local_embedding_row(
-            chosen_id, profile_id=LOCAL_EMBEDDING_PROFILE_ID
+            target_type="session_chunk",
+            target_id=chosen_id,
+            embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
         )
         if (
             local_row is None
