@@ -143,3 +143,26 @@ def test_steward_decision_acquires_local_locks_before_parent_row_lock() -> None:
     assert "acquire_locks=False" in source, "steward_decision should pass acquire_locks=False to _enqueue_local_outbox_on"
 
 
+def test_claim_local_outbox_leases_applies_retry_budget_on_reclaim() -> None:
+    """Verify expired processing job reclaim increments retry_count and transitions to dead_letter if budget exhausted."""
+    source = inspect.getsource(PgVectorStore.claim_local_outbox_leases)
+    assert 'job_status == "processing" and (job_retry_count + 1) >= int(max_retries)' in source
+    assert "status = 'dead_letter'" in source
+    assert "retry_count = CASE" in source
+    assert "WHEN status = 'processing' THEN retry_count + 1" in source
+
+
+def test_bulk_semantic_local_profile_uses_canonical_planner_and_utf8_weights() -> None:
+    """Verify OpenAICompatibleEmbeddingBatcher uses plan_request_batches_v1 and byte-length weights in local mode."""
+    from agent_knowledge.llm_brain_core.bulk_semantic import (
+        OpenAICompatibleEmbeddingBatcher,
+    )
+
+    embed_raw_src = inspect.getsource(OpenAICompatibleEmbeddingBatcher._embed_raw_chunks)
+    assert "plan_request_batches_v1" in embed_raw_src
+
+    embed_many_src = inspect.getsource(OpenAICompatibleEmbeddingBatcher.embed_many)
+    assert "chunk_byte_lengths=" in embed_many_src
+
+
+

@@ -249,6 +249,10 @@ def test_cutover_readiness_fail_closed_gate() -> None:
         eligible_sessions=25,
         ready_sessions=25,
         missing_sessions=0,
+        eligible_session_receipts=25,
+        ready_session_receipts=25,
+        missing_session_receipts=0,
+        session_receipts_verified=True,
         outbox_queued=0,
         outbox_processing=0,
         outbox_failed_retryable=0,
@@ -289,6 +293,31 @@ def test_cutover_readiness_fail_closed_gate() -> None:
         neo4j_progress=dirty_neo4j,
     )
     assert blocked_report.ready is False
+
+    unverified_receipts_pg = PgBackfillProgress(
+        eligible_cards=10,
+        ready_cards=10,
+        eligible_sessions=25,
+        ready_sessions=25,
+        session_receipts_verified=False,
+    )
+    unverified_report = evaluate_cutover_readiness(
+        pg_progress=unverified_receipts_pg,
+        neo4j_progress=clean_neo4j,
+    )
+    assert unverified_report.ready is False
+    assert (
+        "pg_session_receipts_unverified_for_couchdb_authority"
+        in unverified_report.blocking_reasons
+    )
+
+    # In direct migrated reader mode, unverified couchdb receipts do not block cutover
+    direct_report = evaluate_cutover_readiness(
+        pg_progress=unverified_receipts_pg,
+        neo4j_progress=clean_neo4j,
+        direct_migrated_reader=True,
+    )
+    assert direct_report.ready is True
     assert "pg_missing_cards=1" in blocked_report.blocking_reasons
     assert "pg_outbox_dead_letter=2" in blocked_report.blocking_reasons
     assert "neo4j_missing_or_dirty_edges=3" in blocked_report.blocking_reasons

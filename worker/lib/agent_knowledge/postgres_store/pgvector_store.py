@@ -2847,6 +2847,7 @@ class PgVectorStore:
                 cand_target_type = str(_row_value(cand, "target_type", 1))
                 cand_target_id = str(_row_value(cand, "target_id", 2))
                 cand_source_hash = str(_row_value(cand, "source_content_hash", 4))
+                cand_input_hash = str(_row_value(cand, "input_hash", 5))
                 cand_incarnation = int(_row_value(cand, "incarnation", 6))
 
                 identity_parts = self._resolve_target_identity_parts_on(
@@ -2903,6 +2904,47 @@ class PgVectorStore:
                     locked_job = cur.fetchone()
                     if locked_job is None:
                         cur.execute("ROLLBACK TO SAVEPOINT local_claim_candidate")
+                        cur.execute("RELEASE SAVEPOINT local_claim_candidate")
+                        continue
+
+                    job_status = str(_row_value(locked_job, "status", 8) or "")
+                    job_retry_count = int(_row_value(locked_job, "retry_count", 13) or 0)
+
+                    # Reclaiming an expired processing job counts against the retry budget
+                    if job_status == "processing" and (job_retry_count + 1) >= int(max_retries):
+                        cur.execute(
+                            """
+                            UPDATE local_embedding_outbox
+                               SET status = 'dead_letter',
+                                   retry_count = retry_count + 1,
+                                   lease_until = NULL,
+                                   last_error = 'lease expired and retry budget exhausted',
+                                   updated_at = clock_timestamp()
+                             WHERE outbox_id = %s
+                            """,
+                            (cand_outbox_id,),
+                        )
+                        derived_table = (
+                            "card_local_embeddings"
+                            if cand_target_type == "memory_card"
+                            else "session_local_embeddings"
+                        )
+                        parent_id_col = "memory_id" if cand_target_type == "memory_card" else "chunk_id"
+                        cur.execute(
+                            f"""
+                            INSERT INTO {derived_table} (
+                                {parent_id_col}, profile_id, source_content_hash, input_hash,
+                                vector, state, updated_at
+                            ) VALUES (%s, %s, %s, %s, NULL, 'dead_letter', NOW())
+                            ON CONFLICT ({parent_id_col}, profile_id) DO UPDATE SET
+                                source_content_hash = EXCLUDED.source_content_hash,
+                                input_hash = EXCLUDED.input_hash,
+                                vector = NULL,
+                                state = 'dead_letter',
+                                updated_at = NOW()
+                            """,
+                            (cand_target_id, profile_id, cand_source_hash, cand_input_hash),
+                        )
                         cur.execute("RELEASE SAVEPOINT local_claim_candidate")
                         continue
 
@@ -2965,10 +3007,18 @@ class PgVectorStore:
                         """
                         UPDATE local_embedding_outbox
                            SET status = 'processing',
+                               retry_count = CASE
+                                   WHEN status = 'processing' THEN retry_count + 1
+                                   ELSE retry_count
+                               END,
                                fencing_token = fencing_token + 1,
                                worker_id = %s,
                                claimed_at = clock_timestamp(),
                                lease_until = clock_timestamp() + (%s * INTERVAL '1 second'),
+                               last_error = CASE
+                                   WHEN status = 'processing' THEN 'lease expired; reclaimed'
+                                   ELSE last_error
+                               END,
                                updated_at = clock_timestamp()
                          WHERE outbox_id = %s
                         RETURNING outbox_id, target_type, target_id, profile_id,

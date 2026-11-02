@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -78,6 +79,10 @@ class PgBackfillProgress:
     tombstones_count: int = 0
     legacy_card_embeddings_preserved: int = 0
     legacy_session_embeddings_preserved: int = 0
+    eligible_session_receipts: int = 0
+    ready_session_receipts: int = 0
+    missing_session_receipts: int = 0
+    session_receipts_verified: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -132,6 +137,7 @@ def inspect_pg_local_embedding_state(
     store: Any,
     *,
     profile_id: str = LOCAL_EMBEDDING_PROFILE_ID,
+    couchdb_store: Any | None = None,
 ) -> PgBackfillProgress:
     """Read-only inspection of PostgreSQL local embedding backfill and outbox state."""
     with store._scope(write=False) as conn:
@@ -181,6 +187,41 @@ def inspect_pg_local_embedding_state(
             )
             ready_sessions = _scalar_count(cur.fetchone())
 
+            ready_session_receipts = 0
+            session_receipts_verified = False
+            if couchdb_store is not None:
+                cur.execute(
+                    """
+                    SELECT DISTINCT smc.session_id_hash
+                      FROM session_memory_chunks smc
+                      JOIN session_local_embeddings sle
+                        ON sle.chunk_id = smc.chunk_id
+                       AND sle.profile_id = %s
+                       AND sle.source_content_hash = smc.content_hash
+                       AND sle.state = 'ready'
+                    """,
+                    (profile_id,),
+                )
+                session_id_hashes = [
+                    str(_cell(r, "session_id_hash", 0) or "") for r in cur.fetchall() or ()
+                ]
+                for sid_hash in session_id_hashes:
+                    if not sid_hash:
+                        continue
+                    try:
+                        doc = couchdb_store.get(f"projection_state:{sid_hash}")
+                    except Exception:
+                        doc = None
+                    if isinstance(doc, dict):
+                        receipts = doc.get("backend_receipts")
+                        if isinstance(receipts, dict):
+                            local_map = receipts.get("postgres_pgvector_local")
+                            if isinstance(local_map, dict):
+                                rec = local_map.get(profile_id)
+                                if isinstance(rec, dict) and rec.get("receipt_version") == 3:
+                                    ready_session_receipts += 1
+                session_receipts_verified = True
+
             cur.execute(
                 """
                 SELECT status AS status, COUNT(*) AS n
@@ -209,6 +250,12 @@ def inspect_pg_local_embedding_state(
             cur.execute("SELECT COUNT(*) FROM session_memory_chunks WHERE embedding IS NOT NULL")
             legacy_sessions = _scalar_count(cur.fetchone())
 
+    missing_session_receipts = (
+        max(0, eligible_sessions - ready_session_receipts)
+        if session_receipts_verified
+        else eligible_sessions
+    )
+
     return PgBackfillProgress(
         eligible_cards=eligible_cards,
         ready_cards=ready_cards,
@@ -216,6 +263,10 @@ def inspect_pg_local_embedding_state(
         eligible_sessions=eligible_sessions,
         ready_sessions=ready_sessions,
         missing_sessions=max(0, eligible_sessions - ready_sessions),
+        eligible_session_receipts=eligible_sessions,
+        ready_session_receipts=ready_session_receipts,
+        missing_session_receipts=missing_session_receipts,
+        session_receipts_verified=session_receipts_verified,
         outbox_queued=outbox_counts.get("queued", 0),
         outbox_processing=outbox_counts.get("processing", 0),
         outbox_failed_retryable=outbox_counts.get("failed", 0),
@@ -388,6 +439,7 @@ def backfill_pg_local_embeddings(
     lease_seconds: int = 30,
     max_retries: int = 5,
     worker_id: str | None = None,
+    couchdb_store: Any | None = None,
 ) -> PgBackfillProgress:
     """Bounded, idempotent, resumable PostgreSQL backfill for cards and session chunks."""
     from ..postgres_store.outbox_worker import LocalEmbeddingOutboxWorker
@@ -424,7 +476,74 @@ def backfill_pg_local_embeddings(
         total_stale += worker.last_batch_stale
         total_failed += worker.last_batch_failed
 
-    snapshot = inspect_pg_local_embedding_state(store, profile_id=profile_id)
+    if couchdb_store is not None:
+        from ..rag_ingress.pg_representation import (
+            LOCAL_SESSION_REPRESENTATION_KIND,
+            build_local_representation_receipt_v3,
+        )
+
+        with store._scope(write=False) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT smc.chunk_id, smc.project, smc.provider, smc.session_id_hash,
+                           smc.content_hash, sle.input_hash
+                      FROM session_memory_chunks smc
+                      JOIN session_local_embeddings sle
+                        ON sle.chunk_id = smc.chunk_id
+                       AND sle.profile_id = %s
+                       AND sle.source_content_hash = smc.content_hash
+                       AND sle.state = 'ready'
+                    """,
+                    (profile_id,),
+                )
+                ready_session_rows = cur.fetchall() or ()
+
+        for s_row in ready_session_rows:
+            s_chunk_id = str(_cell(s_row, "chunk_id", 0))
+            s_project = str(_cell(s_row, "project", 1))
+            s_provider = str(_cell(s_row, "provider", 2) or "unspecified")
+            s_sid_hash = str(_cell(s_row, "session_id_hash", 3))
+            s_content_hash = str(_cell(s_row, "content_hash", 4))
+            s_input_hash = str(_cell(s_row, "input_hash", 5))
+            doc_id = f"projection_state:{s_sid_hash}"
+            try:
+                state_doc = couchdb_store.get(doc_id)
+            except Exception:
+                state_doc = None
+            if isinstance(state_doc, dict):
+                receipts = state_doc.get("backend_receipts")
+                if not isinstance(receipts, dict):
+                    receipts = {}
+                local_map = receipts.get("postgres_pgvector_local")
+                if not isinstance(local_map, dict):
+                    local_map = {}
+                existing_rec = local_map.get(profile_id)
+                if not isinstance(existing_rec, dict) or existing_rec.get("receipt_version") != 3:
+                    try:
+                        new_rec = build_local_representation_receipt_v3(
+                            representation_kind=LOCAL_SESSION_REPRESENTATION_KIND,
+                            project=s_project,
+                            provider=s_provider,
+                            session_id_hash=s_sid_hash,
+                            active_content_hash=s_content_hash,
+                            projected_source_hash=s_content_hash,
+                            representation_content_hash=s_content_hash,
+                            session_memory_knowledge_id=s_chunk_id,
+                            identity_scheme="local_v1",
+                            embedding_profile=profile_id,
+                            input_hash=s_input_hash,
+                        )
+                        local_map[profile_id] = new_rec
+                        receipts["postgres_pgvector_local"] = local_map
+                        state_doc["backend_receipts"] = receipts
+                        couchdb_store.put(state_doc)
+                    except Exception:
+                        pass
+
+    snapshot = inspect_pg_local_embedding_state(
+        store, profile_id=profile_id, couchdb_store=couchdb_store
+    )
     return PgBackfillProgress(
         eligible_cards=snapshot.eligible_cards,
         ready_cards=snapshot.ready_cards,
@@ -432,6 +551,10 @@ def backfill_pg_local_embeddings(
         eligible_sessions=snapshot.eligible_sessions,
         ready_sessions=snapshot.ready_sessions,
         missing_sessions=snapshot.missing_sessions,
+        eligible_session_receipts=snapshot.eligible_session_receipts,
+        ready_session_receipts=snapshot.ready_session_receipts,
+        missing_session_receipts=snapshot.missing_session_receipts,
+        session_receipts_verified=snapshot.session_receipts_verified,
         enqueued_cards=enq_cards,
         enqueued_sessions=enq_sessions,
         batches_executed=batches_executed,
@@ -797,8 +920,14 @@ def evaluate_cutover_readiness(
     pg_progress: PgBackfillProgress | None = None,
     neo4j_progress: Neo4jBackfillProgress | None = None,
     profile_id: str = LOCAL_EMBEDDING_PROFILE_ID,
+    direct_migrated_reader: bool | None = None,
 ) -> LocalEmbeddingCutoverReport:
     """Fail-closed cutover readiness check across PostgreSQL and Neo4j."""
+    is_direct = (
+        direct_migrated_reader
+        if direct_migrated_reader is not None
+        else (os.getenv("PG_RECALL_DIRECT_MIGRATED", "").strip().casefold() == "true")
+    )
     blocking: list[str] = []
     if pg_progress is None and neo4j_progress is None:
         blocking.append("no_backend_inspected")
@@ -808,6 +937,11 @@ def evaluate_cutover_readiness(
             blocking.append(f"pg_missing_cards={pg_progress.missing_cards}")
         if pg_progress.missing_sessions > 0:
             blocking.append(f"pg_missing_sessions={pg_progress.missing_sessions}")
+        if not is_direct:
+            if not pg_progress.session_receipts_verified:
+                blocking.append("pg_session_receipts_unverified_for_couchdb_authority")
+            elif pg_progress.missing_session_receipts > 0:
+                blocking.append(f"pg_missing_session_receipts={pg_progress.missing_session_receipts}")
         if pg_progress.outbox_queued > 0:
             blocking.append(f"pg_outbox_queued={pg_progress.outbox_queued}")
         if pg_progress.outbox_processing > 0:

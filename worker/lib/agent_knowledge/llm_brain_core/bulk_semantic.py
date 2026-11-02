@@ -23,6 +23,7 @@ from ..local_embedding.canonical import (
     aggregate_chunk_embeddings,
     decode_base64_f32_le,
     normalize_canonical_text,
+    plan_request_batches_v1,
     split_into_canonical_chunks,
 )
 from ..local_embedding.profile import (
@@ -290,8 +291,19 @@ class OpenAICompatibleEmbeddingBatcher:
         texts: list[str],
     ) -> list[list[float] | None]:
         results: list[list[float] | None] = []
-        for start in range(0, len(texts), self._max_batch_size):
-            chunk = list(texts[start : start + self._max_batch_size])
+        if self._is_local_profile:
+            batches = plan_request_batches_v1(
+                texts,
+                model=self._model,
+                encoding_format=None,
+                dimensions=None,
+            )
+        else:
+            batches = [
+                list(texts[start : start + self._max_batch_size])
+                for start in range(0, len(texts), self._max_batch_size)
+            ]
+        for chunk in batches:
             raw = self._post_embeddings_chunk(headers=headers, chunk=chunk)
             data = json.loads(raw)
             rows = data.get("data") if isinstance(data, dict) else None
@@ -337,6 +349,7 @@ class OpenAICompatibleEmbeddingBatcher:
             flat_chunks.extend(chunks)
             spans.append((start, len(flat_chunks)))
         flat_vectors = self._embed_raw_chunks(headers=headers, texts=flat_chunks)
+        chunk_byte_lengths = [len(c.encode("utf-8")) for c in flat_chunks]
         aggregated: list[list[float] | None] = []
         for start, end in spans:
             sub = flat_vectors[start:end]
@@ -348,7 +361,11 @@ class OpenAICompatibleEmbeddingBatcher:
                 aggregated.append(list(valid_sub[0]))
             else:
                 aggregated.append(
-                    aggregate_chunk_embeddings(valid_sub, expected_dim=LOCAL_EMBEDDING_DIM)
+                    aggregate_chunk_embeddings(
+                        valid_sub,
+                        chunk_byte_lengths=chunk_byte_lengths[start:end],
+                        expected_dim=LOCAL_EMBEDDING_DIM,
+                    )
                 )
         return aggregated
 
