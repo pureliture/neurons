@@ -38,13 +38,8 @@ pytestmark = [
     pytest.mark.skipif(not PG_DSN, reason="LBRAIN_TEST_PG_DSN required"),
 ]
 
-_MODEL_DIR = Path(
-    os.environ.get("NEURON_LOCAL_EMBEDDING_MODEL_DIR")
-    or (
-        Path.home()
-        / ".hermes/profiles/atlas/cache/scratch/model2vec-mac-test-hf/hub/models--minishlab--potion-multilingual-128M/snapshots/73908c3438cf03b6a01bcb9611d62b23d0726f08"
-    )
-)
+_MODEL_DIR_ENV = os.environ.get("NEURON_LOCAL_EMBEDDING_MODEL_DIR", "").strip()
+_MODEL_DIR = Path(_MODEL_DIR_ENV) if _MODEL_DIR_ENV else None
 
 
 @pytest.fixture()
@@ -148,8 +143,8 @@ def test_backfill_multi_batch_with_journal_coordinator_no_self_conflict(
 ):
     import threading
 
-    if not _MODEL_DIR.is_dir():
-        pytest.skip("Pinned Model2Vec snapshot required")
+    if not _MODEL_DIR or not _MODEL_DIR.is_dir():
+        pytest.skip("Pinned Model2Vec snapshot required (set NEURON_LOCAL_EMBEDDING_MODEL_DIR)")
 
     engine = LocalModel2VecEngine.from_model_dir(_MODEL_DIR)
     server = create_local_embedding_http_server(

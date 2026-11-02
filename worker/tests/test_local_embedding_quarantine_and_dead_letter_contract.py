@@ -352,6 +352,40 @@ def test_pg_backfill_get_local_embedding_row_keyword_args_contract() -> None:
     assert 'target_id=chosen_id' in src
 
 
+def test_backfill_operation_id_length_capped_to_128() -> None:
+    """Verify backfill operation ID does not exceed 128 characters even with long group and worker IDs."""
+    import hashlib
+
+    profile_id = "lbrain-memory-model2vec-256-v1"
+    group_id = "g" * 64
+    worker_id = "test-worker-" + "w" * 40
+
+    raw_op_id = f"backfill:{profile_id}:{group_id}:{worker_id}"
+    assert len(raw_op_id) > 128
+
+    op_digest = hashlib.sha256(raw_op_id.encode("utf-8")).hexdigest()
+    capped_op_id = f"backfill:{op_digest}:{worker_id}"[:128]
+    assert len(capped_op_id) <= 128
+
+    # Check transition.py implementation logic
+    with open("lib/agent_knowledge/local_embedding/transition.py", "r", encoding="utf-8") as f:
+        src = f.read()
+    assert "len(raw_op_id) <= 128" in src
+    assert "op_digest = hashlib.sha256" in src
+
+
+def test_no_private_hermes_paths_in_local_embedding_tests() -> None:
+    """Ensure no private user cache paths appear in local embedding test suites."""
+    from pathlib import Path
+    tests_dir = Path(__file__).resolve().parent
+    for py_file in tests_dir.glob("test_local_embedding_*.py"):
+        if py_file.name == Path(__file__).name:
+            continue
+        text = py_file.read_text(encoding="utf-8")
+        assert ".hermes" not in text, f"Found private path in {py_file.name}"
+
+
+
 
 
 

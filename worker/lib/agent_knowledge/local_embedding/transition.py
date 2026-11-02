@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import uuid
@@ -814,7 +815,12 @@ def backfill_neo4j_local_embeddings(
     groups_fenced_busy = 0
 
     for group_id in target_groups:
-        operation_id = f"backfill:{profile_id}:{group_id}:{resolved_worker_id}"
+        raw_op_id = f"backfill:{profile_id}:{group_id}:{resolved_worker_id}"
+        if len(raw_op_id) <= 128:
+            operation_id = raw_op_id
+        else:
+            op_digest = hashlib.sha256(raw_op_id.encode("utf-8")).hexdigest()
+            operation_id = f"backfill:{op_digest}:{resolved_worker_id}"[:128]
         try:
             if journal_coordinator is not None:
                 lease = journal_coordinator.begin_operation(

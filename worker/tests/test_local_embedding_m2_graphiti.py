@@ -63,20 +63,15 @@ from agent_knowledge.local_embedding import (
 NEO4J_URI = os.environ.get("LBRAIN_TEST_NEO4J_URI", "")
 pytestmark = pytest.mark.skipif(not NEO4J_URI, reason="disposable Neo4j test endpoint required")
 
-_MODEL_DIR = Path(
-    os.environ.get("NEURON_LOCAL_EMBEDDING_MODEL_DIR")
-    or (
-        Path.home()
-        / ".hermes/profiles/atlas/cache/scratch/model2vec-mac-test-hf/hub/models--minishlab--potion-multilingual-128M/snapshots/73908c3438cf03b6a01bcb9611d62b23d0726f08"
-    )
-)
+_MODEL_DIR_ENV = os.environ.get("NEURON_LOCAL_EMBEDDING_MODEL_DIR", "").strip()
+_MODEL_DIR = Path(_MODEL_DIR_ENV) if _MODEL_DIR_ENV else None
 LEGACY_DIM = 3072
 
 
 @pytest.fixture(scope="module")
 def local_client():
-    if not _MODEL_DIR.is_dir():
-        pytest.skip("Pinned real Model2Vec snapshot not present on this host")
+    if not _MODEL_DIR or not _MODEL_DIR.is_dir():
+        pytest.skip("Pinned real Model2Vec snapshot not present on this host (set NEURON_LOCAL_EMBEDDING_MODEL_DIR)")
     engine = LocalModel2VecEngine.from_model_dir(_MODEL_DIR)
     server = create_local_embedding_http_server(
         application=LocalEmbeddingServiceApplication(engine=engine), bind_host="127.0.0.1", port=0

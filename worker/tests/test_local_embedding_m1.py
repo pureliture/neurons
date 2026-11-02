@@ -50,35 +50,11 @@ from agent_knowledge.local_embedding import cli as local_embedding_cli
 
 def _discover_real_model_dir() -> Path | None:
     env_dir = os.environ.get("NEURON_LOCAL_EMBEDDING_MODEL_DIR", "").strip()
-    candidates: list[Path] = []
-    if env_dir:
-        candidates.append(Path(env_dir))
-    home = Path.home()
-    candidates.extend(
-        [
-            home
-            / ".hermes"
-            / "profiles"
-            / "atlas"
-            / "cache"
-            / "scratch"
-            / "model2vec-mac-test-hf"
-            / "hub"
-            / "models--minishlab--potion-multilingual-128M"
-            / "snapshots"
-            / LOCAL_MODEL2VEC_REVISION,
-            home
-            / ".cache"
-            / "huggingface"
-            / "hub"
-            / "models--minishlab--potion-multilingual-128M"
-            / "snapshots"
-            / LOCAL_MODEL2VEC_REVISION,
-        ]
-    )
-    for candidate in candidates:
-        if candidate.is_dir() and all((candidate / name).is_file() for name in LOCAL_MODEL2VEC_FILE_SHA256):
-            return candidate
+    if not env_dir:
+        return None
+    candidate = Path(env_dir)
+    if candidate.is_dir() and all((candidate / name).is_file() for name in LOCAL_MODEL2VEC_FILE_SHA256):
+        return candidate
     return None
 
 

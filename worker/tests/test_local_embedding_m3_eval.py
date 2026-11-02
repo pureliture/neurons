@@ -34,13 +34,8 @@ from agent_knowledge.model_connectors.policy import (
     validate_local_embedding_write_or_query_policy,
 )
 
-CACHED_MODEL_DIR = Path(
-    os.environ.get("NEURON_LOCAL_EMBEDDING_MODEL_DIR")
-    or (
-        Path.home()
-        / ".hermes/profiles/atlas/cache/scratch/model2vec-mac-test-hf/hub/models--minishlab--potion-multilingual-128M/snapshots/73908c3438cf03b6a01bcb9611d62b23d0726f08"
-    )
-)
+CACHED_MODEL_DIR_ENV = os.environ.get("NEURON_LOCAL_EMBEDDING_MODEL_DIR", "").strip()
+CACHED_MODEL_DIR = Path(CACHED_MODEL_DIR_ENV) if CACHED_MODEL_DIR_ENV else None
 
 
 def test_vendored_graphiti_fork_manifest_integrity() -> None:
@@ -108,8 +103,8 @@ def test_sanitized_eval_dataset_minimum_bounds() -> None:
 
 
 @pytest.mark.skipif(
-    not CACHED_MODEL_DIR.is_dir(),
-    reason="Real Model2Vec snapshot directory not present on this host",
+    not CACHED_MODEL_DIR or not CACHED_MODEL_DIR.is_dir(),
+    reason="Real Model2Vec snapshot directory not present on this host (set NEURON_LOCAL_EMBEDDING_MODEL_DIR)",
 )
 def test_real_model2vec_quality_gates_54_queries_24_entity_pairs() -> None:
     """Verify real Model2Vec weights satisfy Recall@5 >= 0.90, 0 false entity merges, and 0 scope/temporal leaks."""
