@@ -625,6 +625,20 @@ class PgSessionMemoryProjector:
             raise RuntimeError(f"chunk {chosen_id} missing after local projection commit")
         _validate_row_scope_and_body(stored)
 
+        local_row = self._store.get_local_embedding_row(
+            chosen_id, profile_id=LOCAL_EMBEDDING_PROFILE_ID
+        )
+        if (
+            local_row is None
+            or local_row.get("state") != "ready"
+            or local_row.get("source_content_hash") != content_hash
+            or local_row.get("input_hash") != input_hash
+        ):
+            from .pg_embedding_chunks import EmbeddingChunksPending
+
+            self.last_local_representation_receipt = None
+            raise EmbeddingChunksPending()
+
         self.last_local_identity_scheme = identity_scheme
         if source_hash:
             self.last_local_representation_receipt = build_local_representation_receipt_v3(

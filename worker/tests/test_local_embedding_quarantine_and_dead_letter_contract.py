@@ -218,6 +218,26 @@ def test_neo4j_operations_use_canonical_tombstone_keys() -> None:
     assert "MERGE (td:EmbeddingDeletion {target_type: 'edge', target_uuid: e.uuid})" in edge_del_src
 
 
+def test_pg_session_projector_requires_ready_local_vector_before_receipt() -> None:
+    """Verify PgSessionMemoryProjector raises EmbeddingChunksPending when local vector is not ready."""
+    from agent_knowledge.rag_ingress.pg_backfill import PgSessionMemoryProjector
+
+    proj_src = inspect.getsource(PgSessionMemoryProjector._project_local_profile)
+    assert "local_row.get(\"state\") != \"ready\"" in proj_src
+    assert "raise EmbeddingChunksPending()" in proj_src
+
+
+def test_transition_calculates_session_receipts_by_unique_session_and_validates_metadata() -> None:
+    """Verify inspect_pg_local_embedding_state uses COUNT(DISTINCT session_id_hash) and valid_local_pg_receipt_metadata."""
+    from agent_knowledge.local_embedding import transition
+
+    inspect_src = inspect.getsource(transition.inspect_pg_local_embedding_state)
+    assert "COUNT(DISTINCT session_id_hash)" in inspect_src
+    assert "valid_local_pg_receipt_metadata(" in inspect_src
+    assert "eligible_session_receipts - ready_session_receipts" in inspect_src
+
+
+
 
 
 

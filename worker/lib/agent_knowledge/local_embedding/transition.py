@@ -173,6 +173,9 @@ def inspect_pg_local_embedding_state(
             cur.execute("SELECT COUNT(*) FROM session_memory_chunks")
             eligible_sessions = _scalar_count(cur.fetchone())
 
+            cur.execute("SELECT COUNT(DISTINCT session_id_hash) FROM session_memory_chunks")
+            eligible_session_receipts = _scalar_count(cur.fetchone())
+
             cur.execute(
                 """
                 SELECT COUNT(*)
@@ -190,6 +193,9 @@ def inspect_pg_local_embedding_state(
             ready_session_receipts = 0
             session_receipts_verified = False
             if couchdb_store is not None:
+                from ..rag_ingress.pg_representation import valid_local_pg_receipt_metadata
+                from ..couchdb_source.session_memory_materializer import materialize_session_memory
+
                 cur.execute(
                     """
                     SELECT DISTINCT smc.session_id_hash
@@ -219,7 +225,20 @@ def inspect_pg_local_embedding_state(
                             if isinstance(local_map, dict):
                                 rec = local_map.get(profile_id)
                                 if isinstance(rec, dict) and rec.get("receipt_version") == 3:
-                                    ready_session_receipts += 1
+                                    try:
+                                        current_mat = materialize_session_memory(
+                                            session_id_hash=sid_hash,
+                                            store=couchdb_store,
+                                        )
+                                        if valid_local_pg_receipt_metadata(
+                                            rec,
+                                            store=store,
+                                            current_materialized=current_mat,
+                                            require_ready_vector=True,
+                                        ):
+                                            ready_session_receipts += 1
+                                    except Exception:
+                                        pass
                 session_receipts_verified = True
 
             cur.execute(
@@ -251,9 +270,9 @@ def inspect_pg_local_embedding_state(
             legacy_sessions = _scalar_count(cur.fetchone())
 
     missing_session_receipts = (
-        max(0, eligible_sessions - ready_session_receipts)
+        max(0, eligible_session_receipts - ready_session_receipts)
         if session_receipts_verified
-        else eligible_sessions
+        else eligible_session_receipts
     )
 
     return PgBackfillProgress(
@@ -263,7 +282,7 @@ def inspect_pg_local_embedding_state(
         eligible_sessions=eligible_sessions,
         ready_sessions=ready_sessions,
         missing_sessions=max(0, eligible_sessions - ready_sessions),
-        eligible_session_receipts=eligible_sessions,
+        eligible_session_receipts=eligible_session_receipts,
         ready_session_receipts=ready_session_receipts,
         missing_session_receipts=missing_session_receipts,
         session_receipts_verified=session_receipts_verified,
