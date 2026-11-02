@@ -25,7 +25,7 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY lib ./lib
 
-RUN python -m pip install --no-cache-dir . \
+RUN python -m pip install --no-cache-dir ".[local-embedding]" \
     && python -m pip install --no-cache-dir "nats-py>=2.6" \
     # M6 dual-write (lean): qdrant-client to reach Qdrant + openai for the
     # OpenAI-compatible embedding endpoint. Docling is intentionally omitted --
