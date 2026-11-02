@@ -13,8 +13,12 @@ import threading
 import time
 from typing import Callable, Any
 
-from ..model_connectors import DEFAULT_EMBEDDING_DIM
-from .pgvector_store import PgVectorStore, OutboxJob, make_dummy_vector
+from ..model_connectors import (
+    DEFAULT_EMBEDDING_DIM,
+    LOCAL_EMBEDDING_DIM,
+    LOCAL_EMBEDDING_PROFILE_ID,
+)
+from .pgvector_store import PgVectorStore, OutboxJob, LocalOutboxJob, make_dummy_vector
 
 logger = logging.getLogger(__name__)
 
@@ -318,4 +322,135 @@ class GraphProjectionWorker:
 
     def stop(self) -> None:
         """Signal the polling loop to stop."""
+        self._stop_event.set()
+
+
+class LocalEmbeddingOutboxWorker:
+    """Leased worker for local_embedding_outbox (D2 lock-order, fence epoch & incarnation CAS)."""
+
+    def __init__(
+        self,
+        store: PgVectorStore,
+        worker_id: str | None = None,
+        batch_size: int = 10,
+        lease_seconds: int = 30,
+        poll_interval_seconds: float = 0.5,
+        embedding_fn: Callable[[str], list[float]] | None = None,
+        max_retries: int = 5,
+        embedding_profile: str = LOCAL_EMBEDDING_PROFILE_ID,
+    ):
+        self.store = store
+        self.worker_id = worker_id or f"local_worker_{int(time.time() * 1000)}"
+        self.batch_size = batch_size
+        self.lease_seconds = lease_seconds
+        self.poll_interval = poll_interval_seconds
+        if embedding_fn is None:
+            raise ValueError(
+                "embedding_fn is required; inject CanonicalLocalEmbeddingClient.embed "
+                "(generate_deterministic_embedding is test-only)"
+            )
+        self.embedding_fn = embedding_fn
+        self.max_retries = max_retries
+        self.embedding_profile = embedding_profile
+        self._stop_event = threading.Event()
+        self.last_batch_failed = 0
+        self.last_batch_completed = 0
+        self.last_batch_stale = 0
+        self.last_batch_attempted = 0
+
+    def run_once(self, *, batch_size: int | None = None) -> int:
+        """Claim a batch of local_embedding_outbox jobs and process each outside DB transactions."""
+        self.last_batch_failed = 0
+        self.last_batch_completed = 0
+        self.last_batch_stale = 0
+        self.last_batch_attempted = 0
+        jobs = self.store.claim_local_outbox_leases(
+            worker_id=self.worker_id,
+            batch_size=int(batch_size) if batch_size is not None else self.batch_size,
+            lease_seconds=self.lease_seconds,
+            profile_id=self.embedding_profile,
+            max_retries=self.max_retries,
+        )
+        if not jobs:
+            return 0
+
+        processed_count = 0
+        for job in jobs:
+            self.last_batch_attempted += 1
+            try:
+                completed = self.process_job(job)
+                if completed:
+                    self.last_batch_completed += 1
+                else:
+                    self.last_batch_stale += 1
+                processed_count += 1
+            except Exception as exc:
+                self.last_batch_failed += 1
+                retryable = getattr(exc, "retryable", None)
+                if retryable is None:
+                    retryable = not isinstance(exc, (ValueError, TypeError))
+                reason_code = getattr(exc, "code", None) or type(exc).__name__
+                error_code = ("retryable_error:" if retryable else "terminal_error:") + str(reason_code)
+                logger.error("Local embedding outbox processing failed (%s)", error_code)
+                try:
+                    self.store.mark_local_outbox_failed(
+                        outbox_id=job.outbox_id,
+                        worker_id=self.worker_id,
+                        fencing_token=job.fencing_token,
+                        error_code=error_code,
+                        retryable=bool(retryable),
+                        max_retries=self.max_retries,
+                        profile_id=self.embedding_profile,
+                    )
+                except ValueError:
+                    logger.warning("Local embedding failure not recorded: lease_not_owned")
+                processed_count += 1
+
+        return processed_count
+
+    def process_job(self, job: LocalOutboxJob) -> bool:
+        """Compute 256-dim vector outside DB transaction, then complete via lock-ordered CAS."""
+        vector = self.embedding_fn(job.payload_text)
+        if not vector or len(vector) != LOCAL_EMBEDDING_DIM:
+            raise ValueError(
+                f"Local embedding function returned invalid vector length {len(vector) if vector else 0}"
+            )
+        return self.store.complete_local_outbox_cas(
+            outbox_id=job.outbox_id,
+            worker_id=self.worker_id,
+            fencing_token=job.fencing_token,
+            vector=vector,
+            profile_id=self.embedding_profile,
+        )
+
+    def renew_lease(
+        self,
+        outbox_id: int,
+        lease_seconds: int = 30,
+        fencing_token: int = 1,
+    ) -> bool:
+        """Renew active lease for a long-running local embedding job."""
+        return self.store.renew_local_outbox_lease(
+            outbox_id=outbox_id,
+            worker_id=self.worker_id,
+            fencing_token=fencing_token,
+            lease_seconds=lease_seconds,
+        )
+
+    def run_loop(
+        self,
+        stop_event: threading.Event | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
+        stop = stop_event or self._stop_event
+        iterations = 0
+        while not stop.is_set():
+            if max_iterations is not None and iterations >= max_iterations:
+                break
+            processed = self.run_once()
+            iterations += 1
+            if processed == 0:
+                stop.wait(self.poll_interval)
+
+    def stop(self) -> None:
         self._stop_event.set()

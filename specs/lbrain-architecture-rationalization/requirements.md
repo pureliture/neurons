@@ -37,6 +37,7 @@
   - distance: cosine
   - PostgreSQL type: `halfvec(3072)`
   - HNSW operator class: `halfvec_cosine_ops`
+  - **[2026-11-01 개정/가산 스펙 관계 (`specs/model2vec-local-embedding/`)]**: 기존 `lbrain-memory-gemini-embedding-2-v1`(및 `lbrain-memory-gemini-embedding-2-v2-bounded8k`) 3,072차원 스키마·데이터·이력은 삭제하지 않고 그대로 보존한다. 유료 Gemini 임베딩 API를 로컬 Model2Vec으로 대체하는 경로는 `specs/model2vec-local-embedding/requirements.md` 및 `specs/model2vec-local-embedding/design.md`를 정본으로 따르며, 별도 테이블(`card_local_embeddings`, `session_local_embeddings`), 별도 outbox(`local_embedding_outbox`), 별도 Neo4j 속성(`name_embedding_model2vec_v1`, `fact_embedding_model2vec_v1`), receipt v3를 통해 256차원 프로필 `lbrain-memory-model2vec-256-v1`(`model: local-model2vec-256-v1`, `vector(256)`, `vector_cosine_ops`)을 가산적(additive)으로 운영한다. 두 프로필의 벡터와 점수는 절대 혼합하지 않는다.
 - **R1.3 (실제 SQL·Fail-Closed)**: `PgVectorStore`의 CRUD와 fallback 검색은 실제 `psycopg` SQL을 사용한다. 연결 실패나 schema 불일치를 Python dict, 임시 메모리 저장소, 빈 결과로 숨기지 않고 호출자에게 예외와 명시적 degraded 상태를 전달한다.
 - **R1.4 (Dual CAS)**: `memory_cards`와 `session_memory_chunks`의 임베딩 write-back은 outbox 생성 당시 `content_hash`와 현재 행의 hash가 일치할 때만 반영한다. 불일치는 성공으로 위장하지 않는 CAS no-op으로 기록한다.
 - **R1.5 (Outbox 안전성)**: `embedding_outbox`는 active job 중복을 막는 unique index, `FOR UPDATE SKIP LOCKED`, `claimed_at`, `lease_until`, `worker_id`, `retry_count`, dead-letter를 사용한다. 임베딩 생성 책임자는 Embedding Worker 하나로 고정한다.
@@ -85,8 +86,8 @@
 
 ### AC1. 데이터·임베딩 계약
 
-- [ ] 신규 schema가 `gemini-embedding-2`, `halfvec(3072)`, `halfvec_cosine_ops`를 사용한다.
-- [ ] 카드와 세션 청크의 vector/query/worker/migration dimension이 하나의 shared constant와 profile을 따른다.
+- [ ] 신규 schema가 `gemini-embedding-2`, `halfvec(3072)`, `halfvec_cosine_ops`를 사용한다. (단, 로컬 Model2Vec 256차원 전환 및 가산 스키마·프로필 분리 계약은 `specs/model2vec-local-embedding/requirements.md` 및 `design.md`를 정본으로 따른다.)
+- [ ] 카드와 세션 청크의 vector/query/worker/migration dimension이 하나의 shared constant와 profile을 따른다. (프로필별 불변 descriptor 및 3,072차원/256차원 무혼합 격리 규칙은 `specs/model2vec-local-embedding/design.md` D2–D3 참조.)
 - [ ] `pgvector/pgvector:pg17` 또는 동등하게 검증된 image에서 `pgvector >= 0.8.0`, extension 설치/활성화, HNSW, `hnsw.iterative_scan` 설정을 실제 PostgreSQL로 검증한다.
 - [ ] 기존 Qdrant collection의 실제 차원·distance·model preflight 결과와 quarantine/re-embed 결과가 남는다.
 

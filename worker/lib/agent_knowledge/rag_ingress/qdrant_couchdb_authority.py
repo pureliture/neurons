@@ -35,10 +35,20 @@ from ..llm_brain_core.runtime import session_source_revision_from_couchdb_source
 class CouchDBProjectionStateAuthorityResolver:
     """Resolve a mirror hit to CouchDB projection authority by session + content_hash."""
 
-    def __init__(self, store: Any, *, filters: dict[str, str] | None = None, backend: str = "qdrant") -> None:
+    def __init__(
+        self,
+        store: Any,
+        *,
+        filters: dict[str, str] | None = None,
+        backend: str = "qdrant",
+        embedding_profile: str = "",
+        pg_store: Any | None = None,
+    ) -> None:
         self._store = store
         self._backend = backend
         self._filters = dict(filters or {})
+        self._embedding_profile = embedding_profile
+        self._pg_store = pg_store
 
     def resolve(self, hit: dict[str, Any]) -> dict[str, Any] | None:
         session_id_hash = str(hit.get("session_id_hash") or "")
@@ -49,7 +59,48 @@ class CouchDBProjectionStateAuthorityResolver:
         if state is None:
             return None
         representation_hash = None
-        if self._backend == "postgres_pgvector":
+        if self._backend == "postgres_pgvector_local":
+            from ..model_connectors import LOCAL_EMBEDDING_PROFILE_ID
+            from ..couchdb_source.session_memory_materializer import materialize_session_memory
+            from .pg_representation import (
+                REPRESENTATION_KIND,
+                valid_local_pg_receipt_metadata,
+            )
+
+            profile_key = self._embedding_profile or LOCAL_EMBEDDING_PROFILE_ID
+            receipts = state.get("backend_receipts") or {}
+            if not isinstance(receipts, dict):
+                return None
+            local_map = receipts.get("postgres_pgvector_local") or {}
+            if not isinstance(local_map, dict):
+                return None
+            state = local_map.get(profile_key, {})
+            if not isinstance(state, dict) or state.get("receipt_version") != 3:
+                return None
+            current = materialize_session_memory(session_id_hash=session_id_hash, store=self._store)
+            if not valid_local_pg_receipt_metadata(
+                state,
+                store=self._pg_store,
+                current_materialized=current,
+            ):
+                return None
+            if state["session_id_hash"] != session_id_hash:
+                return None
+            if state.get("representation_kind") == REPRESENTATION_KIND:
+                from ..couchdb_source.document_model import sha256_hash
+                from .qdrant_backfill import public_safe_mask_body
+
+                if sha256_hash(public_safe_mask_body(current.body)) != state["representation_content_hash"]:
+                    return None
+            else:
+                if current.content_hash != state["representation_content_hash"]:
+                    return None
+            representation_hash = state["representation_content_hash"]
+            if str(state.get("session_memory_knowledge_id") or "") != str(hit.get("memory_id") or ""):
+                return None
+            if any(str(state.get(key) or "") != str(hit.get(key) or "") for key in ("provider", "project")):
+                return None
+        elif self._backend == "postgres_pgvector":
             receipts = state.get("backend_receipts") or {}
             if not isinstance(receipts, dict):
                 return None

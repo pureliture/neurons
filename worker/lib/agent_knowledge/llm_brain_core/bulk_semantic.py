@@ -11,10 +11,33 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from graphiti_core.local_profile import (
+    compute_graph_edge_embedding_input_hash,
+    compute_graph_node_embedding_input_hash,
+    format_graph_edge_embedding_input,
+    format_graph_node_embedding_input,
+    is_local_embedding_enabled,
+)
+
+from ..local_embedding.canonical import (
+    aggregate_chunk_embeddings,
+    decode_base64_f32_le,
+    normalize_canonical_text,
+    plan_request_batches_v1,
+    serialize_embedding_request_body,
+    split_into_canonical_chunks,
+)
+from ..local_embedding.profile import (
+    LOCAL_EMBEDDING_DIM,
+    LOCAL_EMBEDDING_MODEL_ALIAS,
+    LOCAL_EMBEDDING_PROFILE_ID,
+)
+from ..model_connectors.policy import validate_local_embedding_write_or_query_policy
 from ._util import PRIVATE_OUTPUT_RE, SECRET_ASSIGNMENT_RE, public_safe_text, short_hash
 from .graphiti_adapter import (
     _AsyncLoopRunner,
     _episode_type_json,
+    _is_local_embedding_config,
     _llm_reasoning_effort_env,
     _parse_datetime,
     _reject_forbidden_gemini_llm_model,
@@ -173,6 +196,7 @@ class OpenAICompatibleEmbeddingBatcher:
         base_url: str,
         model: str,
         api_key: str = "",
+        embedding_profile: str = "",
         timeout_seconds: int = DEFAULT_BULK_SEMANTIC_TIMEOUT_SECONDS,
         max_batch_size: int = DEFAULT_BULK_SEMANTIC_EMBEDDING_BATCH_SIZE,
         post_fn: Callable[..., str] | None = None,
@@ -184,23 +208,79 @@ class OpenAICompatibleEmbeddingBatcher:
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._api_key = api_key
+        self._is_local_profile = _is_local_embedding_config(
+            embedding_profile=embedding_profile,
+            embedding_model=model,
+        )
+        self._embedding_profile = (
+            LOCAL_EMBEDDING_PROFILE_ID if self._is_local_profile else str(embedding_profile or "").strip()
+        )
+        if self._is_local_profile:
+            validate_local_embedding_write_or_query_policy(
+                profile_id=LOCAL_EMBEDDING_PROFILE_ID,
+                model=self._model,
+                base_url=self._base_url,
+                dimension=LOCAL_EMBEDDING_DIM,
+            )
+            self._model = LOCAL_EMBEDDING_MODEL_ALIAS
         self._timeout_seconds = max(1, int(timeout_seconds))
         self._max_batch_size = max(1, int(max_batch_size))
         self._post_fn = post_fn or _urllib_post
+
+    @property
+    def is_local_profile(self) -> bool:
+        return self._is_local_profile
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> "OpenAICompatibleEmbeddingBatcher | None":
         env = environ or os.environ
         if not _truthy_env(env.get("LLM_BRAIN_BULK_SEMANTIC_EMBEDDINGS", "true")):
             return None
-        model = env.get("LLM_BRAIN_EMBEDDING_MODEL", env.get("EMBEDDING_MODEL", ""))
-        base_url = env.get("LLM_BRAIN_EMBEDDING_BASE_URL", env.get("OPENAI_BASE_URL", ""))
-        if not model or not base_url:
-            return None
+        raw_profile = str(
+            env.get("NEURON_EMBEDDING_PROFILE")
+            or env.get("LLM_BRAIN_EMBEDDING_PROFILE")
+            or ""
+        ).strip()
+        raw_model = env.get("LLM_BRAIN_EMBEDDING_MODEL", env.get("EMBEDDING_MODEL", ""))
+        raw_provider = env.get(
+            "LLM_BRAIN_EMBEDDING_PROVIDER",
+            env.get("EMBEDDING_PROVIDER", ""),
+        ).lower()
+        is_local = _is_local_embedding_config(
+            embedding_profile=raw_profile,
+            embedding_model=raw_model,
+            embedding_provider=raw_provider,
+        )
+        if is_local:
+            # Local embedding mode NEVER falls back to OPENAI_BASE_URL.
+            base_url = env.get(
+                "LLM_BRAIN_EMBEDDING_BASE_URL",
+                env.get("NEURON_LOCAL_EMBEDDING_BASE_URL", ""),
+            )
+            validate_local_embedding_write_or_query_policy(
+                profile_id=LOCAL_EMBEDDING_PROFILE_ID,
+                model=raw_model or LOCAL_EMBEDDING_MODEL_ALIAS,
+                base_url=base_url,
+                dimension=LOCAL_EMBEDDING_DIM,
+            )
+            model = LOCAL_EMBEDDING_MODEL_ALIAS
+            api_key = env.get(
+                "LLM_BRAIN_EMBEDDING_API_KEY",
+                env.get("NEURON_LOCAL_EMBEDDING_API_KEY", ""),
+            )
+            embedding_profile = LOCAL_EMBEDDING_PROFILE_ID
+        else:
+            model = raw_model
+            base_url = env.get("LLM_BRAIN_EMBEDDING_BASE_URL", env.get("OPENAI_BASE_URL", ""))
+            if not model or not base_url:
+                return None
+            api_key = env.get("LLM_BRAIN_EMBEDDING_API_KEY", env.get("OPENAI_API_KEY", ""))
+            embedding_profile = raw_profile
         return cls(
             base_url=base_url,
             model=model,
-            api_key=env.get("LLM_BRAIN_EMBEDDING_API_KEY", env.get("OPENAI_API_KEY", "")),
+            api_key=api_key,
+            embedding_profile=embedding_profile,
             timeout_seconds=_positive_int_env(
                 env.get("LLM_BRAIN_BULK_SEMANTIC_TIMEOUT_SECONDS", ""),
                 DEFAULT_BULK_SEMANTIC_TIMEOUT_SECONDS,
@@ -211,18 +291,26 @@ class OpenAICompatibleEmbeddingBatcher:
             ),
         )
 
-    def embed_many(self, texts: list[str]) -> list[list[float] | None]:
-        if not texts:
-            return []
-        headers = {
-            "Content-Type": "application/json",
-            "User-Agent": "neurons-bulk-semantic/1.0",
-        }
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
+    def _embed_raw_chunks(
+        self,
+        *,
+        headers: dict[str, str],
+        texts: list[str],
+    ) -> list[list[float] | None]:
         results: list[list[float] | None] = []
-        for start in range(0, len(texts), self._max_batch_size):
-            chunk = list(texts[start : start + self._max_batch_size])
+        if self._is_local_profile:
+            batches = plan_request_batches_v1(
+                texts,
+                model=self._model,
+                encoding_format=None,
+                dimensions=None,
+            )
+        else:
+            batches = [
+                list(texts[start : start + self._max_batch_size])
+                for start in range(0, len(texts), self._max_batch_size)
+            ]
+        for chunk in batches:
             raw = self._post_embeddings_chunk(headers=headers, chunk=chunk)
             data = json.loads(raw)
             rows = data.get("data") if isinstance(data, dict) else None
@@ -234,15 +322,70 @@ class OpenAICompatibleEmbeddingBatcher:
                     continue
                 try:
                     index = int(row.get("index"))
-                    embedding = [float(item) for item in row.get("embedding") or []]
+                    raw_embedding = row.get("embedding")
+                    if isinstance(raw_embedding, str) and self._is_local_profile:
+                        embedding = decode_base64_f32_le(
+                            raw_embedding, expected_dim=LOCAL_EMBEDDING_DIM
+                        )
+                    else:
+                        embedding = [float(item) for item in raw_embedding or []]
                 except (TypeError, ValueError):
                     continue
                 by_index[index] = embedding
             results.extend(by_index.get(index) for index in range(len(chunk)))
         return results
 
+    def embed_many(self, texts: list[str]) -> list[list[float] | None]:
+        if not texts:
+            return []
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "neurons-bulk-semantic/1.0",
+        }
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        if not self._is_local_profile:
+            return self._embed_raw_chunks(headers=headers, texts=texts)
+
+        flat_chunks: list[str] = []
+        spans: list[tuple[int, int]] = []
+        for text in texts:
+            normalized = normalize_canonical_text(str(text or ""))
+            chunks = split_into_canonical_chunks(normalized or " ")
+            start = len(flat_chunks)
+            flat_chunks.extend(chunks)
+            spans.append((start, len(flat_chunks)))
+        flat_vectors = self._embed_raw_chunks(headers=headers, texts=flat_chunks)
+        chunk_byte_lengths = [len(c.encode("utf-8")) for c in flat_chunks]
+        aggregated: list[list[float] | None] = []
+        for start, end in spans:
+            sub = flat_vectors[start:end]
+            if not sub or any(vec is None for vec in sub):
+                aggregated.append(None)
+                continue
+            valid_sub = [vec for vec in sub if vec is not None]
+            if len(valid_sub) == 1:
+                aggregated.append(list(valid_sub[0]))
+            else:
+                aggregated.append(
+                    aggregate_chunk_embeddings(
+                        valid_sub,
+                        chunk_byte_lengths=chunk_byte_lengths[start:end],
+                        expected_dim=LOCAL_EMBEDDING_DIM,
+                    )
+                )
+        return aggregated
+
     def _post_embeddings_chunk(self, *, headers: dict[str, str], chunk: list[str]) -> str:
-        body = json.dumps({"model": self._model, "input": chunk}, ensure_ascii=True)
+        if self._is_local_profile:
+            body = serialize_embedding_request_body(
+                chunk,
+                model=self._model,
+                encoding_format=None,
+                dimensions=None,
+            ).decode("utf-8")
+        else:
+            body = json.dumps({"model": self._model, "input": chunk}, ensure_ascii=True)
         for attempt in range(3):
             try:
                 return self._post_fn(
@@ -270,6 +413,8 @@ class DeterministicGraphitiSemanticWriter:
     ) -> None:
         self._driver = driver
         self._embedder = embedder
+        if embedder is not None and getattr(embedder, "is_local_profile", False):
+            self._driver.local_embedding_profile = LOCAL_EMBEDDING_PROFILE_ID
         self._runner = runner or _AsyncLoopRunner.get_instance()
 
     @classmethod
@@ -277,12 +422,29 @@ class DeterministicGraphitiSemanticWriter:
         env = environ or os.environ
         from graphiti_core.driver.neo4j_driver import Neo4jDriver
 
+        driver = Neo4jDriver(
+            env.get("LLM_BRAIN_NEO4J_URI", env.get("NEO4J_URI", "bolt://localhost:7687")),
+            env.get("LLM_BRAIN_NEO4J_USER", env.get("NEO4J_USER", "neo4j")),
+            env.get("LLM_BRAIN_NEO4J_PASSWORD", env.get("NEO4J_PASSWORD", "")),
+        )
+        raw_profile = str(
+            env.get("NEURON_EMBEDDING_PROFILE")
+            or env.get("LLM_BRAIN_EMBEDDING_PROFILE")
+            or ""
+        ).strip()
+        raw_model = env.get("LLM_BRAIN_EMBEDDING_MODEL", env.get("EMBEDDING_MODEL", ""))
+        raw_provider = env.get(
+            "LLM_BRAIN_EMBEDDING_PROVIDER",
+            env.get("EMBEDDING_PROVIDER", ""),
+        ).lower()
+        if _is_local_embedding_config(
+            embedding_profile=raw_profile,
+            embedding_model=raw_model,
+            embedding_provider=raw_provider,
+        ):
+            driver.local_embedding_profile = LOCAL_EMBEDDING_PROFILE_ID
         return cls(
-            Neo4jDriver(
-                env.get("LLM_BRAIN_NEO4J_URI", env.get("NEO4J_URI", "bolt://localhost:7687")),
-                env.get("LLM_BRAIN_NEO4J_USER", env.get("NEO4J_USER", "neo4j")),
-                env.get("LLM_BRAIN_NEO4J_PASSWORD", env.get("NEO4J_PASSWORD", "")),
-            ),
+            driver,
             embedder=OpenAICompatibleEmbeddingBatcher.from_env(env),
         )
 
@@ -417,6 +579,9 @@ class DeterministicGraphitiSemanticWriter:
     ) -> dict[tuple[str, str], list[float] | None]:
         if self._embedder is None:
             return {}
+        local_mode = is_local_embedding_enabled(self._driver) or getattr(
+            self._embedder, "is_local_profile", False
+        )
         ordered: list[tuple[tuple[str, str], str]] = []
         seen: set[tuple[str, str]] = set()
         for result in normalized_results.values():
@@ -424,12 +589,22 @@ class DeterministicGraphitiSemanticWriter:
                 key = ("entity", _entity_key(entity.name))
                 if key not in seen:
                     seen.add(key)
-                    ordered.append((key, entity.name))
+                    text = (
+                        format_graph_node_embedding_input(entity.name)
+                        if local_mode
+                        else entity.name
+                    )
+                    ordered.append((key, text))
             for relation in result.relations:
                 key = ("relation", _relation_key(relation))
                 if key not in seen:
                     seen.add(key)
-                    ordered.append((key, relation.fact))
+                    text = (
+                        format_graph_edge_embedding_input(relation.fact)
+                        if local_mode
+                        else relation.fact
+                    )
+                    ordered.append((key, text))
         vectors = self._embedder.embed_many([text for _key, text in ordered])
         return {
             key: vector
@@ -637,15 +812,47 @@ async def _save_entity_node_without_embedding(driver: Any, node: Any) -> None:
         "created_at": node.created_at,
         **dict(node.attributes or {}),
     }
-    await driver.execute_query(
-        """
-        MERGE (n:Entity {uuid: $entity_data.uuid})
-        SET n:Entity
-        SET n += $entity_data
-        RETURN n.uuid AS uuid
-        """,
-        entity_data=data,
-    )
+    local_mode = is_local_embedding_enabled(driver)
+    if local_mode:
+        data["name_embedding_model2vec_v1_input_hash"] = (
+            compute_graph_node_embedding_input_hash(node.name)
+        )
+        data["embedding_dirty"] = True
+        data["embedding_updated_at"] = datetime.now(timezone.utc)
+        records, _, _ = await driver.execute_query(
+            """
+            OPTIONAL MATCH (fence_check:EmbeddingGroupFence {group_id: coalesce($entity_data.group_id, '')})
+            WITH fence_check
+            WHERE fence_check IS NULL OR fence_check.status <> 'quarantined'
+            MERGE (n:Entity {uuid: $entity_data.uuid})
+            SET n:Entity
+            SET n += $entity_data
+            FOREACH (_ IN CASE WHEN $entity_data.embedding_dirty = true AND $entity_data.group_id IS NOT NULL AND $entity_data.group_id <> '' THEN [1] ELSE [] END |
+                MERGE (fence:EmbeddingGroupFence {group_id: $entity_data.group_id})
+                ON CREATE SET fence.epoch = 1, fence.status = 'pending', fence.updated_at = datetime()
+                ON MATCH SET fence.epoch = coalesce(fence.epoch, 0) + 1,
+                             fence.status = CASE WHEN fence.status = 'quarantined' THEN 'quarantined' ELSE 'pending' END,
+                             fence.updated_at = datetime()
+            )
+            RETURN n.uuid AS uuid
+            """,
+            entity_data=data,
+        )
+        if not records:
+            from graphiti_core.local_profile import LocalGroupWriteBlockedError
+            raise LocalGroupWriteBlockedError(
+                f"EntityNode {node.uuid} save rejected: group {node.group_id} is quarantined"
+            )
+    else:
+        await driver.execute_query(
+            """
+            MERGE (n:Entity {uuid: $entity_data.uuid})
+            SET n:Entity
+            SET n += $entity_data
+            RETURN n.uuid AS uuid
+            """,
+            entity_data=data,
+        )
 
 
 async def _save_entity_edge_without_embedding(driver: Any, edge: Any) -> None:
@@ -664,16 +871,49 @@ async def _save_entity_edge_without_embedding(driver: Any, edge: Any) -> None:
         "reference_time": edge.reference_time,
         **dict(edge.attributes or {}),
     }
-    await driver.execute_query(
-        """
-        MATCH (source:Entity {uuid: $edge_data.source_uuid})
-        MATCH (target:Entity {uuid: $edge_data.target_uuid})
-        MERGE (source)-[e:RELATES_TO {uuid: $edge_data.uuid}]->(target)
-        SET e += $edge_data
-        RETURN e.uuid AS uuid
-        """,
-        edge_data=data,
-    )
+    local_mode = is_local_embedding_enabled(driver)
+    if local_mode:
+        data["fact_embedding_model2vec_v1_input_hash"] = (
+            compute_graph_edge_embedding_input_hash(edge.fact)
+        )
+        data["embedding_dirty"] = True
+        data["embedding_updated_at"] = datetime.now(timezone.utc)
+        records, _, _ = await driver.execute_query(
+            """
+            OPTIONAL MATCH (fence_check:EmbeddingGroupFence {group_id: coalesce($edge_data.group_id, '')})
+            WITH fence_check
+            WHERE fence_check IS NULL OR fence_check.status <> 'quarantined'
+            MATCH (source:Entity {uuid: $edge_data.source_uuid})
+            MATCH (target:Entity {uuid: $edge_data.target_uuid})
+            MERGE (source)-[e:RELATES_TO {uuid: $edge_data.uuid}]->(target)
+            SET e += $edge_data
+            FOREACH (_ IN CASE WHEN $edge_data.embedding_dirty = true AND $edge_data.group_id IS NOT NULL AND $edge_data.group_id <> '' THEN [1] ELSE [] END |
+                MERGE (fence:EmbeddingGroupFence {group_id: $edge_data.group_id})
+                ON CREATE SET fence.epoch = 1, fence.status = 'pending', fence.updated_at = datetime()
+                ON MATCH SET fence.epoch = coalesce(fence.epoch, 0) + 1,
+                             fence.status = CASE WHEN fence.status = 'quarantined' THEN 'quarantined' ELSE 'pending' END,
+                             fence.updated_at = datetime()
+            )
+            RETURN e.uuid AS uuid
+            """,
+            edge_data=data,
+        )
+        if not records:
+            from graphiti_core.local_profile import LocalGroupWriteBlockedError
+            raise LocalGroupWriteBlockedError(
+                f"EntityEdge {edge.uuid} save rejected: group {edge.group_id} is quarantined"
+            )
+    else:
+        await driver.execute_query(
+            """
+            MATCH (source:Entity {uuid: $edge_data.source_uuid})
+            MATCH (target:Entity {uuid: $edge_data.target_uuid})
+            MERGE (source)-[e:RELATES_TO {uuid: $edge_data.uuid}]->(target)
+            SET e += $edge_data
+            RETURN e.uuid AS uuid
+            """,
+            edge_data=data,
+        )
 
 
 def _strip_code_fences(value: str) -> str:

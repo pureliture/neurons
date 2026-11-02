@@ -306,3 +306,172 @@ CREATE TABLE IF NOT EXISTS graph_projection_outbox (
 CREATE INDEX IF NOT EXISTS idx_graph_projection_outbox_queue
     ON graph_projection_outbox(status, created_at)
     WHERE status IN ('queued', 'failed');
+
+-- 8. Additive Local Model2Vec 256-dim Profile Tables (specs/model2vec-local-embedding D2/D3)
+-- Preserves memory_cards.embedding, session_memory_chunks.embedding, and embedding_outbox untouched.
+
+CREATE TABLE IF NOT EXISTS card_local_embeddings (
+    memory_id VARCHAR(64) NOT NULL REFERENCES memory_cards(memory_id) ON DELETE CASCADE,
+    profile_id VARCHAR(64) NOT NULL,
+    source_content_hash VARCHAR(71) NOT NULL,
+    input_hash VARCHAR(71) NOT NULL,
+    vector vector(256),
+    state VARCHAR(32) NOT NULL DEFAULT 'pending',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (memory_id, profile_id),
+    CONSTRAINT chk_card_local_embeddings_profile CHECK (
+        profile_id = 'lbrain-memory-model2vec-256-v1'
+    ),
+    CONSTRAINT chk_card_local_embeddings_state CHECK (
+        state IN ('pending', 'ready', 'stale', 'failed', 'quarantine')
+    ),
+    CONSTRAINT chk_card_local_embeddings_source_hash CHECK (
+        source_content_hash ~ '^sha256:[0-9a-f]{64}$'
+    ),
+    CONSTRAINT chk_card_local_embeddings_input_hash CHECK (
+        input_hash ~ '^sha256:[0-9a-f]{64}$'
+    ),
+    CONSTRAINT chk_card_local_embeddings_ready_vector CHECK (
+        state != 'ready' OR (vector IS NOT NULL AND vector_dims(vector) = 256 AND vector_norm(vector) > 0)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_card_local_embeddings_vector_hnsw
+    ON card_local_embeddings USING hnsw (vector vector_cosine_ops);
+
+CREATE INDEX IF NOT EXISTS idx_card_local_embeddings_state
+    ON card_local_embeddings(profile_id, state);
+
+CREATE TABLE IF NOT EXISTS session_local_embeddings (
+    chunk_id VARCHAR(64) NOT NULL REFERENCES session_memory_chunks(chunk_id) ON DELETE CASCADE,
+    profile_id VARCHAR(64) NOT NULL,
+    source_content_hash VARCHAR(71) NOT NULL,
+    input_hash VARCHAR(71) NOT NULL,
+    vector vector(256),
+    state VARCHAR(32) NOT NULL DEFAULT 'pending',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (chunk_id, profile_id),
+    CONSTRAINT chk_session_local_embeddings_profile CHECK (
+        profile_id = 'lbrain-memory-model2vec-256-v1'
+    ),
+    CONSTRAINT chk_session_local_embeddings_state CHECK (
+        state IN ('pending', 'ready', 'stale', 'failed', 'quarantine')
+    ),
+    CONSTRAINT chk_session_local_embeddings_source_hash CHECK (
+        source_content_hash ~ '^sha256:[0-9a-f]{64}$'
+    ),
+    CONSTRAINT chk_session_local_embeddings_input_hash CHECK (
+        input_hash ~ '^sha256:[0-9a-f]{64}$'
+    ),
+    CONSTRAINT chk_session_local_embeddings_ready_vector CHECK (
+        state != 'ready' OR (vector IS NOT NULL AND vector_dims(vector) = 256 AND vector_norm(vector) > 0)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_local_embeddings_vector_hnsw
+    ON session_local_embeddings USING hnsw (vector vector_cosine_ops);
+
+CREATE INDEX IF NOT EXISTS idx_session_local_embeddings_state
+    ON session_local_embeddings(profile_id, state);
+
+CREATE TABLE IF NOT EXISTS local_embedding_tombstones (
+    target_type VARCHAR(32) NOT NULL,
+    target_id VARCHAR(64) NOT NULL,
+    profile_id VARCHAR(64) NOT NULL,
+    incarnation BIGINT NOT NULL DEFAULT 1,
+    deleted_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (target_type, target_id, profile_id),
+    CONSTRAINT chk_local_embedding_tombstones_target_type CHECK (
+        target_type IN ('memory_card', 'session_chunk')
+    ),
+    CONSTRAINT chk_local_embedding_tombstones_profile CHECK (
+        profile_id = 'lbrain-memory-model2vec-256-v1'
+    ),
+    CONSTRAINT chk_local_embedding_tombstones_incarnation CHECK (
+        incarnation >= 1
+    )
+);
+
+CREATE TABLE IF NOT EXISTS local_embedding_outbox (
+    outbox_id BIGSERIAL PRIMARY KEY,
+    target_type VARCHAR(32) NOT NULL,
+    target_id VARCHAR(64) NOT NULL,
+    profile_id VARCHAR(64) NOT NULL,
+    source_content_hash VARCHAR(71) NOT NULL,
+    input_hash VARCHAR(71) NOT NULL,
+    payload_text TEXT NOT NULL,
+    incarnation BIGINT NOT NULL DEFAULT 1,
+    status VARCHAR(32) NOT NULL DEFAULT 'queued',
+    fencing_token BIGINT NOT NULL DEFAULT 0,
+    worker_id VARCHAR(64),
+    claimed_at TIMESTAMPTZ,
+    lease_until TIMESTAMPTZ,
+    retry_count INT NOT NULL DEFAULT 0,
+    next_attempt_at TIMESTAMPTZ,
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_local_embedding_outbox_target_type CHECK (
+        target_type IN ('memory_card', 'session_chunk')
+    ),
+    CONSTRAINT chk_local_embedding_outbox_profile CHECK (
+        profile_id = 'lbrain-memory-model2vec-256-v1'
+    ),
+    CONSTRAINT chk_local_embedding_outbox_status CHECK (
+        status IN ('queued', 'processing', 'completed', 'cas_skipped', 'failed', 'dead_letter', 'cancelled')
+    ),
+    CONSTRAINT chk_local_embedding_outbox_retry CHECK (retry_count >= 0),
+    CONSTRAINT chk_local_embedding_outbox_incarnation CHECK (incarnation >= 1),
+    CONSTRAINT chk_local_embedding_outbox_source_hash CHECK (
+        source_content_hash ~ '^sha256:[0-9a-f]{64}$'
+    ),
+    CONSTRAINT chk_local_embedding_outbox_input_hash CHECK (
+        input_hash ~ '^sha256:[0-9a-f]{64}$'
+    )
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_local_embedding_outbox_active
+    ON local_embedding_outbox(target_type, target_id, profile_id, source_content_hash, input_hash, incarnation)
+    WHERE status IN ('queued', 'processing', 'failed');
+
+CREATE INDEX IF NOT EXISTS idx_local_embedding_outbox_queue
+    ON local_embedding_outbox(status, next_attempt_at, created_at)
+    WHERE status IN ('queued', 'processing', 'failed');
+
+CREATE TABLE IF NOT EXISTS graph_operation_journal (
+    operation_id VARCHAR(128) PRIMARY KEY,
+    outbox_id BIGINT,
+    group_id VARCHAR(128) NOT NULL,
+    episode_uuid VARCHAR(128) NOT NULL,
+    source_type VARCHAR(32) NOT NULL,
+    source_id VARCHAR(128) NOT NULL,
+    source_revision VARCHAR(128) NOT NULL,
+    content_hash VARCHAR(71) NOT NULL,
+    profile_id VARCHAR(64) NOT NULL,
+    fence_epoch BIGINT NOT NULL DEFAULT 0,
+    state VARCHAR(32) NOT NULL DEFAULT 'claimed',
+    execution_plan JSONB NOT NULL DEFAULT '{}'::jsonb,
+    step_receipts JSONB NOT NULL DEFAULT '{}'::jsonb,
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_graph_operation_journal_state CHECK (
+        state IN (
+            'claimed',
+            'planned',
+            'neo4j_fenced',
+            'episode_written',
+            'entities_resolved',
+            'edges_resolved',
+            'completed',
+            'failed_needs_recovery',
+            'quarantine',
+            'superseded'
+        )
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_graph_operation_journal_episode
+    ON graph_operation_journal(group_id, episode_uuid, state);
+

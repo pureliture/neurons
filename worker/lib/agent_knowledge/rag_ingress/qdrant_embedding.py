@@ -115,6 +115,53 @@ def _openai_embed_fn(*, model: str, base_url: str, api_key: str, environ: Mappin
         raise SearchableMirrorUnavailable(
             "embedding model not configured (set LLM_BRAIN_EMBEDDING_MODEL)"
         )
+    normalized_model = model.strip().lower()
+    provider_raw = str(
+        env.get("LLM_BRAIN_EMBEDDING_PROVIDER") or env.get("EMBEDDING_PROVIDER") or ""
+    ).strip().lower()
+    profile_raw = str(env.get("LLM_BRAIN_EMBEDDING_PROFILE_ID") or "").strip()
+    if (
+        normalized_model in {"local-model2vec-256-v1", "minishlab/potion-multilingual-128m"}
+        or provider_raw in {"model2vec", "local-model2vec", "local_model2vec"}
+        or profile_raw == "lbrain-memory-model2vec-256-v1"
+    ):
+        if not str(base_url or "").strip():
+            raise SearchableMirrorUnavailable(
+                "local embedding base_url not configured (set LLM_BRAIN_EMBEDDING_BASE_URL)"
+            )
+        from agent_knowledge.local_embedding.client import CanonicalLocalEmbeddingClient
+        from agent_knowledge.local_embedding.profile import LOCAL_MODEL2VEC_MODEL_ALIAS, LOCAL_MODEL2VEC_PROFILE_ID
+        from agent_knowledge.model_connectors.policy import validate_local_embedding_write_or_query_policy
+
+        # Fail closed: a local profile can never target a paid endpoint or paid model.
+        try:
+            validate_local_embedding_write_or_query_policy(
+                profile_id=LOCAL_MODEL2VEC_PROFILE_ID,
+                model=LOCAL_MODEL2VEC_MODEL_ALIAS,
+                base_url=str(base_url),
+                dimension=256,
+            )
+        except PolicyViolation as exc:
+            raise SearchableMirrorUnavailable(str(exc)) from exc
+
+        try:
+            timeout_seconds = float(env.get("LLM_BRAIN_EMBEDDING_TIMEOUT_SECONDS", "30"))
+        except (TypeError, ValueError):
+            timeout_seconds = 30.0
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            timeout_seconds = 30.0
+        local_client = CanonicalLocalEmbeddingClient(
+            base_url=str(base_url),
+            api_key=api_key or "local-model2vec",
+            timeout_seconds=timeout_seconds,
+            use_openai_sdk=True,
+        )
+
+        def _embed_local(text: str) -> list[float]:
+            return list(local_client.embed_document(text).vector)
+
+        _embed_local.close = local_client.close  # type: ignore[attr-defined]
+        return _embed_local
     try:
         from openai import OpenAI
     except ImportError as exc:  # pragma: no cover - exercised only on the live path

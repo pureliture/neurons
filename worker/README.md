@@ -241,8 +241,60 @@ vendored (`lib/agent_knowledge/`):
   `RETIRED_INDEX_BRIDGE_BASE_URL`/`RETIRED_INDEX_BRIDGE_API_KEY`, `RAG_INGRESS_PRESSURE_URL`.
 - 라이브 재배포 자체는 이 작업 범위 밖(별도 goal).
 
+## 로컬 Model2Vec 임베딩 서비스 (`local-embedding`)
+
+유료 Gemini 임베딩 API 호출 없이 로컬 Model2Vec(`minishlab/potion-multilingual-128M`, revision `73908c3438cf03b6a01bcb9611d62b23d0726f08`, `model2vec==0.10.0`, 256차원, 프로필 `lbrain-memory-model2vec-256-v1`, 모델 별칭 `local-model2vec-256-v1`)을 실행·검증하는 서비스와 클라이언트 어댑터를 포함한다. 정본 스펙은 `specs/model2vec-local-embedding/`(`requirements.md`, `design.md`, `milestones.md`)에 있다.
+
+### 1. 의존성 설치 (`local-embedding` optional extra)
+
+기본 worker 이미지는 모델 라이브러리나 가중치를 자동 포함하지 않는다. 로컬 임베딩 서비스 실행 환경에서는 `local-embedding` extra를 명시적으로 동기화한다:
+
+```bash
+cd worker && uv sync --group dev --extra mcp-http --extra local-embedding
+```
+
+### 2. 모델 파일 설치 및 SHA-256 무결성 검증
+
+모델 가중치는 Git에 커밋하지 않는다. 서버 시작(`serve`)과 readiness(`/readyz`)는 네트워크 다운로드를 수행하지 않으므로, 시작 전에 명시적 `install` 명령으로 모델 파일을 준비하고 3개 파일(`model.safetensors`, `tokenizer.json`, `config.json`)의 SHA-256을 검증한다:
+
+```bash
+# (A) 로컬에 이미 받은 스냅샷 디렉터리에서 복사·검증 설치
+cd worker && uv run neuron-local-embedding install \
+  --model-dir /var/lib/neurons/models/potion-multilingual-128M \
+  --source-dir /path/to/local/snapshot
+
+# (B) 초기 1회 명시적 다운로드 후 SHA-256 검증 설치 (운영/설치 시점 전용)
+cd worker && uv run neuron-local-embedding install \
+  --model-dir /var/lib/neurons/models/potion-multilingual-128M \
+  --download
+
+# (C) 오프라인 무결성 및 로딩 self-check 검증 (외부 네트워크 호출 없음)
+cd worker && uv run neuron-local-embedding verify \
+  --model-dir /var/lib/neurons/models/potion-multilingual-128M
+```
+
+검증 대상 고정 SHA-256:
+- `model.safetensors`: `14b5eb39cb4ce5666da8ad1f3dc6be4346e9b2d601c073302fa0a31bf7943397`
+- `tokenizer.json`: `19f1909063da3cfe3bd83a782381f040dccea475f4816de11116444a73e1b6a1`
+- `config.json`: `595e4cab2093732efd5dbe084fd5c1826b5eea693b73b4c1fd971672867d2e54`
+
+### 3. 서비스 실행 및 오프라인 재시작
+
+서비스는 기본적으로 loopback(`127.0.0.1:18120`)만 바인딩하며, 시작/재시작 시 `HF_HUB_OFFLINE=1` 및 `TRANSFORMERS_OFFLINE=1` 상태로 검증된 로컬 디렉터리에서만 모델을 로드한다:
+
+```bash
+export NEURON_LOCAL_EMBEDDING_MODEL_DIR=/var/lib/neurons/models/potion-multilingual-128M
+cd worker && uv run neuron-local-embedding serve --host 127.0.0.1 --port 18120
+# 또는: cd worker && uv run neuron-knowledge local-embedding serve --host 127.0.0.1 --port 18120
+```
+
+- `GET /livez`: 프로세스 생존 상태 확인 (`200 OK`)
+- `GET /readyz`: 고정 모델 파일 SHA-256, `model2vec==0.10.0`, 256차원 준비 상태 확인 (준비 시 `200 OK`, 미준비/불일치 시 `503 model_unavailable` + `Retry-After: 2`)
+- `POST /v1/embeddings`: `model="local-model2vec-256-v1"`, 단건 문자열 또는 문자열 배열(최대 16개, 항목당 최대 8KiB UTF-8, 배치 총합 최대 128KiB UTF-8, 요청 JSON 최대 160KiB), `encoding_format` 생략/`float`/`base64`(IEEE754 float32 little-endian) 지원. 동시 추론 1, 대기열 8, 대기 제한 10초 초과 시 `429 capacity_exceeded` 반환.
+- 모든 Neurons 로컬 임베딩 소비자는 공유 클라이언트 어댑터(`canonical_embedding_v1`)를 통해 호출 전 전체 입력의 `input_hash`(`sha256:<64hex>`)를 계산하고, 8192 bytes UTF-8 문자 경계 보존 분할 및 바이트 길이 가중합 후 L2 정규화를 수행한다.
+
 ## 테스트
 
 ```
-cd worker && python -m pytest          # or: uv run --with pytest python -m pytest
+cd worker && uv run --group dev --extra mcp-http --extra local-embedding pytest -q
 ```

@@ -169,6 +169,8 @@ operator:   halfvec_cosine_ops
 
 일반 `vector` 타입의 dimension 제한 때문에 `vector(3072)`를 사용하지 않는다. `halfvec(3072)`와 `halfvec_cosine_ops`를 schema와 query에서 함께 사용한다.
 
+> **[2026-11-01 가산 스펙 관계 (`specs/model2vec-local-embedding/`)]**: 위 `lbrain-memory-gemini-embedding-2-v1` (`halfvec(3072)`) 컬럼과 기존 데이터·이력은 그대로 보존한다. 로컬 Model2Vec 전환 경로(`lbrain-memory-model2vec-256-v1`, `local-model2vec-256-v1`, `vector(256)`, `vector_cosine_ops`)의 서비스·가산 테이블(`card_local_embeddings`, `session_local_embeddings`)·전용 큐(`local_embedding_outbox`)·receipt v3·Graphiti 0.30.1 vendored fork 계약은 `specs/model2vec-local-embedding/design.md`를 정본으로 읽는다.
+
 ### 3.2. Authority와 vector tables
 
 ```sql
@@ -392,7 +394,7 @@ SQL statement timeout은 1초를 상한으로 하되 호출자의 기존 제한�
 | PostgreSQL type | `halfvec(3072)` |
 | profile | `lbrain-memory-gemini-embedding-2-v1` |
 | owner | Embedding Worker |
-| alternative | Ollama를 명시한 local profile에서만 `nomic-embed-text / 768` |
+| alternative | Ollama를 명시한 local profile에서만 `nomic-embed-text / 768`; 로컬 Model2Vec 전환 프로필(`lbrain-memory-model2vec-256-v1` / `local-model2vec-256-v1` / `256` / `vector(256)`)은 `specs/model2vec-local-embedding/design.md` 정본 참조 |
 
 Graphiti의 Neo4j vector index를 생성하는 embedder도 동일한 profile을 사용해야 한다. 다른 dimension의 vector를 같은 collection/index에 섞지 않는다. Qdrant에 남은 기존 vector가 profile과 다르면 migration tool이 quarantine하고 re-embed job을 만든다.
 

@@ -4,11 +4,21 @@ from .env import (
     DEFAULT_EMBEDDING_DIM,
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_EMBEDDING_PROFILE_ID,
+    LOCAL_EMBEDDING_DIM,
+    LOCAL_EMBEDDING_MODEL,
+    LOCAL_EMBEDDING_PROFILE_ID,
+    resolve_embedding_profile_id,
     resolve_embedding_spec,
     resolve_model_connection_config,
     resolve_reranker_spec,
 )
-from .policy import ModelConnectorConfigError, ModelPolicy, PolicyViolation
+from .policy import (
+    ModelConnectorConfigError,
+    ModelPolicy,
+    PaidEmbeddingFallbackBlockedError,
+    PolicyViolation,
+    validate_local_embedding_write_or_query_policy,
+)
 from .reranker import (
     CandidateReranker,
     FunctionRerankerClient,
@@ -34,6 +44,9 @@ __all__ = [
     "DEFAULT_EMBEDDING_DIM",
     "DEFAULT_EMBEDDING_MODEL",
     "DEFAULT_EMBEDDING_PROFILE_ID",
+    "LOCAL_EMBEDDING_DIM",
+    "LOCAL_EMBEDDING_MODEL",
+    "LOCAL_EMBEDDING_PROFILE_ID",
     "EmbeddingSpec",
     "FunctionRerankerClient",
     "GRAPH_WORKER_SESSION_ID",
@@ -53,6 +66,7 @@ __all__ = [
     "is_opencode_base_url",
     "opencode_session_headers",
     "opencode_session_id",
+    "resolve_embedding_profile_id",
     "resolve_embedding_spec",
     "resolve_model_connection_config",
     "resolve_reranker_spec",

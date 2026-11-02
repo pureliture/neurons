@@ -182,6 +182,7 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "pg-schema-apply": _lazy_handler(".postgres_store.schema_apply_cli"),
     "pg-freshness-revalidate": _lazy_handler(".postgres_store.freshness_revalidate_cli"),
     "pg-memory-propose": _lazy_handler(".session_memory.candidate_intake_cli"),
+    "local-embedding": _lazy_handler(".local_embedding.cli"),
     "transcript-quality": _pending_server_command("transcript-quality"),
     "transcript-resources": _pending_server_command("transcript-resources"),
     "transcript-retrieval": _pending_server_command("transcript-retrieval"),

@@ -1,0 +1,23 @@
+graphiti-core 0.30.1 (vendored fork in worker/lib/graphiti_core)
+Copyright 2024, Zep Software, Inc.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+---
+Neurons Local Model2Vec Profile Modifications:
+- Added `graphiti_core/local_profile.py` for 256-dim `lbrain-memory-model2vec-256-v1` property routing, canonical input normalization, query vector validation, internal attribute stripping, and Community fail-closed guards.
+- Updated Cypher queries and Neo4j operations (`models/nodes/node_db_queries.py`, `models/edges/edge_db_queries.py`, `driver/neo4j/operations/entity_node_ops.py`, `driver/neo4j/operations/entity_edge_ops.py`, `driver/neo4j/operations/community_node_ops.py`, `driver/neo4j/operations/search_ops.py`, `driver/record_parsers.py`, `search/search_utils.py`, `search/search.py`, `nodes.py`, `edges.py`, `utils/bulk_utils.py`, `utils/maintenance/community_operations.py`, `graphiti.py`) to:
+  1. Preserve existing `name_embedding` / `fact_embedding` properties (`SET n += ...` / `SET e += ...`) and write 256-dim local vectors to `name_embedding_model2vec_v1` / `fact_embedding_model2vec_v1` with `*_profile_id`, `*_input_hash`, and `embedding_dirty`.
+  2. Enforce pre-filtering (`IS NOT NULL`, `size(...) = 256`, `*_profile_id = 'lbrain-memory-model2vec-256-v1'`, `coalesce(embedding_dirty, false) = false`) before `vector.similarity.cosine` across search, candidate retrieval, invalidation, and MMR embedding loading.
+  3. Record `EmbeddingDeletion` tombstones and increment `EmbeddingGroupFence.epoch` on node/edge mutations and deletions.
+  4. Fail closed on Community operations (`CommunityDisabledInLocalModeError`) when local Model2Vec mode is active.
