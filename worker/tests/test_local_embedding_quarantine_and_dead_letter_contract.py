@@ -259,6 +259,8 @@ def test_backfill_session_receipts_uses_materialized_source_hash_and_legacy_sche
 
     backfill_src = inspect.getsource(transition.backfill_pg_local_embeddings)
     assert "materialize_session_memory(" in backfill_src
+    assert "s_content_hash != s_active_content_hash" in backfill_src
+    assert "valid_local_pg_receipt_metadata(" in backfill_src
     assert "projected_source_hash=s_source_hash" in backfill_src
     assert "scheme = \"legacy_exact\"" in backfill_src
     assert "scheme = \"legacy_reuse\"" in backfill_src

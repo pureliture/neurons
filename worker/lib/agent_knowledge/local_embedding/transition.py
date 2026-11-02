@@ -504,6 +504,7 @@ def backfill_pg_local_embeddings(
             LOCAL_SESSION_REPRESENTATION_KIND,
             build_local_representation_receipt_v3,
             derive_local_pg_chunk_id,
+            valid_local_pg_receipt_metadata,
             valid_local_representation_receipt_v3,
         )
 
@@ -555,6 +556,30 @@ def backfill_pg_local_embeddings(
             if not s_source_hash or not s_active_content_hash:
                 continue
 
+            # Only issue receipt for chunk matching the current materialization's active content hash
+            if s_content_hash != s_active_content_hash:
+                continue
+
+            receipts = state_doc.get("backend_receipts")
+            if not isinstance(receipts, dict):
+                receipts = {}
+            local_map = receipts.get("postgres_pgvector_local")
+            if not isinstance(local_map, dict):
+                local_map = {}
+            existing_rec = local_map.get(profile_id)
+            needs_receipt = (
+                not isinstance(existing_rec, dict)
+                or existing_rec.get("receipt_version") != 3
+                or not valid_local_pg_receipt_metadata(
+                    existing_rec,
+                    store=store,
+                    current_materialized=current_mat,
+                    require_ready_vector=True,
+                )
+            )
+            if not needs_receipt:
+                continue
+
             # Determine identity scheme matching the existing chunk
             try:
                 local_v1_id = derive_local_pg_chunk_id(
@@ -599,40 +624,32 @@ def backfill_pg_local_embeddings(
             else:
                 scheme = "legacy_reuse"
 
-            receipts = state_doc.get("backend_receipts")
-            if not isinstance(receipts, dict):
-                receipts = {}
-            local_map = receipts.get("postgres_pgvector_local")
-            if not isinstance(local_map, dict):
-                local_map = {}
-            existing_rec = local_map.get(profile_id)
-            if not isinstance(existing_rec, dict) or existing_rec.get("receipt_version") != 3:
-                try:
-                    new_rec = build_local_representation_receipt_v3(
-                        representation_kind=LOCAL_SESSION_REPRESENTATION_KIND,
-                        project=s_project,
-                        provider=s_provider,
-                        session_id_hash=s_sid_hash,
-                        active_content_hash=s_active_content_hash,
-                        projected_source_hash=s_source_hash,
-                        representation_content_hash=s_content_hash,
-                        session_memory_knowledge_id=s_chunk_id,
-                        identity_scheme=scheme,
-                        embedding_profile=profile_id,
-                        input_hash=s_input_hash,
-                    )
-                    if valid_local_representation_receipt_v3(
-                        new_rec,
-                        store=store,
-                        current_materialized=current_mat,
-                        require_ready_vector=True,
-                    ):
-                        local_map[profile_id] = new_rec
-                        receipts["postgres_pgvector_local"] = local_map
-                        state_doc["backend_receipts"] = receipts
-                        couchdb_store.put(state_doc)
-                except Exception:
-                    pass
+            try:
+                new_rec = build_local_representation_receipt_v3(
+                    representation_kind=LOCAL_SESSION_REPRESENTATION_KIND,
+                    project=s_project,
+                    provider=s_provider,
+                    session_id_hash=s_sid_hash,
+                    active_content_hash=s_active_content_hash,
+                    projected_source_hash=s_source_hash,
+                    representation_content_hash=s_content_hash,
+                    session_memory_knowledge_id=s_chunk_id,
+                    identity_scheme=scheme,
+                    embedding_profile=profile_id,
+                    input_hash=s_input_hash,
+                )
+                if valid_local_representation_receipt_v3(
+                    new_rec,
+                    store=store,
+                    current_materialized=current_mat,
+                    require_ready_vector=True,
+                ):
+                    local_map[profile_id] = new_rec
+                    receipts["postgres_pgvector_local"] = local_map
+                    state_doc["backend_receipts"] = receipts
+                    couchdb_store.put(state_doc)
+            except Exception:
+                pass
 
     snapshot = inspect_pg_local_embedding_state(
         store, profile_id=profile_id, couchdb_store=couchdb_store
