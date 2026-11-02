@@ -114,14 +114,14 @@ class Neo4jEntityNodeOperations(EntityNodeOperations):
                 WITH n, collect(r.uuid) AS edge_uuids,
                      [rel IN collect(r) WHERE rel IS NOT NULL AND type(rel) = 'RELATES_TO' | {uuid: rel.uuid, group_id: coalesce(rel.group_id, n.group_id, ''), inc: coalesce(rel.incarnation, 1)}] AS rel_metas
                 FOREACH (rm IN [x IN rel_metas WHERE x.uuid IS NOT NULL] |
-                    MERGE (td:EmbeddingDeletion {group_id: rm.group_id, element_kind: 'edge', uuid: rm.uuid})
-                    ON CREATE SET td.incarnation = rm.inc, td.delete_operation_id = 'del:edge:' + rm.uuid, td.deleted_at = datetime()
-                    ON MATCH SET td.incarnation = coalesce(td.incarnation, 0) + 1, td.delete_operation_id = 'del:edge:' + rm.uuid, td.deleted_at = datetime()
+                    MERGE (td:EmbeddingDeletion {target_type: 'edge', target_uuid: rm.uuid})
+                    ON CREATE SET td.group_id = rm.group_id, td.element_kind = 'edge', td.uuid = rm.uuid, td.incarnation = rm.inc, td.delete_operation_id = 'del:edge:' + rm.uuid, td.deleted_at = datetime()
+                    ON MATCH SET td.group_id = rm.group_id, td.element_kind = 'edge', td.uuid = rm.uuid, td.incarnation = coalesce(td.incarnation, 0) + 1, td.delete_operation_id = 'del:edge:' + rm.uuid, td.deleted_at = datetime()
                 )
                 FOREACH (_ IN CASE WHEN n:Entity THEN [1] ELSE [] END |
-                    MERGE (nd:EmbeddingDeletion {group_id: coalesce(n.group_id, ''), element_kind: 'node', uuid: n.uuid})
-                    ON CREATE SET nd.incarnation = coalesce(n.incarnation, 1), nd.delete_operation_id = 'del:node:' + n.uuid, nd.deleted_at = datetime()
-                    ON MATCH SET nd.incarnation = coalesce(nd.incarnation, 0) + 1, nd.delete_operation_id = 'del:node:' + n.uuid, nd.deleted_at = datetime()
+                    MERGE (nd:EmbeddingDeletion {target_type: 'entity', target_uuid: n.uuid})
+                    ON CREATE SET nd.group_id = coalesce(n.group_id, ''), nd.element_kind = 'entity', nd.uuid = n.uuid, nd.incarnation = coalesce(n.incarnation, 1), nd.delete_operation_id = 'del:node:' + n.uuid, nd.deleted_at = datetime()
+                    ON MATCH SET nd.group_id = coalesce(n.group_id, ''), nd.element_kind = 'entity', nd.uuid = n.uuid, nd.incarnation = coalesce(nd.incarnation, 0) + 1, nd.delete_operation_id = 'del:node:' + n.uuid, nd.deleted_at = datetime()
                     MERGE (fence:EmbeddingGroupFence {group_id: coalesce(n.group_id, '')})
                     ON CREATE SET fence.epoch = 1, fence.status = 'active', fence.updated_at = datetime()
                     ON MATCH SET fence.epoch = coalesce(fence.epoch, 0) + 1, fence.updated_at = datetime()
@@ -156,9 +156,9 @@ class Neo4jEntityNodeOperations(EntityNodeOperations):
             query = """
                 MATCH (n:Entity {group_id: $group_id})
                 CALL (n) {
-                    MERGE (nd:EmbeddingDeletion {group_id: coalesce(n.group_id, ''), element_kind: 'node', uuid: n.uuid})
-                    ON CREATE SET nd.incarnation = coalesce(n.incarnation, 1), nd.delete_operation_id = 'del:node:' + n.uuid, nd.deleted_at = datetime()
-                    ON MATCH SET nd.incarnation = coalesce(nd.incarnation, 0) + 1, nd.delete_operation_id = 'del:node:' + n.uuid, nd.deleted_at = datetime()
+                    MERGE (nd:EmbeddingDeletion {target_type: 'entity', target_uuid: n.uuid})
+                    ON CREATE SET nd.group_id = coalesce(n.group_id, ''), nd.element_kind = 'entity', nd.uuid = n.uuid, nd.incarnation = coalesce(n.incarnation, 1), nd.delete_operation_id = 'del:node:' + n.uuid, nd.deleted_at = datetime()
+                    ON MATCH SET nd.group_id = coalesce(n.group_id, ''), nd.element_kind = 'entity', nd.uuid = n.uuid, nd.incarnation = coalesce(nd.incarnation, 0) + 1, nd.delete_operation_id = 'del:node:' + n.uuid, nd.deleted_at = datetime()
                     MERGE (fence:EmbeddingGroupFence {group_id: coalesce(n.group_id, '')})
                     ON CREATE SET fence.epoch = 1, fence.status = 'active', fence.updated_at = datetime()
                     ON MATCH SET fence.epoch = coalesce(fence.epoch, 0) + 1, fence.updated_at = datetime()
@@ -189,9 +189,9 @@ class Neo4jEntityNodeOperations(EntityNodeOperations):
                 MATCH (n:Entity)
                 WHERE n.uuid IN $uuids
                 CALL (n) {
-                    MERGE (nd:EmbeddingDeletion {group_id: coalesce(n.group_id, ''), element_kind: 'node', uuid: n.uuid})
-                    ON CREATE SET nd.incarnation = coalesce(n.incarnation, 1), nd.delete_operation_id = 'del:node:' + n.uuid, nd.deleted_at = datetime()
-                    ON MATCH SET nd.incarnation = coalesce(nd.incarnation, 0) + 1, nd.delete_operation_id = 'del:node:' + n.uuid, nd.deleted_at = datetime()
+                    MERGE (nd:EmbeddingDeletion {target_type: 'entity', target_uuid: n.uuid})
+                    ON CREATE SET nd.group_id = coalesce(n.group_id, ''), nd.element_kind = 'entity', nd.uuid = n.uuid, nd.incarnation = coalesce(n.incarnation, 1), nd.delete_operation_id = 'del:node:' + n.uuid, nd.deleted_at = datetime()
+                    ON MATCH SET nd.group_id = coalesce(n.group_id, ''), nd.element_kind = 'entity', nd.uuid = n.uuid, nd.incarnation = coalesce(nd.incarnation, 0) + 1, nd.delete_operation_id = 'del:node:' + n.uuid, nd.deleted_at = datetime()
                     MERGE (fence:EmbeddingGroupFence {group_id: coalesce(n.group_id, '')})
                     ON CREATE SET fence.epoch = 1, fence.status = 'active', fence.updated_at = datetime()
                     ON MATCH SET fence.epoch = coalesce(fence.epoch, 0) + 1, fence.updated_at = datetime()

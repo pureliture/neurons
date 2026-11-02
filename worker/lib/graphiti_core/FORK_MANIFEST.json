@@ -15,11 +15,11 @@
       "upstream_sha256": "e7a6bf00811ffe7954f6ab18db5978a35326722b704b3f50f017957ab69b7f89"
     },
     "driver/neo4j/operations/entity_edge_ops.py": {
-      "fork_sha256": "bf7cae363ac21b35a87ccd64c3a471d76d10268ed1ae54f89f0b57081e126e9d",
+      "fork_sha256": "79832ff848042438c60e333ac05c27207a1b359277023c681cd8a1487f3b8bab",
       "upstream_sha256": "da032e328c5529d4e9b79f576be2128522f0c2aad778dc5db61c16549ba35e43"
     },
     "driver/neo4j/operations/entity_node_ops.py": {
-      "fork_sha256": "bea7264147252e8452d1213248afcc90e6c03d9a1402fb34b6efc9260bf48b57",
+      "fork_sha256": "37429d3373f1b66b125ff72a79ff40a559847fe19f72942e39be09200940d583",
       "upstream_sha256": "1dea990fed57e65929f752aecd1a7fb5f043f291e6a85a6d29d95b7f883e9b8f"
     },
     "driver/neo4j/operations/search_ops.py": {
@@ -69,6 +69,10 @@
     "utils/maintenance/community_operations.py": {
       "fork_sha256": "b65ca277c8f13a8273ad4daea7f637b2cc32478d5c037464afd111153d54fb2b",
       "upstream_sha256": "537ec6782ae32c830ec117a3834453e7b517aa7d648254db9eb10c67f38d3a38"
+    },
+    "utils/maintenance/node_operations.py": {
+      "fork_sha256": "e58d4a8b4d07c59c63cc7d0b1d26a42a36d8276997477a10adedf5ad98e5fa5d",
+      "upstream_sha256": "a5874fa63bb38ff6a5d89fedcb6c07701b81ca736d435b69fb26ce26bd6bd921"
     }
   },
   "package": "graphiti-core",

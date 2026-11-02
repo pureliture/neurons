@@ -192,5 +192,32 @@ def test_bulk_semantic_post_uses_canonical_serializer() -> None:
     assert "serialize_embedding_request_body(" in post_src
 
 
+def test_semantic_candidate_search_formats_name_input_in_local_mode() -> None:
+    """Verify _semantic_candidate_search uses format_graph_node_embedding_input in local mode."""
+    from graphiti_core.utils.maintenance import node_operations
+
+    search_src = inspect.getsource(node_operations._semantic_candidate_search)
+    assert "format_graph_node_embedding_input(node.name)" in search_src
+    assert "is_local_embedding_mode(" in search_src
+
+
+def test_neo4j_operations_use_canonical_tombstone_keys() -> None:
+    """Verify Neo4jEntityNodeOperations and Neo4jEntityEdgeOperations record EmbeddingDeletion with target_type/target_uuid."""
+    from graphiti_core.driver.neo4j.operations.entity_node_ops import (
+        Neo4jEntityNodeOperations,
+    )
+    from graphiti_core.driver.neo4j.operations.entity_edge_ops import (
+        Neo4jEntityEdgeOperations,
+    )
+
+    node_del_src = inspect.getsource(Neo4jEntityNodeOperations.delete)
+    assert "MERGE (nd:EmbeddingDeletion {target_type: 'entity', target_uuid: n.uuid})" in node_del_src
+    assert "MERGE (td:EmbeddingDeletion {target_type: 'edge', target_uuid: rm.uuid})" in node_del_src
+
+    edge_del_src = inspect.getsource(Neo4jEntityEdgeOperations.delete)
+    assert "MERGE (td:EmbeddingDeletion {target_type: 'edge', target_uuid: e.uuid})" in edge_del_src
+
+
+
 
 

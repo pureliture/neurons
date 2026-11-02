@@ -26,6 +26,10 @@ from graphiti_core.graphiti_types import GraphitiClients
 from graphiti_core.helpers import semaphore_gather
 from graphiti_core.llm_client import LLMClient
 from graphiti_core.llm_client.config import ModelSize
+from graphiti_core.local_profile import (
+    format_graph_node_embedding_input,
+    is_local_embedding_mode,
+)
 from graphiti_core.nodes import (
     EntityNode,
     EpisodeType,
@@ -423,7 +427,13 @@ async def _semantic_candidate_search(
     if not extracted_nodes:
         return []
 
-    queries = [node.name.replace('\n', ' ') for node in extracted_nodes]
+    local_mode = is_local_embedding_mode(clients.embedder, clients.driver)
+    queries = [
+        format_graph_node_embedding_input(node.name)
+        if local_mode
+        else node.name.replace('\n', ' ')
+        for node in extracted_nodes
+    ]
     try:
         query_vectors = await clients.embedder.create_batch(queries)
     except NotImplementedError:

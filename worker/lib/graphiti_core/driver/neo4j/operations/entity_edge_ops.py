@@ -114,9 +114,9 @@ class Neo4jEntityEdgeOperations(EntityEdgeOperations):
             query = """
                 MATCH (n)-[e:MENTIONS|RELATES_TO|HAS_MEMBER {uuid: $uuid}]->(m)
                 FOREACH (_ IN CASE WHEN type(e) = 'RELATES_TO' THEN [1] ELSE [] END |
-                    MERGE (td:EmbeddingDeletion {group_id: coalesce(e.group_id, ''), element_kind: 'edge', uuid: e.uuid})
-                    ON CREATE SET td.incarnation = coalesce(e.incarnation, 1), td.delete_operation_id = 'del:edge:' + e.uuid, td.deleted_at = datetime()
-                    ON MATCH SET td.incarnation = coalesce(td.incarnation, 0) + 1, td.delete_operation_id = 'del:edge:' + e.uuid, td.deleted_at = datetime()
+                    MERGE (td:EmbeddingDeletion {target_type: 'edge', target_uuid: e.uuid})
+                    ON CREATE SET td.group_id = coalesce(e.group_id, ''), td.element_kind = 'edge', td.uuid = e.uuid, td.incarnation = coalesce(e.incarnation, 1), td.delete_operation_id = 'del:edge:' + e.uuid, td.deleted_at = datetime()
+                    ON MATCH SET td.group_id = coalesce(e.group_id, ''), td.element_kind = 'edge', td.uuid = e.uuid, td.incarnation = coalesce(td.incarnation, 0) + 1, td.delete_operation_id = 'del:edge:' + e.uuid, td.deleted_at = datetime()
                     MERGE (fence:EmbeddingGroupFence {group_id: coalesce(e.group_id, '')})
                     ON CREATE SET fence.epoch = 1, fence.status = 'active', fence.updated_at = datetime()
                     ON MATCH SET fence.epoch = coalesce(fence.epoch, 0) + 1, fence.updated_at = datetime()
@@ -146,9 +146,9 @@ class Neo4jEntityEdgeOperations(EntityEdgeOperations):
                 MATCH (n)-[e:MENTIONS|RELATES_TO|HAS_MEMBER]->(m)
                 WHERE e.uuid IN $uuids
                 FOREACH (_ IN CASE WHEN type(e) = 'RELATES_TO' THEN [1] ELSE [] END |
-                    MERGE (td:EmbeddingDeletion {group_id: coalesce(e.group_id, ''), element_kind: 'edge', uuid: e.uuid})
-                    ON CREATE SET td.incarnation = coalesce(e.incarnation, 1), td.delete_operation_id = 'del:edge:' + e.uuid, td.deleted_at = datetime()
-                    ON MATCH SET td.incarnation = coalesce(td.incarnation, 0) + 1, td.delete_operation_id = 'del:edge:' + e.uuid, td.deleted_at = datetime()
+                    MERGE (td:EmbeddingDeletion {target_type: 'edge', target_uuid: e.uuid})
+                    ON CREATE SET td.group_id = coalesce(e.group_id, ''), td.element_kind = 'edge', td.uuid = e.uuid, td.incarnation = coalesce(e.incarnation, 1), td.delete_operation_id = 'del:edge:' + e.uuid, td.deleted_at = datetime()
+                    ON MATCH SET td.group_id = coalesce(e.group_id, ''), td.element_kind = 'edge', td.uuid = e.uuid, td.incarnation = coalesce(td.incarnation, 0) + 1, td.delete_operation_id = 'del:edge:' + e.uuid, td.deleted_at = datetime()
                     MERGE (fence:EmbeddingGroupFence {group_id: coalesce(e.group_id, '')})
                     ON CREATE SET fence.epoch = 1, fence.status = 'active', fence.updated_at = datetime()
                     ON MATCH SET fence.epoch = coalesce(fence.epoch, 0) + 1, fence.updated_at = datetime()
