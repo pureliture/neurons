@@ -299,3 +299,43 @@ def test_embedding_cache_enabled_flag(raw, expected):
 def test_embedding_cache_enabled_flag_rejects_unknown_values():
     with pytest.raises(ValueError, match="must be a boolean"):
         embedding_cache_enabled({"LLM_BRAIN_EMBEDDING_CACHE_ENABLED": "sometimes"})
+
+
+def test_cached_embedder_implements_embedder_client_and_graphiti_clients_contract():
+    from graphiti_core.driver.driver import GraphDriver
+    from graphiti_core.embedder import EmbedderClient
+    from graphiti_core.graphiti_types import GraphitiClients
+    from graphiti_core.llm_client import LLMClient
+    from graphiti_core.cross_encoder.client import CrossEncoderClient
+    from graphiti_core.tracer import Tracer
+
+    class _DummyDriver(GraphDriver):
+        def __init__(self, *args, **kwargs): pass
+
+    class _DummyLLM(LLMClient):
+        def __init__(self, *args, **kwargs): pass
+
+    class _DummyCrossEncoder(CrossEncoderClient):
+        def __init__(self, *args, **kwargs): pass
+
+    class _DummyTracer(Tracer):
+        def __init__(self, *args, **kwargs): pass
+
+    for cls in (_DummyDriver, _DummyLLM, _DummyCrossEncoder, _DummyTracer):
+        cls.__abstractmethods__ = frozenset()
+
+    backend = _RecordingEmbedder()
+    embedder = CachedEmbedder(backend, namespace="model-a", embedding_dim=1)
+
+    assert isinstance(embedder, EmbedderClient)
+
+    clients = GraphitiClients(
+        driver=_DummyDriver(),
+        llm_client=_DummyLLM(),
+        embedder=embedder,
+        cross_encoder=_DummyCrossEncoder(),
+        tracer=_DummyTracer(),
+    )
+    assert clients.embedder is embedder
+
+

@@ -10,6 +10,8 @@ from concurrent.futures import Future
 from threading import RLock
 from typing import Any
 
+from graphiti_core.embedder import EmbedderClient
+
 DEFAULT_EMBEDDING_CACHE_ENTRIES = 256
 EMBEDDING_CACHE_ENABLED_ENV = "LLM_BRAIN_EMBEDDING_CACHE_ENABLED"
 
@@ -49,7 +51,7 @@ def embedding_cache_namespace(
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
-class CachedEmbedder:
+class CachedEmbedder(EmbedderClient):
     """Bounded process-local cache and single-flight wrapper for Graphiti embedders."""
 
     def __init__(
