@@ -2589,6 +2589,10 @@ class PgVectorStore:
                          AND {derived_table}.input_hash = EXCLUDED.input_hash
                          AND {derived_table}.state = 'ready'
                         THEN 'ready'
+                        WHEN {derived_table}.source_content_hash = EXCLUDED.source_content_hash
+                         AND {derived_table}.input_hash = EXCLUDED.input_hash
+                         AND {derived_table}.state = 'dead_letter'
+                        THEN 'dead_letter'
                         ELSE 'pending'
                     END,
                     updated_at = NOW()
@@ -2606,7 +2610,7 @@ class PgVectorStore:
                    AND source_content_hash = %s
                    AND input_hash = %s
                    AND incarnation = %s
-                   AND status IN ('queued', 'processing', 'failed')
+                   AND status IN ('queued', 'processing', 'failed', 'dead_letter')
                  ORDER BY outbox_id
                  LIMIT 1
                 """,
@@ -2786,6 +2790,7 @@ class PgVectorStore:
         lease_seconds: int = 30,
         *,
         profile_id: str = LOCAL_EMBEDDING_PROFILE_ID,
+        max_retries: int = OUTBOX_RETRY_LIMIT,
     ) -> list[LocalOutboxJob]:
         """Claim local embedding jobs using unlocked candidate scan + ordered advisory & row locks."""
 
@@ -2818,7 +2823,7 @@ class PgVectorStore:
                      ORDER BY created_at ASC, outbox_id ASC
                      LIMIT %s
                     """,
-                    (profile_id, OUTBOX_RETRY_LIMIT, OUTBOX_RETRY_LIMIT, scan_limit),
+                    (profile_id, max_retries, max_retries, scan_limit),
                 )
                 candidates = cur.fetchall()
 
@@ -2880,7 +2885,7 @@ class PgVectorStore:
                                )
                          FOR UPDATE SKIP LOCKED
                         """,
-                        (cand_outbox_id, profile_id, OUTBOX_RETRY_LIMIT, OUTBOX_RETRY_LIMIT),
+                        (cand_outbox_id, profile_id, max_retries, max_retries),
                     )
                     locked_job = cur.fetchone()
                     if locked_job is None:

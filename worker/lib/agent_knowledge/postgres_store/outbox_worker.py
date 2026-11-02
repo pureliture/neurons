@@ -369,6 +369,7 @@ class LocalEmbeddingOutboxWorker:
             batch_size=int(batch_size) if batch_size is not None else self.batch_size,
             lease_seconds=self.lease_seconds,
             profile_id=self.embedding_profile,
+            max_retries=self.max_retries,
         )
         if not jobs:
             return 0

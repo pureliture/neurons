@@ -122,6 +122,9 @@ def get_entity_edge_save_query(
                 return (
                     (
                         """
+                            OPTIONAL MATCH (fence_check:EmbeddingGroupFence {group_id: coalesce($edge_data.group_id, '')})
+                            WITH fence_check
+                            WHERE fence_check IS NULL OR fence_check.status <> 'quarantined'
                             MATCH (source:Entity {uuid: $edge_data.source_uuid})
                             MATCH (target:Entity {uuid: $edge_data.target_uuid})
                             MERGE (source)-[e:RELATES_TO {uuid: $edge_data.uuid}]->(target)
@@ -132,7 +135,9 @@ def get_entity_edge_save_query(
                             FOREACH (_ IN CASE WHEN $edge_data.embedding_dirty = true AND $edge_data.group_id IS NOT NULL AND $edge_data.group_id <> '' THEN [1] ELSE [] END |
                                 MERGE (fence:EmbeddingGroupFence {group_id: $edge_data.group_id})
                                 ON CREATE SET fence.epoch = 1, fence.status = 'pending', fence.updated_at = datetime()
-                                ON MATCH SET fence.epoch = coalesce(fence.epoch, 0) + 1, fence.status = 'pending', fence.updated_at = datetime()
+                                ON MATCH SET fence.epoch = coalesce(fence.epoch, 0) + 1,
+                                             fence.status = CASE WHEN fence.status = 'quarantined' THEN 'quarantined' ELSE 'pending' END,
+                                             fence.updated_at = datetime()
                             )
                             """
                         + save_local_embedding_query
@@ -227,6 +232,9 @@ def get_entity_edge_save_bulk_query(
                 return (
                     """
                         UNWIND $entity_edges AS edge
+                        OPTIONAL MATCH (fence_check:EmbeddingGroupFence {group_id: coalesce(edge.group_id, '')})
+                        WITH edge, fence_check
+                        WHERE fence_check IS NULL OR fence_check.status <> 'quarantined'
                         MATCH (source:Entity {uuid: edge.source_node_uuid})
                         MATCH (target:Entity {uuid: edge.target_node_uuid})
                         MERGE (source)-[e:RELATES_TO {uuid: edge.uuid}]->(target)
@@ -235,7 +243,9 @@ def get_entity_edge_save_bulk_query(
                         FOREACH (_ IN CASE WHEN edge.embedding_dirty = true AND edge.group_id IS NOT NULL AND edge.group_id <> '' THEN [1] ELSE [] END |
                             MERGE (fence:EmbeddingGroupFence {group_id: edge.group_id})
                             ON CREATE SET fence.epoch = 1, fence.status = 'pending', fence.updated_at = datetime()
-                            ON MATCH SET fence.epoch = coalesce(fence.epoch, 0) + 1, fence.status = 'pending', fence.updated_at = datetime()
+                            ON MATCH SET fence.epoch = coalesce(fence.epoch, 0) + 1,
+                                         fence.status = CASE WHEN fence.status = 'quarantined' THEN 'quarantined' ELSE 'pending' END,
+                                         fence.updated_at = datetime()
                         )
                         """
                     + save_local_embedding_query

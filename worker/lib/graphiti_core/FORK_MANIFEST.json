@@ -43,11 +43,11 @@
       "upstream_sha256": "7c65051a62982d8b510ebdbf37bae4d07020e74520e1f6d9bf8a0ffb26beeccb"
     },
     "models/edges/edge_db_queries.py": {
-      "fork_sha256": "47d245e340da9bd5d5d535991a6d9715097f6729be7451669c6c40d63c3089f0",
+      "fork_sha256": "3614cc584aea089c5d98a30fdbfbb98a133077503ddb18c2a8c35b5957514ec4",
       "upstream_sha256": "b967ffeae7da4cb7037e3ba1b14d099543c728e7004e176de81d4b34cf314d43"
     },
     "models/nodes/node_db_queries.py": {
-      "fork_sha256": "726ceb60e61b546b5134f7df520d8136188664ae5057c8e0be4502f6731cfb95",
+      "fork_sha256": "9cf5644bf3ee9e9798ddd0ecc963bf2507a5e0b1f016c92b90ab73cb09317b11",
       "upstream_sha256": "1400e51df33fa4b10c49a4541b1dd3ab690b993a48fe01716e6b91a2356797db"
     },
     "nodes.py": {

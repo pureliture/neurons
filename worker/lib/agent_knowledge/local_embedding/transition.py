@@ -250,7 +250,7 @@ def enqueue_missing_pg_local_embeddings(
                         ON cle.memory_id = mc.memory_id
                        AND cle.profile_id = %s
                        AND cle.source_content_hash = mc.content_hash
-                       AND cle.state = 'ready'
+                       AND cle.state IN ('ready', 'dead_letter')
                       LEFT JOIN local_embedding_tombstones t
                         ON t.target_type = 'memory_card'
                        AND t.target_id = mc.memory_id
@@ -267,7 +267,7 @@ def enqueue_missing_pg_local_embeddings(
                               AND o.target_id = mc.memory_id
                               AND o.profile_id = %s
                               AND o.source_content_hash = mc.content_hash
-                              AND o.status IN ('queued', 'processing', 'failed')
+                              AND o.status IN ('queued', 'processing', 'failed', 'dead_letter')
                        )
                      ORDER BY mc.updated_at ASC, mc.memory_id ASC
                      LIMIT %s
@@ -287,7 +287,7 @@ def enqueue_missing_pg_local_embeddings(
                         ON sle.chunk_id = smc.chunk_id
                        AND sle.profile_id = %s
                        AND sle.source_content_hash = smc.content_hash
-                       AND sle.state = 'ready'
+                       AND sle.state IN ('ready', 'dead_letter')
                       LEFT JOIN local_embedding_tombstones t
                         ON t.target_type = 'session_chunk'
                        AND t.target_id = smc.chunk_id
@@ -301,7 +301,7 @@ def enqueue_missing_pg_local_embeddings(
                               AND o.target_id = smc.chunk_id
                               AND o.profile_id = %s
                               AND o.source_content_hash = smc.content_hash
-                              AND o.status IN ('queued', 'processing', 'failed')
+                              AND o.status IN ('queued', 'processing', 'failed', 'dead_letter')
                        )
                      ORDER BY smc.updated_at ASC, smc.chunk_id ASC
                      LIMIT %s

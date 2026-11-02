@@ -194,6 +194,9 @@ def get_entity_node_save_query(
                 )
                 return (
                     f"""
+                    OPTIONAL MATCH (fence_check:EmbeddingGroupFence {{group_id: coalesce($entity_data.group_id, '')}})
+                    WITH fence_check
+                    WHERE fence_check IS NULL OR fence_check.status <> 'quarantined'
                     MERGE (n:Entity {{uuid: $entity_data.uuid}})
                     SET n:{labels}
                     SET n += $entity_data
@@ -201,7 +204,9 @@ def get_entity_node_save_query(
                     FOREACH (_ IN CASE WHEN $entity_data.embedding_dirty = true AND $entity_data.group_id IS NOT NULL AND $entity_data.group_id <> '' THEN [1] ELSE [] END |
                         MERGE (fence:EmbeddingGroupFence {{group_id: $entity_data.group_id}})
                         ON CREATE SET fence.epoch = 1, fence.status = 'pending', fence.updated_at = datetime()
-                        ON MATCH SET fence.epoch = coalesce(fence.epoch, 0) + 1, fence.status = 'pending', fence.updated_at = datetime()
+                        ON MATCH SET fence.epoch = coalesce(fence.epoch, 0) + 1,
+                                     fence.status = CASE WHEN fence.status = 'quarantined' THEN 'quarantined' ELSE 'pending' END,
+                                     fence.updated_at = datetime()
                     )
                     """
                     + save_local_embedding_query
@@ -304,6 +309,9 @@ def get_entity_node_save_bulk_query(
                 return (
                     """
                         UNWIND $nodes AS node
+                        OPTIONAL MATCH (fence_check:EmbeddingGroupFence {group_id: coalesce(node.group_id, '')})
+                        WITH node, fence_check
+                        WHERE fence_check IS NULL OR fence_check.status <> 'quarantined'
                         MERGE (n:Entity {uuid: node.uuid})
                         SET n:$(node.labels)
                         SET n += node
@@ -312,7 +320,9 @@ def get_entity_node_save_bulk_query(
                         FOREACH (_ IN CASE WHEN node.embedding_dirty = true AND node.group_id IS NOT NULL AND node.group_id <> '' THEN [1] ELSE [] END |
                             MERGE (fence:EmbeddingGroupFence {group_id: node.group_id})
                             ON CREATE SET fence.epoch = 1, fence.status = 'pending', fence.updated_at = datetime()
-                            ON MATCH SET fence.epoch = coalesce(fence.epoch, 0) + 1, fence.status = 'pending', fence.updated_at = datetime()
+                            ON MATCH SET fence.epoch = coalesce(fence.epoch, 0) + 1,
+                                         fence.status = CASE WHEN fence.status = 'quarantined' THEN 'quarantined' ELSE 'pending' END,
+                                         fence.updated_at = datetime()
                         )
                         """
                     + save_local_embedding_query
