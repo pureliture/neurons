@@ -496,9 +496,15 @@ def backfill_pg_local_embeddings(
         total_failed += worker.last_batch_failed
 
     if couchdb_store is not None:
+        from ..couchdb_source.session_memory_materializer import materialize_session_memory
+        from ..model_connectors import DEFAULT_EMBEDDING_PROFILE_ID
+        from ..rag_ingress.pg_backfill import _derive_pg_chunk_id_impl
+        from ..rag_ingress.pg_embedding_chunks import CHUNKED_PROFILE
         from ..rag_ingress.pg_representation import (
             LOCAL_SESSION_REPRESENTATION_KIND,
             build_local_representation_receipt_v3,
+            derive_local_pg_chunk_id,
+            valid_local_representation_receipt_v3,
         )
 
         with store._scope(write=False) as conn:
@@ -530,35 +536,103 @@ def backfill_pg_local_embeddings(
                 state_doc = couchdb_store.get(doc_id)
             except Exception:
                 state_doc = None
-            if isinstance(state_doc, dict):
-                receipts = state_doc.get("backend_receipts")
-                if not isinstance(receipts, dict):
-                    receipts = {}
-                local_map = receipts.get("postgres_pgvector_local")
-                if not isinstance(local_map, dict):
-                    local_map = {}
-                existing_rec = local_map.get(profile_id)
-                if not isinstance(existing_rec, dict) or existing_rec.get("receipt_version") != 3:
-                    try:
-                        new_rec = build_local_representation_receipt_v3(
-                            representation_kind=LOCAL_SESSION_REPRESENTATION_KIND,
-                            project=s_project,
-                            provider=s_provider,
-                            session_id_hash=s_sid_hash,
-                            active_content_hash=s_content_hash,
-                            projected_source_hash=s_content_hash,
-                            representation_content_hash=s_content_hash,
-                            session_memory_knowledge_id=s_chunk_id,
-                            identity_scheme="local_v1",
-                            embedding_profile=profile_id,
-                            input_hash=s_input_hash,
-                        )
+            if not isinstance(state_doc, dict):
+                continue
+
+            try:
+                current_mat = materialize_session_memory(
+                    session_id_hash=s_sid_hash,
+                    store=couchdb_store,
+                )
+            except Exception:
+                current_mat = None
+
+            if current_mat is None or not getattr(current_mat, "fully_materialized", False):
+                continue
+
+            s_source_hash = getattr(current_mat, "source_hash", "") or ""
+            s_active_content_hash = getattr(current_mat, "content_hash", "") or ""
+            if not s_source_hash or not s_active_content_hash:
+                continue
+
+            # Determine identity scheme matching the existing chunk
+            try:
+                local_v1_id = derive_local_pg_chunk_id(
+                    project=s_project,
+                    provider=s_provider,
+                    session_id_hash=s_sid_hash,
+                    source_hash=s_source_hash,
+                    content_hash=s_content_hash,
+                    embedding_profile=profile_id,
+                )
+            except Exception:
+                local_v1_id = ""
+
+            try:
+                legacy_v1_id = _derive_pg_chunk_id_impl(
+                    project=s_project,
+                    provider=s_provider,
+                    session_id_hash=s_sid_hash,
+                    source_hash=s_source_hash,
+                    content_hash=s_content_hash,
+                    embedding_profile=DEFAULT_EMBEDDING_PROFILE_ID,
+                )
+            except Exception:
+                legacy_v1_id = ""
+
+            try:
+                legacy_v2_id = _derive_pg_chunk_id_impl(
+                    project=s_project,
+                    provider=s_provider,
+                    session_id_hash=s_sid_hash,
+                    source_hash=s_source_hash,
+                    content_hash=s_content_hash,
+                    embedding_profile=CHUNKED_PROFILE,
+                )
+            except Exception:
+                legacy_v2_id = ""
+
+            if s_chunk_id and s_chunk_id == local_v1_id:
+                scheme = "local_v1"
+            elif s_chunk_id and s_chunk_id in (legacy_v1_id, legacy_v2_id):
+                scheme = "legacy_exact"
+            else:
+                scheme = "legacy_reuse"
+
+            receipts = state_doc.get("backend_receipts")
+            if not isinstance(receipts, dict):
+                receipts = {}
+            local_map = receipts.get("postgres_pgvector_local")
+            if not isinstance(local_map, dict):
+                local_map = {}
+            existing_rec = local_map.get(profile_id)
+            if not isinstance(existing_rec, dict) or existing_rec.get("receipt_version") != 3:
+                try:
+                    new_rec = build_local_representation_receipt_v3(
+                        representation_kind=LOCAL_SESSION_REPRESENTATION_KIND,
+                        project=s_project,
+                        provider=s_provider,
+                        session_id_hash=s_sid_hash,
+                        active_content_hash=s_active_content_hash,
+                        projected_source_hash=s_source_hash,
+                        representation_content_hash=s_content_hash,
+                        session_memory_knowledge_id=s_chunk_id,
+                        identity_scheme=scheme,
+                        embedding_profile=profile_id,
+                        input_hash=s_input_hash,
+                    )
+                    if valid_local_representation_receipt_v3(
+                        new_rec,
+                        store=store,
+                        current_materialized=current_mat,
+                        require_ready_vector=True,
+                    ):
                         local_map[profile_id] = new_rec
                         receipts["postgres_pgvector_local"] = local_map
                         state_doc["backend_receipts"] = receipts
                         couchdb_store.put(state_doc)
-                    except Exception:
-                        pass
+                except Exception:
+                    pass
 
     snapshot = inspect_pg_local_embedding_state(
         store, profile_id=profile_id, couchdb_store=couchdb_store

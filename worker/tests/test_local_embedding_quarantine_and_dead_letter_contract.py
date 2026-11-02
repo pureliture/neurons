@@ -253,6 +253,18 @@ def test_transition_calculates_session_receipts_by_unique_session_and_validates_
     assert "eligible_session_receipts - ready_session_receipts" in inspect_src
 
 
+def test_backfill_session_receipts_uses_materialized_source_hash_and_legacy_schemes() -> None:
+    """Verify backfill_pg_local_embeddings uses materialized source hash and legacy identity schemes."""
+    from agent_knowledge.local_embedding import transition
+
+    backfill_src = inspect.getsource(transition.backfill_pg_local_embeddings)
+    assert "materialize_session_memory(" in backfill_src
+    assert "projected_source_hash=s_source_hash" in backfill_src
+    assert "scheme = \"legacy_exact\"" in backfill_src
+    assert "scheme = \"legacy_reuse\"" in backfill_src
+    assert "valid_local_representation_receipt_v3(" in backfill_src
+
+
 
 
 
