@@ -47,6 +47,12 @@ class SourceStoreConflict(SourceStoreError):
     """Raised when a conditional additive patch no longer matches its source."""
 
 
+class SourceStoreResponseTooLarge(SourceStoreError):
+    """A bounded store read exceeded the requested response byte limit."""
+
+    code = "couchdb_response_too_large"
+
+
 IMMUTABLE_SOURCE_REVISION_DOC_TYPES = frozenset(
     {
         SourceDocType.REPO_USAGE_PATTERN,
@@ -124,6 +130,9 @@ def _project_fields(doc: dict, fields: list[str] | None) -> dict:
     return copy.deepcopy(doc) if not fields else {key: copy.deepcopy(doc.get(key)) for key in fields}
 
 
+SESSION_QUERY_MAX_PAGE_SIZE = 128
+
+
 @runtime_checkable
 class CouchDBSourceStore(Protocol):
     def put(self, document: dict) -> StoredRevision: ...
@@ -131,6 +140,8 @@ class CouchDBSourceStore(Protocol):
     def put_if_absent(self, document: dict) -> StoredRevision: ...
 
     def get(self, doc_id: str) -> dict | None: ...
+
+    def get_bounded(self, doc_id: str, *, max_response_bytes: int) -> dict | None: ...
 
     def put_if_revision(
         self,
@@ -180,6 +191,17 @@ class CouchDBSourceStore(Protocol):
     ) -> list[dict]: ...
 
     def find_by_session(self, *, session_id_hash: str, doc_type: str = "") -> list[dict]: ...
+
+    def iter_by_session(
+        self,
+        *,
+        session_id_hash: str,
+        doc_type: str,
+        fields: list[str] | None = None,
+        selector: dict | None = None,
+        page_size: int = 128,
+        max_page_bytes: int = 524288,
+    ) -> Iterator[dict]: ...
 
     def delete(self, doc_id: str) -> bool: ...
 
@@ -642,6 +664,26 @@ class InMemoryCouchDBSourceStore:
         stored = self._docs.get(doc_id)
         return copy.deepcopy(stored) if stored is not None else None
 
+    def get_bounded(self, doc_id: str, *, max_response_bytes: int) -> dict | None:
+        """Test adapter equivalent of a bounded GET; production bounds are HTTP-side."""
+
+        stored = self._docs.get(doc_id)
+        if stored is None:
+            return None
+        if max_response_bytes < 1:
+            raise ValueError("bounded GET byte limit must be positive")
+        encoder = json.JSONEncoder(
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        size = 0
+        for part in encoder.iterencode(stored):
+            size += len(part.encode("utf-8"))
+            if size > max_response_bytes:
+                raise SourceStoreResponseTooLarge("bounded GET response byte limit exceeded")
+        return copy.deepcopy(stored)
+
     def put_if_revision(
         self,
         document: dict,
@@ -789,6 +831,55 @@ class InMemoryCouchDBSourceStore:
         ]
         results.sort(key=lambda d: str(d.get("_id")))
         return results
+
+    def iter_by_session(
+        self,
+        *,
+        session_id_hash: str,
+        doc_type: str,
+        fields: list[str] | None = None,
+        selector: dict | None = None,
+        page_size: int = SESSION_QUERY_MAX_PAGE_SIZE,
+        max_page_bytes: int = 524288,
+    ) -> Iterator[dict]:
+        if not session_id_hash or not doc_type:
+            raise SourceStoreError("session query requires exact session and document type")
+        size = min(SESSION_QUERY_MAX_PAGE_SIZE, max(1, int(page_size)))
+        extra_selector = dict(selector or {})
+        if "session_id_hash" in extra_selector or "doc_type" in extra_selector:
+            raise SourceStoreError("session query selector cannot override its scope")
+        scoped_selector = {
+            **extra_selector,
+            "session_id_hash": session_id_hash,
+            "doc_type": doc_type,
+        }
+        # This in-memory adapter is test-only. It yields insertion-ordered pages
+        # without constructing a second list containing every matching body.
+        page: list[dict] = []
+        for document in self._docs.values():
+            if not _matches_selector(document, scoped_selector):
+                continue
+            page.append(_project_fields(document, fields))
+            if len(page) < size:
+                continue
+            encoded_size = len(
+                json.dumps(page, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode(
+                    "utf-8"
+                )
+            )
+            if encoded_size > int(max_page_bytes):
+                raise SourceStoreResponseTooLarge("session query page byte limit exceeded")
+            yield from page
+            page = []
+        if page:
+            encoded_size = len(
+                json.dumps(page, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode(
+                    "utf-8"
+                )
+            )
+            if encoded_size > int(max_page_bytes):
+                raise SourceStoreResponseTooLarge("session query page byte limit exceeded")
+            yield from page
 
     def delete(self, doc_id: str) -> bool:
         existing = self._docs.get(doc_id)

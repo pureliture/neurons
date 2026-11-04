@@ -11,7 +11,7 @@ import logging
 import math
 import threading
 import time
-from typing import Callable, Any
+from typing import Callable, Any, Sequence
 
 from ..model_connectors import (
     DEFAULT_EMBEDDING_DIM,
@@ -338,6 +338,7 @@ class LocalEmbeddingOutboxWorker:
         embedding_fn: Callable[[str], list[float]] | None = None,
         max_retries: int = 5,
         embedding_profile: str = LOCAL_EMBEDDING_PROFILE_ID,
+        target_types: Sequence[str] | None = None,
     ):
         self.store = store
         self.worker_id = worker_id or f"local_worker_{int(time.time() * 1000)}"
@@ -352,6 +353,15 @@ class LocalEmbeddingOutboxWorker:
         self.embedding_fn = embedding_fn
         self.max_retries = max_retries
         self.embedding_profile = embedding_profile
+        if target_types is None:
+            self.target_types = None
+        else:
+            normalized_types = tuple(sorted({str(value).strip() for value in target_types}))
+            if not normalized_types or not set(normalized_types).issubset(
+                {"memory_card", "session_chunk"}
+            ):
+                raise ValueError("invalid local embedding target types")
+            self.target_types = normalized_types
         self._stop_event = threading.Event()
         self.last_batch_failed = 0
         self.last_batch_completed = 0
@@ -370,6 +380,7 @@ class LocalEmbeddingOutboxWorker:
             lease_seconds=self.lease_seconds,
             profile_id=self.embedding_profile,
             max_retries=self.max_retries,
+            target_types=self.target_types,
         )
         if not jobs:
             return 0

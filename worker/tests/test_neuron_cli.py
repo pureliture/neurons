@@ -293,6 +293,7 @@ def test_neuron_knowledge_help_lists_server_owned_commands(capsys):
         "couchdb-graph-trigger",
         "couchdb-graph-project",
         "couchdb-graph-status",
+        "local-embedding-backfill",
     ):
         assert command in COMMAND_HANDLERS
         assert command in output

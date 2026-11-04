@@ -495,6 +495,48 @@ class LedgerGraphProjectionStateStore:
                 result.setdefault(natural_id, set()).add(source_hash)
         return result
 
+    def has_projected_source_hash(
+        self,
+        project: str,
+        natural_id: str,
+        source_hash: str,
+        *,
+        extraction_level: str,
+        entity_type: str,
+        include_source_invalid: bool = False,
+    ) -> bool:
+        """Check one exact projection identity without loading projection history."""
+        if not natural_id or not source_hash:
+            return False
+        with self._ledger._connect() as connection:
+            if not _table_exists(connection, "llm_brain_graph_projection_state"):
+                return False
+            if include_source_invalid:
+                row = connection.execute(
+                    "SELECT 1 FROM llm_brain_graph_projection_state "
+                    "WHERE project = ? AND entity_type = ? AND natural_id = ? "
+                    "AND source_hash = ? AND (extraction_level = ? OR "
+                    "(extraction_level = ? AND upsert_result IN (?, ?))) LIMIT 1",
+                    (
+                        project,
+                        entity_type,
+                        natural_id,
+                        source_hash,
+                        str(extraction_level),
+                        EXTRACTION_LEVEL_ENTITY,
+                        "source_invalid",
+                        "invalid_source",
+                    ),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT 1 FROM llm_brain_graph_projection_state "
+                    "WHERE project = ? AND entity_type = ? AND natural_id = ? "
+                    "AND source_hash = ? AND extraction_level = ? LIMIT 1",
+                    (project, entity_type, natural_id, source_hash, str(extraction_level)),
+                ).fetchone()
+        return row is not None
+
     def list_natural_ids(
         self,
         project: str | None = None,

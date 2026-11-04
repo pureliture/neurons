@@ -1,10 +1,8 @@
 name: Tests
 
-# 워크플로 파일 자체는 차단력이 없다 — green/red status만 게시한다.
-# gate는 오직 branch protection의 required status check 지정으로 발생한다.
-#   - gradle-test : required check(gate)로 지정 (ADR-0002 ArchUnit 포함)
-#   - worker-pytest: advisory(비차단). GC 2건 green 후 required로 승격(M5).
-# required check 이름 = 이 파일의 job name(`gradle-test`)과 정확히 일치해야 self-lock이 안 난다.
+# Required checks are controlled by GitHub branch protection, not this workflow.
+# Read the live branch-protection settings before stating which checks are required.
+# This workflow does not change GitHub required-check settings.
 
 on:
   pull_request:
@@ -55,19 +53,37 @@ jobs:
         with:
           enable-cache: true
 
+      - name: Install and verify pinned Model2Vec snapshot
+        working-directory: worker
+        env:
+          NEURON_LOCAL_EMBEDDING_MODEL_DIR: ${{ runner.temp }}/model2vec-pinned
+        run: |
+          uv run --frozen --group dev --extra local-embedding neuron-local-embedding install --model-dir "$NEURON_LOCAL_EMBEDDING_MODEL_DIR" --download
+          uv run --frozen --group dev --extra local-embedding neuron-local-embedding verify --model-dir "$NEURON_LOCAL_EMBEDDING_MODEL_DIR"
+
       - name: Run worker pytest
         working-directory: worker
-        # live Postgres parity 테스트는 LEDGER_PG_DSN 미설정 시 skipif로 자동 skip된다.
-        # --group dev: pytest는 dev dependency group으로 선언돼 있어 명시적으로 설치해야
-        # clean 러너(전역 pytest 없음)에서 `Failed to spawn: pytest`가 나지 않는다.
-        # 전체 worker 회귀는 MCP transport wiring도 import하므로 mcp-http extra를
-        # 같이 설치해 optional dependency 누락을 fail-closed로 드러낸다.
-        # Model2Vec 로컬 임베딩 검증을 위해 local-embedding extra를 함께 설치한다.
-        run: uv run --group dev --extra mcp-http --extra local-embedding pytest -q
+        env:
+          NEURON_LOCAL_EMBEDDING_MODEL_DIR: ${{ runner.temp }}/model2vec-pinned
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+          HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
+          PYTHON_DOTENV_DISABLED: "1"
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/worker-pytest.xml"
+          uv run --frozen --group dev --extra mcp-http --extra local-embedding pytest -q --junitxml="$report"
+          uv run --frozen --group dev python -c 'import sys, xml.etree.ElementTree as ET; root=ET.parse(sys.argv[1]); modules=("test_local_embedding_m1", "test_local_embedding_m3_eval"); skipped=[case for case in root.findall(".//testcase") if any(module in case.get("classname", "") for module in modules) and case.find("skipped") is not None]; print(f"real Model2Vec module skips={len(skipped)}"); raise SystemExit(bool(skipped))' "$report"
 
-      - name: Local Model2Vec service & eval verification (M1, M3)
+      - name: Model2Vec CLI verification smoke (M1/M3 are covered by suite)
         working-directory: worker
-        run: uv run --group dev --extra mcp-http --extra local-embedding pytest -q -rs tests/test_local_embedding_m1.py tests/test_local_embedding_m3_eval.py
+        env:
+          NEURON_LOCAL_EMBEDDING_MODEL_DIR: ${{ runner.temp }}/model2vec-pinned
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+          HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
+          PYTHON_DOTENV_DISABLED: "1"
+        run: uv run --frozen --group dev --extra local-embedding neuron-local-embedding verify --model-dir "$NEURON_LOCAL_EMBEDDING_MODEL_DIR"
 
   worker-lbrain-pgvector:
     name: worker LBrain pgvector contract (uv)
@@ -107,9 +123,6 @@ jobs:
       - name: 실제 PostgreSQL 권위 저장·공개 Graph-first 조회·검토 묶음 검증
         working-directory: worker
         run: uv run --group dev --extra mcp-http pytest -q -rs tests/test_lbrain_pgvector_contract.py tests/test_graph_first_pg_integration.py tests/test_graph_first_resolver.py tests/test_pg_evidence.py tests/test_pg_session_memory_integration.py tests/test_pg_backfill.py tests/test_pg_representation.py tests/test_pg_projection_privacy.py tests/test_pg_qdrant_import.py tests/test_pg_qdrant_import_cli.py tests/test_pg_import_underflow.py tests/test_pg_projection_locking.py tests/test_pg_import_canonical_preflight.py tests/test_pg_embedding_named_credentials.py tests/test_pg_import_selection.py tests/test_outbox_worker.py tests/test_pg_graph_projection_cli.py tests/test_pg_steward_authority.py tests/test_pg_steward_service_wiring.py tests/test_pg_steward_graph_authority.py tests/test_review_bundle_pg_acceptance.py tests/test_pg_review_bundle_store.py tests/test_review_bundle_http_pg.py tests/test_golden_grader.py tests/test_lbrain_chain_e2e.py
-      - name: Local Model2Vec PostgreSQL pgvector 격리 계약 검증 (M2 PG)
-        working-directory: worker
-        run: uv run --group dev --extra mcp-http --extra local-embedding pytest -q -rs tests/test_local_embedding_m2_pg.py
       - name: PG schema apply 계약 및 멱등 적용 검증
         working-directory: worker
         run: uv run --group dev --extra mcp-http pytest -q -rs tests/test_pg_schema_apply_cli.py
@@ -144,11 +157,22 @@ jobs:
           --health-interval 10s
           --health-timeout 10s
           --health-retries 18
+      couchdb:
+        image: couchdb:3.4@sha256:628c4952c1cf668489fb668fbd24013bf61ff25add0a3643253dde0d47cae449
+        env:
+          COUCHDB_USER: neurons_test
+          COUCHDB_PASSWORD: neurons_test
+        ports:
+          - 5984:5984
     env:
       LBRAIN_TEST_PG_DSN: postgresql://neurons_test:neurons_test@127.0.0.1:5432/neurons_test
       LBRAIN_TEST_NEO4J_URI: bolt://127.0.0.1:17687
       LLM_BRAIN_NEO4J_URI: bolt://127.0.0.1:17687
       LLM_BRAIN_GRAPH_EXTRACT_ENTITIES: "false"
+      NEURON_REQUIRE_MODEL2VEC_INTEGRATION: "1"
+      LBRAIN_TEST_COUCHDB_URL: http://127.0.0.1:5984
+      LBRAIN_TEST_COUCHDB_USER: neurons_test
+      LBRAIN_TEST_COUCHDB_PASSWORD: neurons_test
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -158,14 +182,33 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+      - name: Install and verify pinned Model2Vec snapshot
+        working-directory: worker
+        env:
+          NEURON_LOCAL_EMBEDDING_MODEL_DIR: ${{ runner.temp }}/model2vec-pinned
+        run: |
+          uv run --frozen --group dev --extra local-embedding neuron-local-embedding install --model-dir "$NEURON_LOCAL_EMBEDDING_MODEL_DIR" --download
+          uv run --frozen --group dev --extra local-embedding neuron-local-embedding verify --model-dir "$NEURON_LOCAL_EMBEDDING_MODEL_DIR"
       - name: Reject missing disposable database endpoints
-        run: test -n "$LBRAIN_TEST_PG_DSN" && test -n "$LBRAIN_TEST_NEO4J_URI"
-      - name: Actual PG authority and Neo4j graph card round trip
+        run: test -n "$LBRAIN_TEST_PG_DSN" && test -n "$LBRAIN_TEST_NEO4J_URI" && test -n "$LBRAIN_TEST_COUCHDB_URL" && test -n "$LBRAIN_TEST_COUCHDB_USER" && test -n "$LBRAIN_TEST_COUCHDB_PASSWORD"
+      - name: PG + Neo4j Model2Vec M2 integration (no skips)
         working-directory: worker
-        run: uv run --group dev --extra mcp-http pytest -q -rs tests/test_pg_neo4j_card_e2e.py
-      - name: Local Model2Vec Neo4j + Graphiti 격리 검증 (M2 Graphiti)
-        working-directory: worker
-        run: uv run --group dev --extra mcp-http --extra local-embedding pytest -q -rs tests/test_local_embedding_m2_graphiti.py
+        env:
+          NEURON_LOCAL_EMBEDDING_MODEL_DIR: ${{ runner.temp }}/model2vec-pinned
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+          HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
+          PYTHON_DOTENV_DISABLED: "1"
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/model2vec-integration.xml"
+          uv run --frozen --group dev --extra mcp-http --extra local-embedding pytest -q -rs --junitxml="$report" \
+            tests/test_pg_neo4j_card_e2e.py \
+            tests/test_local_embedding_m2_pg.py \
+            tests/test_local_embedding_m2_graphiti.py \
+            tests/test_local_embedding_journal_coordinator_pg_contract.py \
+            tests/test_local_embedding_couchdb_receipt_e2e.py
+          uv run --frozen --group dev python -c 'import sys, xml.etree.ElementTree as ET; root=ET.parse(sys.argv[1]); skipped=root.findall(".//testcase/skipped"); print(f"Model2Vec integration skips={len(skipped)}"); raise SystemExit(bool(skipped))' "$report"
 
   worker-postgres-parity:
     name: worker PostgreSQL parity (uv)

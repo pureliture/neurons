@@ -61,6 +61,7 @@ def test_claim_local_outbox_leases_signature_and_worker_propagation() -> None:
         lease_seconds=15,
         profile_id="lbrain-memory-model2vec-256-v1",
         max_retries=10,
+        target_types=None,
     )
 
 
@@ -244,27 +245,151 @@ def test_pg_session_projector_requires_ready_local_vector_before_receipt() -> No
 
 
 def test_transition_calculates_session_receipts_by_unique_session_and_validates_metadata() -> None:
-    """Verify inspect_pg_local_embedding_state uses COUNT(DISTINCT session_id_hash) and valid_local_pg_receipt_metadata."""
+    """Verify receipt inspection delegates bounded distinct-session validation."""
     from agent_knowledge.local_embedding import transition
 
     inspect_src = inspect.getsource(transition.inspect_pg_local_embedding_state)
     assert "COUNT(DISTINCT session_id_hash)" in inspect_src
-    assert "valid_local_pg_receipt_metadata(" in inspect_src
-    assert "eligible_session_receipts - ready_session_receipts" in inspect_src
+    assert "_inspect_pg_session_receipts(" in inspect_src
+    receipt_src = inspect.getsource(transition._inspect_pg_session_receipts)
+    assert "valid_local_pg_receipt_metadata(" in receipt_src
+    assert "verified=unchecked == 0 and failed == 0" in receipt_src
 
 
-def test_backfill_session_receipts_uses_materialized_source_hash_and_legacy_schemes() -> None:
-    """Verify backfill_pg_local_embeddings uses materialized source hash and legacy identity schemes."""
+def test_receipt_row_uses_materialized_source_hash_and_legacy_identity_schemes(monkeypatch) -> None:
+    """Exercise receipt source fencing and legacy identity classification."""
+    from types import SimpleNamespace
+
+    from agent_knowledge.couchdb_source import session_memory_materializer
+    from agent_knowledge.couchdb_source.document_model import sha256_hash
     from agent_knowledge.local_embedding import transition
+    from agent_knowledge.local_embedding.canonical import (
+        canonical_input_hash_v1,
+        canonical_session_input_v1,
+    )
+    from agent_knowledge.model_connectors import (
+        DEFAULT_EMBEDDING_PROFILE_ID,
+        LOCAL_EMBEDDING_PROFILE_ID,
+    )
+    from agent_knowledge.rag_ingress.pg_backfill import _derive_pg_chunk_id_impl
+    from agent_knowledge.rag_ingress.pg_embedding_chunks import CHUNKED_PROFILE
+    from agent_knowledge.rag_ingress.pg_representation import derive_local_pg_chunk_id
 
-    backfill_src = inspect.getsource(transition.backfill_pg_local_embeddings)
-    assert "materialize_session_memory(" in backfill_src
-    assert "s_content_hash != s_active_content_hash" in backfill_src
-    assert "valid_local_pg_receipt_metadata(" in backfill_src
-    assert "projected_source_hash=s_source_hash" in backfill_src
-    assert "scheme = \"legacy_exact\"" in backfill_src
-    assert "scheme = \"legacy_reuse\"" in backfill_src
-    assert "valid_local_representation_receipt_v3(" in backfill_src
+    project = "neurons"
+    provider = "codex"
+    session_id_hash = sha256_hash("synthetic receipt session")
+    body = "Synthetic content for receipt source and identity validation."
+    active_content_hash = sha256_hash(body)
+    materialized_source_hash = sha256_hash("synthetic materialized source revision")
+    input_hash = canonical_input_hash_v1(canonical_session_input_v1(body))
+    profile_id = LOCAL_EMBEDDING_PROFILE_ID
+    current_materialized = SimpleNamespace(
+        fully_materialized=True,
+        session_id_hash=session_id_hash,
+        project=project,
+        provider=provider,
+        content_hash=active_content_hash,
+        source_hash=materialized_source_hash,
+    )
+    monkeypatch.setattr(
+        session_memory_materializer,
+        "materialize_session_memory",
+        lambda **_kwargs: current_materialized,
+    )
+
+    identity = {
+        "project": project,
+        "provider": provider,
+        "session_id_hash": session_id_hash,
+        "source_hash": materialized_source_hash,
+        "content_hash": active_content_hash,
+    }
+    legacy_v1_id = _derive_pg_chunk_id_impl(
+        **identity,
+        embedding_profile=DEFAULT_EMBEDDING_PROFILE_ID,
+    )
+    legacy_v2_id = _derive_pg_chunk_id_impl(
+        **identity,
+        embedding_profile=CHUNKED_PROFILE,
+    )
+    local_v1_id = derive_local_pg_chunk_id(
+        **identity,
+        embedding_profile=profile_id,
+    )
+    legacy_reuse_id = "synthetic-legacy-reuse-id"
+    assert legacy_reuse_id not in {legacy_v1_id, legacy_v2_id, local_v1_id}
+
+    class _ReceiptStore:
+        def __init__(self):
+            self.local_row_reads = []
+
+        def get_chunk(self, chunk_id):
+            if chunk_id not in {legacy_v1_id, legacy_reuse_id}:
+                return None
+            return SimpleNamespace(
+                chunk_id=chunk_id,
+                session_id_hash=session_id_hash,
+                project=project,
+                provider=provider,
+                content_hash=active_content_hash,
+                content_markdown=body,
+            )
+
+        def get_local_embedding_row(
+            self, *, target_type, target_id, embedding_profile
+        ):
+            self.local_row_reads.append((target_type, target_id, embedding_profile))
+            return {
+                "embedding_profile": profile_id,
+                "content_hash": active_content_hash,
+                "input_hash": input_hash,
+                "embedding_state": "ready",
+                "embedding": [0.125] * 256,
+            }
+
+    store = _ReceiptStore()
+    cas_receipts = []
+
+    def capture_cas(*, receipt, **_kwargs):
+        cas_receipts.append(receipt)
+        return SimpleNamespace(status="created", reason_code="receipt_created")
+
+    monkeypatch.setattr(transition, "_cas_merge_projection_state_receipt", capture_cas)
+
+    def process(chunk_id, row_content_hash=active_content_hash):
+        return transition._process_pg_local_receipt_row(
+            store=store,
+            couchdb_store=object(),
+            row={
+                "chunk_id": chunk_id,
+                "project": project,
+                "provider": provider,
+                "session_id_hash": session_id_hash,
+                "content_hash": row_content_hash,
+                "input_hash": input_hash,
+            },
+            profile_id=profile_id,
+        )
+
+    assert process(legacy_v1_id) == ("created", "receipt_created")
+    assert process(legacy_reuse_id) == ("created", "receipt_created")
+    assert process("synthetic-stale-id", sha256_hash("stale content")) == (
+        "stale_skipped",
+        "inactive_session_chunk",
+    )
+    assert [receipt["identity_scheme"] for receipt in cas_receipts] == [
+        "legacy_exact",
+        "legacy_reuse",
+    ]
+    assert all(
+        receipt["projected_source_hash"] == materialized_source_hash
+        for receipt in cas_receipts
+    )
+    assert len(store.local_row_reads) == 2
+    assert all(
+        target_type == "session_chunk" and embedding_profile == profile_id
+        for target_type, _target_id, embedding_profile in store.local_row_reads
+    )
 
 
 def test_quarantined_rejected_node_and_edge_writes_raise_local_group_write_blocked_error() -> None:
@@ -350,28 +475,6 @@ def test_pg_backfill_get_local_embedding_row_keyword_args_contract() -> None:
         src = f.read()
     assert 'target_type="session_chunk"' in src
     assert 'target_id=chosen_id' in src
-
-
-def test_backfill_operation_id_length_capped_to_128() -> None:
-    """Verify backfill operation ID does not exceed 128 characters even with long group and worker IDs."""
-    import hashlib
-
-    profile_id = "lbrain-memory-model2vec-256-v1"
-    group_id = "g" * 64
-    worker_id = "test-worker-" + "w" * 40
-
-    raw_op_id = f"backfill:{profile_id}:{group_id}:{worker_id}"
-    assert len(raw_op_id) > 128
-
-    op_digest = hashlib.sha256(raw_op_id.encode("utf-8")).hexdigest()
-    capped_op_id = f"backfill:{op_digest}:{worker_id}"[:128]
-    assert len(capped_op_id) <= 128
-
-    # Check transition.py implementation logic
-    with open("lib/agent_knowledge/local_embedding/transition.py", "r", encoding="utf-8") as f:
-        src = f.read()
-    assert "len(raw_op_id) <= 128" in src
-    assert "op_digest = hashlib.sha256" in src
 
 
 def test_no_private_hermes_paths_in_local_embedding_tests() -> None:

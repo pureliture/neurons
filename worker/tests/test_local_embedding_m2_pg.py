@@ -341,7 +341,12 @@ def test_backfill_is_bounded_resumable_and_idempotent(isolated_pg_store, local_c
     assert second.enqueued_cards == 0  # already enqueued: idempotent
     done = inspect_pg_local_embedding_state(store)
     assert done.ready_cards == 7 and done.missing_cards == 0
-    assert evaluate_cutover_readiness(pg_progress=done).ready is True
+    readiness = evaluate_cutover_readiness(pg_progress=done)
+    assert readiness.ready is False
+    assert (
+        "pg_session_receipts_unverified_for_couchdb_authority"
+        in readiness.blocking_reasons
+    )
 
     third = backfill_pg_local_embeddings(store, _embed(local_client), enqueue_limit_per_kind=7)
     assert third.claimed == 0 and third.enqueued_cards == 0
@@ -364,3 +369,100 @@ def test_backfill_skips_unauthorized_and_deleted_cards(isolated_pg_store, local_
     assert store.get_local_embedding_row(target_type="memory_card", target_id="pg-bfx-ok") is not None
     assert store.get_local_embedding_row(target_type="memory_card", target_id="pg-bfx-disabled") is None
     assert store.get_local_embedding_row(target_type="memory_card", target_id="pg-bfx-deleted") is None
+
+
+def test_pg_session_projector_local_profile_passes_session_lock_conn_keyword(
+    isolated_pg_store, local_client
+):
+    from agent_knowledge.model_connectors import (
+        DEFAULT_EMBEDDING_MODEL,
+        DEFAULT_EMBEDDING_PROFILE_ID,
+        LOCAL_EMBEDDING_DIM,
+        LOCAL_EMBEDDING_MODEL,
+    )
+    from agent_knowledge.rag_ingress.pg_backfill import (
+        PgSessionMemoryProjector,
+        _derive_pg_chunk_id_impl,
+    )
+
+    store = _local(isolated_pg_store)
+    body = "Synthetic session for the local projector lock contract."
+    session_id_hash = sha256_hash("synthetic local projector session")
+    source_hash = sha256_hash("synthetic local projector source revision")
+    content_hash = sha256_hash(body)
+    project = "m2pg-projector-lock-contract"
+    provider = "codex"
+    legacy_chunk_id = _derive_pg_chunk_id_impl(
+        project=project,
+        provider=provider,
+        session_id_hash=session_id_hash,
+        source_hash=source_hash,
+        content_hash=content_hash,
+        embedding_profile=DEFAULT_EMBEDDING_PROFILE_ID,
+    )
+    store.insert_chunk(
+        SessionChunk(
+            chunk_id=legacy_chunk_id,
+            session_id_hash=session_id_hash,
+            project=project,
+            provider=provider,
+            chunk_index=0,
+            content_markdown=body,
+            token_count=len(body.split()),
+            content_hash=content_hash,
+            embedding_model=DEFAULT_EMBEDDING_MODEL,
+            embedding_state="ready",
+            embedding_revision=1,
+            embedding=_legacy_vec(),
+        )
+    )
+    legacy_before = store.get_chunk(legacy_chunk_id)
+    assert legacy_before is not None and legacy_before.embedding is not None
+    assert len(legacy_before.embedding) == LEGACY_DIM
+
+    class _LocalProviderAdapter:
+        model = LOCAL_EMBEDDING_MODEL
+        size = LOCAL_EMBEDDING_DIM
+
+        def embed(self, text: str) -> list[float]:
+            return local_client.embed_document(text).vector
+
+    projector = PgSessionMemoryProjector(
+        store=store,
+        embed_provider=_LocalProviderAdapter(),
+    )
+    projected_chunk_id = projector.project(
+        target_profile="session-memory",
+        document={
+            "body": body,
+            "content_hash": content_hash,
+            "session_id_hash": session_id_hash,
+            "source_hash": source_hash,
+            "project": project,
+            "provider": provider,
+        },
+    )
+
+    assert projected_chunk_id == legacy_chunk_id
+    legacy_after = store.get_chunk(legacy_chunk_id)
+    assert legacy_after is not None and legacy_after.embedding is not None
+    assert len(legacy_after.embedding) == LEGACY_DIM
+    assert list(legacy_after.embedding) == list(legacy_before.embedding)
+
+    local_row = store.get_local_embedding_row(
+        target_type="session_chunk",
+        target_id=legacy_chunk_id,
+        profile_id=LOCAL_EMBEDDING_PROFILE_ID,
+    )
+    assert local_row is not None
+    assert local_row["state"] == "ready"
+    assert local_row["source_content_hash"] == content_hash
+    assert len(local_row["vector"]) == 256
+
+    completed_jobs = [
+        job
+        for job in store.list_local_outbox_jobs(status="completed")
+        if job.target_id == legacy_chunk_id
+    ]
+    assert len(completed_jobs) == 1
+    assert completed_jobs[0].profile_id == LOCAL_EMBEDDING_PROFILE_ID

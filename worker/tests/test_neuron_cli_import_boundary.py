@@ -60,6 +60,7 @@ def test_lazy_command_handlers_import_their_targets_only_when_dispatched(monkeyp
         "couchdb-projection-invalidation-canary": (".rag_ingress.projection_invalidation_canary", "main"),
         "couchdb-temporal-revision-rebuild": (".rag_ingress.temporal_revision_rebuild", "main"),
         "local-embedding": (".local_embedding.cli", "main"),
+        "local-embedding-backfill": (".local_embedding.operator_runner", "main"),
     }
     argv = ["--sentinel"]
     imported: list[tuple[str, str | None, str, list[str]]] = []

@@ -528,8 +528,14 @@ def cas_write_edge_local_embedding(
 class GraphOperationJournalCoordinator:
     """Coordinates durable graph operation checkpoints across PG `graph_operation_journal` and Neo4j."""
 
-    def __init__(self, *, pg_store: Any | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        pg_store: Any | None = None,
+        ensure_schema: bool = True,
+    ) -> None:
         self._pg_store = pg_store
+        self._ensure_schema = bool(ensure_schema)
 
     def begin_operation(
         self,
@@ -544,7 +550,8 @@ class GraphOperationJournalCoordinator:
         payload: dict[str, Any] | None = None,
     ) -> GroupLease:
         """Acquire Neo4j EmbeddingGroupFence lease and record/resume PG journal entry."""
-        ensure_neo4j_safety_schema(session)
+        if self._ensure_schema:
+            ensure_neo4j_safety_schema(session)
         lease = acquire_group_fence_lease(
             session,
             group_id,

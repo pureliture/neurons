@@ -13,7 +13,7 @@ import copy
 import json
 import re
 from dataclasses import dataclass
-from typing import Callable, Iterable, Mapping
+from typing import Callable, Iterable, Iterator, Mapping
 
 from . import document_model as dm
 from .source_store import CouchDBSourceStore, SourceStoreConflict, SourceStoreError
@@ -36,9 +36,40 @@ _SOURCE_SNAPSHOT_SCHEMA_VERSION = "couchdb_source_revision_snapshot.v1"
 _SOURCE_SNAPSHOT_ORIGIN_ID = "source_snapshot_origin_id"
 _SOURCE_SNAPSHOT_SCOPE = "source_snapshot_scope"
 
+# Currentness scans retain at most one CouchDB page (8 documents / 512 KiB)
+# plus 8,192 compact rows (4 MiB encoded). Eight body-bearing documents per
+# response keeps transient transcript memory below 512 KiB; compact rows are
+# capped separately because the canonical hash sorts those fields. Over-limit
+# sessions fail closed and surface a reason code for the graph pending/blocked
+# report; production samples should track that code before changing these caps.
+SOURCE_CURRENTNESS_PAGE_SIZE = 8
+SOURCE_CURRENTNESS_MAX_PAGE_BYTES = 512 * 1024
+SOURCE_CURRENTNESS_MAX_ROWS = 8_192
+SOURCE_CURRENTNESS_MAX_COMPACT_BYTES = 4 * 1024 * 1024
+SOURCE_CURRENTNESS_MAX_MANIFEST_BYTES = 2 * 1024 * 1024
+SOURCE_CURRENTNESS_MAX_MANIFEST_MEMBERS = 8_192
+SOURCE_CURRENTNESS_MAX_POINTER_BYTES = 64 * 1024
+SOURCE_CURRENTNESS_MAX_RETRIES = 1
+
 
 class SourceRevisionResolutionError(SourceStoreError):
     """An active source revision cannot be proven complete and unchanged."""
+
+
+class SourceRevisionCurrentnessLimitError(SourceRevisionResolutionError):
+    """A currentness scan exceeded a hard memory bound and must remain pending."""
+
+    code = "source_revision_currentness_limit_exceeded"
+
+    def __init__(self, message: str, *, reason_code: str | None = None):
+        super().__init__(message)
+        self.reason_code = reason_code or self.code
+
+
+class SourceRevisionSnapshotChangedError(SourceRevisionResolutionError):
+    """A paged currentness scan observed a changing CouchDB database snapshot."""
+
+    code = "source_revision_snapshot_changed_retry"
 
 
 @dataclass(frozen=True)
@@ -921,13 +952,13 @@ def _reusable_manifest_hash(
     return existing_manifest_hash
 
 
-def _validate_member_and_source(
+def _validate_member_record(
     *,
-    get_document: Callable[[str], dict | None],
+    member: Mapping[str, object] | None,
     session_id_hash: str,
     source_revision: str,
     membership: Mapping[str, object],
-) -> dict:
+) -> dict[str, str]:
     source_document_id = str(membership.get("source_document_id") or "")
     member_id = str(membership.get("member_id") or "")
     source_doc_type = str(membership.get("source_doc_type") or "")
@@ -942,7 +973,6 @@ def _validate_member_and_source(
     if member_id != expected_member_id:
         raise SourceRevisionResolutionError("active source revision member is invalid")
     member_hash = _require_hash(membership.get("member_hash"))
-    member = get_document(member_id)
     if member is None:
         raise SourceRevisionResolutionError("active source revision member is missing")
     member_fields = {
@@ -969,13 +999,45 @@ def _validate_member_and_source(
         or str(member.get("member_hash") or "") != member_hash
     ):
         raise SourceRevisionResolutionError("active source revision member changed")
-    source = get_document(source_document_id)
-    if source is None:
-        raise SourceRevisionResolutionError("active source revision source is missing")
+    return member_fields
+
+
+def _validate_source_document_against_member(
+    *,
+    source: Mapping[str, object],
+    session_id_hash: str,
+    member_fields: Mapping[str, str],
+) -> dict:
     descriptor = _source_member_descriptor(source, session_id_hash=session_id_hash)
     if any(descriptor.get(key) != member_fields.get(key) for key in descriptor):
         raise SourceRevisionResolutionError("active source revision source changed")
-    return source
+    return descriptor
+
+
+def _validate_member_and_source(
+    *,
+    get_document: Callable[[str], dict | None],
+    session_id_hash: str,
+    source_revision: str,
+    membership: Mapping[str, object],
+) -> dict:
+    source_document_id = str(membership.get("source_document_id") or "")
+    member_id = str(membership.get("member_id") or "")
+    member_fields = _validate_member_record(
+        member=get_document(member_id),
+        session_id_hash=session_id_hash,
+        source_revision=source_revision,
+        membership=membership,
+    )
+    source = get_document(source_document_id)
+    if source is None:
+        raise SourceRevisionResolutionError("active source revision source is missing")
+    _validate_source_document_against_member(
+        source=source,
+        session_id_hash=session_id_hash,
+        member_fields=member_fields,
+    )
+    return dict(source)
 
 
 def _snapshot_document_map(documents: Iterable[Mapping[str, object]]) -> dict[str, dict]:
@@ -1133,6 +1195,507 @@ def resolve_active_source_revision_from_snapshot(
         source_hash=parsed_pointer["source_hash"],
         manifest_id=parsed_pointer["manifest_id"],
         is_legacy_unpinned=False,
+    )
+
+
+_CURRENTNESS_POINTER_FIELDS = [
+    "_id",
+    "_rev",
+    "doc_type",
+    "session_id_hash",
+    "active_revision",
+    "manifest_id",
+    "manifest_hash",
+    "source_hash",
+]
+_CURRENTNESS_MEMBER_FIELDS = [
+    "_id",
+    "doc_type",
+    "session_id_hash",
+    "source_revision",
+    "member_id",
+    "source_document_id",
+    "source_doc_type",
+    "material_hash_field",
+    "material_hash",
+    "member_revision_hash",
+    "source_document_hash",
+    "member_hash",
+]
+_CURRENTNESS_LEGACY_FIELDS = {
+    dm.SourceDocType.CONVERSATION_CHUNK: [
+        "_id",
+        "doc_type",
+        "session_id_hash",
+        "content_hash",
+        "coverage_hash",
+        "source_hash",
+        "observed_at_start",
+        "observed_at_end",
+        "turn_start_index",
+        "turn_end_index",
+        "part_index",
+        "part_count",
+        "char_start",
+        "char_end",
+        "source_snapshot_schema_version",
+        _SOURCE_SNAPSHOT_SCOPE,
+        _SOURCE_SNAPSHOT_ORIGIN_ID,
+        "current_source_scope",
+        "supersedes_source_document_hash",
+    ],
+    dm.SourceDocType.TOOL_EVIDENCE_BUNDLE: [
+        "_id",
+        "doc_type",
+        "session_id_hash",
+        "content_hash",
+        "coverage_hash",
+        "source_hash",
+        "observed_at_start",
+        "observed_at_end",
+        "part_index",
+        "part_count",
+        "evidence_index_start",
+        "evidence_index_end",
+        "source_snapshot_schema_version",
+        _SOURCE_SNAPSHOT_SCOPE,
+        _SOURCE_SNAPSHOT_ORIGIN_ID,
+        "current_source_scope",
+        "supersedes_source_document_hash",
+    ],
+}
+
+
+def _encoded_json_size(value: object, *, limit: int) -> int:
+    encoder = json.JSONEncoder(
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    total = 0
+    try:
+        for part in encoder.iterencode(value):
+            total += len(part.encode("utf-8"))
+            if total > limit:
+                return total
+    except (TypeError, ValueError) as exc:
+        raise SourceRevisionResolutionError(
+            "source revision currentness metadata is invalid"
+        ) from exc
+    return total
+
+
+def _consume_currentness_row(budget: dict[str, int], *, compact: object | None = None) -> None:
+    budget["rows"] += 1
+    if budget["rows"] > SOURCE_CURRENTNESS_MAX_ROWS:
+        raise SourceRevisionCurrentnessLimitError(
+            "source revision currentness row limit exceeded; session remains pending",
+            reason_code="source_revision_row_limit_exceeded",
+        )
+    if compact is not None:
+        budget["compact_bytes"] += _encoded_json_size(
+            compact,
+            limit=SOURCE_CURRENTNESS_MAX_COMPACT_BYTES,
+        )
+        if budget["compact_bytes"] > SOURCE_CURRENTNESS_MAX_COMPACT_BYTES:
+            raise SourceRevisionCurrentnessLimitError(
+                "source revision currentness compact-byte limit exceeded; session remains pending",
+                reason_code="source_revision_compact_bytes_exceeded",
+            )
+
+
+def _iter_bounded_currentness_documents(
+    *,
+    store: CouchDBSourceStore,
+    session_id_hash: str,
+    doc_type: str,
+    budget: dict[str, int],
+    fields: list[str] | None = None,
+    selector: dict | None = None,
+) -> Iterator[dict]:
+    iterator = getattr(store, "iter_by_session", None)
+    if not callable(iterator):
+        raise SourceRevisionResolutionError(
+            "bounded session reader is required for source currentness"
+        )
+    try:
+        rows = iterator(
+            session_id_hash=session_id_hash,
+            doc_type=doc_type,
+            fields=fields,
+            selector=selector,
+            page_size=SOURCE_CURRENTNESS_PAGE_SIZE,
+            max_page_bytes=SOURCE_CURRENTNESS_MAX_PAGE_BYTES,
+        )
+        for row in rows:
+            if not isinstance(row, Mapping):
+                raise SourceRevisionResolutionError(
+                    "source revision currentness page is invalid"
+                )
+            document = dict(row)
+            if (
+                str(document.get("session_id_hash") or "") != session_id_hash
+                or str(document.get("doc_type") or "") != doc_type
+            ):
+                raise SourceRevisionResolutionError(
+                    "source revision currentness page escaped its session scope"
+                )
+            _consume_currentness_row(budget)
+            yield document
+    except SourceRevisionCurrentnessLimitError:
+        raise
+    except Exception as exc:
+        if getattr(exc, "code", "") == "couchdb_response_too_large":
+            raise SourceRevisionCurrentnessLimitError(
+                "source revision currentness page-byte limit exceeded; session remains pending",
+                reason_code="source_revision_page_bytes_exceeded",
+            ) from exc
+        raise
+
+
+def _get_bounded_currentness_document(
+    *,
+    store: CouchDBSourceStore,
+    document_id: str,
+    max_response_bytes: int,
+    reason_code: str,
+) -> dict | None:
+    bounded_get = getattr(store, "get_bounded", None)
+    if not callable(bounded_get):
+        raise SourceRevisionCurrentnessLimitError(
+            "bounded document reader is required for active source currentness",
+            reason_code="source_revision_bounded_get_unavailable",
+        )
+    try:
+        return bounded_get(document_id, max_response_bytes=max_response_bytes)
+    except Exception as exc:
+        if getattr(exc, "code", "") == "couchdb_response_too_large":
+            raise SourceRevisionCurrentnessLimitError(
+                f"{reason_code}; session remains pending",
+                reason_code=reason_code,
+            ) from exc
+        raise
+
+
+def _currentness_component(
+    document: Mapping[str, object],
+    *,
+    budget: dict[str, int],
+    validated_descriptor: Mapping[str, object] | None = None,
+) -> dict[str, str]:
+    doc_type = str(document.get("doc_type") or "")
+    if validated_descriptor is None:
+        material_hash_field, _ = _material_identity(document)
+        if material_hash_field == "document_hash" and doc_type != dm.SourceDocType.TRANSCRIPT_SESSION:
+            raise SourceRevisionResolutionError(
+                "source revision currentness requires a material hash for body-free source types"
+            )
+        revision_token = _revision_fingerprint(
+            document,
+            material_hash_field=material_hash_field,
+        )
+    else:
+        revision_token = str(validated_descriptor.get("member_revision_hash") or "")
+    component = {
+        "doc_type": doc_type,
+        "content_hash": str(document.get("content_hash") or ""),
+        "coverage_hash": str(document.get("coverage_hash") or ""),
+        "source_hash": str(document.get("source_hash") or ""),
+        "observed_at_start": str(document.get("observed_at_start") or ""),
+        "observed_at_end": str(document.get("observed_at_end") or ""),
+        "started_at": str(document.get("started_at") or ""),
+        "ended_at": str(document.get("ended_at") or ""),
+        "revision_token": revision_token,
+    }
+    _consume_currentness_row(budget, compact=component)
+    return component
+
+
+def _source_hash_from_currentness_components(
+    components: Iterable[Mapping[str, object]],
+) -> str:
+    rows = list(components)
+    sessions = [
+        row for row in rows if row.get("doc_type") == dm.SourceDocType.TRANSCRIPT_SESSION
+    ]
+    chunks = [
+        row for row in rows if row.get("doc_type") == dm.SourceDocType.CONVERSATION_CHUNK
+    ]
+    bundles = [
+        row for row in rows if row.get("doc_type") == dm.SourceDocType.TOOL_EVIDENCE_BUNDLE
+    ]
+    observed_at_start, observed_at_end = dm.observed_time_bounds(
+        sessions=sessions,
+        chunks=chunks,
+    )
+    return dm.build_source_hash(
+        (str(row.get("content_hash") or "") for row in chunks),
+        (str(row.get("coverage_hash") or "") for row in bundles),
+        observed_at_start=observed_at_start,
+        observed_at_end=observed_at_end,
+        conversation_revision_tokens=(str(row.get("revision_token") or "") for row in chunks),
+        tool_evidence_revision_tokens=(str(row.get("revision_token") or "") for row in bundles),
+    )
+
+
+def _read_currentness_pointer(
+    *,
+    store: CouchDBSourceStore,
+    session_id_hash: str,
+    budget: dict[str, int],
+) -> tuple[dict | None, dict | None]:
+    pointer_id = dm.active_source_revision_pointer_doc_id(session_id_hash)
+    pointer = _get_bounded_currentness_document(
+        store=store,
+        document_id=pointer_id,
+        max_response_bytes=SOURCE_CURRENTNESS_MAX_POINTER_BYTES,
+        reason_code="source_revision_pointer_bytes_exceeded",
+    )
+    candidates = list(
+        _iter_bounded_currentness_documents(
+            store=store,
+            session_id_hash=session_id_hash,
+            doc_type=dm.SourceDocType.ACTIVE_SOURCE_REVISION,
+            fields=_CURRENTNESS_POINTER_FIELDS,
+            budget=budget,
+        )
+    )
+    if pointer is None:
+        if candidates:
+            raise SourceRevisionResolutionError("active source revision pointer is invalid")
+        orphan_member = next(
+            _iter_bounded_currentness_documents(
+                store=store,
+                session_id_hash=session_id_hash,
+                doc_type=dm.SourceDocType.SOURCE_REVISION_MEMBER,
+                fields=_CURRENTNESS_MEMBER_FIELDS,
+                budget=budget,
+            ),
+            None,
+        )
+        orphan_manifest = next(
+            _iter_bounded_currentness_documents(
+                store=store,
+                session_id_hash=session_id_hash,
+                doc_type=dm.SourceDocType.SOURCE_REVISION_MANIFEST,
+                fields=["_id", "doc_type", "session_id_hash", "source_revision"],
+                budget=budget,
+            ),
+            None,
+        )
+        if orphan_member is not None or orphan_manifest is not None:
+            raise SourceRevisionResolutionError(
+                "active source revision controls exist without an active pointer"
+            )
+        return None, None
+    if not isinstance(pointer, Mapping):
+        raise SourceRevisionResolutionError("active source revision pointer is invalid")
+    parsed_pointer = _parse_pointer(pointer, session_id_hash=session_id_hash)
+    if (
+        len(candidates) != 1
+        or str(candidates[0].get("_id") or "") != pointer_id
+        or _parse_pointer(candidates[0], session_id_hash=session_id_hash) != parsed_pointer
+    ):
+        raise SourceRevisionResolutionError("active source revision pointer is invalid")
+    return dict(pointer), parsed_pointer
+
+
+def _active_currentness_components(
+    *,
+    store: CouchDBSourceStore,
+    session_id_hash: str,
+    parsed_pointer: Mapping[str, str],
+    budget: dict[str, int],
+) -> list[dict[str, str]]:
+    manifest = _get_bounded_currentness_document(
+        store=store,
+        document_id=str(parsed_pointer["manifest_id"]),
+        max_response_bytes=SOURCE_CURRENTNESS_MAX_MANIFEST_BYTES,
+        reason_code="source_revision_manifest_bytes_exceeded",
+    )
+    if manifest is None:
+        raise SourceRevisionResolutionError("active source revision manifest is missing")
+    if not isinstance(manifest, Mapping):
+        raise SourceRevisionResolutionError("active source revision manifest is invalid")
+    raw_members = manifest.get("members")
+    if (
+        isinstance(raw_members, list)
+        and len(raw_members) > SOURCE_CURRENTNESS_MAX_MANIFEST_MEMBERS
+    ):
+        raise SourceRevisionCurrentnessLimitError(
+            "source revision currentness manifest member limit exceeded; session remains pending",
+            reason_code="source_revision_manifest_members_exceeded",
+        )
+    manifest_size = _encoded_json_size(
+        manifest,
+        limit=SOURCE_CURRENTNESS_MAX_MANIFEST_BYTES,
+    )
+    if manifest_size > SOURCE_CURRENTNESS_MAX_MANIFEST_BYTES:
+        raise SourceRevisionCurrentnessLimitError(
+            "source revision currentness manifest-byte limit exceeded; session remains pending",
+            reason_code="source_revision_manifest_bytes_exceeded",
+        )
+    _consume_currentness_row(budget, compact=manifest)
+    members = _parse_manifest(
+        manifest,
+        session_id_hash=session_id_hash,
+        active_revision=parsed_pointer["active_revision"],
+        expected_manifest_hash=parsed_pointer["manifest_hash"],
+        expected_source_hash=parsed_pointer["source_hash"],
+    )
+    members_by_id = {str(member["member_id"]): member for member in members}
+    members_by_source = {str(member["source_document_id"]): member for member in members}
+    if len(members_by_id) != len(members) or len(members_by_source) != len(members):
+        raise SourceRevisionResolutionError("active source revision membership is invalid")
+
+    member_fields_by_source: dict[str, dict[str, str]] = {}
+    seen_member_ids: set[str] = set()
+    for member_document in _iter_bounded_currentness_documents(
+        store=store,
+        session_id_hash=session_id_hash,
+        doc_type=dm.SourceDocType.SOURCE_REVISION_MEMBER,
+        fields=_CURRENTNESS_MEMBER_FIELDS,
+        selector={"source_revision": parsed_pointer["active_revision"]},
+        budget=budget,
+    ):
+        member_id = str(member_document.get("member_id") or "")
+        membership = members_by_id.get(member_id)
+        if membership is None or member_id in seen_member_ids:
+            raise SourceRevisionResolutionError("active source revision member is invalid")
+        seen_member_ids.add(member_id)
+        source_document_id = str(membership["source_document_id"])
+        member_fields_by_source[source_document_id] = _validate_member_record(
+            member=member_document,
+            session_id_hash=session_id_hash,
+            source_revision=parsed_pointer["active_revision"],
+            membership=membership,
+        )
+    if set(member_fields_by_source) != set(members_by_source):
+        raise SourceRevisionResolutionError("active source revision member is missing")
+
+    components: list[dict[str, str]] = []
+    seen_source_ids: set[str] = set()
+    for doc_type in _SOURCE_MEMBER_TYPES:
+        for source_document in _iter_bounded_currentness_documents(
+            store=store,
+            session_id_hash=session_id_hash,
+            doc_type=doc_type,
+            fields=None,
+            budget=budget,
+        ):
+            source_id = str(source_document.get("_id") or "")
+            membership = members_by_source.get(source_id)
+            if membership is None:
+                continue
+            if source_id in seen_source_ids:
+                raise SourceRevisionResolutionError("active source revision source is duplicated")
+            seen_source_ids.add(source_id)
+            descriptor = _validate_source_document_against_member(
+                source=source_document,
+                session_id_hash=session_id_hash,
+                member_fields=member_fields_by_source[source_id],
+            )
+            components.append(
+                _currentness_component(
+                    source_document,
+                    budget=budget,
+                    validated_descriptor=descriptor,
+                )
+            )
+    if seen_source_ids != set(members_by_source):
+        raise SourceRevisionResolutionError("active source revision source is missing")
+    return components
+
+
+def _legacy_currentness_components(
+    *,
+    store: CouchDBSourceStore,
+    session_id_hash: str,
+    budget: dict[str, int],
+) -> list[dict[str, str]]:
+    components: list[dict[str, str]] = []
+    for doc_type in (
+        dm.SourceDocType.TRANSCRIPT_SESSION,
+        dm.SourceDocType.CONVERSATION_CHUNK,
+        dm.SourceDocType.TOOL_EVIDENCE_BUNDLE,
+    ):
+        fields = _CURRENTNESS_LEGACY_FIELDS.get(doc_type)
+        for document in _iter_bounded_currentness_documents(
+            store=store,
+            session_id_hash=session_id_hash,
+            doc_type=doc_type,
+            fields=fields,
+            budget=budget,
+        ):
+            if _is_immutable_source_copy(document):
+                continue
+            if doc_type == dm.SourceDocType.TRANSCRIPT_SESSION and "body" in document:
+                raise SourceRevisionResolutionError(
+                    "transcript session currentness record unexpectedly contains a body"
+                )
+            components.append(_currentness_component(document, budget=budget))
+    return components
+
+
+def resolve_source_hash_for_currentness(
+    *,
+    session_id_hash: str,
+    store: CouchDBSourceStore,
+) -> str:
+    """Resolve one source hash using bounded pages and a drift-fenced snapshot.
+
+    Active revisions are validated against their immutable manifest/member
+    descriptors while each full source document is resident in one bounded
+    page. Legacy scans use the database update sequence before/after paging; an
+    unrelated database write can cause one safe retry, and continued global
+    churn returns an explicit pending/blocked error rather than mixed hashes.
+    """
+
+    dm.assert_hash_like("session_id_hash", session_id_hash)
+    for attempt in range(SOURCE_CURRENTNESS_MAX_RETRIES + 1):
+        budget = {"rows": 0, "compact_bytes": 0}
+        before_sequence = str(store.read_change_sequence())
+        pointer, parsed_pointer = _read_currentness_pointer(
+            store=store,
+            session_id_hash=session_id_hash,
+            budget=budget,
+        )
+        if parsed_pointer is None:
+            components = _legacy_currentness_components(
+                store=store,
+                session_id_hash=session_id_hash,
+                budget=budget,
+            )
+        else:
+            components = _active_currentness_components(
+                store=store,
+                session_id_hash=session_id_hash,
+                parsed_pointer=parsed_pointer,
+                budget=budget,
+            )
+        source_hash = _source_hash_from_currentness_components(components)
+        if parsed_pointer is not None and source_hash != parsed_pointer["source_hash"]:
+            raise SourceRevisionResolutionError("active source revision hash changed")
+        after_sequence = str(store.read_change_sequence())
+        pointer_after = (
+            _get_bounded_currentness_document(
+                store=store,
+                document_id=dm.active_source_revision_pointer_doc_id(session_id_hash),
+                max_response_bytes=SOURCE_CURRENTNESS_MAX_POINTER_BYTES,
+                reason_code="source_revision_pointer_bytes_exceeded",
+            )
+            if pointer is not None
+            else None
+        )
+        if (
+            before_sequence == after_sequence
+            and (pointer is None or pointer_after == pointer)
+        ):
+            return source_hash
+        if attempt >= SOURCE_CURRENTNESS_MAX_RETRIES:
+            break
+    raise SourceRevisionSnapshotChangedError(
+        "source revision changed during bounded currentness read; retry session later"
     )
 
 

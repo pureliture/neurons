@@ -501,11 +501,11 @@ class PgSessionMemoryProjector:
 
         with self._store.transaction() as conn:
             self._store.acquire_session_identity_lock(
-                conn,
                 project=project,
                 provider=provider,
                 session_id_hash=session_id_hash,
                 content_hash=content_hash,
+                conn=conn,
             )
             scope_rows = self._store.find_session_chunks_by_natural_scope(
                 session_id_hash=session_id_hash,
