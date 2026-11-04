@@ -567,8 +567,9 @@ def test_executable_module_and_lazy_registration():
     import sys
     from agent_knowledge import cli as router
     assert "pg-qdrant-import" in router.COMMAND_HANDLERS
+    # This is only an outer interpreter-startup guard, not a CLI latency budget.
     result = subprocess.run([sys.executable, "-m", "agent_knowledge.rag_ingress.pg_qdrant_import_cli", "--help"],
-                            text=True, capture_output=True, timeout=10)
+                            text=True, capture_output=True, timeout=30)
     assert result.returncode == 0 and "--limit" in result.stdout and "--apply" in result.stdout
 
 
@@ -719,9 +720,11 @@ rc = cli.main(argv, boundary_factory=Boundary)
 print(json.dumps({"elapsed": time.monotonic() - start, "rc": rc}))
 '''
     pidfile = path / "worker.pid"
+    # Keep the inner 50ms/10ms product deadlines strict; this is only the
+    # outer watchdog for interpreter startup under parallel CI load.
     result = subprocess.run([sys.executable, "-c", script,
                              json.dumps([argv, stage, str(pidfile), startup_delay])],
-                            text=True, capture_output=True, timeout=8)
+                            text=True, capture_output=True, timeout=30)
     assert result.returncode == 0, result.stderr
     report, timing = [json.loads(line) for line in result.stdout.splitlines()]
     assert timing["rc"] == 1
