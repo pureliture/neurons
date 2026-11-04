@@ -701,6 +701,19 @@ def test_apply_preserves_body_and_content_hash_refreshes_coverage_and_invalidate
             del args, kwargs
             return {SESSION_HASH.replace(":", "_"): {before_coverage["source_hash"]}}
 
+        def has_projected_source_hash(
+            self,
+            project,
+            natural_id,
+            source_hash,
+            *,
+            extraction_level,
+            entity_type,
+            include_source_invalid=False,
+        ):
+            del project, extraction_level, entity_type, include_source_invalid
+            return source_hash in self.list_projected_source_hash_sets().get(natural_id, set())
+
     assert [
         row["session_id_hash"]
         for row in _select_sessions(

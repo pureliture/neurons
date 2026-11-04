@@ -9,6 +9,7 @@ import os
 import sys
 import time
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -34,7 +35,18 @@ from .runtime_graph import build_graph_adapter_from_env
 
 COUCHDB_GRAPH_PROJECTION_SCHEMA_VERSION = "llm_brain_couchdb_graph_projection.v1"
 GRAPH_PROJECTION_CURSOR_SCHEMA_VERSION = "llm_brain_graph_projection_cursor.v1"
-SOURCE_INVALID_UPSERT_RESULTS = frozenset({"source_invalid", "invalid_source"})
+GRAPH_SELECTION_PAGE_SIZE = 256
+MAX_GRAPH_SELECTION_SIZE = 1000
+MAX_GRAPH_SELECTION_PROJECTS = 256
+GRAPH_SELECTION_SNAPSHOT_ATTEMPTS = 2
+
+
+@dataclass(frozen=True)
+class _SessionSelection:
+    sessions: list[dict[str, Any]]
+    source_count: int
+    eligible_count: int
+    pending_count: int
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -161,28 +173,24 @@ def run_couchdb_projection(
             runtime_dir,
             scope_ref=cursor_scope_ref,
         )
-        eligible_sessions = _select_sessions(
+        selection = _select_sessions_bounded(
             source_store,
             project=project,
             provider=provider,
-            limit=0,
+            limit=limit,
             projection_state_store=projection_state_store if resume else None,
             extraction_level=target_level if resume else None,
             include_current=bool(reextract_entities),
+            cursor_offset=cursor_offset,
         )
         effective_cursor_offset = (
-            cursor_offset % len(eligible_sessions) if eligible_sessions else 0
+            cursor_offset % selection.eligible_count if selection.eligible_count else 0
         )
-        eligible_sessions = _rotate_sessions(
-            eligible_sessions,
-            offset=effective_cursor_offset,
-        )
-        sessions = eligible_sessions[: int(limit)] if limit > 0 else eligible_sessions
-        total_available = _count_sessions(source_store, project=project, provider=provider)
+        sessions = selection.sessions
+        total_available = selection.source_count
         report_every = max(1, int(report_every))
         max_projects = max(0, int(max_projects))
 
-        projected_cache: dict[str, dict[str, set[str]]] = {}
         durations: list[int] = []
         by_provider: Counter[str] = Counter()
         by_project: Counter[str] = Counter()
@@ -230,19 +238,14 @@ def run_couchdb_projection(
                     extractor_version="couchdb-graph-project.1",
                 )
                 if resume and not reextract_entities:
-                    if session_project not in projected_cache:
-                        projected_cache[session_project] = (
-                            projection_state_store.list_projected_source_hash_sets(
-                                session_project,
-                                extraction_level=target_level,
-                                entity_type="Session",
-                            )
-                        )
                     episode_source_hash = str(episode.payload.get("source_hash") or "")
-                    if (
-                        episode_source_hash
-                        and episode_source_hash
-                        in projected_cache[session_project].get(episode.natural_id, set())
+                    if projection_state_store.has_projected_source_hash(
+                        session_project,
+                        episode.natural_id,
+                        episode_source_hash,
+                        extraction_level=target_level,
+                        entity_type="Session",
+                        include_source_invalid=target_level != EXTRACTION_LEVEL_ENTITY,
                     ):
                         skipped_resumed += 1
                         status = "skipped_resumed"
@@ -252,10 +255,7 @@ def run_couchdb_projection(
                         duplicates += d
                         skipped_disabled += sd
                         failed += f
-                        if not f and not sd:
-                            projected_cache[session_project].setdefault(
-                                episode.natural_id, set()
-                            ).add(episode_source_hash)
+
                 else:
                     status, reason, p, d, sd, f = _project_one(worker, episode)
                     projected += p
@@ -356,7 +356,7 @@ def run_couchdb_projection(
             "run_ref": _project_ref(run_id),
             "canonical_counts": {
                 "source_sessions": total_available,
-                "eligible_sessions": len(eligible_sessions),
+                "eligible_sessions": selection.eligible_count,
                 "selected_sessions": len(sessions),
             },
             "filters": {
@@ -366,7 +366,7 @@ def run_couchdb_projection(
             },
             "limit": int(limit),
             "truncated": bool(
-                (limit > 0 and len(eligible_sessions) > len(sessions))
+                selection.eligible_count > len(sessions)
                 or stopped_after_max_projects
             ),
             "graph_enabled": bool(enable_graph),
@@ -520,19 +520,6 @@ def _write_scheduler_cursor(
     temporary.replace(path)
 
 
-def _rotate_sessions(
-    sessions: list[dict[str, Any]],
-    *,
-    offset: int,
-) -> list[dict[str, Any]]:
-    if not sessions:
-        return []
-    normalized = max(0, int(offset)) % len(sessions)
-    if normalized == 0:
-        return list(sessions)
-    return [*sessions[normalized:], *sessions[:normalized]]
-
-
 def _build_source_store(
     *,
     couchdb_url: str,
@@ -584,74 +571,236 @@ def _select_sessions(
     extraction_level: str | None = None,
     include_current: bool = False,
 ) -> list[dict[str, Any]]:
-    sessions = source_store.find_by_type(
-        SourceDocType.TRANSCRIPT_SESSION,
-        fields=["session_id_hash", "project", "provider", "source_hash"],
+    return _select_sessions_bounded(
+        source_store,
+        project=project,
+        provider=provider,
+        limit=limit,
+        projection_state_store=projection_state_store,
+        extraction_level=extraction_level,
+        include_current=include_current,
+    ).sessions
+
+
+def _select_sessions_bounded(
+    source_store: CouchDBSourceStore,
+    *,
+    project: str,
+    provider: str,
+    limit: int,
+    projection_state_store: LedgerGraphProjectionStateStore | None = None,
+    extraction_level: str | None = None,
+    include_current: bool = False,
+    cursor_offset: int = 0,
+) -> _SessionSelection:
+    """Select a bounded fair window without retaining source or projection history.
+
+    Two bounded CouchDB passes are used because project fairness depends on the
+    current-projection count for every selected project. Only per-project counts,
+    the bounded result window, and one source page are retained in memory.
+    """
+    requested = int(limit)
+    selection_limit = (
+        min(requested, MAX_GRAPH_SELECTION_SIZE)
+        if requested > 0
+        else MAX_GRAPH_SELECTION_SIZE
     )
-    filtered = _filter_sessions(sessions, project=project, provider=provider)
-    for session in filtered:
-        session_id_hash = str(session.get("session_id_hash") or "")
+
+    for _attempt in range(GRAPH_SELECTION_SNAPSHOT_ATTEMPTS):
+        project_counts: dict[str, dict[str, int]] = {}
+        source_count = 0
+        first_digest = hashlib.sha256()
+
+        for session in _iter_session_revisions(
+            source_store,
+            project=project,
+            provider=provider,
+        ):
+            source_count += 1
+            is_current = _session_projection_is_current(
+                session,
+                projection_state_store=projection_state_store,
+                extraction_level=extraction_level,
+            )
+            session_project = str(session.get("project") or "")
+            counts = project_counts.setdefault(session_project, {"pending": 0, "current": 0})
+            counts["current" if is_current else "pending"] += 1
+            _update_selection_digest(first_digest, session, is_current=is_current)
+            if len(project_counts) > MAX_GRAPH_SELECTION_PROJECTS:
+                raise ValueError("graph selection exceeds the project-scope bound")
+
+        project_order = sorted(
+            project_counts,
+            key=lambda value: (project_counts[value]["current"], value),
+        )
+        pending_counts = {
+            name: values["pending"] for name, values in project_counts.items()
+        }
+        current_counts = {
+            name: values["current"] for name, values in project_counts.items()
+        }
+        pending_total = sum(pending_counts.values())
+        current_total = sum(current_counts.values()) if include_current else 0
+        eligible_count = pending_total + current_total
+        normalized_offset = max(0, int(cursor_offset)) % eligible_count if eligible_count else 0
+
+        pending_order = [name for name in project_order if pending_counts[name] > 0]
+        current_order = [name for name in project_order if current_counts[name] > 0]
+        pending_positions = {name: index for index, name in enumerate(pending_order)}
+        current_positions = {name: index for index, name in enumerate(current_order)}
+        pending_ordinals: Counter[str] = Counter()
+        current_ordinals: Counter[str] = Counter()
+        observed_counts: dict[str, dict[str, int]] = {}
+        second_digest = hashlib.sha256()
+        observed_source_count = 0
+        selected_by_slot: dict[int, dict[str, Any]] = {}
+
+        for session in _iter_session_revisions(
+            source_store,
+            project=project,
+            provider=provider,
+        ):
+            observed_source_count += 1
+            is_current = _session_projection_is_current(
+                session,
+                projection_state_store=projection_state_store,
+                extraction_level=extraction_level,
+            )
+            _update_selection_digest(second_digest, session, is_current=is_current)
+            session_project = str(session.get("project") or "")
+            lane = "current" if is_current else "pending"
+            counts = observed_counts.setdefault(session_project, {"pending": 0, "current": 0})
+            counts[lane] += 1
+
+            if lane == "current" and not include_current:
+                continue
+            lane_counts = current_counts if lane == "current" else pending_counts
+            lane_order = current_order if lane == "current" else pending_order
+            positions = current_positions if lane == "current" else pending_positions
+            ordinals = current_ordinals if lane == "current" else pending_ordinals
+            ordinal = ordinals[session_project]
+            ordinals[session_project] += 1
+            rank = _round_robin_rank(
+                ordinal,
+                session_project,
+                project_order=lane_order,
+                project_positions=positions,
+                project_counts=lane_counts,
+            )
+            absolute_rank = rank + (pending_total if lane == "current" else 0)
+            slot = (absolute_rank - normalized_offset) % eligible_count if eligible_count else 0
+            if slot < selection_limit:
+                if slot in selected_by_slot:
+                    raise ValueError("graph selection source contains duplicate session identity")
+                selected_by_slot[slot] = session
+
+        if (
+            source_count != observed_source_count
+            or project_counts != observed_counts
+            or first_digest.digest() != second_digest.digest()
+        ):
+            continue
+
+        selected = [selected_by_slot[index] for index in sorted(selected_by_slot)]
+        return _SessionSelection(
+            sessions=selected,
+            source_count=source_count,
+            eligible_count=eligible_count,
+            pending_count=pending_total,
+        )
+
+    raise ValueError("graph source changed during bounded selection; retry the projection")
+
+
+def _iter_session_revisions(
+    source_store: CouchDBSourceStore,
+    *,
+    project: str,
+    provider: str,
+):
+    for source_session in source_store.iter_by_type(
+        SourceDocType.TRANSCRIPT_SESSION,
+        fields=["_id", "session_id_hash", "project", "provider"],
+        page_size=GRAPH_SELECTION_PAGE_SIZE,
+    ):
+        session_id_hash = str(source_session.get("session_id_hash") or "")
+        session_project = str(source_session.get("project") or "")
+        session_provider = str(source_session.get("provider") or "")
+        if not session_id_hash:
+            continue
+        if project and session_project != project:
+            continue
+        if provider and session_provider != provider:
+            continue
+        session = dict(source_session)
         session["source_hash"] = session_source_revision_from_couchdb_source(
             session_id_hash=session_id_hash,
             source_store=source_store,
         )
-    projected_by_project = _projected_session_source_hashes_by_project(
-        filtered,
-        projection_state_store=projection_state_store,
+        yield session
+
+
+def _session_projection_is_current(
+    session: dict[str, Any],
+    *,
+    projection_state_store: LedgerGraphProjectionStateStore | None,
+    extraction_level: str | None,
+) -> bool:
+    source_hash = str(session.get("source_hash") or "")
+    if (
+        not source_hash
+        or projection_state_store is None
+        or extraction_level is None
+    ):
+        return False
+    return projection_state_store.has_projected_source_hash(
+        str(session.get("project") or ""),
+        _session_natural_id(str(session.get("session_id_hash") or "")),
+        source_hash,
         extraction_level=extraction_level,
+        entity_type="Session",
+        include_source_invalid=extraction_level != EXTRACTION_LEVEL_ENTITY,
     )
-    current_counts: Counter[str] = Counter()
-    pending: list[dict[str, Any]] = []
-    current: list[dict[str, Any]] = []
-    for session in filtered:
-        session_project = str(session.get("project") or "")
-        natural_id = _session_natural_id(str(session.get("session_id_hash") or ""))
-        source_hash = str(session.get("source_hash") or "")
-        is_current = bool(source_hash) and (
-            source_hash
-            in projected_by_project.get(session_project, {}).get(natural_id, set())
-        )
-        if is_current:
-            current_counts[session_project] += 1
-            current.append(session)
-        else:
-            pending.append(session)
-    filtered = _round_robin_sessions(pending, current_counts=current_counts)
-    if include_current:
-        filtered.extend(_round_robin_sessions(current, current_counts=current_counts))
-    if limit <= 0:
-        return filtered
-    return filtered[: int(limit)]
 
 
-def _round_robin_sessions(
-    sessions: list[dict[str, Any]], *, current_counts: Counter[str]
-) -> list[dict[str, Any]]:
-    by_project: dict[str, list[dict[str, Any]]] = {}
-    for session in sessions:
-        by_project.setdefault(str(session.get("project") or ""), []).append(session)
-    for project_sessions in by_project.values():
-        project_sessions.sort(key=_session_sort_key)
-    project_order = sorted(by_project, key=lambda value: (current_counts[value], value))
-    ordered: list[dict[str, Any]] = []
-    while project_order:
-        remaining: list[str] = []
-        for session_project in project_order:
-            project_sessions = by_project[session_project]
-            if project_sessions:
-                ordered.append(project_sessions.pop(0))
-            if project_sessions:
-                remaining.append(session_project)
-        project_order = remaining
-    return ordered
-
-
-def _count_sessions(source_store: CouchDBSourceStore, *, project: str, provider: str) -> int:
-    sessions = source_store.find_by_type(
-        SourceDocType.TRANSCRIPT_SESSION,
-        fields=["session_id_hash", "project", "provider"],
+def _update_selection_digest(digest: Any, session: dict[str, Any], *, is_current: bool) -> None:
+    payload = json.dumps(
+        [
+            str(session.get("_id") or ""),
+            str(session.get("project") or ""),
+            str(session.get("provider") or ""),
+            str(session.get("session_id_hash") or ""),
+            str(session.get("source_hash") or ""),
+            bool(is_current),
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
     )
-    return len(_filter_sessions(sessions, project=project, provider=provider))
+    digest.update(payload.encode("utf-8"))
+    digest.update(b"\n")
+
+
+def _round_robin_rank(
+    ordinal: int,
+    session_project: str,
+    *,
+    project_order: list[str],
+    project_positions: dict[str, int],
+    project_counts: dict[str, int],
+) -> int:
+    """Return a candidate's rank in a fair interleave using O(projects) state."""
+    position = project_positions[session_project]
+    completed_rounds = sum(min(ordinal, project_counts[name]) for name in project_order)
+    earlier_in_round = sum(
+        1
+        for name in project_order
+        if project_positions[name] < position and project_counts[name] > ordinal
+    )
+    return completed_rounds + earlier_in_round
+
+
+def _session_natural_id(session_id_hash: str) -> str:
+    return str(session_id_hash or "").replace(":", "_")
 
 
 def _filter_sessions(
@@ -660,60 +809,14 @@ def _filter_sessions(
     project: str,
     provider: str,
 ) -> list[dict[str, Any]]:
-    filtered = [session for session in sessions if str(session.get("session_id_hash") or "")]
-    if project:
-        filtered = [session for session in filtered if str(session.get("project") or "") == project]
-    if provider:
-        filtered = [session for session in filtered if str(session.get("provider") or "") == provider]
-    return filtered
-
-
-def _session_sort_key(session: dict[str, Any]) -> tuple[str, str, str]:
-    return (
-        str(session.get("project") or ""),
-        str(session.get("provider") or ""),
-        str(session.get("session_id_hash") or ""),
-    )
-
-
-def _session_natural_id(session_id_hash: str) -> str:
-    return str(session_id_hash or "").replace(":", "_")
-
-
-def _projected_session_source_hashes_by_project(
-    sessions: list[dict[str, Any]],
-    *,
-    projection_state_store: LedgerGraphProjectionStateStore | None,
-    extraction_level: str | None,
-) -> dict[str, dict[str, set[str]]]:
-    if projection_state_store is None or extraction_level is None:
-        return {}
-    projects = sorted({str(session.get("project") or "") for session in sessions})
-
-    def _projected_for(query_project: str | None) -> dict[str, set[str]]:
-        projected = projection_state_store.list_projected_source_hash_sets(
-            query_project,
-            extraction_level=extraction_level,
-            entity_type="Session",
-        )
-        if extraction_level != EXTRACTION_LEVEL_ENTITY:
-            source_invalid = projection_state_store.list_projected_source_hash_sets(
-                query_project,
-                extraction_level=EXTRACTION_LEVEL_ENTITY,
-                entity_type="Session",
-                upsert_results=SOURCE_INVALID_UPSERT_RESULTS,
-            )
-            for natural_id, source_hashes in source_invalid.items():
-                projected.setdefault(natural_id, set()).update(source_hashes)
-        return projected
-
-    # `natural_id` is globally unique per session, so for multi-project selections a
-    # single global query (project=None) is equivalent to per-project queries and
-    # avoids an N+1 round-trip; a session's id only appears under its own project.
-    if len(projects) > 1:
-        shared = _projected_for(None)
-        return {session_project: shared for session_project in projects}
-    return {session_project: _projected_for(session_project) for session_project in projects}
+    """Filter an already bounded/status-only source list by scope."""
+    return [
+        session
+        for session in sessions
+        if str(session.get("session_id_hash") or "")
+        and (not project or str(session.get("project") or "") == project)
+        and (not provider or str(session.get("provider") or "") == provider)
+    ]
 
 
 def _project_one(worker: GraphProjectionWorker, episode: Any) -> tuple[str, str, int, int, int, int]:

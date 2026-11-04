@@ -14,6 +14,7 @@ from agent_knowledge.couchdb_source.document_model import (
 from agent_knowledge.couchdb_source.source_revision import (
     resolve_active_source_revision,
     resolve_active_source_revision_from_snapshot,
+    resolve_source_hash_for_currentness,
 )
 from agent_knowledge.couchdb_source.source_store import CouchDBSourceStore
 
@@ -248,15 +249,12 @@ def _materialize_artifact_from_couchdb_source_once(
 def session_source_revision_from_couchdb_source(
     *, session_id_hash: str, source_store: CouchDBSourceStore
 ) -> str:
-    # Selection paths obtain exactly one session-scoped snapshot.  The pure
-    # resolver interprets both legacy and active control documents from that
-    # snapshot, so projected active sessions avoid per-document ``get`` calls
-    # without widening from malformed active state to legacy discovery.
-    documents = source_store.find_by_session(session_id_hash=session_id_hash)
-    return resolve_active_source_revision_from_snapshot(
+    # Graph selection needs only the hash; the bounded resolver validates the
+    # current source snapshot without materializing a second body-bearing tree.
+    return resolve_source_hash_for_currentness(
         session_id_hash=session_id_hash,
-        documents=documents,
-    ).source_hash
+        store=source_store,
+    )
 
 
 def _source_revision_from_documents(

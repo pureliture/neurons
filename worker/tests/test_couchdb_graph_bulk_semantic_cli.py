@@ -189,20 +189,22 @@ def _seed_session(
     *,
     raw_id: str,
     body: str = "Graphiti writes semantic entities into Neo4j using MENTIONS and RELATES_TO edges.",
+    project: str = PROJECT,
+    provider: str = PROVIDER,
 ) -> str:
-    sid = dm.build_session_id_hash(PROVIDER, raw_id)
+    sid = dm.build_session_id_hash(provider, raw_id)
     session = TranscriptSession(
         session_id_hash=sid,
-        provider=PROVIDER,
-        project=PROJECT,
+        provider=provider,
+        project=project,
         started_at="2026-06-21T00:00:00Z",
     )
     store.put(dm.build_transcript_session_document(session=session))
     chunk = TranscriptChunk.from_text(
         chunk_id=f"chunk_{raw_id}",
         session_id_hash=sid,
-        provider=PROVIDER,
-        project=PROJECT,
+        provider=provider,
+        project=project,
         turn_start_index=0,
         turn_end_index=0,
         text=body,
@@ -212,8 +214,8 @@ def _seed_session(
     store.put(
         dm.build_coverage_manifest_document(
             session_id_hash=sid,
-            provider=PROVIDER,
-            project=PROJECT,
+            provider=provider,
+            project=project,
             conversation_chunk_count=1,
             tool_evidence_bundle_count=0,
             conversation_content_hashes=[chunk_doc["content_hash"]],
@@ -440,6 +442,83 @@ def test_bulk_semantic_max_projects_caps_below_batch_size(tmp_path):
     assert report["projection"]["projected"] == 2
     assert report["projection"]["stopped_after_max_projects"] is True
     assert extractor.calls == [["s1", "s2"]]
+
+
+def test_bulk_semantic_bounded_selection_preserves_scope_resume_and_report_counts(tmp_path):
+    class _BoundedStore(InMemoryCouchDBSourceStore):
+        def __init__(self):
+            super().__init__()
+            self.page_sizes = []
+
+        def find_by_type(self, *_args, **_kwargs):
+            raise AssertionError("bulk selection must not materialize all source rows")
+
+        def iter_by_type(self, *args, page_size=10000, **kwargs):
+            self.page_sizes.append(page_size)
+            assert 0 < page_size <= 256
+            yield from super().iter_by_type(*args, page_size=page_size, **kwargs)
+
+    store = _BoundedStore()
+    for index in range(3):
+        _seed_session(store, raw_id=f"scoped-{index}")
+    _seed_session(store, raw_id="other-project", project="another-project")
+    _seed_session(store, raw_id="other-provider", provider="gemini")
+
+    first = run_couchdb_bulk_semantic_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=2,
+        project=PROJECT,
+        provider=PROVIDER,
+        max_sessions_per_call=2,
+        max_projects=1,
+        extractor=_FakeBulkExtractor(),
+        writer=_FakeBulkWriter(),
+    )
+
+    assert first["canonical_counts"] == {
+        "source_sessions": 3,
+        "eligible_sessions": 3,
+        "selected_sessions": 2,
+    }
+    assert first["filters"]["project_set"] is True
+    assert first["filters"]["provider"] == PROVIDER
+    assert first["projection"]["attempted"] == 1
+    assert first["projection"]["projected"] == 1
+    assert first["projection"]["stopped_after_max_projects"] is True
+    assert first["truncated"] is True
+    assert store.page_sizes and max(store.page_sizes) <= 256
+
+    resumed = run_couchdb_bulk_semantic_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=2,
+        project=PROJECT,
+        provider=PROVIDER,
+        max_sessions_per_call=2,
+        extractor=_FakeBulkExtractor(),
+        writer=_FakeBulkWriter(),
+    )
+    assert resumed["canonical_counts"]["source_sessions"] == 3
+    assert resumed["canonical_counts"]["eligible_sessions"] == 2
+    assert resumed["canonical_counts"]["selected_sessions"] == 2
+    assert resumed["projection"]["projected"] == 2
+
+    current = run_couchdb_bulk_semantic_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=2,
+        project=PROJECT,
+        provider=PROVIDER,
+        max_sessions_per_call=2,
+        extractor=_ExplodingExtractor(),
+        writer=_FakeBulkWriter(),
+    )
+    assert current["canonical_counts"]["source_sessions"] == 3
+    assert current["canonical_counts"]["eligible_sessions"] == 0
+    assert current["canonical_counts"]["selected_sessions"] == 0
+    assert current["projection"]["attempted"] == 0
+    assert current["semantic"]["llm_batches"] == 0
 
 
 def test_bulk_semantic_max_projects_caps_failed_extraction_batches(tmp_path):
