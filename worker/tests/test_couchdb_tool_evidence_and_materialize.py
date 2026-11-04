@@ -299,7 +299,21 @@ def test_distinct_tool_coverage_revision_invalidates_session_and_graph_currentne
 
     class _ProjectedFirstRevision:
         def list_projected_source_hash_sets(self, *args, **kwargs):
+            del args, kwargs
             return {_session_natural_id(_sid()): {first_coverage["source_hash"]}}
+
+        def has_projected_source_hash(
+            self,
+            project,
+            natural_id,
+            source_hash,
+            *,
+            extraction_level,
+            entity_type,
+            include_source_invalid=False,
+        ):
+            del project, extraction_level, entity_type, include_source_invalid
+            return source_hash in self.list_projected_source_hash_sets().get(natural_id, set())
 
     graph_selected = _select_graph_sessions(
         store,
@@ -368,7 +382,21 @@ def test_tool_evidence_body_revision_invalidates_both_projection_lanes_but_dupli
 
     class _ProjectedFirstRevision:
         def list_projected_source_hash_sets(self, *args, **kwargs):
+            del args, kwargs
             return {_session_natural_id(_sid()): {first_coverage["source_hash"]}}
+
+        def has_projected_source_hash(
+            self,
+            project,
+            natural_id,
+            source_hash,
+            *,
+            extraction_level,
+            entity_type,
+            include_source_invalid=False,
+        ):
+            del project, extraction_level, entity_type, include_source_invalid
+            return source_hash in self.list_projected_source_hash_sets().get(natural_id, set())
 
     assert _select_graph_sessions(
         store,

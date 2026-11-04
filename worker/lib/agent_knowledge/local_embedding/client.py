@@ -32,6 +32,9 @@ from .profile import (
     LOCAL_MODEL2VEC_PROFILE_ID,
 )
 
+DEFAULT_MAX_RETRIES = 2
+MAX_RETRY_DELAY_SECONDS = 5.0
+
 
 class LocalEmbeddingClientError(RuntimeError):
     """Sanitized client error with explicit retryability classification."""
@@ -208,7 +211,7 @@ class CanonicalLocalEmbeddingClient:
         dimensions: int = LOCAL_MODEL2VEC_DIMENSIONS,
         encoding_format: str | None = "float",
         timeout_seconds: float = 15.0,
-        max_retries: int = 2,
+        max_retries: int = DEFAULT_MAX_RETRIES,
         retry_backoff_seconds: float = 0.25,
         use_openai_sdk: bool = False,
         openai_client: Any | None = None,
@@ -460,7 +463,7 @@ class CanonicalLocalEmbeddingClient:
                 )
                 attempt += 1
                 if delay > 0:
-                    self._sleep_fn(min(delay, 5.0))
+                    self._sleep_fn(min(delay, MAX_RETRY_DELAY_SECONDS))
 
     async def _send_chunk_batch_async(self, batch: list[str]) -> tuple[list[list[float]], int]:
         attempt = 0
@@ -479,7 +482,7 @@ class CanonicalLocalEmbeddingClient:
                 )
                 attempt += 1
                 if delay > 0:
-                    await asyncio.sleep(min(delay, 5.0))
+                    await asyncio.sleep(min(delay, MAX_RETRY_DELAY_SECONDS))
 
     def _call_http_sync(self, batch: list[str]) -> tuple[list[list[float]], int]:
         body = serialize_embedding_request_body(

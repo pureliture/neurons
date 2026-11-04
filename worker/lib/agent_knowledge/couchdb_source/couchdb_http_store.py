@@ -31,6 +31,7 @@ from .document_model import (
 )
 from .source_store import (
     IMMUTABLE_SOURCE_REVISION_DOC_TYPES,
+    SESSION_QUERY_MAX_PAGE_SIZE,
     SourceStoreConflict,
     SourceStoreError,
     StoredRevision,
@@ -49,22 +50,37 @@ class CouchDBError(RuntimeError):
     """Raised on a non-success CouchDB HTTP response or connection failure."""
 
 
-def _urllib_transport(method: str, url: str, headers: dict, body: bytes, *, timeout_seconds: float = 30) -> ProxyResponse:
+class CouchDBResponseTooLarge(CouchDBError):
+    """A bounded read response exceeded its caller-provided byte limit."""
+
+    code = "couchdb_response_too_large"
+
+
+def _urllib_transport(
+    method: str,
+    url: str,
+    headers: dict,
+    body: bytes,
+    *,
+    timeout_seconds: float = 30,
+    max_response_bytes: int | None = None,
+) -> ProxyResponse:
     from urllib import request
     from urllib.error import HTTPError, URLError
 
     req = request.Request(url, data=body if body else None, headers=headers, method=method)
+    read_size = None if max_response_bytes is None else max(0, int(max_response_bytes)) + 1
     try:
         with request.urlopen(req, timeout=timeout_seconds) as response:
             return ProxyResponse(
                 status_code=response.status,
-                body=response.read(),
+                body=response.read() if read_size is None else response.read(read_size),
                 headers={key.lower(): value for key, value in response.headers.items()},
             )
     except HTTPError as exc:
         return ProxyResponse(
             status_code=exc.code,
-            body=exc.read(),
+            body=exc.read() if read_size is None else exc.read(read_size),
             headers={key.lower(): value for key, value in exc.headers.items()},
         )
     except (URLError, TimeoutError) as exc:
@@ -97,7 +113,14 @@ class CouchDBHttpSourceStore:
 
     # --- HTTP plumbing --------------------------------------------------------
 
-    def _request(self, method: str, path: str, *, json_body: dict | None = None) -> tuple[int, dict]:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: dict | None = None,
+        max_response_bytes: int | None = None,
+    ) -> tuple[int, dict]:
         headers = {"Accept": "application/json"}
         body = b""
         if json_body is not None:
@@ -112,11 +135,22 @@ class CouchDBHttpSourceStore:
                 raise CouchDBError("operation deadline exceeded")
             timeout_seconds = min(timeout_seconds, remaining)
         if self.transport is _urllib_transport:
+            # The default urllib transport reads at most cap + 1 bytes. An
+            # injected transport is a test seam and may allocate its response
+            # before returning; the post-return check below is not a hard
+            # allocation bound for arbitrary injected transports.
             response = self.transport(
-                method, self.base_url + path, headers, body, timeout_seconds=timeout_seconds
+                method,
+                self.base_url + path,
+                headers,
+                body,
+                timeout_seconds=timeout_seconds,
+                max_response_bytes=max_response_bytes,
             )
         else:
             response = self.transport(method, self.base_url + path, headers, body)
+        if max_response_bytes is not None and len(response.body) > int(max_response_bytes):
+            raise CouchDBResponseTooLarge("CouchDB response exceeded configured byte limit")
         try:
             payload = json.loads(response.body.decode("utf-8") or "{}") if response.body else {}
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -142,6 +176,24 @@ class CouchDBHttpSourceStore:
             return None
         if status != 200:
             raise CouchDBError(f"GET {doc_id} failed: HTTP {status}")
+        return payload
+
+    def get_bounded(self, doc_id: str, *, max_response_bytes: int) -> dict | None:
+        """Read a document with the transport byte cap applied before JSON parsing."""
+
+        if max_response_bytes < 1:
+            raise ValueError("bounded GET byte limit must be positive")
+        status, payload = self._request(
+            "GET",
+            self._doc_path(doc_id),
+            max_response_bytes=max_response_bytes,
+        )
+        if status == 404:
+            return None
+        if status != 200:
+            raise CouchDBError(f"bounded GET {doc_id} failed: HTTP {status}")
+        if not isinstance(payload, dict):
+            raise CouchDBError("bounded GET returned an invalid document")
         return payload
 
     def _require_source_document_unpinned(
@@ -676,6 +728,70 @@ class CouchDBHttpSourceStore:
             docs = [doc for doc in docs if doc.get("doc_type") != SourceDocType.REPO_USAGE_PATTERN]
         docs.sort(key=lambda d: str(d.get("_id")))
         return docs
+
+    def iter_by_session(
+        self,
+        *,
+        session_id_hash: str,
+        doc_type: str,
+        fields: list[str] | None = None,
+        selector: dict | None = None,
+        page_size: int = SESSION_QUERY_MAX_PAGE_SIZE,
+        max_page_bytes: int = 524288,
+    ) -> Iterator[dict]:
+        """Yield a bounded session-scoped query without accumulating all pages."""
+
+        if not session_id_hash or not doc_type:
+            raise ValueError("session query requires exact session and document type")
+        if max_page_bytes < 1:
+            raise ValueError("session query byte limit must be positive")
+        extra_selector = dict(selector or {})
+        if "session_id_hash" in extra_selector or "doc_type" in extra_selector:
+            raise ValueError("session query selector cannot override its scope")
+        query_selector = {
+            **extra_selector,
+            "session_id_hash": session_id_hash,
+            "doc_type": doc_type,
+        }
+        size = min(SESSION_QUERY_MAX_PAGE_SIZE, max(1, int(page_size)))
+        bookmark = ""
+        while True:
+            body: dict = {
+                "selector": query_selector,
+                "sort": [{"_id": "asc"}],
+                "limit": size,
+            }
+            if fields:
+                body["fields"] = list(fields)
+            if bookmark:
+                body["bookmark"] = bookmark
+            status, payload = self._request(
+                "POST",
+                f"/{self.db}/_find",
+                json_body=body,
+                max_response_bytes=max_page_bytes,
+            )
+            if status != 200:
+                raise CouchDBError(f"_find by session failed: HTTP {status}")
+            docs = payload.get("docs") if isinstance(payload, dict) else None
+            if not isinstance(docs, list):
+                raise CouchDBError("_find by session returned an invalid page")
+            if len(docs) > size:
+                raise CouchDBError("_find by session exceeded its requested page size")
+            if not docs:
+                return
+            for doc in docs:
+                if not isinstance(doc, dict):
+                    raise CouchDBError("_find by session returned an invalid document")
+                yield doc
+            next_bookmark = str(payload.get("bookmark") or "")
+            if not next_bookmark:
+                if len(docs) >= size:
+                    raise CouchDBError("_find by session omitted a required continuation bookmark")
+                return
+            if next_bookmark == bookmark:
+                raise CouchDBError("_find by session bookmark did not advance")
+            bookmark = next_bookmark
 
     def delete(self, doc_id: str) -> bool:
         existing = self.get(doc_id)

@@ -2804,21 +2804,31 @@ class PgVectorStore:
         *,
         profile_id: str = LOCAL_EMBEDDING_PROFILE_ID,
         max_retries: int = OUTBOX_RETRY_LIMIT,
+        target_types: Sequence[str] | None = None,
     ) -> list[LocalOutboxJob]:
         """Claim local embedding jobs using unlocked candidate scan + ordered advisory & row locks."""
 
         if not worker_id or batch_size < 1 or lease_seconds < 1:
             raise ValueError("invalid local outbox lease arguments")
+        normalized_target_types: tuple[str, ...] | None = None
+        if target_types is not None:
+            normalized_target_types = tuple(sorted({str(value).strip() for value in target_types}))
+            if not normalized_target_types or not set(normalized_target_types).issubset(
+                {"memory_card", "session_chunk"}
+            ):
+                raise ValueError("invalid local outbox target types")
+        target_type_filter = " AND target_type = ANY(%s)" if normalized_target_types else ""
         claimed: list[LocalOutboxJob] = []
         scan_limit = max(int(batch_size) * 4, 16)
         with self._scope(write=True) as db:
             with db.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT outbox_id, target_type, target_id, profile_id,
                            source_content_hash, input_hash, incarnation
                       FROM local_embedding_outbox
                      WHERE profile_id = %s
+                       {target_type_filter}
                        AND (
                             status = 'queued'
                             OR (
@@ -2836,7 +2846,11 @@ class PgVectorStore:
                      ORDER BY created_at ASC, outbox_id ASC
                      LIMIT %s
                     """,
-                    (profile_id, max_retries, max_retries, scan_limit),
+                    (
+                        (profile_id, list(normalized_target_types), max_retries, max_retries, scan_limit)
+                        if normalized_target_types
+                        else (profile_id, max_retries, max_retries, scan_limit)
+                    ),
                 )
                 candidates = cur.fetchall()
 
@@ -2845,6 +2859,8 @@ class PgVectorStore:
                     break
                 cand_outbox_id = int(_row_value(cand, "outbox_id", 0))
                 cand_target_type = str(_row_value(cand, "target_type", 1))
+                if normalized_target_types and cand_target_type not in normalized_target_types:
+                    continue
                 cand_target_id = str(_row_value(cand, "target_id", 2))
                 cand_source_hash = str(_row_value(cand, "source_content_hash", 4))
                 cand_input_hash = str(_row_value(cand, "input_hash", 5))
@@ -2875,7 +2891,7 @@ class PgVectorStore:
                         continue
 
                     cur.execute(
-                        """
+                        f"""
                         SELECT outbox_id, target_type, target_id, profile_id,
                                source_content_hash, input_hash, payload_text, incarnation,
                                status, fencing_token, worker_id, claimed_at, lease_until,
@@ -2883,6 +2899,7 @@ class PgVectorStore:
                           FROM local_embedding_outbox
                          WHERE outbox_id = %s
                            AND profile_id = %s
+                           {target_type_filter}
                            AND (
                                 status = 'queued'
                                 OR (
@@ -2899,7 +2916,17 @@ class PgVectorStore:
                                )
                          FOR UPDATE SKIP LOCKED
                         """,
-                        (cand_outbox_id, profile_id, max_retries, max_retries),
+                        (
+                            (
+                                cand_outbox_id,
+                                profile_id,
+                                list(normalized_target_types),
+                                max_retries,
+                                max_retries,
+                            )
+                            if normalized_target_types
+                            else (cand_outbox_id, profile_id, max_retries, max_retries)
+                        ),
                     )
                     locked_job = cur.fetchone()
                     if locked_job is None:

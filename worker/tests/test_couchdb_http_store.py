@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import urllib.request
 from urllib.parse import urlparse
 
 import pytest
 
 import agent_knowledge.couchdb_source.couchdb_http_store as couchdb_http_store
 from agent_knowledge.couchdb_source import document_model as dm
-from agent_knowledge.couchdb_source.couchdb_http_store import CouchDBError, CouchDBHttpSourceStore
+from agent_knowledge.couchdb_source.couchdb_http_store import (
+    CouchDBError,
+    CouchDBHttpSourceStore,
+    CouchDBResponseTooLarge,
+)
 from agent_knowledge.couchdb_source.source_revision import (
     activate_source_revision,
     build_revision_scoped_source_documents,
@@ -188,6 +193,34 @@ def test_put_then_get_roundtrip():
     got = store.get(doc["_id"])
     assert got["doc_type"] == dm.SourceDocType.TRANSCRIPT_SESSION
     assert got["_rev"] == rev.rev
+
+
+def test_bounded_get_reads_only_limit_plus_one_before_json_decode(monkeypatch):
+    class OversizedResponse:
+        status = 200
+        headers = {}
+
+        def __init__(self):
+            self.read_sizes = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, size=-1):
+            self.read_sizes.append(size)
+            return b"x" * (size if size >= 0 else 4096)
+
+    response = OversizedResponse()
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: response)
+    store = CouchDBHttpSourceStore(base_url="http://couch.test:5984", db="transcript_source")
+
+    with pytest.raises(CouchDBResponseTooLarge):
+        store.get_bounded("large-manifest", max_response_bytes=64)
+
+    assert response.read_sizes == [65]
 
 
 def test_put_is_idempotent_for_identical_content():
