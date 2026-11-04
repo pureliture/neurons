@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import urllib.request
 from urllib.parse import urlparse
 
 import pytest
 
 import agent_knowledge.couchdb_source.couchdb_http_store as couchdb_http_store
 from agent_knowledge.couchdb_source import document_model as dm
-from agent_knowledge.couchdb_source.couchdb_http_store import CouchDBError, CouchDBHttpSourceStore
+from agent_knowledge.couchdb_source.couchdb_http_store import (
+    CouchDBError,
+    CouchDBHttpSourceStore,
+    CouchDBResponseTooLarge,
+)
 from agent_knowledge.couchdb_source.source_revision import (
     activate_source_revision,
     build_revision_scoped_source_documents,
@@ -188,6 +193,108 @@ def test_put_then_get_roundtrip():
     got = store.get(doc["_id"])
     assert got["doc_type"] == dm.SourceDocType.TRANSCRIPT_SESSION
     assert got["_rev"] == rev.rev
+
+
+def test_iter_by_type_retries_oversized_page_with_smaller_limit():
+    oversized_bytes = 8 * 1024 * 1024 + 1
+    calls = []
+
+    def transport(method, url, headers, body):
+        request = json.loads(body.decode("utf-8"))
+        calls.append(request)
+        if len(calls) == 1:
+            return ProxyResponse(200, b"x" * oversized_bytes, {})
+        if len(calls) == 2:
+            return ProxyResponse(
+                200,
+                json.dumps({"docs": [{"_id": "small-page"}], "bookmark": "page-1"}).encode(),
+                {},
+            )
+        return ProxyResponse(200, json.dumps({"docs": [], "bookmark": "page-1"}).encode(), {})
+
+    store = CouchDBHttpSourceStore(
+        base_url="http://couch.test:5984",
+        db="transcript_source",
+        transport=transport,
+    )
+
+    docs = list(store.iter_by_type("transcript_session", limit=300, page_size=256))
+
+    assert docs == [{"_id": "small-page"}]
+    assert [request["limit"] for request in calls] == [256, 128, 128]
+    assert "bookmark" not in calls[0]
+    assert "bookmark" not in calls[1]
+    assert calls[2]["bookmark"] == "page-1"
+
+
+def test_iter_by_type_fails_closed_when_single_document_page_exceeds_byte_limit():
+    def transport(_method, _url, _headers, _body):
+        return ProxyResponse(200, b"x" * (8 * 1024 * 1024 + 1), {})
+
+    store = CouchDBHttpSourceStore(
+        base_url="http://couch.test:5984",
+        db="transcript_source",
+        transport=transport,
+    )
+
+    with pytest.raises(CouchDBResponseTooLarge):
+        list(store.iter_by_type("transcript_session", limit=1, page_size=1))
+
+
+def test_iter_by_type_transport_reads_only_page_limit_plus_one(monkeypatch):
+    class OversizedResponse:
+        status = 200
+        headers = {}
+
+        def __init__(self):
+            self.read_sizes = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, size=-1):
+            self.read_sizes.append(size)
+            return b"x" * size
+
+    response = OversizedResponse()
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: response)
+    store = CouchDBHttpSourceStore(base_url="http://couch.test:5984", db="transcript_source")
+
+    with pytest.raises(CouchDBResponseTooLarge):
+        list(store.iter_by_type("transcript_session", limit=1, page_size=1))
+
+    assert response.read_sizes == [couchdb_http_store.COUCHDB_FIND_MAX_PAGE_RESPONSE_BYTES + 1]
+
+
+def test_bounded_get_reads_only_limit_plus_one_before_json_decode(monkeypatch):
+    class OversizedResponse:
+        status = 200
+        headers = {}
+
+        def __init__(self):
+            self.read_sizes = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, size=-1):
+            self.read_sizes.append(size)
+            return b"x" * (size if size >= 0 else 4096)
+
+    response = OversizedResponse()
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: response)
+    store = CouchDBHttpSourceStore(base_url="http://couch.test:5984", db="transcript_source")
+
+    with pytest.raises(CouchDBResponseTooLarge):
+        store.get_bounded("large-manifest", max_response_bytes=64)
+
+    assert response.read_sizes == [65]
 
 
 def test_put_is_idempotent_for_identical_content():

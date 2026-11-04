@@ -1152,3 +1152,204 @@ def test_status_preserves_scoped_entity_attempt_across_newer_episodic_runs(tmp_p
         progress_jsonl=[progress],
     )
     assert incomplete["progress"]["latest_entity_run"]["completed"] is False
+
+
+def test_projection_selection_streams_bounded_pages_and_does_not_load_projection_history(
+    tmp_path, monkeypatch
+):
+    from agent_knowledge.llm_brain_core.ledger_adapter import LedgerGraphProjectionStateStore
+
+    class _PagedSourceStore(InMemoryCouchDBSourceStore):
+        def __init__(self):
+            super().__init__()
+            self.page_sizes = []
+
+        def find_by_type(self, *args, **kwargs):
+            raise AssertionError("graph selection must not materialize all CouchDB rows")
+
+        def iter_by_type(self, *args, page_size=10000, **kwargs):
+            self.page_sizes.append(page_size)
+            assert 0 < page_size <= 256
+            yield from super().iter_by_type(*args, page_size=page_size, **kwargs)
+
+    def _forbid_history_materialization(*args, **kwargs):
+        raise AssertionError("graph selection must query exact currentness, not load history")
+
+    monkeypatch.setattr(
+        LedgerGraphProjectionStateStore,
+        "list_projected_source_hash_sets",
+        _forbid_history_materialization,
+    )
+    store = _PagedSourceStore()
+    for index in range(7):
+        _seed_session(store, raw_id=f"bounded-selection-{index}")
+
+    graph = _EntityFlagFakeGraph()
+    first = _project(
+        tmp_path=tmp_path,
+        store=store,
+        graph_adapter=graph,
+        limit=3,
+    )
+
+    assert first["canonical_counts"]["source_sessions"] == 7
+    assert first["canonical_counts"]["eligible_sessions"] == 7
+    assert first["canonical_counts"]["selected_sessions"] == 3
+    assert first["truncated"] is True
+    assert first["projection"]["projected"] == 3
+    assert store.page_sizes and max(store.page_sizes) <= 256
+
+
+def test_projection_selection_resumes_tail_after_bounded_page_cut(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    session_ids = [
+        _seed_session(store, raw_id=f"bounded-tail-{index:03d}")
+        for index in range(11)
+    ]
+    runtime_dir = tmp_path / "runtime"
+    projected_ids = set()
+
+    for _ in range(4):
+        graph = _EntityFlagFakeGraph()
+        report = _project(
+            tmp_path=tmp_path,
+            store=store,
+            graph_adapter=graph,
+            limit=3,
+            runtime_dir=runtime_dir,
+        )
+        projected_ids.update(
+            str(episode.payload.get("session_id_hash") or "")
+            for episode in graph._episodes.values()
+        )
+        assert report["projection"]["attempted"] <= 3
+
+    assert projected_ids == set(session_ids)
+
+
+def test_projection_selection_restarts_scan_after_source_update_and_delete(tmp_path):
+    class _ChangingSourceStore(InMemoryCouchDBSourceStore):
+        def __init__(self):
+            super().__init__()
+            self.scan_count = 0
+            self.deleted_session = ""
+            self.added_session = ""
+
+        def iter_by_type(self, *args, page_size=10000, **kwargs):
+            self.scan_count += 1
+            scan_number = self.scan_count
+            yield from super().iter_by_type(*args, page_size=page_size, **kwargs)
+            if scan_number == 1:
+                _seed_session(
+                    self,
+                    raw_id="source-race-1",
+                    body="the source changed between bounded selection passes",
+                )
+                assert self.delete(dm.session_doc_id(self.deleted_session)) is True
+                self.added_session = _seed_session(
+                    self,
+                    raw_id="source-added-during-scan",
+                )
+
+    store = _ChangingSourceStore()
+    session_ids = [
+        _seed_session(store, raw_id=f"source-race-{index}")
+        for index in range(5)
+    ]
+    store.deleted_session = session_ids[0]
+
+    graph = _EntityFlagFakeGraph()
+    report = _project(
+        tmp_path=tmp_path,
+        store=store,
+        graph_adapter=graph,
+        limit=20,
+    )
+    projected_ids = {
+        str(episode.payload.get("session_id_hash") or "")
+        for episode in graph._episodes.values()
+    }
+    expected_final_ids = set(session_ids) - {store.deleted_session}
+    expected_final_ids.add(store.added_session)
+
+    assert report["canonical_counts"]["source_sessions"] == len(expected_final_ids)
+    assert projected_ids == expected_final_ids
+    assert store.scan_count >= 4
+
+
+def test_exact_projection_currentness_is_scoped_by_level_project_and_source_hash(tmp_path):
+    from agent_knowledge.llm_brain_core.ledger_adapter import LedgerGraphProjectionStateStore
+
+    ledger_path = tmp_path / "ledger.sqlite3"
+    ledger = Ledger(ledger_path)
+    with ledger._connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO llm_brain_graph_projection_state (
+                episode_id, extraction_level, project, entity_type, natural_id,
+                source_hash, upsert_result, projected_at, updated_at
+            ) VALUES (?, ?, ?, 'Session', ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (
+                "entity-invalid-source",
+                "entity",
+                PROJECT,
+                "session_hash",
+                "sha256:current-source",
+                "source_invalid",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO llm_brain_graph_projection_state (
+                episode_id, extraction_level, project, entity_type, natural_id,
+                source_hash, upsert_result, projected_at, updated_at
+            ) VALUES (?, ?, ?, 'Session', ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (
+                "episodic-current-source",
+                "episodic",
+                PROJECT,
+                "session_hash",
+                "sha256:episodic-source",
+                "inserted",
+            ),
+        )
+    state = LedgerGraphProjectionStateStore(ledger)
+
+    assert state.has_projected_source_hash(
+        PROJECT,
+        "session_hash",
+        "sha256:episodic-source",
+        extraction_level="episodic",
+        entity_type="Session",
+    ) is True
+    assert state.has_projected_source_hash(
+        PROJECT,
+        "session_hash",
+        "sha256:episodic-source",
+        extraction_level="entity",
+        entity_type="Session",
+    ) is False
+    assert state.has_projected_source_hash(
+        PROJECT,
+        "session_hash",
+        "sha256:current-source",
+        extraction_level="episodic",
+        entity_type="Session",
+        include_source_invalid=True,
+    ) is True
+    assert state.has_projected_source_hash(
+        "other-project",
+        "session_hash",
+        "sha256:episodic-source",
+        extraction_level="episodic",
+        entity_type="Session",
+    ) is False
+    assert state.has_projected_source_hash(
+        PROJECT,
+        "session_hash",
+        "sha256:stale-source",
+        extraction_level="episodic",
+        entity_type="Session",
+    ) is False

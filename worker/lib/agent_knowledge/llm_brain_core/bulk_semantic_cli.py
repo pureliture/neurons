@@ -24,10 +24,9 @@ from .bulk_semantic import (
 from .couchdb_projection_cli import (
     _acquire_runtime_lock,
     _build_source_store,
-    _count_sessions,
     _project_ref,
     _release_runtime_lock,
-    _select_sessions,
+    _select_sessions_bounded,
     _write_dead_letter,
     _write_jsonl,
 )
@@ -37,7 +36,10 @@ from .ledger_adapter import (
     LedgerSessionMemoryArtifactStore,
 )
 from .models import PROJECTION_SCHEMA_VERSION
-from .runtime import session_episode_from_couchdb_source
+from .runtime import (
+    session_episode_from_couchdb_source,
+    session_source_revision_from_couchdb_source,
+)
 
 BULK_SEMANTIC_SCHEMA_VERSION = "llm_brain_couchdb_bulk_semantic.v1"
 
@@ -160,21 +162,23 @@ def run_couchdb_bulk_semantic_projection(
     extractor = extractor or OpenAICompatibleBulkSemanticExtractor.from_env()
     writer = writer or DeterministicGraphitiSemanticWriter.from_env()
 
-    eligible_sessions = _select_sessions(
+    selection = _select_sessions_bounded(
         source_store,
         project=project,
         provider=provider,
-        limit=0,
+        limit=limit,
         projection_state_store=projection_state_store,
         extraction_level=EXTRACTION_LEVEL_ENTITY,
     )
-    selected = eligible_sessions[: int(limit)] if limit > 0 else eligible_sessions
-    total_available = _count_sessions(source_store, project=project, provider=provider)
+    selected = selection.sessions
+    total_available = selection.source_count
     max_sessions_per_call = max(1, int(max_sessions_per_call))
     max_session_chars = max(200, int(max_session_chars))
     report_every = max(1, int(report_every))
     max_projects = max(0, int(max_projects))
 
+    # Only touched sessions from this bounded selection are cached; historical
+    # projection state is checked with an indexed exact-identity query above.
     projected_cache: dict[str, dict[str, set[str]]] = {}
     by_provider: Counter[str] = Counter()
     by_project: Counter[str] = Counter()
@@ -215,19 +219,16 @@ def run_couchdb_bulk_semantic_projection(
                 stopped_after_max_projects = True
                 break
             try:
-                if session_project not in projected_cache:
-                    projected_cache[session_project] = (
-                        projection_state_store.list_projected_source_hash_sets(
-                            session_project,
-                            extraction_level=EXTRACTION_LEVEL_ENTITY,
-                            entity_type="Session",
-                        )
-                    )
-                source_hash = str(session.get("source_hash") or "")
-                if (
-                    source_hash
-                    and source_hash
-                    in projected_cache[session_project].get(natural_id, set())
+                source_hash = session_source_revision_from_couchdb_source(
+                    session_id_hash=session_id_hash,
+                    source_store=source_store,
+                )
+                if projection_state_store.has_projected_source_hash(
+                    session_project,
+                    natural_id,
+                    source_hash,
+                    extraction_level=EXTRACTION_LEVEL_ENTITY,
+                    entity_type="Session",
                 ):
                     skipped_resumed += 1
                     status = "skipped_resumed"
@@ -341,7 +342,7 @@ def run_couchdb_bulk_semantic_projection(
         "status": status,
         "canonical_counts": {
             "source_sessions": total_available,
-            "eligible_sessions": len(eligible_sessions),
+            "eligible_sessions": selection.eligible_count,
             "selected_sessions": len(selected),
         },
         "filters": {
@@ -351,7 +352,7 @@ def run_couchdb_bulk_semantic_projection(
         },
         "limit": int(limit),
         "truncated": bool(
-            (limit > 0 and len(eligible_sessions) > len(selected))
+            selection.eligible_count > len(selected)
             or stopped_after_max_projects
         ),
         "target_extraction_level": EXTRACTION_LEVEL_ENTITY,
