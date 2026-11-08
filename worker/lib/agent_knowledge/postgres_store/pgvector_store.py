@@ -432,6 +432,7 @@ class PgVectorStore:
                 "source_revision": card.content_hash,
                 "content_hash": card.content_hash,
                 "authority_memory_id": card.memory_id,
+                "memory_id": card.memory_id,
                 "project": card.project,
                 "card_type": card.card_type,
                 "title": card.title,
