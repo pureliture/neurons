@@ -34,6 +34,14 @@ def _service(tmp_path: Path) -> KnowledgeSearchService:
     )
 
 
+def test_mcp_server_star_import_exports_public_contract():
+    ns = {}
+    exec("from agent_knowledge.mcp_server import *", ns)
+    assert ns["TOOL_NAME"] == "knowledge.search"
+    assert "REVIEW_READER_TOOL_NAMES" in ns
+    assert "REVIEW_READER_AUTH_IDENTITY" in ns
+
+
 def test_review_reader_tools_list_serves_only_queue_list():
     tools = list_tools(surface="review-reader")
     assert {t["name"] for t in tools} == {MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME}
