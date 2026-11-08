@@ -58,6 +58,7 @@ from .mcp_tools import (
     STEWARD_RESTRICTED_TOOL_NAMES,
     ADMIN_TOOL_NAMES,
     PUBLIC_AGENT_TOOL_NAMES,
+    REVIEW_READER_TOOL_NAMES,
     TOOL_NAME,
     ToolContract,
     list_tools,
@@ -109,6 +110,8 @@ class ToolRuntimeContract:
 
 ADMIN_AUTH_IDENTITY = "lbrain_admin"
 
+REVIEW_READER_AUTH_IDENTITY = "lbrain_review_reader"
+
 
 def handle_jsonrpc_message(
     message: dict,
@@ -120,6 +123,8 @@ def handle_jsonrpc_message(
 ) -> dict | None:
     if tier in ("public", "agent"):
         surface = "agent"
+    elif tier == "review-reader":
+        surface = "review-reader"
     elif tier == "admin":
         surface = "admin"
 
@@ -142,6 +147,10 @@ def handle_jsonrpc_message(
                 if auth_token != ADMIN_AUTH_IDENTITY:
                     return _error(request_id, -32000, "unauthorized: lbrain_admin identity required")
                 return _success(request_id, {"tools": list_tools(surface="admin")})
+            if surface == "review-reader":
+                if auth_token != REVIEW_READER_AUTH_IDENTITY:
+                    return _error(request_id, -32000, "unauthorized: lbrain_review_reader identity required")
+                return _success(request_id, {"tools": list_tools(surface="review-reader")})
             if surface == "agent":
                 return _success(request_id, {"tools": list_tools(surface="agent")})
             return _success(request_id, {"tools": list_tools(surface=surface)})
@@ -158,6 +167,12 @@ def handle_jsonrpc_message(
             if surface == "admin":
                 if auth_token != ADMIN_AUTH_IDENTITY:
                     return _error(request_id, -32000, "unauthorized: lbrain_admin identity required")
+
+            if surface == "review-reader":
+                if auth_token != REVIEW_READER_AUTH_IDENTITY:
+                    return _error(request_id, -32000, "unauthorized: lbrain_review_reader identity required")
+                if tool_name not in REVIEW_READER_TOOL_NAMES:
+                    return _error(request_id, -32601, f"unknown tool: {tool_name}")
 
             return _success(
                 request_id,
@@ -222,6 +237,11 @@ def dispatch_tool_call(
     if surface == "admin" and auth_token != ADMIN_AUTH_IDENTITY:
         raise PermissionError("unauthorized: lbrain_admin identity required")
 
+    if surface == "review-reader":
+        if auth_token != REVIEW_READER_AUTH_IDENTITY:
+            raise PermissionError("unauthorized: lbrain_review_reader identity required")
+        if tool_name not in REVIEW_READER_TOOL_NAMES:
+            raise ValueError(f"unknown tool: {tool_name}")
     registry = tool_handler_registry()
     handler = registry.get(tool_name)
     if handler is None:

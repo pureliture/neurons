@@ -51,6 +51,9 @@ STEWARD_RESTRICTED_TOOL_NAMES = (
     MEMORY_STALE_COMMIT_TOOL_NAME,
     MEMORY_REVIEW_BUNDLE_COMMIT_TOOL_NAME,
 )
+REVIEW_READER_TOOL_NAMES = frozenset({
+    MEMORY_REVIEW_QUEUE_LIST_TOOL_NAME,
+})
 
 PUBLIC_AGENT_TOOL_NAMES = frozenset({
     BRAIN_RESOLVE_TOOL_NAME,
@@ -1077,10 +1080,15 @@ def list_admin_tools() -> list[dict]:
         },
     ]
 
+def list_review_reader_tools() -> list[dict]:
+    return [t for t in list_admin_tools() if t["name"] in REVIEW_READER_TOOL_NAMES]
+
 
 def list_tools(surface: str = "all") -> list[dict]:
     if surface in ("agent", "public"):
         return list_public_agent_tools()
+    if surface == "review-reader":
+        return list_review_reader_tools()
     if surface == "admin":
         return list_admin_tools()
     if surface == "all":

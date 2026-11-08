@@ -477,7 +477,7 @@ def _mcp_http_main(argv: list[str] | None = None) -> int:
     from . import mcp_http_server
 
     parser = argparse.ArgumentParser(prog="neuron-knowledge mcp-http")
-    parser.add_argument("--surface", choices=("agent", "admin"), default="agent")
+    parser.add_argument("--surface", choices=("agent", "admin", "review-reader"), default="agent")
     # 공통 인자: _mcp_stdio_main과 1:1 동일(service 구성 동일).
     _add_recall_service_arguments(parser)
     # HTTP transport 전용.
@@ -502,7 +502,7 @@ def _mcp_http_main(argv: list[str] | None = None) -> int:
         mcp_http_server.serve(
             service,
             surface=args.surface,
-            admin_token=os.environ.get("LLM_BRAIN_ADMIN_TOKEN") if args.surface == "admin" else None,
+            admin_token=os.environ.get("LLM_BRAIN_REVIEW_READER_TOKEN") if args.surface == "review-reader" else os.environ.get("LLM_BRAIN_ADMIN_TOKEN") if args.surface == "admin" else None,
             host=args.host,
             port=args.port,
             allow_non_loopback=args.allow_non_loopback,
