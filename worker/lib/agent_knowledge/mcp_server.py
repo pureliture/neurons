@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .knowledge_search_service import DisabledRetiredIndexBridgeClient, KnowledgeSearchService, build_index_client
-from .mcp_jsonrpc import _call_tool, dispatch_tool_call, handle_jsonrpc_message, run_stdio_server
+from .mcp_jsonrpc import REVIEW_READER_AUTH_IDENTITY, _call_tool, dispatch_tool_call, handle_jsonrpc_message, run_stdio_server
 from .mcp_tools import (
     BRAIN_CORPUS_INGEST_PLAN_TOOL_NAME,
     BRAIN_CORPUS_STATUS_TOOL_NAME,
@@ -39,6 +39,7 @@ from .mcp_tools import (
     MEMORY_SUPERSEDE_COMMIT_TOOL_NAME,
     MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME,
     STEWARD_RESTRICTED_TOOL_NAMES,
+    REVIEW_READER_TOOL_NAMES,
     TOOL_NAME,
     list_tools,
 )
@@ -92,6 +93,8 @@ __all__ = [
     "MEMORY_SUPERSEDE_PROPOSE_TOOL_NAME",
     "STEWARD_RESTRICTED_TOOL_NAMES",
     "TOOL_NAME",
+    "REVIEW_READER_TOOL_NAMES",
+    "REVIEW_READER_AUTH_IDENTITY",
     "BrainStewardService",
     "StewardPermissionError",
     "AuthorizedMemoryReader",

@@ -36,7 +36,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from .knowledge_search_service import KnowledgeSearchService
-from .mcp_jsonrpc import ADMIN_AUTH_IDENTITY, dispatch_tool_call
+from .mcp_jsonrpc import ADMIN_AUTH_IDENTITY, REVIEW_READER_AUTH_IDENTITY, dispatch_tool_call
 from .mcp_tools import list_tools
 
 DEFAULT_PORT = 8765
@@ -356,16 +356,18 @@ def build_app(
     surface: str = "agent",
     admin_token: str | None = None,
 ) -> Starlette:
-    if surface not in {"agent", "admin"}:
-        raise ValueError("mcp-http surface must be agent or admin")
-    if surface == "admin":
-        if admin_token == ADMIN_AUTH_IDENTITY:
+    if surface not in {"agent", "admin", "review-reader"}:
+        raise ValueError("mcp-http surface must be agent or admin or review-reader")
+    if surface in {"admin", "review-reader"}:
+        fixed_identities = {"fixed admin identity", ADMIN_AUTH_IDENTITY}
+        if surface == "review-reader":
+            fixed_identities.add(REVIEW_READER_AUTH_IDENTITY)
+        if admin_token in fixed_identities:
             raise ValueError("mcp-http fixed admin identity is not a credential")
         if not isinstance(admin_token, str) or len(admin_token) < 32:
             raise ValueError("mcp-http admin token must be at least 32 characters")
         if not admin_token.isascii() or any(char.isspace() or ord(char) < 33 or ord(char) > 126 for char in admin_token):
             raise ValueError("mcp-http admin token must use visible ASCII without whitespace")
-    # bind 가드: 0.0.0.0은 무조건 거부(전 인터페이스 노출 차단). 비-loopback은
     # --allow-non-loopback + tailnet 대역일 때만 허용한다. k3s canary는 추가 플래그로
     # Pod IP bind만 열어 Kubernetes readiness/Service 라우팅을 통과시킨다.
     if host == "0.0.0.0":  # noqa: S104 - 명시적 거부 가드
@@ -399,9 +401,15 @@ def build_app(
             name,
             arguments,
             surface=surface,
-            # `lbrain_admin`은 credential가 아닌 내부 identity다. admin process의 Bearer
-            # ASGI 경계를 통과한 handler closure에서만 dispatcher에 전달한다.
-            auth_token=ADMIN_AUTH_IDENTITY if surface == "admin" else None,
+            # `lbrain_admin`/`lbrain_review_reader`는 credential가 아닌 내부 identity다.
+            # 인증된 Bearer ASGI 경계를 통과한 handler closure에서만 dispatcher에 전달한다.
+            auth_token=(
+                ADMIN_AUTH_IDENTITY
+                if surface == "admin"
+                else REVIEW_READER_AUTH_IDENTITY
+                if surface == "review-reader"
+                else None
+            ),
         )
 
     # DNS rebinding 보호는 loopback/tailnet 모두 활성화한다.
@@ -423,7 +431,7 @@ def build_app(
             "/mcp",
             endpoint=(
                 _AdminBearerAuthASGIApp(_StreamableHTTPASGIApp(session_manager), admin_token)
-                if surface == "admin"
+                if surface in {"admin", "review-reader"}
                 else _StreamableHTTPASGIApp(session_manager)
             ),
         ),
