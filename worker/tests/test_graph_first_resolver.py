@@ -820,3 +820,62 @@ def test_session_chunk_with_same_normalized_body_as_card_summary_is_folded_despi
     assert [(item["id"], item["source"]) for item in result["items"]] == [("mem_a", "graph_card")]
     assert result["metadata"]["sources"] == {"graph_card": 1, "session_memory": 0}
     assert result["metadata"]["session_memory_merged"] is True
+
+
+def _stale_graph_store(*cards):
+    store = Store(cards=list(cards))
+    for card in store.cards:
+        card["semantic_score"] = 0.9
+    return store
+
+
+def test_graph_keys_absent_from_authority_fall_back_to_pgvector():
+    # Derived index points at cards PG no longer has (join reports `mismatch`):
+    # do not return an empty success, go to the authority's own search and keep
+    # the observed join status visible.
+    calls = []
+    store = _stale_graph_store(_card("mem_b", HASH_B))
+    store.calls = calls
+    graph = Graph([_episode("mem_gone", HASH_A)], calls=calls)
+
+    result = GraphFirstResolver(store, graph, lambda _: [0.1]).resolve(project="neurons", query="x")
+
+    assert calls == ["graph", "health", ("list", ["mem_gone"]), "hybrid", ("list", ["mem_b"])]
+    assert [item["id"] for item in result["items"]] == ["mem_b"]
+    assert result["metadata"]["retrieval_path"] == "pgvector_fallback"
+    assert result["metadata"]["graph_status"] == "available"
+    assert result["metadata"]["authority_join_status"] == "mismatch"
+    assert result["metadata"]["fallback_used"] is True
+    assert "error_code" not in result
+
+
+def test_graph_episodes_without_authority_keys_fall_back_to_pgvector_as_unavailable():
+    store = _stale_graph_store(_card("mem_b", HASH_B))
+    graph = Graph([SimpleNamespace(payload={}), SimpleNamespace(payload={"authority_memory_id": "x"})])
+
+    result = GraphFirstResolver(store, graph, lambda _: [0.1]).resolve(project="neurons", query="x")
+
+    assert [item["id"] for item in result["items"]] == ["mem_b"]
+    assert result["metadata"]["retrieval_path"] == "pgvector_fallback"
+    assert result["metadata"]["authority_join_status"] == "unavailable"
+    assert result["metadata"]["fallback_used"] is True
+
+
+def test_graph_keys_all_mismatched_fall_back_to_pgvector_with_mismatch_status():
+    store = _stale_graph_store(_card("mem_a", HASH_A))
+    graph = Graph([_episode("mem_a", HASH_B)])
+
+    result = GraphFirstResolver(store, graph, lambda _: [0.1]).resolve(project="neurons", query="x")
+
+    assert [item["id"] for item in result["items"]] == ["mem_a"]
+    assert result["metadata"]["retrieval_path"] == "pgvector_fallback"
+    assert result["metadata"]["authority_join_status"] == "mismatch"
+    assert result["metadata"]["fallback_used"] is True
+
+
+def test_stale_graph_without_embedder_is_explicit_error_not_empty_success():
+    result = GraphFirstResolver(Store(), Graph([_episode("mem_gone", HASH_A)])).resolve(project="neurons", query="x")
+
+    assert result["items"] == []
+    assert result["error_code"] == "embedding_unavailable"
+    assert result["metadata"]["graph_status"] == "available"

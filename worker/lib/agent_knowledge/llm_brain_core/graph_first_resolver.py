@@ -367,6 +367,33 @@ class GraphFirstResolver:
                 graph_status="projection_lag",
                 lag=lag,
             )
+        if not graph_cards and join_status != "verified":
+            # 그래프가 가리킨 card가 PG authority에 없거나(hash) 달라졌다: derived
+            # index가 authority보다 뒤처진 상태다. 빈 결과를 돌려주면 fallback이
+            # 차단되므로 pgvector authority 검색으로 내려가되, 관측된 join 상태는
+            # metadata에 그대로 남긴다.
+            fallback_cards, error_code, fallback_used, _ = self._fallback_cards(request)
+            if fallback_cards is None:
+                return self._error_payload(
+                    request,
+                    error_code=error_code or "authority_store_unavailable",
+                    graph_status="available",
+                    lag=lag,
+                )
+            cards, merged = self._merge_session_memory(request, fallback_cards)
+            return self._serialize(
+                request,
+                cards,
+                metadata=self._metadata(
+                    retrieval_path="pgvector_fallback",
+                    graph_status="available",
+                    authority_join_status=join_status,
+                    fallback_used=fallback_used,
+                    projection_lag_ms=lag,
+                    session_memory_merged=merged,
+                    freshness=freshness,
+                ),
+            )
         # 공용 뇌 계약: 관련 card가 있어도 다른 에이전트의 session-memory를 항상
         # rank fusion으로 병합한다. card가 가려서 더 최신인 세션 지식이 사라지지 않는다.
         cards, merged = self._merge_session_memory(request, graph_cards)
