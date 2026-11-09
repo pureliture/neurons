@@ -49,5 +49,36 @@ with open(path, "w", encoding="utf-8") as f:
     json.dump(payload, f, sort_keys=True)
 PY
 
-timeout "${SESSION_MEMORY_BUILD_TIMEOUT_SECONDS:-300}" \
-  python -m agent_knowledge.cli couchdb-session-memory-build "${argv[@]}"
+# A run that does no work must be visible as a failure, not a silent success.
+set +e
+output="$(timeout "${SESSION_MEMORY_BUILD_TIMEOUT_SECONDS:-300}" \
+  python -m agent_knowledge.cli couchdb-session-memory-build "${argv[@]}" 2>&1)"
+rc=$?
+set -e
+printf '%s\n' "$output"
+if [ "$rc" -ne 0 ]; then
+  echo "[build-guard] cli exit=${rc}" >&2
+  exit "$rc"
+fi
+
+python - "$output" <<'PY'
+import json
+import sys
+
+lines = [line for line in sys.argv[1].splitlines() if line.strip().startswith("{")]
+if not lines:
+    sys.exit(0)
+try:
+    report = json.loads(lines[-1])
+except json.JSONDecodeError:
+    sys.exit(0)
+selected = int(report.get("selected") or 0)
+projected = int(report.get("projected") or 0)
+failed = int(report.get("failed") or 0)
+if failed > 0:
+    print(f"[build-guard] {failed} projection failures", file=sys.stderr)
+    sys.exit(1)
+if selected > 0 and projected == 0:
+    print(f"[build-guard] selected {selected} but projected 0: no progress", file=sys.stderr)
+    sys.exit(1)
+PY

@@ -1200,6 +1200,13 @@ def _build_graphiti(config: GraphitiNeo4jConfig):
         )
         if is_local_embedding:
             raw_embedder.local_embedding_profile = LOCAL_EMBEDDING_PROFILE_ID
+        # GraphitiClients validates `embedder` with pydantic's isinstance check against
+        # the EmbedderClient ABC. CachedEmbedder implements the same create/create_batch
+        # contract but cannot subclass it at import time without a cycle, so register it
+        # as a virtual subclass (idempotent).
+        from graphiti_core.embedder.client import EmbedderClient as _EmbedderClient
+
+        _EmbedderClient.register(CachedEmbedder)
         embedder = CachedEmbedder(
             raw_embedder,
             namespace=embedding_cache_namespace(

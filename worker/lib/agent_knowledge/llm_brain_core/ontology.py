@@ -105,7 +105,7 @@ def episode_from_memory_card(card: Mapping[str, Any], *, project: str = "") -> O
     card_project = str(card.get("project") or "")
     resolved_project = str(project or card_project)
     payload = {
-        "memory_id": str(card.get("memory_id") or ""),
+        "memory_id": str(card.get("memory_id") or card.get("authority_memory_id") or ""),
         "brain_id": str(card.get("brain_id") or ""),
         "project": resolved_project,
         "card_type": str(card.get("card_type") or ""),
