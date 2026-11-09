@@ -5,7 +5,7 @@ cd /app
 mkdir -p state/runtime
 chmod 700 state state/runtime 2>/dev/null || true
 
-export SESSION_MEMORY_PROJECTION_BACKEND="${SESSION_MEMORY_PROJECTION_BACKEND:-qdrant}"
+export SESSION_MEMORY_PROJECTION_BACKEND="${SESSION_MEMORY_PROJECTION_BACKEND:-postgres_pgvector}"
 export QDRANT_URL="${QDRANT_URL:-http://neurons-qdrant:6333}"
 export QDRANT_COLLECTION="${QDRANT_COLLECTION:-neurons_mirror_gemini_3072_v1}"
 

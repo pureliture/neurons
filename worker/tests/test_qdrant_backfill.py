@@ -120,7 +120,7 @@ def _seed_projected_session(store, sid, **kw):
         def project(self, *, target_profile, document):
             return "mem_" + str(document.get("content_hash", "")).split(":")[-1][:12]
 
-    materialize_and_project(session_id_hash=sid, store=store, projector=_Projector())
+    materialize_and_project(session_id_hash=sid, store=store, projector=_Projector(), backend="qdrant")
     return store.get(dm.projection_state_doc_id(sid))
 
 
@@ -173,7 +173,7 @@ def test_active_content_hash_empty_on_failure_path():
         def project(self, *, target_profile, document):
             return "ref"
 
-    project_session_memory(materialized=mat, store=store, projector=_Projector())
+    project_session_memory(materialized=mat, store=store, projector=_Projector(), backend="qdrant")
     state = store.get(dm.projection_state_doc_id(sid))
     assert state["projection_status"] == dm.ProjectionStatus.FAILED
     assert state.get("active_content_hash", "") == ""
@@ -384,7 +384,7 @@ def test_qdrant_projector_canonical_write_no_retired_index_bridge():
     adapter = _adapter(client)
     projector = QdrantSessionMemoryProjector(QdrantSessionMemoryMirrorSink(adapter))
 
-    result = project_session_memory(materialized=mat, store=store, projector=projector)
+    result = project_session_memory(materialized=mat, store=store, projector=projector, backend="qdrant")
     assert result["status"] == "projected"
     assert result["ref"].startswith("qdrant_sm:")
     assert client.point_count("test_mirror") == 1
@@ -411,7 +411,7 @@ def test_qdrant_projector_failure_marks_projection_failed():
             raise RuntimeError("qdrant down")
 
     result = project_session_memory(
-        materialized=mat, store=store, projector=QdrantSessionMemoryProjector(_BoomSink())
+        materialized=mat, store=store, projector=QdrantSessionMemoryProjector(_BoomSink()), backend="qdrant"
     )
     assert result["status"] == dm.ProjectionStatus.FAILED
     state = store.get(dm.projection_state_doc_id(sid))
@@ -434,7 +434,7 @@ def test_forward_and_backfill_produce_same_point_id():
         def project(self, *, target_profile, document):
             return "mem_fwd"
 
-    materialize_and_project(session_id_hash=sid, store=store, projector=_Projector(), mirror_sink=sink)
+    materialize_and_project(session_id_hash=sid, store=store, projector=_Projector(), mirror_sink=sink, backend="qdrant")
     forward_ids = set(client._collections["test_mirror"].keys())
     assert len(forward_ids) == 1
 

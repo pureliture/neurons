@@ -477,7 +477,7 @@ def _projection_state_for_materialization(
     failure_reason: str = "",
     failure_source_hash: str = "",
     ref: str = "",
-    backend: str = "qdrant",
+    backend: str = "postgres_pgvector",
     embedding_profile: str = "",
 ) -> dict:
     if backend == "postgres_pgvector_local":
@@ -667,7 +667,7 @@ def _commit_projection_state_if_source_current(
     failure_reason: str = "",
     failure_source_hash: str = "",
     ref: str = "",
-    backend: str = "qdrant",
+    backend: str = "postgres_pgvector",
     representation_receipt: dict | None = None,
     embedding_profile: str = "",
 ) -> tuple[str, dict]:
@@ -913,7 +913,7 @@ def project_session_memory(
     store: CouchDBSourceStore,
     projector: SessionMemoryProjector,
     mirror_sink: "QdrantMirrorSink | None" = None,
-    backend: str = "qdrant",
+    backend: str = "postgres_pgvector",
 ) -> dict:
     """Project a materialized session-memory to RetiredIndexBridge, recording projection_state.
 
@@ -1079,7 +1079,7 @@ def materialize_and_project(
     store: CouchDBSourceStore,
     projector: SessionMemoryProjector | None = None,
     mirror_sink: "QdrantMirrorSink | None" = None,
-    backend: str = "qdrant",
+    backend: str = "postgres_pgvector",
 ) -> dict:
     """End-to-end M3 step for one session: refresh coverage, materialize, project."""
 

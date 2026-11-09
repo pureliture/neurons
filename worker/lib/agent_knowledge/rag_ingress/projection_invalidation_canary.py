@@ -517,6 +517,7 @@ def _run_session_memory_lane(
         1,
         project=project,
         provider=provider,
+        backend="qdrant",
     )
     projected = 0
     projected_source_hash = ""
@@ -526,6 +527,7 @@ def _run_session_memory_lane(
             session_id_hash=session_id_hash,
             store=source_store,
             projector=projector,
+            backend="qdrant",
         )
         projection = result.get("projection") or {}
         if str(projection.get("status") or "") == ProjectionStatus.PROJECTED:
@@ -862,6 +864,7 @@ def run_projection_invalidation_canary(
             1,
             project=str(validated["project"]),
             provider=str(validated["provider"]),
+            backend="qdrant",
         )
     )
     duplicate_graph_selected, duplicate_graph_projected = _run_stage(

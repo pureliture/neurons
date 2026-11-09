@@ -294,7 +294,7 @@ def test_distinct_tool_coverage_revision_invalidates_session_and_graph_currentne
     ) == current_coverage["source_hash"]
     assert [
         row["session_id_hash"]
-        for row in _select_sessions_needing_projection(store, limit=0)
+        for row in _select_sessions_needing_projection(store, limit=0, backend="qdrant")
     ] == [_sid()]
 
     class _ProjectedFirstRevision:
@@ -378,7 +378,7 @@ def test_tool_evidence_body_revision_invalidates_both_projection_lanes_but_dupli
     )
     assert duplicate.outcome == "duplicate"
     assert duplicate_coverage["source_hash"] == first_coverage["source_hash"]
-    assert _select_sessions_needing_projection(store, limit=0) == []
+    assert _select_sessions_needing_projection(store, limit=0, backend="qdrant") == []
 
     class _ProjectedFirstRevision:
         def list_projected_source_hash_sets(self, *args, **kwargs):
@@ -424,7 +424,7 @@ def test_tool_evidence_body_revision_invalidates_both_projection_lanes_but_dupli
     assert current_coverage["source_hash"] != first_coverage["source_hash"]
     assert [
         row["session_id_hash"]
-        for row in _select_sessions_needing_projection(store, limit=0)
+        for row in _select_sessions_needing_projection(store, limit=0, backend="qdrant")
     ] == [_sid()]
     assert [
         row["session_id_hash"]
@@ -556,7 +556,7 @@ def test_projection_goes_to_session_memory_only() -> None:
     _seed_session(store)
     store_tool_evidence_bundles([_record(0)], store=store)
     projector = RecordingSessionMemoryProjector()
-    report = materialize_and_project(session_id_hash=_sid(), store=store, projector=projector)
+    report = materialize_and_project(session_id_hash=_sid(), store=store, projector=projector, backend="qdrant")
     assert report["projection"]["status"] == dm.ProjectionStatus.PROJECTED
     assert len(projector.calls) == 1
     assert projector.calls[0]["target_profile"] == dm.INDEX_RECALL_PROFILE
@@ -680,7 +680,7 @@ def test_materialization_loss_blocks_projection() -> None:
     assert mat.fully_materialized is False
     assert "materialization_loss" in mat.notes
     projector = RecordingSessionMemoryProjector()
-    result = project_session_memory(materialized=mat, store=store, projector=projector)
+    result = project_session_memory(materialized=mat, store=store, projector=projector, backend="qdrant")
     assert result["status"] == dm.ProjectionStatus.FAILED
     assert projector.calls == []  # never projected
     state = store.get(dm.projection_state_doc_id(_sid()))

@@ -83,7 +83,7 @@ def _blocked_source_hash_from_state(state: dict, backend: str) -> str:
 
 
 def _select_sessions_needing_projection(
-    store, limit: int, *, project: str = "", provider: str = "", backend: str = "qdrant"
+    store, limit: int, *, project: str = "", provider: str = "", backend: str = "postgres_pgvector"
 ) -> list[dict]:
     """Return sessions whose projected revision is not the current source revision.
 
@@ -420,7 +420,7 @@ def _select_sessions_incremental(
     limit: int,
     project: str = "",
     provider: str = "",
-    backend: str = "qdrant",
+    backend: str = "postgres_pgvector",
 ) -> tuple[list[dict], dict, int]:
     """Change-feed driven selection.
 
@@ -828,7 +828,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # --- Backend Resolution -------------------------------------------------
-    backend = os.environ.get("SESSION_MEMORY_PROJECTION_BACKEND", "qdrant").strip().lower()
+    backend = os.environ.get("SESSION_MEMORY_PROJECTION_BACKEND", "postgres_pgvector").strip().lower()
 
     # --- Session selection --------------------------------------------------
     sessions = _select_sessions_for_cycle(
