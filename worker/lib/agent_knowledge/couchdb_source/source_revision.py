@@ -554,18 +554,22 @@ def _manifest_hash(
 def _assert_material_body_integrity(document: Mapping[str, object]) -> None:
     """Fail closed when a resolved body-bearing member no longer hashes to its content_hash.
 
-    Only full documents reach here; the bounded currentness path and the
-    redacted inventory never load bodies and rely on the stored hash by design.
+    Conversation chunks and tool evidence bundles both store ``content_hash =
+    sha256(body)``; a bundle's ``coverage_hash`` covers its member records, not
+    the body, so it never substitutes for the body check. Only full documents
+    reach here: bounded currentness and the redacted inventory never load
+    bodies and compare stored hash metadata by design, so content validation
+    is this check at materialize time.
     """
 
     doc_type = str(document.get("doc_type") or "")
+    if doc_type not in _BODY_MATERIAL_DOC_TYPES:
+        return
     content_hash = str(document.get("content_hash") or "")
-    if doc_type == dm.SourceDocType.CONVERSATION_CHUNK and not content_hash:
+    if not content_hash:
         raise SourceRevisionResolutionError(
             "active source revision source is missing its material hash"
         )
-    if doc_type not in _BODY_MATERIAL_DOC_TYPES or not content_hash:
-        return
     body = document.get("body")
     if not isinstance(body, str) or not body or dm.sha256_hash(body) != content_hash:
         raise SourceRevisionResolutionError(
@@ -1699,6 +1703,11 @@ def resolve_source_hash_for_currentness(
     pointer appeared mid-read; a same-session change causes one safe retry, and
     continued churn returns an explicit pending/blocked error rather than mixed
     or superseded hashes.
+
+    This is a hash-metadata comparison only: bodies are never loaded, so a
+    stored body that no longer matches its ``content_hash`` still reads as
+    "unchanged" here. Content validation belongs to the materialize path, where
+    ``resolve_active_source_revision`` re-hashes each resident body.
     """
 
     dm.assert_hash_like("session_id_hash", session_id_hash)
