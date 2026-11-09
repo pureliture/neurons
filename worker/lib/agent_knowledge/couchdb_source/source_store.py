@@ -40,7 +40,38 @@ from .document_model import (
 
 
 class SourceStoreError(ValueError):
-    """Raised when a document violates the store write contract."""
+    """Raised when a document violates the store write contract.
+
+    Delivery classification: a plain ``SourceStoreError`` is *not* proven
+    deterministic. Its cause may depend on store state that an operator repair
+    or a concurrent writer can still change (for example a non-converging
+    coverage manifest or a malformed active control plane), so delivery keeps
+    it on the uncertain/replayable lane. Only :class:`SourceContractViolation`
+    is terminal for the same input.
+    """
+
+
+class SourceContractViolation(SourceStoreError):
+    """A deterministic source write contract violation.
+
+    Raised only where the same incoming document fails for the same reason on
+    every retry because the check depends solely on the incoming document and
+    on source identity fields that the store never mutates once written
+    (``transcript_session`` ``session_id_hash``/``provider``/``project``).
+    Retrying cannot repair it, so ingress delivery may quarantine the job
+    immediately instead of burning replay attempts.
+
+    ``reason_code`` is a fixed, redaction-safe identifier (no field values) that
+    delivery records as ``source_contract_violation:<reason_code>``.
+
+    Anything whose outcome may change with store state (conflicts, CAS races,
+    unresolved active control plane, non-converging aggregates) must stay a
+    plain :class:`SourceStoreError`/:class:`SourceStoreConflict` (fail-closed).
+    """
+
+    def __init__(self, message: str, *, reason_code: str) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
 
 
 class SourceStoreConflict(SourceStoreError):
@@ -478,7 +509,10 @@ def merge_transcript_session_documents(
 
     validate_for_write(incoming)
     if incoming.get("doc_type") != SourceDocType.TRANSCRIPT_SESSION:
-        raise SourceStoreError("aggregate merge requires a transcript_session document")
+        raise SourceContractViolation(
+            "aggregate merge requires a transcript_session document",
+            reason_code="aggregate_merge_requires_transcript_session",
+        )
 
     if existing is None:
         merged = copy.deepcopy(incoming)
@@ -487,14 +521,24 @@ def merge_transcript_session_documents(
         return merged
 
     if existing.get("doc_type") != SourceDocType.TRANSCRIPT_SESSION:
+        # Store-state corruption under a transcript_session id: not determined
+        # by the incoming payload, so it stays a non-terminal store error.
         raise SourceStoreError("existing aggregate is not a transcript_session document")
     if str(existing.get("_id") or "") != str(incoming.get("_id") or ""):
-        raise SourceStoreError("transcript session document id changed")
+        raise SourceContractViolation(
+            "transcript session document id changed",
+            reason_code="transcript_session_document_id_changed",
+        )
     for field in ("session_id_hash", "provider", "project"):
         old = str(existing.get(field) or "")
         new = str(incoming.get(field) or "")
         if old and new and old != new:
-            raise SourceStoreError(f"transcript session {field} changed")
+            # Identity fields are never rewritten by this merge, so the same
+            # incoming envelope fails identically on every retry.
+            raise SourceContractViolation(
+                f"transcript session {field} changed",
+                reason_code=f"transcript_session_{field}_changed",
+            )
 
     merged = copy.deepcopy(existing)
     for field in ("_rev", "idempotency_key", "payload_hash"):
@@ -938,6 +982,7 @@ __all__ = [
     "InMemoryCouchDBSourceStore",
     "IMMUTABLE_SOURCE_REVISION_DOC_TYPES",
     "SOURCE_REVISION_MEMBER_SOURCE_DOC_TYPES",
+    "SourceContractViolation",
     "SourceStoreConflict",
     "SourceStoreError",
     "StoredRevision",

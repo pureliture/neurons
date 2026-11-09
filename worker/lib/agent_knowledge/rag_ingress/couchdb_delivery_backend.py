@@ -39,6 +39,33 @@ Fail-closed gate (the backend-neutral payload gate in :mod:`.delivery_payload_ga
 4. build_conversation_chunk_document calls assert_source_text_clean internally.
 5. Any CouchDBError or unexpected exception mid-flight -> DeliveryOutcomeUncertain
    (the PUT may have succeeded before the exception).
+6. A :class:`..couchdb_source.source_store.SourceContractViolation` raised by the
+   store mid-flight -> immediate ``payload_integrity_mismatch`` evidence with
+   ``run="source_contract_violation:<reason_code>"`` (the executor quarantines).
+
+Mid-flight failure classification (fail-closed)
+-----------------------------------------------
+The transcript path writes the deterministic chunk document first and then
+merges the ``transcript_session`` aggregate. Failures after the first write are
+sorted into exactly two lanes:
+
+- **Terminal (quarantine now)**: ``SourceContractViolation`` only. It is raised
+  solely where the same input fails identically on every retry because the check
+  depends on the incoming payload and on session identity fields the store never
+  rewrites (``transcript_session`` ``session_id_hash``/``provider``/``project``
+  mismatch against the existing aggregate). Replaying it to ``max_attempts``
+  cannot change the outcome; it only delays the quarantine. The
+  ``reason_code`` is a fixed identifier and never carries field values.
+- **Uncertain (replay/reconcile)**: ``CouchDBError`` (network/HTTP),
+  ``SourceStoreConflict`` (CAS/concurrency races), every other
+  ``SourceStoreError`` (non-converging coverage, unresolved active control
+  plane, store-state corruption) and unexpected exceptions. Whenever a failure
+  could depend on store state another writer or an operator repair may change,
+  it stays here.
+
+An already written chunk document before a terminal violation is harmless for
+reprocessing: its ``_id`` is deterministic, so a later submit of the same
+payload is an idempotent duplicate rather than a second chunk.
 
 doc_ref convention: ``session_doc_id(session_id_hash)`` so status() can look
 up the authoritative session document.  dataset_ref: ``couchdb:<db>``.
@@ -77,6 +104,7 @@ from ..couchdb_source.source_revision import (
 )
 from ..couchdb_source.source_store import (
     CouchDBSourceStore,
+    SourceContractViolation,
     SourceStoreConflict,
     payload_hash,
     payload_hash as source_payload_hash,
@@ -143,6 +171,18 @@ def _payload_integrity_evidence(
         run=run,
         status="payload_integrity_mismatch",
     )
+
+
+_REASON_CODE_ALLOWED = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_")
+
+
+def _redacted_reason_code(exc: SourceContractViolation) -> str:
+    """Keep only the fixed reason identifier; never echo exception text."""
+
+    code = str(getattr(exc, "reason_code", "") or "").strip().lower()
+    if not code or any(char not in _REASON_CODE_ALLOWED for char in code):
+        return "unclassified"
+    return code
 
 
 def _active_pointer_membership_evidence(
@@ -758,12 +798,25 @@ class CouchDBDeliveryBackend:
                     source_changed=True,
                 )
 
+        except SourceContractViolation as exc:
+            # Deterministic contract violation (e.g. the existing aggregate's
+            # project differs from this payload). The same input fails the same
+            # way on every retry, so quarantine now instead of replaying to
+            # max_attempts. Any chunk already written under its deterministic
+            # id is an idempotent duplicate on reprocessing, not a second copy.
+            return _payload_integrity_evidence(
+                job,
+                run="source_contract_violation:" + _redacted_reason_code(exc),
+            )
         except CouchDBError as exc:
             # Network/store errors mid-flight: the PUT may have reached CouchDB
             # before the exception.  Signal uncertain so the executor does NOT
             # record this as a clean retryable failure.
             raise DeliveryOutcomeUncertain(exc.__class__.__name__) from exc
         except Exception as exc:
+            # SourceStoreConflict, other SourceStoreError subclasses and unknown
+            # failures stay uncertain: their outcome may still depend on store
+            # state that a concurrent writer or an operator repair can change.
             raise DeliveryOutcomeUncertain(exc.__class__.__name__) from exc
 
         # The Qdrant mirror is strictly post-authoritative and best-effort. A

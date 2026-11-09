@@ -6,8 +6,10 @@ from agent_knowledge.couchdb_source import document_model as dm
 from agent_knowledge.couchdb_source.source_store import (
     CouchDBSourceStore,
     InMemoryCouchDBSourceStore,
+    SourceContractViolation,
     SourceStoreConflict,
     SourceStoreError,
+    merge_transcript_session_documents,
 )
 from agent_knowledge.couchdb_source.source_revision import (
     activate_source_revision,
@@ -642,3 +644,41 @@ def test_get_returns_independent_copy() -> None:
     got = store.get(doc["_id"])
     got["provider"] = "tampered"
     assert store.get(doc["_id"])["provider"] == "codex"
+
+
+def test_aggregate_merge_identity_change_is_deterministic_contract_violation() -> None:
+    existing = _session_doc()
+    for field in ("provider", "project"):
+        incoming = dict(_session_doc())
+        incoming[field] = existing[field] + "-other"
+        with pytest.raises(SourceContractViolation) as raised:
+            merge_transcript_session_documents(existing=existing, incoming=incoming)
+        assert raised.value.reason_code == f"transcript_session_{field}_changed"
+        assert isinstance(raised.value, SourceStoreError)
+        assert not isinstance(raised.value, SourceStoreConflict)
+        assert "-other" not in raised.value.reason_code
+
+    store = InMemoryCouchDBSourceStore()
+    store.put(_session_doc())
+    drifted = dict(_session_doc())
+    drifted["project"] = "another-project"
+    with pytest.raises(SourceContractViolation) as raised:
+        store.merge_transcript_session_aggregate(incoming=drifted)
+    assert raised.value.reason_code == "transcript_session_project_changed"
+
+
+def test_aggregate_merge_requires_transcript_session_is_contract_violation() -> None:
+    incoming = _chunk_doc("not a session envelope")
+    with pytest.raises(SourceContractViolation) as raised:
+        merge_transcript_session_documents(existing=None, incoming=incoming)
+    assert raised.value.reason_code == "aggregate_merge_requires_transcript_session"
+
+
+def test_aggregate_merge_over_foreign_doc_type_stays_non_terminal_store_error() -> None:
+    """Store-state corruption is not payload-determined, so it must not be terminal."""
+    incoming = _session_doc()
+    corrupted_existing = dict(_chunk_doc("wrong family under the session id"))
+    corrupted_existing["_id"] = incoming["_id"]
+    with pytest.raises(SourceStoreError) as raised:
+        merge_transcript_session_documents(existing=corrupted_existing, incoming=incoming)
+    assert not isinstance(raised.value, SourceContractViolation)

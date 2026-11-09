@@ -143,6 +143,39 @@ RAG document delivery에 필요한 만큼만. Kafka 식 replay/topic/partition�
   `deliveryAttempt`가 `MAX_DELIVER(5)`를 넘으면 `ack` 후 **quarantine candidate**(= `DEAD_LETTER`).
 - 검증 실패한 큐 payload는 `ack` 후 quarantine(무한 재전송 방지).
 
+### CouchDB delivery mid-flight 실패 분류 (`CouchDBDeliveryBackend.submit`)
+
+transcript 경로는 결정론적 id의 `conversation_chunk` 문서를 먼저 쓰고 그 뒤
+`transcript_session` aggregate를 merge한다. 첫 write 이후의 실패는 두 lane 중 하나로만
+분류한다(fail-closed: 애매하면 uncertain).
+
+| 예외 | lane | 처리 |
+|---|---|---|
+| `SourceContractViolation` | terminal | 즉시 `payload_integrity_mismatch` evidence → executor가 `quarantined`. `run = source_contract_violation:<reason_code>` |
+| `CouchDBError` (네트워크/HTTP) | uncertain | `DeliveryOutcomeUncertain` → `replayable`, `max_attempts`까지 재시도 |
+| `SourceStoreConflict` (CAS/동시성 경합) | uncertain | 위와 동일 |
+| 그 외 `SourceStoreError` (coverage 미수렴, active control plane 미해결, store 상태 손상) | uncertain | 위와 동일 |
+| 예상 못 한 예외 | uncertain | 위와 동일 |
+
+`SourceContractViolation`은 **같은 입력이면 항상 같은 이유로 실패**하는 검증에서만
+raise한다. 판단 기준: 검사가 incoming payload와, store가 한 번 쓴 뒤 절대 다시 쓰지 않는
+session identity field(`transcript_session`의 `session_id_hash`/`provider`/`project`)에만
+의존해야 한다. 현재 분류된 reason code:
+
+- `transcript_session_session_id_hash_changed` / `transcript_session_provider_changed` /
+  `transcript_session_project_changed` — 기존 aggregate와 incoming envelope의 identity 불일치
+  (예: 같은 `session_id_hash` 아래 다른 project를 주장하는 mixed-project payload)
+- `transcript_session_document_id_changed` — aggregate 문서 id 불일치
+- `aggregate_merge_requires_transcript_session` — aggregate merge에 `transcript_session`이 아닌 문서 전달
+
+반대로 "existing aggregate is not a transcript_session document"(store 상태 손상),
+coverage manifest 미수렴, `SourceRevisionResolutionError` 등 **store 상태가 바뀌면 결과가
+바뀔 수 있는** 실패는 plain `SourceStoreError`로 남겨 uncertain lane을 유지한다.
+`reason_code`는 고정 식별자(`[a-z0-9_]`)이며 payload 값(project 이름 등)을 담지 않는다.
+
+merge 이전에 이미 기록된 chunk 문서는 결정론적 `_id`를 가지므로, 같은 payload를 재처리해도
+두 번째 chunk 문서가 생기지 않는다(idempotent duplicate).
+
 ## 6. 금지 / 범위 (이번 slice)
 
 - live RetiredIndexBridge upload/parse 금지(contract/test/dry-run 중심).
