@@ -9,13 +9,17 @@ import os
 import sys
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from agent_knowledge.couchdb_source.couchdb_http_store import CouchDBHttpSourceStore
 from agent_knowledge.couchdb_source.document_model import SourceDocType
+from agent_knowledge.couchdb_source.source_revision import (
+    SourceRevisionResolutionError,
+    SourceRevisionSnapshotChangedError,
+)
 from agent_knowledge.couchdb_source.source_store import CouchDBSourceStore
 from agent_knowledge.ledger import Ledger
 
@@ -41,6 +45,7 @@ GRAPH_SELECTION_PAGE_SIZE = 256
 MAX_GRAPH_SELECTION_SIZE = 1000
 MAX_GRAPH_SELECTION_PROJECTS = 256
 GRAPH_SELECTION_SNAPSHOT_ATTEMPTS = 2
+SELECTION_ERROR_FIELD = "selection_error"
 
 
 @dataclass(frozen=True)
@@ -49,6 +54,9 @@ class _SessionSelection:
     source_count: int
     eligible_count: int
     pending_count: int
+    unresolved_count: int = 0
+    unresolved_reasons: dict[str, int] = field(default_factory=dict)
+    unresolved: list[dict[str, Any]] = field(default_factory=list)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -207,6 +215,15 @@ def run_couchdb_projection(
             f"{time.time_ns()}:{os.getpid()}".encode("utf-8")
         ).hexdigest()
 
+        for unresolved_session in selection.unresolved:
+            _write_dead_letter(
+                dead_letter_jsonl,
+                session=unresolved_session,
+                run_id=run_id,
+                reason_code=str(unresolved_session.get(SELECTION_ERROR_FIELD) or ""),
+                stage="select",
+            )
+
         _write_jsonl(
             progress_jsonl,
             {
@@ -214,6 +231,7 @@ def run_couchdb_projection(
                 "run_id": run_id,
                 "selected": len(sessions),
                 "total_available": total_available,
+                "unresolved_sessions": selection.unresolved_count,
                 "limit": int(limit),
                 "project_set": bool(project),
                 "project_ref": _project_ref(project),
@@ -336,6 +354,9 @@ def run_couchdb_projection(
         elapsed_total_ms = int((time.monotonic() - started) * 1000)
         attempted = processed
         status = "ok" if failed == 0 else ("partial" if projected or duplicates or skipped_resumed else "failed")
+        if status == "ok" and selection.unresolved_count:
+            # Healthy sessions were processed, but excluded sessions still need attention.
+            status = "partial"
         removed_from_pending = (
             0
             if reextract_entities
@@ -362,6 +383,7 @@ def run_couchdb_projection(
                 "skipped_resumed": skipped_resumed,
                 "skipped_disabled": skipped_disabled,
                 "skipped_inconsistent": skipped_inconsistent,
+                "unresolved_sessions": selection.unresolved_count,
                 "elapsed_total_ms": elapsed_total_ms,
                 "project_set": bool(project),
                 "project_ref": _project_ref(project),
@@ -388,6 +410,11 @@ def run_couchdb_projection(
                 "project_set": bool(project),
                 "project_ref": _project_ref(project),
                 "provider": provider,
+            },
+            "selection": {
+                "unresolved_sessions": selection.unresolved_count,
+                "unresolved_dead_lettered": len(selection.unresolved),
+                "unresolved_reasons": dict(selection.unresolved_reasons),
             },
             "limit": int(limit),
             "truncated": bool(
@@ -637,12 +664,17 @@ def _select_sessions_bounded(
         source_count = 0
         first_digest = hashlib.sha256()
 
+        unresolved_count = 0
         for session in _iter_session_revisions(
             source_store,
             project=project,
             provider=provider,
         ):
             source_count += 1
+            if session.get(SELECTION_ERROR_FIELD):
+                unresolved_count += 1
+                _update_selection_digest(first_digest, session, is_current=False)
+                continue
             is_current = _session_projection_is_current(
                 session,
                 projection_state_store=projection_state_store,
@@ -679,6 +711,9 @@ def _select_sessions_bounded(
         observed_counts: dict[str, dict[str, int]] = {}
         second_digest = hashlib.sha256()
         observed_source_count = 0
+        observed_unresolved_count = 0
+        unresolved_reasons: Counter[str] = Counter()
+        unresolved: list[dict[str, Any]] = []
         selected_by_slot: dict[int, dict[str, Any]] = {}
 
         for session in _iter_session_revisions(
@@ -687,6 +722,14 @@ def _select_sessions_bounded(
             provider=provider,
         ):
             observed_source_count += 1
+            if session.get(SELECTION_ERROR_FIELD):
+                observed_unresolved_count += 1
+                unresolved_reasons[str(session[SELECTION_ERROR_FIELD])] += 1
+                # Keep the retained dead-letter window bounded like the selection itself.
+                if len(unresolved) < MAX_GRAPH_SELECTION_SIZE:
+                    unresolved.append(session)
+                _update_selection_digest(second_digest, session, is_current=False)
+                continue
             is_current = _session_projection_is_current(
                 session,
                 projection_state_store=projection_state_store,
@@ -722,6 +765,7 @@ def _select_sessions_bounded(
 
         if (
             source_count != observed_source_count
+            or unresolved_count != observed_unresolved_count
             or project_counts != observed_counts
             or first_digest.digest() != second_digest.digest()
         ):
@@ -733,6 +777,9 @@ def _select_sessions_bounded(
             source_count=source_count,
             eligible_count=eligible_count,
             pending_count=pending_total,
+            unresolved_count=observed_unresolved_count,
+            unresolved_reasons=dict(sorted(unresolved_reasons.items())),
+            unresolved=unresolved,
         )
 
     raise ValueError("graph source changed during bounded selection; retry the projection")
@@ -759,11 +806,25 @@ def _iter_session_revisions(
         if provider and session_provider != provider:
             continue
         session = dict(source_session)
-        session["source_hash"] = session_source_revision_from_couchdb_source(
-            session_id_hash=session_id_hash,
-            source_store=source_store,
-        )
+        try:
+            session["source_hash"] = session_source_revision_from_couchdb_source(
+                session_id_hash=session_id_hash,
+                source_store=source_store,
+            )
+        except SourceRevisionSnapshotChangedError:
+            # Global database churn is a batch-level retry, not a per-session fault.
+            raise
+        except SourceRevisionResolutionError as exc:
+            # One corrupted or over-budget session must not stop the whole batch:
+            # mark it so selection excludes it and the caller dead-letters it.
+            session["source_hash"] = ""
+            session[SELECTION_ERROR_FIELD] = _selection_error_code(exc)
         yield session
+
+
+def _selection_error_code(exc: SourceRevisionResolutionError) -> str:
+    reason_code = str(getattr(exc, "reason_code", "") or "")
+    return reason_code or type(exc).__name__
 
 
 def _session_projection_is_current(
@@ -798,6 +859,7 @@ def _update_selection_digest(digest: Any, session: dict[str, Any], *, is_current
             str(session.get("session_id_hash") or ""),
             str(session.get("source_hash") or ""),
             bool(is_current),
+            str(session.get(SELECTION_ERROR_FIELD) or ""),
         ],
         ensure_ascii=False,
         separators=(",", ":"),

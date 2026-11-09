@@ -14,11 +14,20 @@ from agent_knowledge.couchdb_source.document_model import (
     SourceDocType,
     sha256_hash,
 )
+from agent_knowledge.couchdb_source.source_revision import (
+    SourceRevisionResolutionError,
+    SourceRevisionSnapshotChangedError,
+)
 from agent_knowledge.couchdb_source.source_store import CouchDBSourceStore
 from agent_knowledge.ledger import Ledger, _column_names
 from agent_knowledge.ledger_base import _table_exists
 
-from .couchdb_projection_cli import _build_source_store, _filter_sessions, _project_ref
+from .couchdb_projection_cli import (
+    _build_source_store,
+    _filter_sessions,
+    _project_ref,
+    _selection_error_code,
+)
 from .ledger_adapter import EXTRACTION_LEVEL_ENTITY, EXTRACTION_LEVEL_EPISODIC
 from .runtime import session_source_revision_from_couchdb_source
 
@@ -84,7 +93,9 @@ def build_graph_projection_status(
     dead_letter_jsonl: list[Path] | None = None,
 ) -> dict[str, Any]:
     ledger = Ledger(ledger_path, read_only=True)
-    source_sessions = _source_sessions(source_store, project=project, provider=provider)
+    source_sessions, unresolved_reasons = _source_sessions(
+        source_store, project=project, provider=provider
+    )
     source_natural_ids = {
         _session_natural_id(str(session.get("session_id_hash") or ""))
         for session in source_sessions
@@ -252,6 +263,8 @@ def build_graph_projection_status(
         },
         "source": {
             "session_count": source_count,
+            "unresolved_sessions": sum(unresolved_reasons.values()),
+            "unresolved_reasons": dict(sorted(unresolved_reasons.items())),
         },
         "projection_state": {
             "source_state_digest": source_state_digest,
@@ -302,7 +315,12 @@ def _source_sessions(
     *,
     project: str,
     provider: str,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], Counter[str]]:
+    """Resolve source hashes per session; unresolved sessions are counted, not fatal.
+
+    ``SourceRevisionSnapshotChangedError`` still propagates because it signals
+    database-wide churn rather than one session's corruption.
+    """
     sessions = source_store.find_by_type(
         SourceDocType.TRANSCRIPT_SESSION,
         fields=[
@@ -315,15 +333,23 @@ def _source_sessions(
             "materialized_at",
         ],
     )
-    filtered = _filter_sessions(sessions, project=project, provider=provider)
-    for session in filtered:
+    unresolved_reasons: Counter[str] = Counter()
+    resolved: list[dict[str, Any]] = []
+    for session in _filter_sessions(sessions, project=project, provider=provider):
         session_id_hash = str(session.get("session_id_hash") or "")
-        session["source_hash"] = session_source_revision_from_couchdb_source(
-            session_id_hash=session_id_hash,
-            source_store=source_store,
-        )
-    filtered.sort(key=lambda session: str(session.get("session_id_hash") or ""))
-    return filtered
+        try:
+            session["source_hash"] = session_source_revision_from_couchdb_source(
+                session_id_hash=session_id_hash,
+                source_store=source_store,
+            )
+        except SourceRevisionSnapshotChangedError:
+            raise
+        except SourceRevisionResolutionError as exc:
+            unresolved_reasons[_selection_error_code(exc)] += 1
+            continue
+        resolved.append(session)
+    resolved.sort(key=lambda session: str(session.get("session_id_hash") or ""))
+    return resolved, unresolved_reasons
 
 
 def _session_memory_projection_states(

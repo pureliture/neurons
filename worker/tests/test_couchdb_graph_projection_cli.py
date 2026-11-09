@@ -9,6 +9,10 @@ from typing import Any
 from agent_knowledge.couchdb_source import document_model as dm
 from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
 from agent_knowledge.ledger import Ledger
+import pytest
+
+from agent_knowledge.couchdb_source.source_revision import SourceRevisionSnapshotChangedError
+from agent_knowledge.llm_brain_core import couchdb_projection_cli
 from agent_knowledge.llm_brain_core.couchdb_projection_cli import run_couchdb_projection
 from agent_knowledge.llm_brain_core.graph import FakeGraphMemoryAdapter
 from agent_knowledge.llm_brain_core.graph_projection_status_cli import build_graph_projection_status
@@ -1539,3 +1543,98 @@ def test_exact_projection_currentness_is_scoped_by_level_project_and_source_hash
         extraction_level="episodic",
         entity_type="Session",
     ) is False
+
+
+def _corrupt_session_material_hash(store: InMemoryCouchDBSourceStore, sid: str) -> None:
+    """Drop the chunk content_hash out of band so currentness cannot resolve this session."""
+    for doc_id, doc in list(store._docs.items()):
+        if doc.get("doc_type") == dm.SourceDocType.CONVERSATION_CHUNK and doc.get("session_id_hash") == sid:
+            store._docs[doc_id] = {k: v for k, v in doc.items() if k != "content_hash"}
+
+
+def test_unresolved_source_session_is_excluded_and_dead_lettered_without_stopping_batch(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    healthy = {_seed_session(store, raw_id=f"healthy-{index}") for index in range(3)}
+    corrupted = _seed_session(store, raw_id="corrupted-material-hash")
+    _corrupt_session_material_hash(store, corrupted)
+    dead_letter = tmp_path / "dead-letter.jsonl"
+    graph = _EntityFlagFakeGraph()
+
+    report = _project(
+        tmp_path=tmp_path,
+        store=store,
+        graph_adapter=graph,
+        limit=10,
+        dead_letter_jsonl=dead_letter,
+    )
+
+    touched = {
+        str(episode.payload.get("session_id_hash") or "")
+        for episode in graph._episodes.values()
+    }
+    assert touched == healthy
+    assert report["status"] == "partial"
+    assert report["projection"]["projected"] == 3
+    assert report["projection"]["failed"] == 0
+    assert report["canonical_counts"]["source_sessions"] == 4
+    assert report["canonical_counts"]["eligible_sessions"] == 3
+    assert report["selection"] == {
+        "unresolved_sessions": 1,
+        "unresolved_dead_lettered": 1,
+        "unresolved_reasons": {"SourceRevisionResolutionError": 1},
+    }
+    lines = [json.loads(line) for line in dead_letter.read_text(encoding="utf-8").splitlines()]
+    assert len(lines) == 1
+    assert lines[0]["stage"] == "select"
+    assert lines[0]["reason_code"] == "SourceRevisionResolutionError"
+    assert lines[0]["session_id_hash"] == corrupted
+    assert lines[0]["run_id"].startswith("run:")
+
+
+def test_unresolved_only_selection_reports_partial_with_nothing_attempted(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    corrupted = _seed_session(store, raw_id="only-corrupted")
+    _corrupt_session_material_hash(store, corrupted)
+
+    report = _project(tmp_path=tmp_path, store=store, graph_adapter=_EntityFlagFakeGraph(), limit=5)
+
+    assert report["status"] == "partial"
+    assert report["projection"]["attempted"] == 0
+    assert report["selection"]["unresolved_sessions"] == 1
+
+
+def test_snapshot_changed_during_selection_still_fails_the_batch(tmp_path, monkeypatch):
+    store = InMemoryCouchDBSourceStore()
+    _seed_session(store, raw_id="churn")
+
+    def _changed(**_kwargs):
+        raise SourceRevisionSnapshotChangedError("snapshot changed")
+
+    monkeypatch.setattr(couchdb_projection_cli, "session_source_revision_from_couchdb_source", _changed)
+
+    with pytest.raises(SourceRevisionSnapshotChangedError):
+        _project(tmp_path=tmp_path, store=store, graph_adapter=_EntityFlagFakeGraph(), limit=5)
+
+
+def test_status_counts_unresolved_source_sessions_instead_of_failing(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    _seed_session(store, raw_id="status-healthy-a")
+    _seed_session(store, raw_id="status-healthy-b")
+    corrupted = _seed_session(store, raw_id="status-corrupted")
+    _corrupt_session_material_hash(store, corrupted)
+    Ledger(tmp_path / "ledger.sqlite3")
+
+    report = build_graph_projection_status(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        project=PROJECT,
+        provider=PROVIDER,
+    )
+
+    assert report["status"] == "ok"
+    assert report["source"] == {
+        "session_count": 2,
+        "unresolved_sessions": 1,
+        "unresolved_reasons": {"SourceRevisionResolutionError": 1},
+    }
+    assert report["projection_state"]["entity_valid_source_sessions"] == 2
