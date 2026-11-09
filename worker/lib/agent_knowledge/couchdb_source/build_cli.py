@@ -757,6 +757,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--provider", default="", help="Scope selection to this provider (empty = all).")
     parser.add_argument("--approval", default="", help="Path to live-approval JSON (required for non-dry-run).")
     parser.add_argument("--dataset-name", default="session-memory", help="Projection dataset name (default: session-memory).")
+    parser.add_argument(
+        "--session-id-hash",
+        action="append",
+        default=[],
+        dest="session_id_hashes",
+        help="Project only this session_id_hash (sha256:<hex>, repeatable; event-driven path). Skips checkpoint selection and never writes the checkpoint.",
+    )
 
     args = parser.parse_args(argv)
 
@@ -831,15 +838,40 @@ def main(argv: list[str] | None = None) -> int:
     backend = os.environ.get("SESSION_MEMORY_PROJECTION_BACKEND", "qdrant").strip().lower()
 
     # --- Session selection --------------------------------------------------
-    sessions = _select_sessions_for_cycle(
-        store,
-        limit=args.limit,
-        project=str(args.project or ""),
-        provider=str(args.provider or ""),
-        backend=backend,
-        mode=os.environ.get("SESSION_MEMORY_SELECTION_MODE", "auto"),
-        persist=not args.dry_run,
-    )
+    explicit_session_ids = _explicit_session_ids(args.session_id_hashes)
+    if explicit_session_ids is None:
+        print(
+            json.dumps(
+                {
+                    "schema_version": BUILD_CLI_SCHEMA_VERSION,
+                    "error": "invalid_session_id_hash",
+                    "reason": "--session-id-hash must be a sha256:<64-hex> session_id_hash",
+                    "dry_run": bool(args.dry_run),
+                    "selected": 0,
+                    "projected": 0,
+                    "failed": 0,
+                    "skipped": 0,
+                    "sessions": [],
+                },
+                sort_keys=True,
+            )
+        )
+        return 2
+    if explicit_session_ids:
+        # Event-driven path: the caller already knows which sessions changed.
+        # The selection checkpoint is neither read nor written here; the
+        # regular cycle stays its single writer.
+        sessions = [{"session_id_hash": value} for value in explicit_session_ids]
+    else:
+        sessions = _select_sessions_for_cycle(
+            store,
+            limit=args.limit,
+            project=str(args.project or ""),
+            provider=str(args.provider or ""),
+            backend=backend,
+            mode=os.environ.get("SESSION_MEMORY_SELECTION_MODE", "auto"),
+            persist=not args.dry_run,
+        )
     selected_count = len(sessions)
 
     if args.dry_run:
@@ -938,6 +970,7 @@ def main(argv: list[str] | None = None) -> int:
     projected = 0
     failed = 0
     skipped = 0
+    session_reports: list[dict] = []
 
     try:
         for session in sessions:
@@ -957,12 +990,25 @@ def main(argv: list[str] | None = None) -> int:
                 status = str(projection.get("status") or "")
                 if status == "projected":
                     projected += 1
+                    outcome = "projected"
                 elif status == "pending" or not result.get("fully_materialized"):
                     skipped += 1
+                    outcome = "pending"
                 else:
                     failed += 1
-            except Exception:
+                    outcome = "failed"
+                session_reports.append(
+                    {"session_id_hash": session_id_hash, "status": outcome, "error_class": ""}
+                )
+            except Exception as exc:
                 failed += 1
+                session_reports.append(
+                    {
+                        "session_id_hash": session_id_hash,
+                        "status": "failed",
+                        "error_class": type(exc).__name__,
+                    }
+                )
     finally:
         _close_if_supported(mirror_sink)
         _close_if_supported(projector)
@@ -976,11 +1022,29 @@ def main(argv: list[str] | None = None) -> int:
                 "projected": projected,
                 "failed": failed,
                 "skipped": skipped,
+                "sessions": session_reports,
             },
             sort_keys=True,
         )
     )
     return 0 if failed == 0 else 1
+
+
+def _explicit_session_ids(values) -> list[str] | None:
+    """Normalise ``--session-id-hash`` values; None when any value is malformed."""
+    import re
+
+    ordered: list[str] = []
+    for raw in values or ():
+        for part in str(raw or "").split(","):
+            value = part.strip().lower()
+            if not value:
+                continue
+            if not re.fullmatch(r"(sha256:)?[0-9a-f]{64}", value):
+                return None
+            if value not in ordered:
+                ordered.append(value)
+    return ordered
 
 
 def _close_if_supported(resource) -> None:

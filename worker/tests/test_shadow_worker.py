@@ -901,3 +901,99 @@ def test_main_rejects_blank_couchdb_config_before_state_or_backend_startup(
         shadow_worker.main()
 
     assert state_path.exists() is False
+
+
+def test_run_consume_publishes_session_changed_after_delivery_and_tolerates_publish_failure(tmp_path, monkeypatch):
+    from agent_knowledge.rag_ingress.couchdb_delivery_backend import CouchDBDeliveryBackend
+    from agent_knowledge.rag_ingress.shadow_worker import run_consume
+    from agent_knowledge.session_memory.change_events import SessionChangeCollector
+
+    store = IngestStateStore(tmp_path / "ingress.sqlite", canonical_state=True)
+    payload = _couchdb_payload(tag="session-changed-publish")
+    collector = SessionChangeCollector()
+    backend = CouchDBDeliveryBackend(
+        state_db=store.state_db, store=InMemoryCouchDBSourceStore(), on_session_changed=collector
+    )
+
+    class FakeMessage:
+        def __init__(self):
+            self.data = __import__("json").dumps(payload).encode("utf-8")
+            self.metadata = SimpleNamespace(num_delivered=1, sequence=SimpleNamespace(stream=1))
+            self.ack_calls = 0
+
+        async def ack(self):
+            self.ack_calls += 1
+
+        async def nak(self, delay=None):
+            raise AssertionError("delivered message must be acked")
+
+    message = FakeMessage()
+
+    class FakeSubscription:
+        def __init__(self):
+            self.fetches = 0
+
+        async def fetch(self, _count, timeout):
+            self.fetches += 1
+            if self.fetches == 1:
+                return [message]
+            raise TimeoutError("idle")
+
+    published = []
+    publish_failures = {"count": 0}
+
+    class FakeJetStream:
+        async def stream_info(self, _stream):
+            return object()
+
+        async def pull_subscribe(self, _subject, *, durable, stream):
+            return FakeSubscription()
+
+        async def publish(self, subject, data, *, stream=None, headers=None):
+            if publish_failures["count"]:
+                publish_failures["count"] -= 1
+                raise ConnectionError("broker unavailable")
+            published.append((subject, __import__("json").loads(data), stream, headers))
+
+    class FakeNatsConnection:
+        def jetstream(self):
+            return FakeJetStream()
+
+        async def drain(self):
+            return None
+
+    async def connect(_url):
+        return FakeNatsConnection()
+
+    monkeypatch.setitem(sys.modules, "nats", SimpleNamespace(connect=connect))
+    logs = []
+
+    def consume():
+        return asyncio.run(
+            run_consume(
+                nats_url="nats://fake", stream="RAG_INGRESS_SHADOW", subject="rag.shadow.>",
+                durable="shadow-test", store=store, backend=backend, deliver=True,
+                max_messages=1, idle_timeout=0.01, session_change_collector=collector,
+                log=logs.append,
+            )
+        )
+
+    result = consume()
+
+    assert result["statuses"] == ["delivered"]
+    assert message.ack_calls == 1
+    (subject, event, stream, headers), = published
+    assert subject == "session_memory.changed" and stream == "SESSION_MEMORY_EVENTS"
+    assert headers["Nats-Msg-Id"].startswith("sm:")
+    assert event["session_id_hash"] == payload["payload"]["document"]["metadata"]["session_id_hash"]
+    assert "body" not in event
+
+    # Publish failure: ingress ack unchanged, failure logged without the URL.
+    publish_failures["count"] = 1
+    message.ack_calls = 0
+    second = _couchdb_payload(tag="session-changed-publish-2")
+    payload.clear(); payload.update(second)
+    result = consume()
+    assert result["statuses"] == ["delivered"] and message.ack_calls == 1
+    assert any(line.startswith("session_change_publish_failed count=1 error=ConnectionError") for line in logs)
+    assert len(published) == 1

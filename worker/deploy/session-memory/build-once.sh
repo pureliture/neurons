@@ -26,6 +26,17 @@ if [ -n "${SESSION_MEMORY_BUILD_PROVIDER:-}" ]; then
   argv+=("--provider" "$SESSION_MEMORY_BUILD_PROVIDER")
 fi
 
+# RUN_MODE=watch가 이벤트로 받은 세션만 처리할 때 쉼표 구분 session_id_hash를 넘긴다.
+# 지정되면 CLI는 selection checkpoint를 읽지도 쓰지도 않는다.
+if [ -n "${SESSION_MEMORY_BUILD_SESSION_IDS:-}" ]; then
+  IFS=',' read -r -a watch_session_ids <<< "$SESSION_MEMORY_BUILD_SESSION_IDS"
+  for watch_session_id in "${watch_session_ids[@]}"; do
+    if [ -n "$watch_session_id" ]; then
+      argv+=("--session-id-hash" "$watch_session_id")
+    fi
+  done
+fi
+
 python - "$approval" "${argv[@]}" <<'PY'
 import json
 import sys

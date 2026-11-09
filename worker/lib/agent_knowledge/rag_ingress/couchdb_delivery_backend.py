@@ -103,6 +103,8 @@ from .state_db import RAGIngressStateDB
 
 
 CouchDBMirrorOutcomeHook = Callable[[MirrorWriteOutcome], None]
+SessionChangedHook = Callable[[Any], None]
+
 _PAYLOAD_PREPARATION_ERRORS = (AttributeError, OverflowError, TypeError, ValueError)
 _CHUNK_IDENTITY_FIELDS = (
     "doc_type",
@@ -330,11 +332,13 @@ class CouchDBDeliveryBackend:
         store: CouchDBSourceStore,
         mirror: Any | None = None,
         on_mirror_outcome: CouchDBMirrorOutcomeHook | None = None,
+        on_session_changed: SessionChangedHook | None = None,
     ) -> None:
         self._state_db = state_db
         self._store = store
         self._mirror = mirror
         self._on_mirror_outcome = on_mirror_outcome
+        self._on_session_changed = on_session_changed
 
     # ------------------------------------------------------------------
     # DeliveryBackend Protocol
@@ -773,6 +777,12 @@ class CouchDBDeliveryBackend:
         # DeliveryExecutor, so they still have exactly one mirror side effect.
         # The mirror sees the full server-redacted, leak-gated payload.
         self._submit_mirror_after_authoritative_success(payload)
+        self._notify_session_changed(
+            session_id_hash=session_id_hash,
+            provider=provider,
+            project=project,
+            payload_hash=str(job.payload_hash or ""),
+        )
 
         return DeliveryBackendEvidence(
             idempotency_key=job.idempotency_key,
@@ -783,6 +793,27 @@ class CouchDBDeliveryBackend:
             status="succeeded",
             observed_at=datetime.datetime.now(tz=datetime.timezone.utc),
         )
+
+    def _notify_session_changed(
+        self, *, session_id_hash: str, provider: str, project: str, payload_hash: str
+    ) -> None:
+        """Post-authoritative, best-effort: the session-memory lane is woken with
+        hashed identifiers only. A hook failure never affects delivery evidence."""
+        if self._on_session_changed is None:
+            return
+        try:
+            from ..session_memory.change_events import SessionChangedEvent
+
+            self._on_session_changed(
+                SessionChangedEvent(
+                    session_id_hash=session_id_hash,
+                    provider=provider,
+                    project=project,
+                    payload_hash=payload_hash,
+                )
+            )
+        except Exception:
+            pass
 
     def _submit_mirror_after_authoritative_success(self, redacted_payload: dict) -> None:
         if self._mirror is None:
@@ -940,6 +971,7 @@ def build_couchdb_delivery_backend(
     environ: Mapping[str, str] | None = None,
     mirror_builder: Callable[[Mapping[str, str]], Any | None] | None = None,
     on_mirror_outcome: CouchDBMirrorOutcomeHook | None = None,
+    on_session_changed: SessionChangedHook | None = None,
 ) -> CouchDBDeliveryBackend:
     """Factory used by the env-switch wiring in state_cli to build the backend.
 
@@ -989,11 +1021,13 @@ def build_couchdb_delivery_backend(
         store=store,
         mirror=mirror,
         on_mirror_outcome=outcome_hook if mirror is not None else None,
+        on_session_changed=on_session_changed,
     )
 
 
 __all__ = [
     "CouchDBDeliveryBackend",
     "CouchDBMirrorOutcomeHook",
+    "SessionChangedHook",
     "build_couchdb_delivery_backend",
 ]

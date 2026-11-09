@@ -1735,3 +1735,61 @@ def test_pg_missing_reselects_even_if_qdrant_current() -> None:
         store, limit=10, project="", provider="", backend="postgres_pgvector"
     )
     assert len(pg_selected) == 1
+
+
+# ---------------------------------------------------------------------------
+# Explicit session selection (--session-id-hash, event-driven RUN_MODE=watch)
+# ---------------------------------------------------------------------------
+
+class TestExplicitSessionSelection:
+    def test_explicit_sessions_bypass_checkpoint_and_report_per_session(self, tmp_path, monkeypatch) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sid1 = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="s1")
+        _build_synthetic_session(store, provider="claude", project="neurons", raw_id="s2")
+        checkpoint_path = tmp_path / "selection-checkpoint.json"
+        monkeypatch.setenv("SESSION_MEMORY_SELECTION_CHECKPOINT", str(checkpoint_path))
+
+        argv = ["--session-id-hash", sid1, "--approval", str(tmp_path / "approval.json")]
+        _write_approval(tmp_path, argv=argv)
+        projector = RecordingSessionMemoryProjector()
+        rc, report = _run(argv, store, projector=projector)
+
+        assert rc == 0
+        assert report["selected"] == 1 and report["projected"] == 1
+        assert report["sessions"] == [{"session_id_hash": sid1, "status": "projected", "error_class": ""}]
+        assert len(projector.calls) == 1
+        assert not checkpoint_path.exists()  # explicit runs never write the checkpoint
+
+    def test_explicit_sessions_accept_comma_lists_and_dedup(self, tmp_path) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sid1 = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="s1")
+        sid2 = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="s2")
+
+        argv = ["--session-id-hash", f"{sid1},{sid2}", "--session-id-hash", sid1, "--approval", str(tmp_path / "approval.json")]
+        _write_approval(tmp_path, argv=argv)
+        rc, report = _run(argv, store, projector=RecordingSessionMemoryProjector())
+
+        assert rc == 0
+        assert [row["session_id_hash"] for row in report["sessions"]] == [sid1, sid2]
+
+    def test_malformed_session_id_hash_fails_closed(self, tmp_path) -> None:
+        store = InMemoryCouchDBSourceStore()
+        argv = ["--session-id-hash", "raw-session-id", "--approval", str(tmp_path / "approval.json")]
+        _write_approval(tmp_path, argv=argv)
+
+        rc, report = _run(argv, store)
+
+        assert rc == 2
+        assert report["error"] == "invalid_session_id_hash"
+        assert "raw-session-id" not in json.dumps(report)
+
+    def test_regular_cycle_report_also_lists_sessions(self, tmp_path) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sid1 = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="s1")
+        argv = ["--approval", str(tmp_path / "approval.json")]
+        _write_approval(tmp_path, argv=argv)
+
+        rc, report = _run(argv, store, projector=RecordingSessionMemoryProjector())
+
+        assert rc == 0
+        assert report["sessions"] == [{"session_id_hash": sid1, "status": "projected", "error_class": ""}]
