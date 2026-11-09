@@ -61,6 +61,7 @@ _MAX_EDGE_PROVENANCE_LOOKUPS_IN_FLIGHT = 8
 # full upper bound, and both are injectable for tests and tuning.
 DEFAULT_GRAPH_READ_TIMEOUT_SECONDS = 30.0
 DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS = 300.0
+DEFAULT_GRAPH_INDEX_ONLINE_TIMEOUT_SECONDS = 60.0
 _ALLOWED_LLM_REASONING_EFFORTS = frozenset({"high", "medium", "low", "none"})
 _GEMINI_LLM_FORBIDDEN_MESSAGE = (
     "Gemini LLM models are forbidden for Graphiti semantic extraction; "
@@ -295,6 +296,7 @@ class GraphitiNeo4jGraphMemoryAdapter:
         read_timeout_seconds: float = DEFAULT_GRAPH_READ_TIMEOUT_SECONDS,
         write_timeout_seconds: float = DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS,
         runner: "_AsyncLoopRunner | None" = None,
+        index_online_timeout_seconds: float = DEFAULT_GRAPH_INDEX_ONLINE_TIMEOUT_SECONDS,
     ) -> None:
         self._graphiti = graphiti
         self._fallback_graphiti = fallback_graphiti
@@ -325,6 +327,7 @@ class GraphitiNeo4jGraphMemoryAdapter:
         # Entity. Injectable for tests; defaults to a MENTIONS-count query.
         self._entity_extracted = entity_extracted or _default_entity_extracted
         self._indices_ready: set[int] = set()
+        self._index_online_timeout_seconds = max(1.0, float(index_online_timeout_seconds))
 
     @classmethod
     def from_config(cls, config: GraphitiNeo4jConfig) -> "GraphitiNeo4jGraphMemoryAdapter":
@@ -394,7 +397,28 @@ class GraphitiNeo4jGraphMemoryAdapter:
                 result = build()
                 if inspect.isawaitable(result):
                     await result
+                await self._await_graph_indices_online(graphiti)
             self._indices_ready.add(id(graphiti))
+
+    async def _await_graph_indices_online(self, graphiti: Any) -> None:
+        # CREATE INDEX returns once the DDL is accepted; population runs in the
+        # background and the index stays POPULATING for a while. A fulltext
+        # search against a POPULATING index raises, so block until every index
+        # is ONLINE before the first write. Best-effort: a driver without this
+        # procedure (or a timeout) falls through to the existing fail-closed
+        # write path instead of blocking projection forever.
+        driver = getattr(graphiti, "driver", None)
+        execute_query = getattr(driver, "execute_query", None)
+        if not callable(execute_query):
+            return
+        timeout = max(1, int(self._index_online_timeout_seconds))
+        try:
+            await asyncio.wait_for(
+                execute_query("CALL db.awaitIndexes($timeout)", params={"timeout": timeout}),
+                timeout=timeout + 5,
+            )
+        except Exception as exc:
+            _LOG.warning("graph index online wait skipped: %s", type(exc).__name__)
 
     def upsert_episode(self, episode: OntologyEpisode) -> UpsertEpisodeResult:
         # Two-body split:
