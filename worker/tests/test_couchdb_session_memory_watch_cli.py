@@ -7,8 +7,8 @@ from types import SimpleNamespace
 from agent_knowledge.couchdb_source import watch_cli
 from agent_knowledge.session_memory import change_events as ce
 
-H1 = "1" * 64
-H2 = "2" * 64
+H1 = "sha256:" + "1" * 64
+H2 = "sha256:" + "2" * 64
 
 
 def _event_bytes(session_id_hash, payload_hash="f" * 64):
@@ -281,3 +281,23 @@ def test_cli_registry_exposes_watch_command():
 
     assert "couchdb-session-memory-watch" in cli.COMMAND_HANDLERS
     assert cli.COMMAND_METADATA["couchdb-session-memory-watch"]["runtime_category"] == "active_runtime"
+
+
+def test_bare_hex_event_is_normalised_before_build_and_acked_against_stored_hash(tmp_path):
+    bare_upper = H1.split(":", 1)[1].upper()
+    raw = json.dumps({"session_id_hash": bare_upper, "schema_version": ce.SESSION_CHANGED_EVENT_SCHEMA}).encode()
+    m1 = FakeMsg(raw)
+    sub = FakeSub([[m1]])
+    js = FakeJs(sub)
+    settings, env = _settings(tmp_path)
+    builds = []
+
+    def run_build(ids):
+        builds.append(ids)
+        return 0, {"sessions": [{"session_id_hash": H1, "status": "projected"}]}
+
+    counters = _run(settings, env, js, run_build, max_cycles=1)
+
+    assert builds == [(H1,)]
+    assert m1.calls == [("ack", None)]
+    assert counters["acked"] == 1 and counters["terminated_invalid"] == 0 and js.published == []

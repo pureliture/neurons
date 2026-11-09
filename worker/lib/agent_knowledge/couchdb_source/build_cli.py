@@ -1031,16 +1031,17 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _explicit_session_ids(values) -> list[str] | None:
-    """Normalise ``--session-id-hash`` values; None when any value is malformed."""
-    import re
+    """Normalise ``--session-id-hash`` values to the stored ``sha256:<lowercase hex>``
+    form (a bare 64-hex digest is accepted); None when any value is malformed."""
+    from ..session_memory.change_events import normalize_session_id_hash
 
     ordered: list[str] = []
     for raw in values or ():
         for part in str(raw or "").split(","):
-            value = part.strip().lower()
-            if not value:
+            if not part.strip():
                 continue
-            if not re.fullmatch(r"(sha256:)?[0-9a-f]{64}", value):
+            value = normalize_session_id_hash(part)
+            if value is None:
                 return None
             if value not in ordered:
                 ordered.append(value)

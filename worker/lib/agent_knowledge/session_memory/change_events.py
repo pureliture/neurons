@@ -17,7 +17,7 @@ import datetime
 import json
 import re
 import threading
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
 SESSION_MEMORY_EVENTS_STREAM = "SESSION_MEMORY_EVENTS"
 SESSION_MEMORY_EVENTS_SUBJECTS = ("session_memory.>",)
@@ -33,16 +33,25 @@ PUBLISH_ENABLED_ENV = "SESSION_MEMORY_EVENTS_PUBLISH"
 NATS_URL_ENV = "RAG_INGRESS_NATS_URL"
 DEFAULT_NATS_URL = "nats://127.0.0.1:4222"
 
-# Canonical session_id_hash is ``sha256:<64 hex>``; the bare digest is tolerated.
-_HASH_RE = re.compile(r"^(sha256:)?[0-9a-f]{64}$")
+# Canonical session_id_hash is ``sha256:<64 lowercase hex>``. A bare 64-hex digest
+# (any case) is normalised to that form; every other shape is rejected.
+_HASH_RE = re.compile(r"^(sha256:)?([0-9a-fA-F]{64})$")
 
 
 def _utc_now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
+def normalize_session_id_hash(value: object) -> str | None:
+    """Return the canonical ``sha256:<lowercase hex>`` form, or None when malformed."""
+    match = _HASH_RE.fullmatch(str(value or "").strip())
+    if match is None:
+        return None
+    return f"sha256:{match.group(2).lower()}"
+
+
 def is_session_id_hash(value: object) -> bool:
-    return bool(_HASH_RE.fullmatch(str(value or "")))
+    return normalize_session_id_hash(value) is not None
 
 
 @dataclass(frozen=True)
@@ -79,8 +88,8 @@ def parse_session_changed_event(data: bytes) -> SessionChangedEvent | None:
         return None
     if not isinstance(payload, dict):
         return None
-    session_id_hash = str(payload.get("session_id_hash") or "")
-    if not is_session_id_hash(session_id_hash):
+    session_id_hash = normalize_session_id_hash(payload.get("session_id_hash"))
+    if session_id_hash is None:
         return None
     return SessionChangedEvent(
         session_id_hash=session_id_hash,
@@ -119,8 +128,11 @@ class SessionChangeCollector:
         self._events: collections.deque[SessionChangedEvent] = collections.deque()
 
     def __call__(self, event: SessionChangedEvent) -> None:
-        if not is_session_id_hash(event.session_id_hash):
+        normalized = normalize_session_id_hash(event.session_id_hash)
+        if normalized is None:
             return
+        if normalized != event.session_id_hash:
+            event = replace(event, session_id_hash=normalized)
         with self._lock:
             self._events.append(event)
 

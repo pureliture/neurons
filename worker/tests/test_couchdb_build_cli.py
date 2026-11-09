@@ -1793,3 +1793,26 @@ class TestExplicitSessionSelection:
 
         assert rc == 0
         assert report["sessions"] == [{"session_id_hash": sid1, "status": "projected", "error_class": ""}]
+
+    def test_bare_hex_session_id_hash_is_normalised_to_stored_form(self, tmp_path) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sid1 = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="s1")
+        assert sid1.startswith("sha256:")
+        bare_upper = sid1.split(":", 1)[1].upper()
+
+        argv = ["--session-id-hash", bare_upper, "--approval", str(tmp_path / "approval.json")]
+        _write_approval(tmp_path, argv=argv)
+        projector = RecordingSessionMemoryProjector()
+        rc, report = _run(argv, store, projector=projector)
+
+        assert rc == 0
+        assert report["sessions"] == [{"session_id_hash": sid1, "status": "projected", "error_class": ""}]
+        assert len(projector.calls) == 1
+
+    def test_other_prefix_or_wrong_length_session_id_hash_is_rejected(self, tmp_path) -> None:
+        for bad in ("md5:" + "a" * 64, "a" * 63, "sha256:" + "a" * 63):
+            store = InMemoryCouchDBSourceStore()
+            argv = ["--session-id-hash", bad, "--approval", str(tmp_path / "approval.json")]
+            _write_approval(tmp_path, argv=argv)
+            rc, report = _run(argv, store)
+            assert rc == 2 and report["error"] == "invalid_session_id_hash", bad

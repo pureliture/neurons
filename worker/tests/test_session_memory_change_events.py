@@ -3,7 +3,8 @@ import json
 
 from agent_knowledge.session_memory import change_events as ce
 
-HASH = "a" * 64
+DIGEST = "a" * 64
+HASH = "sha256:" + DIGEST
 
 
 def test_event_payload_is_hashed_identifiers_only_and_dedup_id_is_per_delivery():
@@ -12,7 +13,7 @@ def test_event_payload_is_hashed_identifiers_only_and_dedup_id_is_per_delivery()
 
     assert set(payload) == {"session_id_hash", "provider", "project", "payload_hash", "changed_at", "schema_version"}
     assert payload["schema_version"] == ce.SESSION_CHANGED_EVENT_SCHEMA
-    assert event.msg_id() == f"sm:{HASH[:16]}:{'b' * 16}"
+    assert event.msg_id() == f"sm:{DIGEST[:16]}:{'b' * 16}"
     other_delivery = ce.SessionChangedEvent(session_id_hash=HASH, payload_hash="c" * 64)
     assert other_delivery.msg_id() != event.msg_id()
 
@@ -85,7 +86,7 @@ def test_publish_collected_sends_subject_stream_and_msg_id():
     subject, payload, stream, headers = js.published[0]
     assert subject == ce.SESSION_MEMORY_CHANGED_SUBJECT
     assert stream == ce.SESSION_MEMORY_EVENTS_STREAM
-    assert headers == {"Nats-Msg-Id": f"sm:{HASH[:16]}:{'d' * 16}"}
+    assert headers == {"Nats-Msg-Id": f"sm:{DIGEST[:16]}:{'d' * 16}"}
     assert payload["session_id_hash"] == HASH
 
 
@@ -112,3 +113,20 @@ def test_dead_letter_payload_carries_attempts_and_error_class_only():
     assert body["event"]["session_id_hash"] == HASH
     body = json.loads(ce.build_dead_letter_payload(None, attempts=1, error_class="invalid_event", raw_len=3))
     assert body["event"] is None and body["raw_len"] == 3
+
+
+def test_bare_64_hex_is_normalised_to_stored_sha256_form_and_other_shapes_rejected():
+    upper = DIGEST.upper()
+    assert ce.normalize_session_id_hash(upper) == HASH
+    assert ce.normalize_session_id_hash(" " + HASH + " ") == HASH
+    parsed = ce.parse_session_changed_event(json.dumps({"session_id_hash": upper}).encode())
+    assert parsed is not None and parsed.session_id_hash == HASH
+
+    collector = ce.SessionChangeCollector()
+    collector(ce.SessionChangedEvent(session_id_hash=DIGEST, payload_hash="d" * 64))
+    (event,) = collector.drain()
+    assert event.session_id_hash == HASH and event.payload_hash == "d" * 64
+
+    for bad in ("md5:" + DIGEST, DIGEST[:63], DIGEST + "0", "g" * 64, "sha256:" + DIGEST[:63], "SHA256:" + DIGEST, ""):
+        assert ce.normalize_session_id_hash(bad) is None, bad
+        assert ce.parse_session_changed_event(json.dumps({"session_id_hash": bad}).encode()) is None, bad
