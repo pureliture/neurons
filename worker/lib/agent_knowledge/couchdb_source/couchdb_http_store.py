@@ -56,6 +56,13 @@ class CouchDBResponseTooLarge(CouchDBError):
     code = "couchdb_response_too_large"
 
 
+def _is_no_usable_index(payload: object) -> bool:
+    """True when a _find rejection says no index matches the sort."""
+    if not isinstance(payload, dict):
+        return False
+    return str(payload.get("error") or "") == "no_usable_index"
+
+
 COUCHDB_FIND_MAX_PAGE_RESPONSE_BYTES = 8 * 1024 * 1024
 
 
@@ -788,6 +795,18 @@ class CouchDBHttpSourceStore:
                 json_body=body,
                 max_response_bytes=max_page_bytes,
             )
+            if status == 400 and _is_no_usable_index(payload) and "sort" in body:
+                # Some databases have no index matching the sort, so _find
+                # rejects the request. Drop the sort and retry without it
+                # (CouchDB returns documents in its default order).
+                body = dict(body)
+                body.pop("sort", None)
+                status, payload = self._request(
+                    "POST",
+                    f"/{self.db}/_find",
+                    json_body=body,
+                    max_response_bytes=max_page_bytes,
+                )
             if status != 200:
                 raise CouchDBError(f"_find by session failed: HTTP {status}")
             docs = payload.get("docs") if isinstance(payload, dict) else None
