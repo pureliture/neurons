@@ -134,7 +134,12 @@ def test_public_query_graph_authority_join_and_explicit_pg_fallback(tmp_path, gr
         assert payload["metadata"]["authority_join_status"] == "verified"
         assert payload["metadata"]["fallback_used"] is (not graph_available)
         assert payload["items"][0]["currentness"] == ("superseded" if historical else "current")
-        assert events == (["graph"] if graph_available else ["graph", "embedding"])
+        # 공용 뇌 계약: graph card가 있어도 session-memory lane을 위해 질의 embedding을
+        # 한 번 계산한다. as_of(시점 조회)는 권위 card만 보므로 embedding을 생략한다.
+        assert events == (["graph"] if historical else ["graph", "embedding"])
+        assert payload["metadata"]["sources"] == {"graph_card": 1, "session_memory": 0}
+        assert payload["items"][0]["source"] == "graph_card"
+        assert payload["metadata"]["freshness"]["session_memory_available"] is True
         serialized = json.dumps(payload, ensure_ascii=False)
         assert "정본에서 읽은 결정" in serialized
         assert "그래프의 추론 문구" not in serialized

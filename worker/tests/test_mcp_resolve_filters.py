@@ -449,3 +449,31 @@ def test_resolver_invariant_old_but_current_retained_by_default():
     assert res["items"][0]["id"] == "c-old-current"
     assert res["items"][0]["temporal"]["age"]["label"] in ("old", "historical")
     assert res["items"][0]["currentness"] == "current"
+
+
+def test_mcp_brain_resolve_default_mode_is_query_when_query_present_and_context_otherwise():
+    from agent_knowledge.mcp_jsonrpc import _dispatch_brain_resolve_tool
+
+    seen = []
+
+    class _Service:
+        def brain_memory_resolve(self, **kwargs):
+            seen.append(kwargs)
+            return {"items": [], "metadata": {}}
+
+    _dispatch_brain_resolve_tool(BRAIN_RESOLVE_TOOL_NAME, {"project": "neurons", "query": "결정"}, _Service())
+    _dispatch_brain_resolve_tool(BRAIN_RESOLVE_TOOL_NAME, {"project": "neurons"}, _Service())
+    _dispatch_brain_resolve_tool(BRAIN_RESOLVE_TOOL_NAME, {"project": "neurons", "query": "   "}, _Service())
+    _dispatch_brain_resolve_tool(
+        BRAIN_RESOLVE_TOOL_NAME, {"project": "neurons", "query": "결정", "mode": "context"}, _Service()
+    )
+    assert [call["mode"] for call in seen] == ["query", "context", "context", "context"]
+    # 기본 query mode는 기존 명시 query mode와 같은 90일 max_age 기본값을 쓴다.
+    assert seen[0]["max_age"] == 90 * 86400
+    assert "max_age" not in seen[1] and "max_age" not in seen[3]
+
+
+def test_mcp_brain_resolve_schema_default_mode_is_query():
+    tools = list_public_agent_tools()
+    resolve_tool = next(t for t in tools if t["name"] == BRAIN_RESOLVE_TOOL_NAME)
+    assert resolve_tool["inputSchema"]["properties"]["mode"]["default"] == "query"

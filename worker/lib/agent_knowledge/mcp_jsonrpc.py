@@ -1044,10 +1044,16 @@ def _dispatch_brain_resolve_tool(tool_name: str, arguments: dict, service: Knowl
             return _tool_result(service.brain_resolve(query=str(arguments.get("query") or "")))
         raise ValueError(f"{tool_name} requires project or repository")
 
+    query = arguments.get("query", "")
+    mode = arguments.get("mode")
+    if mode is None:
+        # 공용 뇌 기본 경로는 graph-first query다. 질의어가 없으면 query mode가
+        # 거부되므로 활성 컨텍스트(context)로 내려간다. 명시 mode는 그대로 존중한다.
+        mode = "query" if isinstance(query, str) and query.strip() else "context"
     resolve_kwargs: dict[str, Any] = {
         "project": project,
-        "query": arguments.get("query", ""),
-        "mode": arguments.get("mode", "context"),
+        "query": query,
+        "mode": mode,
         "response_mode": arguments.get("response_mode", "minimal"),
         "as_of": arguments.get("as_of", ""),
         "limit": _bounded_limit(arguments.get("limit"), default=5, maximum=20),

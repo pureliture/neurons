@@ -36,6 +36,13 @@ _EVIDENCE_ROOT_LIMIT = 20
 _EVIDENCE_MAX_DEPTH = 5
 _EVIDENCE_EDGE_LIMIT = 100
 _NON_CARD_ENTITY_TYPES = frozenset({"Session", "SourceRef", "LocalEvidenceEdge"})
+# 공용 뇌 응답 항목의 출처. graph_card는 PG 권위 검증을 통과한 MemoryCard,
+# session_memory는 다른 에이전트 세션에서 만들어진 session_memory_chunks 행이다.
+SOURCE_GRAPH_CARD = "graph_card"
+SOURCE_SESSION_MEMORY = "session_memory"
+# Reciprocal rank fusion 상수. 두 lane의 1위가 동점이면 graph/권위 card가 먼저 온다.
+_RRF_K = 60
+_SESSION_CHUNK_MIN_SIMILARITY = 0.45
 
 
 class _ResolveRequest(BaseModel):
@@ -154,6 +161,7 @@ class GraphFirstResolver:
         self._store = store
         self._graph_adapter = graph_adapter
         self._embed_query = embed_query
+        self._query_vectors: dict[str, list[float]] = {}
 
     def resolve(
         self,
@@ -257,7 +265,7 @@ class GraphFirstResolver:
         )
         if needs_semantic_fallback:
             if self._embed_query is not None and callable(getattr(self._store, "hybrid_search", None)):
-                fallback_cards, _, _, _ = self._fallback_cards(request)
+                fallback_cards, _, _, _ = self._fallback_cards(request, include_session_memory=True)
                 if fallback_cards:
                     cards = _dedupe_cards([*fallback_cards, *cards])
                     retrieval_path = "pgvector_fallback"
@@ -307,9 +315,10 @@ class GraphFirstResolver:
         except Exception:
             return self._error_payload(request, error_code="authority_store_unavailable")
 
+        freshness = self._freshness(request, lag=lag, unprojected=unprojected)
         if graph_status in {"degraded", "unavailable"}:
             # An outage/degraded state takes precedence over projection lag.
-            return self._resolve_fallback(request, graph_status=graph_status, lag=lag)
+            return self._resolve_fallback(request, graph_status=graph_status, lag=lag, freshness=freshness)
 
         graph_cards, join_status = self._join_graph_candidates(
             request, tuple(getattr(graph_result, "episodes", ()) or ())
@@ -320,6 +329,7 @@ class GraphFirstResolver:
             fallback_cards, error_code, fallback_used, fallback_join = self._fallback_cards(request)
             if fallback_cards is not None:
                 cards = _dedupe_cards([*graph_cards, *fallback_cards])
+                cards, merged = self._merge_session_memory(request, cards)
                 retrieval_path = "graph_neo4j" if graph_cards else "pgvector_fallback"
                 return self._serialize(
                     request,
@@ -330,18 +340,23 @@ class GraphFirstResolver:
                         authority_join_status=join_status if join_status != "verified" else fallback_join,
                         fallback_used=fallback_used,
                         projection_lag_ms=lag,
+                        session_memory_merged=merged,
+                        freshness=freshness,
                     ),
                 )
             if graph_cards:
+                cards, merged = self._merge_session_memory(request, graph_cards)
                 payload = self._serialize(
                     request,
-                    graph_cards,
+                    cards,
                     metadata=self._metadata(
                         retrieval_path="graph_neo4j",
                         graph_status="projection_lag",
                         authority_join_status=join_status,
                         fallback_used=fallback_used,
                         projection_lag_ms=lag,
+                        session_memory_merged=merged,
+                        freshness=freshness,
                     ),
                     error_code=error_code,
                 )
@@ -352,30 +367,27 @@ class GraphFirstResolver:
                 graph_status="projection_lag",
                 lag=lag,
             )
-        if (
-            not graph_cards
-            and join_status == "verified"
-            and not request.as_of
-            and self._embed_query is not None
-            and callable(getattr(self._store, "search_session_chunks", None))
-        ):
-            fallback_cards, _, fallback_used, fallback_join = self._fallback_cards(request)
-            if fallback_cards:
-                return self._serialize(
-                    request,
-                    fallback_cards,
-                    metadata=self._metadata(
-                        retrieval_path="pgvector_fallback",
-                        graph_status="available",
-                        authority_join_status=fallback_join,
-                        fallback_used=fallback_used,
-                        projection_lag_ms=lag,
-                    ),
-                )
+        # 공용 뇌 계약: 관련 card가 있어도 다른 에이전트의 session-memory를 항상
+        # rank fusion으로 병합한다. card가 가려서 더 최신인 세션 지식이 사라지지 않는다.
+        cards, merged = self._merge_session_memory(request, graph_cards)
+        if not graph_cards and merged:
+            return self._serialize(
+                request,
+                cards,
+                metadata=self._metadata(
+                    retrieval_path="pgvector_fallback",
+                    graph_status="available",
+                    authority_join_status=join_status,
+                    fallback_used=True,
+                    projection_lag_ms=lag,
+                    session_memory_merged=True,
+                    freshness=freshness,
+                ),
+            )
         auth_src = "postgres" if any(c.get("authority_source") == "postgres" for c in graph_cards) else None
         return self._serialize(
             request,
-            graph_cards,
+            cards,
             metadata=self._metadata(
                 retrieval_path="graph_neo4j",
                 graph_status="available",
@@ -383,6 +395,8 @@ class GraphFirstResolver:
                 fallback_used=False,
                 projection_lag_ms=lag,
                 authority_source=auth_src,
+                session_memory_merged=merged,
+                freshness=freshness,
             ),
         )
 
@@ -531,10 +545,18 @@ class GraphFirstResolver:
             return [], "mismatch"
         return [], "unavailable" if saw_missing else "verified"
 
-    def _resolve_fallback(self, request: _ResolveRequest, *, graph_status: str, lag: int | None) -> dict[str, Any]:
+    def _resolve_fallback(
+        self,
+        request: _ResolveRequest,
+        *,
+        graph_status: str,
+        lag: int | None,
+        freshness: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         cards, error_code, fallback_used, join_status = self._fallback_cards(request)
         if cards is None:
             return self._error_payload(request, error_code=error_code or "authority_store_unavailable", graph_status=graph_status, lag=lag)
+        cards, merged = self._merge_session_memory(request, cards)
         return self._serialize(
             request,
             cards,
@@ -544,15 +566,81 @@ class GraphFirstResolver:
                 authority_join_status=join_status,
                 fallback_used=fallback_used,
                 projection_lag_ms=lag,
+                session_memory_merged=merged,
+                freshness=freshness,
             ),
         )
 
-    def _fallback_cards(self, request: _ResolveRequest) -> tuple[list[dict[str, Any]] | None, str | None, bool, str]:
+    def _query_vector(self, request: _ResolveRequest) -> list[float] | None:
+        """질의 embedding은 요청당 한 번만 계산한다. 실패하면 None."""
         if self._embed_query is None:
-            return None, "embedding_unavailable", False, "unavailable"
+            return None
+        cached = self._query_vectors.get(request.query)
+        if cached is not None:
+            return cached
         try:
             vector = self._embed_query(request.query)
         except Exception:
+            return None
+        if not isinstance(vector, (list, tuple)):
+            return None
+        vector = list(vector)
+        self._query_vectors[request.query] = vector
+        return vector
+
+    def _merge_session_memory(
+        self, request: _ResolveRequest, cards: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """권위 card 목록에 session-memory 검색 결과를 rank fusion으로 병합한다.
+
+        card는 PG 권위 검증을 이미 통과한 상태이며 `source=graph_card`로 표시한다.
+        session_memory_chunks 결과는 `source=session_memory`로 표시한다. as_of 요청은
+        권위 card의 시점 조회이므로 세션 지식을 섞지 않는다.
+        """
+        tagged = [_tag_source(card, SOURCE_GRAPH_CARD) for card in cards]
+        if request.as_of or not callable(getattr(self._store, "search_session_chunks", None)):
+            return tagged, False
+        chunk_cards = self._session_chunk_cards(request)
+        if not chunk_cards:
+            return tagged, False
+        return _rank_fuse(tagged, chunk_cards), True
+
+    def _freshness(
+        self, request: _ResolveRequest, *, lag: int | None, unprojected: bool
+    ) -> dict[str, Any]:
+        """프로젝트 반영 지연 정보. 계산 가능한 값만 넣고, 모르면 None으로 둔다."""
+        freshness: dict[str, Any] = {
+            "projection_lag_ms": lag,
+            "unprojected_cards": bool(unprojected),
+            "session_memory_last_built_at": None,
+            "session_memory_last_observed_at": None,
+            "session_memory_pending_chunks": None,
+            "session_memory_pending_sessions": None,
+            "session_memory_available": False,
+        }
+        probe = getattr(self._store, "session_memory_freshness", None)
+        if not callable(probe):
+            return freshness
+        try:
+            snapshot = probe(request.project)
+        except Exception:
+            return freshness
+        if not isinstance(snapshot, Mapping):
+            return freshness
+        freshness["session_memory_available"] = True
+        freshness["session_memory_last_built_at"] = _iso_or_none(snapshot.get("last_built_at"))
+        freshness["session_memory_last_observed_at"] = _iso_or_none(snapshot.get("last_observed_at"))
+        freshness["session_memory_pending_chunks"] = _int_or_none(snapshot.get("pending_chunks"))
+        freshness["session_memory_pending_sessions"] = _int_or_none(snapshot.get("pending_sessions"))
+        return freshness
+
+    def _fallback_cards(
+        self, request: _ResolveRequest, *, include_session_memory: bool = False
+    ) -> tuple[list[dict[str, Any]] | None, str | None, bool, str]:
+        if self._embed_query is None:
+            return None, "embedding_unavailable", False, "unavailable"
+        vector = self._query_vector(request)
+        if vector is None:
             return None, "embedding_unavailable", False, "unavailable"
         try:
             ranked = self._store.hybrid_search(
@@ -599,7 +687,7 @@ class GraphFirstResolver:
             if memory_id in by_id and str(by_id[memory_id].get("content_hash") or "") == content_hash
         ]
         join_status = "verified" if len(cards) == len(ranked) else "mismatch"
-        if not cards and callable(getattr(self._store, "search_session_chunks", None)):
+        if include_session_memory and not cards and callable(getattr(self._store, "search_session_chunks", None)):
             chunk_cards = self._session_chunk_cards(request, vector)
             if chunk_cards:
                 return chunk_cards, None, True, join_status
@@ -614,11 +702,8 @@ class GraphFirstResolver:
         ):
             return []
         if vector is None:
-            if self._embed_query is None:
-                return []
-            try:
-                vector = self._embed_query(request.query)
-            except Exception:
+            vector = self._query_vector(request)
+            if vector is None:
                 return []
         try:
             chunks = self._store.search_session_chunks(
@@ -629,8 +714,8 @@ class GraphFirstResolver:
         except Exception:
             return []
         tokens = _query_tokens(request.query)
-        threshold = max(1, (len(tokens) + 1) // 3) if tokens else 1
         results: list[dict[str, Any]] = []
+        seen_hashes: set[str] = set()
         for row in chunks or ():
             if not isinstance(row, Mapping):
                 continue
@@ -644,7 +729,9 @@ class GraphFirstResolver:
                 else (_finite_score_or_none(row.get("similarity_score", row.get("score"))) or 0.0)
             )
             lexical_hits = len(tokens & _query_tokens(text)) if tokens else 0
-            if similarity < 0.45 and lexical_hits < threshold:
+            # 의미 유사도가 낮고 질의 토큰이 하나도 없는 청크만 제외한다. 토큰 비율
+            # threshold는 다른 에이전트의 세션 지식을 과도하게 걸러냈다.
+            if similarity < _SESSION_CHUNK_MIN_SIMILARITY and lexical_hits == 0:
                 continue
             chunk_id = str(row.get("chunk_id") or "")
             if not chunk_id:
@@ -652,6 +739,10 @@ class GraphFirstResolver:
             content_hash = str(row.get("content_hash") or "")
             if not content_hash.startswith("sha256:"):
                 content_hash = "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+            # 동일 본문이 legacy/local chunk_id로 두 번 저장된 경우 한 번만 돌려준다.
+            if content_hash in seen_hashes:
+                continue
+            seen_hashes.add(content_hash)
             body = _session_chunk_body(text)
             safe_summary = _safe(body, 65536)
             if not safe_summary:
@@ -670,6 +761,7 @@ class GraphFirstResolver:
                 },
                 "currentness": str(row.get("currentness") or "current"),
                 "content_hash": content_hash,
+                "source": SOURCE_SESSION_MEMORY,
             }
             if row.get("observed_at") is not None:
                 chunk_card["observed_at"] = row.get("observed_at")
@@ -902,6 +994,10 @@ class GraphFirstResolver:
                 "unknown_age": _unknown,
                 "anomalous_time": _anomalous,
             }
+        sources = {
+            SOURCE_GRAPH_CARD: sum(1 for item in items if item.get("source") == SOURCE_GRAPH_CARD),
+            SOURCE_SESSION_MEMORY: sum(1 for item in items if item.get("source") == SOURCE_SESSION_MEMORY),
+        }
         payload: dict[str, Any] = {
             "schema_version": "lbrain_slim_context.v1",
             "project": request.project,
@@ -914,6 +1010,7 @@ class GraphFirstResolver:
             "metadata": {
                 **metadata,
                 "has_more": has_more,
+                **({"sources": sources} if request.mode != "context" else {}),
                 **({"temporal_coverage": _temporal_coverage} if _temporal_coverage is not None else {}),
                 **({"temporal_view": "as_of", "as_of": request.as_of} if request.as_of else {}),
             },
@@ -994,6 +1091,8 @@ class GraphFirstResolver:
         fallback_used: bool,
         projection_lag_ms: int | None,
         authority_source: str | None = None,
+        session_memory_merged: bool | None = None,
+        freshness: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         meta = {
             "retrieval_path": retrieval_path,
@@ -1004,6 +1103,10 @@ class GraphFirstResolver:
         }
         if authority_source is not None:
             meta["authority_source"] = authority_source
+        if session_memory_merged is not None:
+            meta["session_memory_merged"] = bool(session_memory_merged)
+        if freshness is not None:
+            meta["freshness"] = dict(freshness)
         return meta
 
     @staticmethod
@@ -1211,6 +1314,8 @@ def _item(card: Mapping[str, Any], *, include_created_at: bool = True) -> dict[s
         item["typed_payload"] = _safe_typed_value(raw_typed)
     if card.get("authority_source"):
         item["authority_source"] = _safe(card.get("authority_source"), 64)
+    if card.get("source"):
+        item["source"] = _safe(card.get("source"), 32)
     if card.get("temporal_conflict"):
         item["temporal_conflict"] = True
     created_at = card.get("created_at") or card.get("observed_at")
@@ -1404,6 +1509,8 @@ def _context_item(card: Mapping[str, Any]) -> dict[str, Any]:
     }
     if card.get("authority_source"):
         item["authority_source"] = _safe(card.get("authority_source"), 64)
+    if card.get("source"):
+        item["source"] = _safe(card.get("source"), 32)
     if card.get("temporal_conflict"):
         item["temporal_conflict"] = True
     return item
@@ -1546,6 +1653,99 @@ def _dedupe_cards(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
             result.append(_copy_card(card))
             seen.add(memory_id)
     return result
+
+
+def _tag_source(card: Mapping[str, Any], source: str) -> dict[str, Any]:
+    copied = _copy_card(card)
+    copied.setdefault("source", source)
+    return copied
+
+
+def _card_identity(card: Mapping[str, Any]) -> tuple[str, str]:
+    return (
+        str(card.get("memory_id") or card.get("id") or ""),
+        str(card.get("content_hash") or ""),
+    )
+
+
+def _content_fingerprint(text: Any) -> str:
+    """본문 정규화(공백 압축 + 소문자) 후 sha256. 비어 있으면 빈 문자열."""
+    normalized = " ".join(str(text or "").split()).lower()
+    if not normalized:
+        return ""
+    return "fp:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _dedupe_keys(card: Mapping[str, Any]) -> set[str]:
+    """card↔chunk 교차 중복 판정 키.
+
+    권위 card의 `content_hash`는 card payload 전체의 hash이고 session chunk의
+    `content_hash`는 세션 본문의 sha256이라 계산 방식이 다르다. 따라서 두 기준을
+    모두 쓴다: (1) `content_hash` 문자열 일치, (2) 본문 정규화 후 sha256 일치
+    (`_content_fingerprint`; card는 `summary`, chunk는 헤더를 제거한 세션 본문).
+    """
+    keys: set[str] = set()
+    content_hash = str(card.get("content_hash") or "")
+    if content_hash:
+        keys.add("hash:" + content_hash)
+    fingerprint = _content_fingerprint(card.get("summary"))
+    if fingerprint:
+        keys.add(fingerprint)
+    return keys
+
+
+def _rank_fuse(primary: list[dict[str, Any]], secondary: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Reciprocal rank fusion of two ranked lanes with cross-lane dedupe.
+
+    동점이면 primary(권위 card) lane이 먼저 온다. 권위 card는 `memory_id`가
+    식별자다. session chunk가 `_dedupe_keys` 기준으로 어떤 권위 card와 같은 내용이면
+    card 1건만 남기고 chunk는 제거하되 RRF 점수는 합산한다. chunk끼리는 같은 키로
+    1건만 남긴다(동일 본문이 legacy/local chunk_id로 이중 저장된 경우).
+    """
+    scores: dict[str, float] = {}
+    order: dict[str, int] = {}
+    chosen: dict[str, dict[str, Any]] = {}
+    alias: dict[str, str] = {}
+    position = 0
+    for lane in (primary, secondary):
+        for rank, card in enumerate(lane, start=1):
+            memory_id, _content_hash = _card_identity(card)
+            if not memory_id:
+                continue
+            dedupe_keys = _dedupe_keys(card)
+            is_chunk = card.get("source") == SOURCE_SESSION_MEMORY
+            key = memory_id
+            if is_chunk:
+                matched = next((alias[k] for k in sorted(dedupe_keys) if k in alias), None)
+                key = matched or memory_id
+            if key not in chosen:
+                chosen[key] = _copy_card(card)
+                order[key] = position
+                position += 1
+            for dedupe_key in dedupe_keys:
+                alias.setdefault(dedupe_key, key)
+            scores[key] = scores.get(key, 0.0) + 1.0 / (_RRF_K + rank)
+    ranked = sorted(chosen, key=lambda key: (-scores[key], order[key]))
+    return [chosen[key] for key in ranked]
+
+
+def _iso_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        value = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).isoformat()
+    text = str(value).strip()
+    return text or None
+
+
+def _int_or_none(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _shrink_card(card: dict[str, Any]) -> bool:
