@@ -123,3 +123,97 @@ def test_entrypoint_scheduler_runs_only_the_build_lane() -> None:
     assert "run_build() { /app/deploy/build-once.sh; }" in script
     assert 'if [ $((now - last_build)) -ge "$build_interval_seconds" ]; then' in script
     assert "run_build || echo" in script
+
+
+def test_entrypoint_watch_mode_is_opt_in_and_wraps_jetstream_consumer() -> None:
+    script = Path("deploy/session-memory/entrypoint.sh").read_text(encoding="utf-8")
+
+    assert 'case "${RUN_MODE:-cron}" in' in script
+    assert "watch) run_watch_loop ;;" in script
+    assert "couchdb-session-memory-watch" in script
+    assert "run_interruptible watch_cli --consume" in script
+    assert "SESSION_MEMORY_WATCH_FAILURE_BACKOFF_MAX_SECONDS" in script
+    assert "trap stop_watch TERM INT" in script
+    assert "_changes" not in script
+
+
+def test_entrypoint_watch_failure_backoff_is_bounded() -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "\n".join(
+                [
+                    "set -euo pipefail",
+                    "source deploy/session-memory/entrypoint.sh",
+                    "failure_backoff_seconds 1 300",
+                    "failure_backoff_seconds 2 300",
+                    "failure_backoff_seconds 4 300",
+                    "failure_backoff_seconds 7 300",
+                    "failure_backoff_seconds 50 300",
+                ]
+            ),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout.splitlines() == ["5", "10", "40", "300", "300"]
+
+
+def test_entrypoint_watch_loop_restarts_consumer_with_backoff(tmp_path: Path) -> None:
+    log_path = tmp_path / "calls.log"
+    count_path = tmp_path / "count"
+    count_path.write_text("0", encoding="utf-8")
+    script = "\n".join(
+        [
+            "set -euo pipefail",
+            "source deploy/session-memory/entrypoint.sh",
+            f"log={log_path}",
+            f"count_file={count_path}",
+            # run_interruptible backgrounds watch_cli, so state must live in files.
+            "watch_cli() {",
+            '  local count; count=$(( $(cat "$count_file") + 1 )); echo "$count" > "$count_file"',
+            '  echo "consume $*" >> "$log"',
+            '  [ "$count" -ne 2 ]',
+            "}",
+            'watch_should_continue() { [ "$(cat "$count_file")" -lt 3 ]; }',
+            'sleep() { echo "sleep $1" >> "$log"; }',
+            "SESSION_MEMORY_WATCH_FAILURE_BACKOFF_MAX_SECONDS=300 run_watch_loop",
+        ]
+    )
+    result = subprocess.run(
+        ["bash", "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert log_path.read_text(encoding="utf-8").splitlines() == [
+        "consume --consume",
+        "consume --consume",
+        "sleep 5",
+        "consume --consume",
+    ]
+    assert "[watch] consumer rc=1 consecutive_failures=1 backoff=5s" in result.stdout
+
+
+def test_build_once_passes_watch_session_ids_as_explicit_selection() -> None:
+    script = Path("deploy/session-memory/build-once.sh").read_text(encoding="utf-8")
+
+    assert "SESSION_MEMORY_BUILD_SESSION_IDS" in script
+    assert '"--session-id-hash" "$watch_session_id"' in script
+
+
+def test_compose_defaults_to_cron_and_health_checks_watch_heartbeat() -> None:
+    compose = Path("deploy/session-memory/compose.yaml").read_text(encoding="utf-8")
+
+    assert "RUN_MODE: ${RUN_MODE:-cron}" in compose
+    assert "RAG_INGRESS_NATS_URL: ${RAG_INGRESS_NATS_URL:-nats://127.0.0.1:4222}" in compose
+    assert "SESSION_MEMORY_WATCH_DEBOUNCE_SECONDS: ${SESSION_MEMORY_WATCH_DEBOUNCE_SECONDS:-2}" in compose
+    assert "SESSION_MEMORY_WATCH_IDLE_SWEEP_SECONDS: ${SESSION_MEMORY_WATCH_IDLE_SWEEP_SECONDS:-900}" in compose
+    assert "SESSION_MEMORY_WATCH_MAX_DELIVER: ${SESSION_MEMORY_WATCH_MAX_DELIVER:-5}" in compose
+    assert '"couchdb-session-memory-watch", "--health"' in compose

@@ -178,7 +178,7 @@ def _run_backfill_apply(args: argparse.Namespace) -> int:
     return 0
 
 
-def _build_live_backend(args: argparse.Namespace, state_db: RAGIngressStateDB):
+def _build_live_backend(args: argparse.Namespace, state_db: RAGIngressStateDB, *, on_session_changed=None):
     """Construct the live DeliveryBackend selected by INGRESS_DELIVERY_BACKEND.
 
     Returns None (and prints an error) if the selection is unknown or the
@@ -214,6 +214,7 @@ def _build_live_backend(args: argparse.Namespace, state_db: RAGIngressStateDB):
             couchdb_password=couchdb_password,
             couchdb_db=couchdb_db,
             environ=os.environ,
+            on_session_changed=on_session_changed,
         )
 
     print(
@@ -233,9 +234,12 @@ def _run_drain_deliveries(args: argparse.Namespace) -> int:
         if backend_name != _BACKEND_COUCHDB:
             # Unknown names keep the existing live-blocked gate.
             return _print_live_blocked("drain-deliveries")
+        from ..session_memory.change_events import SessionChangeCollector, publish_enabled
+
+        collector = SessionChangeCollector() if publish_enabled(os.environ) else None
         try:
             state_db = RAGIngressStateDB(args.state_db)
-            backend = _build_live_backend(args, state_db)
+            backend = _build_live_backend(args, state_db, on_session_changed=collector)
             if backend is None:
                 return 2
             result = drain_pending_deliveries(
@@ -250,6 +254,10 @@ def _run_drain_deliveries(args: argparse.Namespace) -> int:
         except (ValueError, OSError) as exc:
             print(str(exc), file=sys.stderr)
             return 2
+        if collector is not None:
+            # Best-effort wake-up for the session-memory lane; a publish failure
+            # is logged and never changes the drain result.
+            result["session_change_events_published"] = _publish_session_changes_blocking(collector)
         print(json.dumps(result, sort_keys=True))
         return 0
     try:
@@ -267,6 +275,25 @@ def _run_drain_deliveries(args: argparse.Namespace) -> int:
         return 2
     print(json.dumps(result, sort_keys=True))
     return 0
+
+
+def _publish_session_changes_blocking(collector) -> int:
+    import asyncio
+
+    from ..session_memory.change_events import nats_url_from_env, publish_events_standalone
+
+    events = collector.drain()
+    if not events:
+        return 0
+    try:
+        return int(asyncio.run(publish_events_standalone(
+            events,
+            nats_url=nats_url_from_env(os.environ),
+            log=lambda line: print(line, file=sys.stderr),
+        )))
+    except Exception as exc:  # noqa: BLE001
+        print(f"session_change_publish_failed count={len(events)} error={type(exc).__name__}", file=sys.stderr)
+        return 0
 
 
 def _run_reconcile_deliveries(args: argparse.Namespace) -> int:

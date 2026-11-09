@@ -19,8 +19,24 @@ services:
     # 유지돼 contract 일치. 호스트-cron과 동일 동작.
     network_mode: host
     environment:
+      # cron(기본) | watch(NATS JetStream 이벤트 기반, opt-in) | build
       RUN_MODE: ${RUN_MODE:-cron}
       NEURON_LEDGER_PG_DSN: ${NEURON_LEDGER_PG_DSN:-}
+      # watch(JetStream consumer) 설정. 기본값은 couchdb-session-memory-watch와 동일.
+      # network_mode: host 이므로 NATS는 loopback 바인드 주소를 쓴다.
+      RAG_INGRESS_NATS_URL: ${RAG_INGRESS_NATS_URL:-nats://127.0.0.1:4222}
+      SESSION_MEMORY_WATCH_DEBOUNCE_SECONDS: ${SESSION_MEMORY_WATCH_DEBOUNCE_SECONDS:-2}
+      SESSION_MEMORY_WATCH_DEBOUNCE_MAX_SECONDS: ${SESSION_MEMORY_WATCH_DEBOUNCE_MAX_SECONDS:-10}
+      SESSION_MEMORY_WATCH_IDLE_SWEEP_SECONDS: ${SESSION_MEMORY_WATCH_IDLE_SWEEP_SECONDS:-900}
+      SESSION_MEMORY_WATCH_MAX_DELIVER: ${SESSION_MEMORY_WATCH_MAX_DELIVER:-5}
+      SESSION_MEMORY_WATCH_NAK_BACKOFF_SECONDS: ${SESSION_MEMORY_WATCH_NAK_BACKOFF_SECONDS:-30,60,120,300}
+    # RUN_MODE=watch에서만 heartbeat 나이를 판정한다(cron/build는 항상 not_applicable=0).
+    healthcheck:
+      test: ["CMD", "python", "-m", "agent_knowledge.cli", "couchdb-session-memory-watch", "--health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
     security_opt:
       - no-new-privileges:true
     volumes:

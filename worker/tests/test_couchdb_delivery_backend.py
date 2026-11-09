@@ -1285,3 +1285,58 @@ def test_submit_missing_session_id_hash_returns_integrity_mismatch(tmp_path):
     evidence = backend.submit(_job_view(state_db, "idem_no_sid"))
     assert evidence.status == "payload_integrity_mismatch"
     assert store.all_docs() == []
+
+
+def test_session_changed_hook_receives_hashed_identifiers_after_success(tmp_path):
+    state_db = _state_db(tmp_path)
+    payload = _payload(idempotency_key="idem_session_changed")
+    _seed(state_db, payload)
+    events = []
+    backend = CouchDBDeliveryBackend(
+        state_db=state_db,
+        store=InMemoryCouchDBSourceStore(),
+        on_session_changed=events.append,
+    )
+
+    evidence = backend.submit(_job_view(state_db, "idem_session_changed"))
+
+    assert evidence.status == "succeeded"
+    (event,) = events
+    assert event.session_id_hash == SESSION_ID_HASH
+    assert event.payload_hash == evidence.payload_hash
+    assert set(event.__dataclass_fields__) == {
+        "session_id_hash", "provider", "project", "payload_hash", "changed_at", "schema_version"
+    }
+
+
+def test_session_changed_hook_failure_cannot_change_couchdb_success(tmp_path):
+    def failing_hook(_event):
+        raise RuntimeError("publisher down")
+
+    state_db = _state_db(tmp_path)
+    payload = _payload(idempotency_key="idem_session_changed_failure")
+    _seed(state_db, payload)
+    store = InMemoryCouchDBSourceStore()
+    backend = CouchDBDeliveryBackend(state_db=state_db, store=store, on_session_changed=failing_hook)
+
+    evidence = backend.submit(_job_view(state_db, "idem_session_changed_failure"))
+
+    assert evidence.status == "succeeded"
+    assert store.get(session_doc_id(SESSION_ID_HASH)) is not None
+
+
+def test_session_changed_hook_is_not_called_when_submit_fails(tmp_path):
+    class FailingStore(InMemoryCouchDBSourceStore):
+        def put(self, document):
+            raise RuntimeError("simulated CouchDB failure")
+
+    state_db = _state_db(tmp_path)
+    payload = _payload(idempotency_key="idem_session_changed_store_failure")
+    _seed(state_db, payload)
+    events = []
+    backend = CouchDBDeliveryBackend(state_db=state_db, store=FailingStore(), on_session_changed=events.append)
+
+    with pytest.raises(Exception):
+        backend.submit(_job_view(state_db, "idem_session_changed_store_failure"))
+
+    assert events == []

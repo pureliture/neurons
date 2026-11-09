@@ -164,6 +164,7 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "memory": autopilot_cli.main,
     "session-entry-recall": _pending_server_command("session-entry-recall"),
     "couchdb-session-memory-build": couchdb_build_cli.main,
+    "couchdb-session-memory-watch": _lazy_handler(".couchdb_source.watch_cli"),
     "couchdb-migration-flow": _lazy_handler(".couchdb_source.migration_flow_cli"),
     "couchdb-graph-trigger": _lazy_handler(".llm_brain_core.graph_trigger_cli"),
     "couchdb-graph-project": _lazy_handler(".llm_brain_core.couchdb_projection_cli"),
@@ -199,6 +200,11 @@ COMMAND_METADATA: dict[str, dict[str, object]] = {
         "runtime_category": "active_runtime",
         "deletion_candidate": False,
         "live_mutation_requires_approval": True,
+    },
+    "couchdb-session-memory-watch": {
+        "runtime_category": "active_runtime",
+        "deletion_candidate": False,
+        "live_mutation_requires_approval": False,
     },
     "couchdb-migration-flow": {
         "runtime_category": "human_gated_migration",

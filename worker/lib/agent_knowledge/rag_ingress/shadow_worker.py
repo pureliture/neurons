@@ -352,6 +352,7 @@ async def run_consume(*, nats_url: str, stream: str, subject: str, durable: str,
                       pressure_open: Callable[[], bool] | None = None,
                       lease_owner: str | None = None,
                       lease_owner_factory: Callable[[str, int], str] | None = None,
+                      session_change_collector=None,
                       log: Callable[[str], None] = print) -> dict:
     """Async JetStream pull-consume loop.
 
@@ -399,6 +400,18 @@ async def run_consume(*, nats_url: str, stream: str, subject: str, durable: str,
             raise  # Missing consumer, permissions or drift never trigger create.
     else:
         sub = await js.pull_subscribe(subject, durable=durable, stream=stream)
+    if session_change_collector is not None:
+        # session-memory wake-up lane (best-effort). The stream is ensured once
+        # so a publish never fails merely because the consumer has not started.
+        from ..session_memory.change_events import (
+            ensure_session_memory_stream,
+            publish_collected_best_effort,
+        )
+
+        try:
+            await ensure_session_memory_stream(js)
+        except Exception as exc:  # noqa: BLE001
+            log(f"session_change_stream_unavailable error={type(exc).__name__}")
     processed = 0
     results: list[str] = []
     fetch_batch = max(int(fetch_batch), 1)
@@ -427,6 +440,8 @@ async def run_consume(*, nats_url: str, stream: str, subject: str, durable: str,
                 )
                 await msg.ack()
                 log(f"worker processed status={res.status} delivered={res.delivered}")
+                if session_change_collector is not None:
+                    await publish_collected_best_effort(js, session_change_collector, log=log)
                 return res.status
             except DeliveryDeferred as exc:
                 await msg.nak(delay=exc.delay_seconds())
@@ -634,10 +649,14 @@ def main() -> int:
     )
     lease_owner = _new_lease_owner()
     backend = None
+    session_change_collector = None
     if deliver:
         if delivery_backend == _DELIVERY_BACKEND_COUCHDB:
             from .couchdb_delivery_backend import build_couchdb_delivery_backend
+            from ..session_memory.change_events import SessionChangeCollector, publish_enabled
 
+            if publish_enabled(os.environ):
+                session_change_collector = SessionChangeCollector()
             assert couchdb_config is not None
             backend = build_couchdb_delivery_backend(
                 state_db=store.state_db,
@@ -646,6 +665,7 @@ def main() -> int:
                 couchdb_password=couchdb_config["COUCHDB_PASSWORD"],
                 couchdb_db=couchdb_config["COUCHDB_DB"],
                 environ=os.environ,
+                on_session_changed=session_change_collector,
             )
     nats_url = os.environ.get("RAG_INGRESS_NATS_URL", "nats://127.0.0.1:4222")
     subject = os.environ.get("SHADOW_SUBJECT", "rag.shadow.>")
@@ -669,6 +689,7 @@ def main() -> int:
             allow_live=allow_live, max_deliver=max_deliver,
             fetch_batch=fetch_batch, concurrency=concurrency,
             pressure_open=pressure_open, lease_owner=lease_owner,
+            session_change_collector=session_change_collector,
         ))
     print(json.dumps(result, sort_keys=True))
     return 0
