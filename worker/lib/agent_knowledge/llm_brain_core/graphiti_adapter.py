@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import inspect
 import logging
 import os
 import threading
@@ -323,6 +324,7 @@ class GraphitiNeo4jGraphMemoryAdapter:
         # episode_id" by checking for MENTIONS edges from the episode to any
         # Entity. Injectable for tests; defaults to a MENTIONS-count query.
         self._entity_extracted = entity_extracted or _default_entity_extracted
+        self._indices_ready: set[int] = set()
 
     @classmethod
     def from_config(cls, config: GraphitiNeo4jConfig) -> "GraphitiNeo4jGraphMemoryAdapter":
@@ -378,6 +380,22 @@ class GraphitiNeo4jGraphMemoryAdapter:
             valid_at=_parse_datetime(episode.reference_time),
         )
 
+    async def _ensure_graph_indices(self) -> None:
+        # Graphiti's Neo4jDriver only schedules index creation when constructed
+        # inside a running loop, which this sync wrapper never is. Without the
+        # fulltext/range indexes a fresh Neo4j fails edge search (ClientError on
+        # `edge_name_and_fact`). The DDL is IF NOT EXISTS, so run it once per
+        # Graphiti instance before the first write.
+        for graphiti in (self._graphiti, self._fallback_graphiti):
+            if graphiti is None or id(graphiti) in self._indices_ready:
+                continue
+            build = getattr(graphiti, "build_indices_and_constraints", None)
+            if callable(build):
+                result = build()
+                if inspect.isawaitable(result):
+                    await result
+            self._indices_ready.add(id(graphiti))
+
     def upsert_episode(self, episode: OntologyEpisode) -> UpsertEpisodeResult:
         # Two-body split:
         #   `body`            -> stored EpisodicNode.content (canonical JSON). Recall
@@ -393,6 +411,7 @@ class GraphitiNeo4jGraphMemoryAdapter:
         group_id = graph_group_id_for_episode(episode, self._default_group_id)
 
         async def _call() -> UpsertEpisodeResult:
+            await self._ensure_graph_indices()
             if not self._extract_entities:
                 # episode_id MERGE idempotency: an episode_id already encodes the
                 # content_hash (see OntologyEpisode.from_payload), so a node with

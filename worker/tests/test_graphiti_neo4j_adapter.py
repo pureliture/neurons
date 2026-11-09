@@ -146,6 +146,29 @@ def test_graphiti_adapter_default_path_inserts_then_reports_duplicate_on_reupser
     assert graphiti.saved_uuids == [episode.episode_id]
 
 
+def test_graphiti_adapter_builds_graph_indices_once_before_first_write():
+    # Graphiti's driver only schedules index creation inside a running loop, so a
+    # fresh Neo4j would lack the fulltext indexes edge search depends on.
+    class _IndexTrackingGraphiti(_FakeGraphiti):
+        def __init__(self) -> None:
+            super().__init__()
+            self.index_builds = 0
+
+        async def build_indices_and_constraints(self, delete_existing: bool = False):
+            assert not self.saved_uuids
+            self.index_builds += 1
+
+    graphiti = _IndexTrackingGraphiti()
+    adapter = GraphitiNeo4jGraphMemoryAdapter(graphiti, default_group_id="/project/neurons")
+
+    for natural_id in ("task:index-a", "task:index-b"):
+        episode = _episode("Task", natural_id, {"brain_id": "/project/neurons", "task": natural_id})
+        assert adapter.upsert_episode(episode) == "inserted"
+
+    assert graphiti.index_builds == 1
+    assert len(graphiti.saved_uuids) == 2
+
+
 def test_graphiti_adapter_default_path_does_not_build_entity_extraction_body(monkeypatch):
     graphiti = _FakeGraphiti()
 
