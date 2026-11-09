@@ -554,3 +554,131 @@ def test_legacy_currentness_rechecks_pointer_published_between_matching_scans():
     assert activated == [True]
     assert expected != legacy_hash
     assert actual == expected
+
+
+class _PointerReadHookStore:
+    """Delegates to an in-memory store and runs a hook before each pointer GET."""
+
+    def __init__(self, inner: InMemoryCouchDBSourceStore, on_pointer_get: Callable[[int], None]):
+        self._inner = inner
+        self._on_pointer_get = on_pointer_get
+        self.pointer_gets = 0
+
+    def __getattr__(self, name: str):
+        return getattr(self._inner, name)
+
+    def get_bounded(self, doc_id: str, *, max_response_bytes: int):
+        if doc_id.startswith(f"{dm.SourceDocType.ACTIVE_SOURCE_REVISION}:"):
+            self.pointer_gets += 1
+            self._on_pointer_get(self.pointer_gets)
+        return self._inner.get_bounded(doc_id, max_response_bytes=max_response_bytes)
+
+
+class _PointerWriteDroppingStore:
+    """Lets activation stage copies/manifest/member but withholds the pointer CAS."""
+
+    def __init__(self, inner: InMemoryCouchDBSourceStore):
+        self._inner = inner
+        self.withheld_pointer: dict | None = None
+
+    def __getattr__(self, name: str):
+        return getattr(self._inner, name)
+
+    def put_if_revision(self, document: dict, *, expected_rev: str):
+        if document.get("doc_type") == dm.SourceDocType.ACTIVE_SOURCE_REVISION:
+            self.withheld_pointer = dict(document)
+            return dict(document)
+        return self._inner.put_if_revision(document, expected_rev=expected_rev)
+
+
+def _legacy_session_fixture(label: str) -> tuple[str, InMemoryCouchDBSourceStore, dict, list[dict]]:
+    session_id_hash = dm.build_session_id_hash("codex", label)
+    inner = InMemoryCouchDBSourceStore()
+    session = dm.build_transcript_session_document(
+        session=TranscriptSession(
+            session_id_hash=session_id_hash,
+            provider="codex",
+            project="neurons",
+            started_at="2026-11-01T00:00:00Z",
+            ended_at="2026-11-01T00:01:00Z",
+        )
+    )
+    chunks = [
+        dm.build_conversation_chunk_document(
+            chunk=TranscriptChunk.from_text(
+                chunk_id=f"{label}-chunk-{index}",
+                session_id_hash=session_id_hash,
+                provider="codex",
+                project="neurons",
+                turn_start_index=index,
+                turn_end_index=index,
+                text=f"{label} body {index}",
+            )
+        )
+        for index in range(2)
+    ]
+    inner.put(session)
+    for chunk in chunks:
+        inner.put(chunk)
+    return session_id_hash, inner, session, chunks
+
+
+def _stage_activation_without_pointer(
+    inner: InMemoryCouchDBSourceStore, session_id_hash: str
+) -> _PointerWriteDroppingStore:
+    staging = _PointerWriteDroppingStore(inner)
+    activate_source_revision(store=cast(CouchDBSourceStore, staging), session_id_hash=session_id_hash)
+    assert staging.withheld_pointer is not None
+    assert inner.get(dm.active_source_revision_pointer_doc_id(session_id_hash)) is None
+    return staging
+
+
+def test_legacy_currentness_treats_activation_staged_mid_read_as_retryable():
+    session_id_hash, inner, _session, _chunks = _legacy_session_fixture("in-flight-staging")
+
+    def stage_before_recheck(pointer_get_index: int):
+        if pointer_get_index == 2:
+            _stage_activation_without_pointer(inner, session_id_hash)
+
+    store = _PointerReadHookStore(inner, stage_before_recheck)
+
+    with pytest.raises(SourceRevisionSnapshotChangedError):
+        resolve_source_hash_for_currentness(
+            session_id_hash=session_id_hash,
+            store=cast(CouchDBSourceStore, store),
+        )
+    assert store.pointer_gets == 3
+
+
+def test_legacy_currentness_follows_pointer_landing_after_mid_read_staging():
+    session_id_hash, inner, _session, _chunks = _legacy_session_fixture("in-flight-landing")
+    staged: list[_PointerWriteDroppingStore] = []
+
+    def stage_then_publish(pointer_get_index: int):
+        if pointer_get_index == 2:
+            staged.append(_stage_activation_without_pointer(inner, session_id_hash))
+        elif pointer_get_index == 3:
+            inner.put_if_revision(staged[0].withheld_pointer, expected_rev="")
+
+    store = _PointerReadHookStore(inner, stage_then_publish)
+
+    actual = resolve_source_hash_for_currentness(
+        session_id_hash=session_id_hash,
+        store=cast(CouchDBSourceStore, store),
+    )
+
+    expected = resolve_active_source_revision(store=inner, session_id_hash=session_id_hash).source_hash
+    assert actual == expected
+
+
+def test_legacy_currentness_keeps_hard_error_for_preexisting_orphan_controls():
+    session_id_hash, inner, _session, _chunks = _legacy_session_fixture("permanent-orphan")
+    _stage_activation_without_pointer(inner, session_id_hash)
+
+    with pytest.raises(SourceRevisionResolutionError) as excinfo:
+        resolve_source_hash_for_currentness(
+            session_id_hash=session_id_hash,
+            store=inner,
+        )
+    assert not isinstance(excinfo.value, SourceRevisionSnapshotChangedError)
+    assert "without an active pointer" in str(excinfo.value)

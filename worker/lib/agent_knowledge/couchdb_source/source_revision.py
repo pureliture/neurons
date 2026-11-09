@@ -1443,7 +1443,20 @@ def _read_currentness_pointer(
     store: CouchDBSourceStore,
     session_id_hash: str,
     budget: dict[str, int],
+    controls_may_be_in_flight: bool = False,
 ) -> tuple[dict | None, dict | None]:
+    """Read the active pointer and verify it against the session control documents.
+
+    Controls (pointer candidates, members, manifest) without a pointer are a
+    permanent orphan and fail closed, unless the caller already observed the
+    session without any controls earlier in the same bounded read; then they
+    belong to an activation still in flight and the read must be retried.
+    """
+    in_flight_error = (
+        SourceRevisionSnapshotChangedError
+        if controls_may_be_in_flight
+        else SourceRevisionResolutionError
+    )
     pointer_id = dm.active_source_revision_pointer_doc_id(session_id_hash)
     pointer = _get_bounded_currentness_document(
         store=store,
@@ -1462,7 +1475,7 @@ def _read_currentness_pointer(
     )
     if pointer is None:
         if candidates:
-            raise SourceRevisionResolutionError("active source revision pointer is invalid")
+            raise in_flight_error("active source revision pointer is invalid")
         orphan_member = next(
             _iter_bounded_currentness_documents(
                 store=store,
@@ -1484,7 +1497,7 @@ def _read_currentness_pointer(
             None,
         )
         if orphan_member is not None or orphan_manifest is not None:
-            raise SourceRevisionResolutionError(
+            raise in_flight_error(
                 "active source revision controls exist without an active pointer"
             )
         return None, None
@@ -1653,13 +1666,20 @@ def resolve_source_hash_for_currentness(
     """
 
     dm.assert_hash_like("session_id_hash", session_id_hash)
+    activation_in_flight = False
     for attempt in range(SOURCE_CURRENTNESS_MAX_RETRIES + 1):
         budget = {"rows": 0, "compact_bytes": 0}
-        pointer, parsed_pointer = _read_currentness_pointer(
-            store=store,
-            session_id_hash=session_id_hash,
-            budget=budget,
-        )
+        try:
+            pointer, parsed_pointer = _read_currentness_pointer(
+                store=store,
+                session_id_hash=session_id_hash,
+                budget=budget,
+                controls_may_be_in_flight=activation_in_flight,
+            )
+        except SourceRevisionSnapshotChangedError:
+            if attempt >= SOURCE_CURRENTNESS_MAX_RETRIES:
+                break
+            continue
         if parsed_pointer is None:
             first_hash = _source_hash_from_currentness_components(
                 _legacy_currentness_components(
@@ -1681,13 +1701,18 @@ def resolve_source_hash_for_currentness(
                 # cannot see a revision that was published mid-read. Re-read the
                 # pointer before trusting the legacy hash; a pointer that appeared
                 # means the active path must decide.
-                _, parsed_pointer_after = _read_currentness_pointer(
-                    store=store,
-                    session_id_hash=session_id_hash,
-                    budget=budget,
-                )
-                if parsed_pointer_after is None:
-                    return first_hash
+                try:
+                    _, parsed_pointer_after = _read_currentness_pointer(
+                        store=store,
+                        session_id_hash=session_id_hash,
+                        budget=budget,
+                        controls_may_be_in_flight=True,
+                    )
+                except SourceRevisionSnapshotChangedError:
+                    activation_in_flight = True
+                else:
+                    if parsed_pointer_after is None:
+                        return first_hash
             if attempt >= SOURCE_CURRENTNESS_MAX_RETRIES:
                 break
             continue
