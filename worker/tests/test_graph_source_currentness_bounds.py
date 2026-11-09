@@ -371,7 +371,7 @@ def test_active_source_currentness_fails_closed_on_control_corruption(corruption
         )
 
 
-def test_unrelated_database_write_causes_one_safe_retry_not_a_mixed_hash():
+def test_unrelated_database_write_is_ignored_by_session_scope_scan():
     documents = _source_documents()
     session_id_hash = str(documents[0]["session_id_hash"])
     expected = resolve_active_source_revision_from_snapshot(
@@ -379,24 +379,27 @@ def test_unrelated_database_write_causes_one_safe_retry_not_a_mixed_hash():
         documents=documents,
     ).source_hash
     store = _PagedSourceStore(documents)
-    sequence_reads = 0
+    unrelated_writes = 0
 
-    def read_sequence_with_unrelated_write():
-        nonlocal sequence_reads
-        sequence_reads += 1
-        if sequence_reads == 2:
-            store.sequence += 1
-            store.documents.append(
-                {
-                    "_id": "unrelated-session:write",
-                    "doc_type": dm.SourceDocType.CONVERSATION_CHUNK,
-                    "session_id_hash": dm.build_session_id_hash("codex", "other-session"),
-                    "content_hash": dm.sha256_hash("unrelated"),
-                }
-            )
-        return str(store.sequence)
+    def append_unrelated_session_chunk(doc_type, offset, current_store):
+        nonlocal unrelated_writes
+        if (
+            unrelated_writes
+            or doc_type != dm.SourceDocType.CONVERSATION_CHUNK
+            or offset != 0
+        ):
+            return
+        unrelated_writes += 1
+        current_store.documents.append(
+            {
+                "_id": "unrelated-session:write",
+                "doc_type": dm.SourceDocType.CONVERSATION_CHUNK,
+                "session_id_hash": dm.build_session_id_hash("codex", "other-session"),
+                "content_hash": dm.sha256_hash("unrelated"),
+            }
+        )
 
-    store.read_change_sequence = read_sequence_with_unrelated_write
+    store.on_page = append_unrelated_session_chunk
 
     actual = session_source_revision_from_couchdb_source(
         session_id_hash=session_id_hash,
@@ -404,23 +407,32 @@ def test_unrelated_database_write_causes_one_safe_retry_not_a_mixed_hash():
     )
 
     assert actual == expected
-    assert sequence_reads == 4
+    assert unrelated_writes == 1
 
 
-def test_continued_unrelated_database_churn_fails_after_one_retry():
+def test_continued_same_session_churn_fails_after_one_retry():
     documents = _source_documents()
     session_id_hash = str(documents[0]["session_id_hash"])
+    session_chunk = next(
+        document
+        for document in documents
+        if document.get("doc_type") == dm.SourceDocType.CONVERSATION_CHUNK
+    )
     store = _PagedSourceStore(documents)
-    sequence_reads = 0
+    scannable = {"scans_started": 0}
 
-    def read_sequence_with_continued_unrelated_writes():
-        nonlocal sequence_reads
-        sequence_reads += 1
-        if sequence_reads in {2, 4}:
-            store.sequence += 1
-        return str(store.sequence)
+    def flip_same_session_chunk_hash(doc_type, offset, current_store):
+        if doc_type != dm.SourceDocType.CONVERSATION_CHUNK or offset != 0:
+            return
+        scannable["scans_started"] += 1
+        for document in current_store.documents:
+            if document.get("_id") == session_chunk["_id"]:
+                document["content_hash"] = dm.sha256_hash(
+                    f"churn-{scannable['scans_started']}"
+                )
+                break
 
-    store.read_change_sequence = read_sequence_with_continued_unrelated_writes
+    store.on_page = flip_same_session_chunk_hash
 
     with pytest.raises(SourceRevisionSnapshotChangedError):
         session_source_revision_from_couchdb_source(
@@ -428,7 +440,7 @@ def test_continued_unrelated_database_churn_fails_after_one_retry():
             source_store=cast(CouchDBSourceStore, store),
         )
 
-    assert sequence_reads == 4
+    assert scannable["scans_started"] == 4
 
 
 def test_same_session_change_during_paging_discards_mixed_attempt_and_retries():
