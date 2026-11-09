@@ -97,7 +97,19 @@ def test_query_is_graph_first_then_authority_join_and_preserves_graph_order():
 
     assert calls == ["graph", "health", ("list", ["mem_a", "mem_b"])]
     assert [item["id"] for item in result["items"]] == ["mem_a", "mem_b"]
-    assert result["metadata"] == {"retrieval_path": "graph_neo4j", "graph_status": "available", "authority_join_status": "verified", "fallback_used": False, "projection_lag_ms": None, "has_more": False, "temporal_coverage": {"items": 2, "with_observed_at": 0, "unknown_age": 2, "anomalous_time": 0}}
+    assert result["metadata"] == {
+        "retrieval_path": "graph_neo4j", "graph_status": "available", "authority_join_status": "verified",
+        "fallback_used": False, "projection_lag_ms": None, "has_more": False,
+        "session_memory_merged": False,
+        "freshness": {
+            "projection_lag_ms": None, "unprojected_cards": False, "session_memory_available": False,
+            "session_memory_last_built_at": None, "session_memory_last_observed_at": None,
+            "session_memory_pending_chunks": None, "session_memory_pending_sessions": None,
+        },
+        "sources": {"graph_card": 2, "session_memory": 0},
+        "temporal_coverage": {"items": 2, "with_observed_at": 0, "unknown_age": 2, "anomalous_time": 0},
+    }
+    assert all(item["source"] == "graph_card" for item in result["items"])
 
 
 def test_unprojected_graph_keeps_verified_graph_order_and_supplements_from_pgvector():
@@ -649,3 +661,130 @@ def test_context_status_state_token_keeps_title_and_supplements_topical_chunk_fa
     assert "paper-trader-kr-decision" in ctx_res["statuses"][0]["status"]
     assert "US postmarket SLA evidence prefetch completed" in ctx_res["statuses"][1]["status"]
     assert ctx_res["statuses"][1]["status_state"] == "completed"
+
+
+HASH_C = "sha256:" + "c" * 64
+
+
+class SharedBrainStore(Store):
+    """graph card와 다른 에이전트의 session-memory 청크를 함께 가진 PG 대역."""
+
+    def __init__(self, *args, chunks=None, freshness=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.chunks = list(chunks or [])
+        self.freshness = freshness
+
+    def search_session_chunks(self, query_vector, project=None, limit=5, conn=None):
+        self.calls.append(("chunks", project))
+        return list(self.chunks)
+
+    def session_memory_freshness(self, project):
+        self.calls.append(("freshness", project))
+        if self.freshness is None:
+            raise RuntimeError("freshness unavailable")
+        return dict(self.freshness)
+
+
+def _chunk_row(chunk_id: str, text: str, content_hash: str, distance: float = 0.2) -> dict:
+    return {
+        "chunk_id": chunk_id,
+        "project": "neurons",
+        "provider": "codex",
+        "content_markdown": _SESSION_CHUNK_HEADER.format(sid=chunk_id) + text,
+        "content_hash": content_hash,
+        "distance": distance,
+        "observed_at": "2026-11-09T01:00:00+00:00",
+        "created_at": "2026-11-09T01:05:00+00:00",
+    }
+
+
+def test_query_always_merges_session_memory_with_graph_cards_by_rank_fusion():
+    calls = []
+    store = SharedBrainStore(
+        cards=[_card("mem_a", HASH_A)],
+        calls=calls,
+        chunks=[_chunk_row("chk_agent_b", "user: authority 저장소를 PostgreSQL로 결정했다\n", HASH_B)],
+        freshness={
+            "last_built_at": "2026-11-09T01:05:00+00:00",
+            "last_observed_at": "2026-11-09T01:00:00+00:00",
+            "pending_chunks": 1,
+            "pending_sessions": 1,
+        },
+    )
+    graph = Graph([_episode("mem_a", HASH_A)], calls=calls)
+
+    result = GraphFirstResolver(store, graph, lambda _: [0.1, 0.2]).resolve(project="neurons", query="authority 결정")
+
+    # 관련 card가 있어도 session-memory 검색은 생략되지 않는다.
+    assert ("chunks", "neurons") in calls
+    assert [item["id"] for item in result["items"]] == ["mem_a", "chunk:chk_agent_b"]
+    assert [item["source"] for item in result["items"]] == ["graph_card", "session_memory"]
+    assert result["metadata"]["retrieval_path"] == "graph_neo4j"
+    assert result["metadata"]["fallback_used"] is False
+    assert result["metadata"]["session_memory_merged"] is True
+    assert result["metadata"]["sources"] == {"graph_card": 1, "session_memory": 1}
+    freshness = result["metadata"]["freshness"]
+    assert freshness["session_memory_available"] is True
+    assert freshness["session_memory_last_built_at"] == "2026-11-09T01:05:00+00:00"
+    assert freshness["session_memory_pending_chunks"] == 1
+    assert freshness["session_memory_pending_sessions"] == 1
+    assert freshness["unprojected_cards"] is False
+
+
+def test_rank_fusion_lets_higher_ranked_session_memory_precede_lower_ranked_cards():
+    store = SharedBrainStore(
+        cards=[_card("mem_a", HASH_A), _card("mem_b", HASH_B)],
+        chunks=[_chunk_row("chk_top", "user: authority 결정 최신 세션\n", HASH_C, distance=0.05)],
+    )
+    graph = Graph([_episode("mem_a", HASH_A), _episode("mem_b", HASH_B)])
+
+    result = GraphFirstResolver(store, graph, lambda _: [0.1]).resolve(project="neurons", query="authority 결정")
+
+    # RRF: card 1위와 chunk 1위는 동점이며 권위 card가 먼저, chunk 1위가 card 2위보다 앞선다.
+    assert [item["id"] for item in result["items"]] == ["mem_a", "chunk:chk_top", "mem_b"]
+
+
+def test_session_memory_duplicates_by_content_hash_are_collapsed():
+    text = "user: 같은 세션 본문이 legacy/local id로 두 번 저장됨\n"
+    store = SharedBrainStore(
+        cards=[],
+        chunks=[_chunk_row("chk_legacy", text, HASH_C, 0.1), _chunk_row("chk_local", text, HASH_C, 0.11)],
+    )
+
+    result = GraphFirstResolver(store, Graph([]), lambda _: [0.1]).resolve(project="neurons", query="세션 본문")
+
+    assert [item["id"] for item in result["items"]] == ["chunk:chk_legacy"]
+    assert result["metadata"]["retrieval_path"] == "pgvector_fallback"
+    assert result["metadata"]["fallback_used"] is True
+    assert result["metadata"]["sources"] == {"graph_card": 0, "session_memory": 1}
+
+
+def test_freshness_probe_failure_is_reported_as_unavailable_not_error():
+    store = SharedBrainStore(cards=[_card()], chunks=[], freshness=None)
+    result = GraphFirstResolver(store, Graph([_episode()]), lambda _: [0.1]).resolve(project="neurons", query="authority")
+    assert "error_code" not in result
+    assert result["metadata"]["freshness"]["session_memory_available"] is False
+    assert result["metadata"]["session_memory_merged"] is False
+
+
+def test_as_of_query_does_not_merge_session_memory():
+    store = SharedBrainStore(cards=[_card()], chunks=[_chunk_row("chk_x", "user: authority\n", HASH_B)])
+    result = GraphFirstResolver(store, Graph([_episode()]), lambda _: [0.1]).resolve(
+        project="neurons", query="authority", as_of="2026-11-01"
+    )
+    assert [item["id"] for item in result["items"]] == ["mem_a"]
+    assert result["metadata"]["session_memory_merged"] is False
+
+
+def test_query_embeds_once_per_request_even_when_fallback_and_session_memory_run():
+    embedded = []
+    store = SharedBrainStore(cards=[_card()], chunks=[_chunk_row("chk_x", "user: authority\n", HASH_B)])
+    for card in store.cards:
+        card["semantic_score"] = 0.9
+    result = GraphFirstResolver(store, Graph([], status="unavailable"), lambda q: embedded.append(q) or [0.1]).resolve(
+        project="neurons", query="authority"
+    )
+    assert embedded == ["authority"]
+    assert [item["id"] for item in result["items"]] == ["mem_a", "chunk:chk_x"]
+    assert result["metadata"]["retrieval_path"] == "pgvector_fallback"
+    assert result["metadata"]["session_memory_merged"] is True

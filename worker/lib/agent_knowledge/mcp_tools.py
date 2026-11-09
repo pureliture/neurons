@@ -223,9 +223,11 @@ def list_public_agent_tools() -> list[dict]:
         {
             "name": BRAIN_RESOLVE_TOOL_NAME,
             "description": (
-                "통합 LLM-Brain 읽기 도구. 프로젝트 활성 컨텍스트(mode='context'), "
-                "Graphiti/Neo4j 우선 질의(mode='query'), 또는 카드 목록(mode='list')을 조회한다. "
-                "그래프 장애·미투영 시 PG fallback과 검색 경로 metadata를 명시한다."
+                "통합 LLM-Brain 읽기 도구(공용 뇌). query가 있으면 기본 mode='query'로 "
+                "Graphiti/Neo4j 우선 질의 후 PG 권위 card와 다른 에이전트의 session-memory를 "
+                "rank fusion으로 병합해 돌려준다(items[].source=graph_card|session_memory). "
+                "프로젝트 활성 컨텍스트(mode='context'), 카드 목록(mode='list')도 지원한다. "
+                "그래프 장애·미투영 시 PG fallback과 검색 경로·신선도(metadata.freshness)를 명시한다."
             ),
             "inputSchema": {
                 "type": "object",
@@ -244,8 +246,11 @@ def list_public_agent_tools() -> list[dict]:
                     "mode": {
                         "type": "string",
                         "enum": ["context", "query", "list"],
-                        "default": "context",
-                        "description": "조회 모드: context (활성 컨텍스트), query (시맨틱/키워드 검색), list (카드 목록)",
+                        "default": "query",
+                        "description": (
+                            "조회 모드: query (그래프 우선 검색 + session-memory 병합, query가 있을 때 기본), "
+                            "context (활성 컨텍스트, query가 비어 있을 때 기본), list (카드 목록)"
+                        ),
                     },
                     "response_mode": {
                         "type": "string",

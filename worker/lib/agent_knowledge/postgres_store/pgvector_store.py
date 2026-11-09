@@ -1810,6 +1810,45 @@ class PgVectorStore:
         return {"unprojected": int(_row_value(row, "missing", 0)) > 0,
                 "projection_lag_ms": lag}
 
+    def session_memory_freshness(self, project: str, *, conn: Any | None = None) -> dict[str, Any]:
+        """프로젝트 session-memory의 PG 반영 상태. ingress/CouchDB 단계의 지연은 보지 못한다.
+
+        pending은 어느 embedding profile로도 검색 가능 상태가 아닌 청크다
+        (legacy `embedding_state <> 'ready'` 이면서 ready 상태의 local embedding 행도 없음).
+        """
+        pending_clause = """
+            NOT (
+                smc.embedding_state = 'ready'
+                OR EXISTS (
+                    SELECT 1 FROM session_local_embeddings sle
+                     WHERE sle.chunk_id = smc.chunk_id
+                       AND sle.state = 'ready'
+                       AND sle.source_content_hash = smc.content_hash
+                )
+            )"""
+        with self._scope(conn=conn) as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT MAX(smc.created_at) AS last_built_at,
+                           MAX(smc.observed_at) AS last_observed_at,
+                           COUNT(*) AS total_chunks,
+                           COUNT(*) FILTER (WHERE {pending_clause}) AS pending_chunks,
+                           COUNT(DISTINCT smc.session_id_hash) FILTER (WHERE {pending_clause}) AS pending_sessions
+                      FROM session_memory_chunks AS smc
+                     WHERE smc.project = %s
+                    """,
+                    (project,),
+                )
+                row = cur.fetchone()
+        return {
+            "last_built_at": _row_value(row, "last_built_at", 0),
+            "last_observed_at": _row_value(row, "last_observed_at", 1),
+            "total_chunks": int(_row_value(row, "total_chunks", 2) or 0),
+            "pending_chunks": int(_row_value(row, "pending_chunks", 3) or 0),
+            "pending_sessions": int(_row_value(row, "pending_sessions", 4) or 0),
+        }
+
     def hybrid_search(
         self,
         project: str | list[float] = "",
