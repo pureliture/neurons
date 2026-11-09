@@ -1158,3 +1158,47 @@ def test_pre_cas_origin_mutation_leaves_active_snapshot_resolvable_but_fail_clos
     assert store.get(dm.active_source_revision_pointer_doc_id(_session_id_hash())) != previous_pointer
     resolved = resolve_active_source_revision(store=store, session_id_hash=_session_id_hash())
     assert resolved.conversation_chunks[0]["body"] == chunk["body"]
+
+
+def test_metadata_only_tool_evidence_bundle_passes_material_integrity():
+    from agent_knowledge.couchdb_source.source_revision import _assert_material_body_integrity
+
+    _assert_material_body_integrity(
+        {
+            "doc_type": dm.SourceDocType.TOOL_EVIDENCE_BUNDLE,
+            "session_id_hash": _session_id_hash(),
+            "project": "neurons",
+            "provider": "codex",
+        }
+    )
+
+
+def test_tool_evidence_bundle_with_body_but_no_hash_still_fails():
+    from agent_knowledge.couchdb_source.source_revision import _assert_material_body_integrity
+
+    with pytest.raises(SourceRevisionResolutionError, match="missing its material hash"):
+        _assert_material_body_integrity(
+            {
+                "doc_type": dm.SourceDocType.TOOL_EVIDENCE_BUNDLE,
+                "session_id_hash": _session_id_hash(),
+                "project": "neurons",
+                "provider": "codex",
+                "body": "public-safe evidence summary",
+            }
+        )
+
+
+def test_tool_evidence_bundle_body_hash_mismatch_still_fails():
+    from agent_knowledge.couchdb_source.source_revision import _assert_material_body_integrity
+
+    with pytest.raises(SourceRevisionResolutionError, match="does not match"):
+        _assert_material_body_integrity(
+            {
+                "doc_type": dm.SourceDocType.TOOL_EVIDENCE_BUNDLE,
+                "session_id_hash": _session_id_hash(),
+                "project": "neurons",
+                "provider": "codex",
+                "content_hash": dm.sha256_hash("different body"),
+                "body": "public-safe evidence summary",
+            }
+        )

@@ -566,11 +566,20 @@ def _assert_material_body_integrity(document: Mapping[str, object]) -> None:
     if doc_type not in _BODY_MATERIAL_DOC_TYPES:
         return
     content_hash = str(document.get("content_hash") or "")
+    body = document.get("body")
+    if (
+        doc_type == dm.SourceDocType.TOOL_EVIDENCE_BUNDLE
+        and not content_hash
+        and not body
+    ):
+        # Metadata-only legacy/compacted bundles carry no body. The coverage
+        # manifest still pins their coverage hash, so body validation does not
+        # apply; requiring content_hash here blocks every session that has one.
+        return
     if not content_hash:
         raise SourceRevisionResolutionError(
             "active source revision source is missing its material hash"
         )
-    body = document.get("body")
     if not isinstance(body, str) or not body or dm.sha256_hash(body) != content_hash:
         raise SourceRevisionResolutionError(
             "active source revision source body does not match its material hash"
