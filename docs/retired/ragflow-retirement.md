@@ -49,7 +49,7 @@ The live runtime was **already bridge-free** before this change, and that was ve
 - the live ingress worker selects `INGRESS_DELIVERY_BACKEND=couchdb`;
 - no `RETIRED_INDEX_BRIDGE_*` or `RAGFLOW_*` key exists in any live deployment env or secret;
 - the live ingress-api runs with `SPRING_PROFILES_ACTIVE=api`, and the ingress-api **canary** with `api,retired-index-bridge` — but with no bridge credential the bridge adapter reported `isConfigured()==false`, so it already failed every delivery (`failed("retired_index_bridge delivery unavailable")`) and reported `closed("pressure_read_failed")` pressure;
-- the live session-memory build lane runs with `SESSION_MEMORY_PROJECTION_BACKEND=postgres_pgvector` (the code default is now `qdrant`; neither value is the retired bridge).
+- the live session-memory build lane runs with `SESSION_MEMORY_PROJECTION_BACKEND=postgres_pgvector` (the code default is now `postgres_pgvector`, matching the live lane; `qdrant` is still accepted when set explicitly, and neither value is the retired bridge).
 
 What is still owed by the owner of the private `neurons-ops` overlay:
 

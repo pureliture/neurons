@@ -298,3 +298,27 @@ cd worker && uv run neuron-local-embedding serve --host 127.0.0.1 --port 18120
 ```
 cd worker && uv run --group dev --extra mcp-http --extra local-embedding pytest -q
 ```
+
+## Hermes 혼합 project scope 판정
+
+Hermes는 한 세션 안에서 profile이 바뀔 수 있어 같은 세션의 CouchDB 문서가
+`project` 값에 서로 다른 label(profile 이름 / workspace 이름)을 가질 수 있다.
+판정은 `couchdb_source/hermes_project_scope.py`의
+`decide_hermes_project_scope()` 하나로 하고, graph projection lane
+(`llm_brain_core/runtime.py`)과 PG/Qdrant session-memory build lane
+(`couchdb_source/session_memory_materializer.py`)이 같은 결과를 따른다.
+
+- workspace-vs-profile: session 문서의 workspace로 정규화하고 note
+  `hermes_profile_normalized_to_workspace`를 남긴다. CouchDB 문서는 바꾸지 않는다.
+- 그 외(profile-vs-profile, profile 세션에 workspace 혼입, 미등록 label):
+  `inconsistent_hermes_project_scope`로 두 lane 모두 거부한다. graph lane은
+  `skipped_inconsistent`로 집계하고 현재 source hash를 ledger projection state에
+  `source_invalid`로 기록해 resume과 `couchdb-graph-status` backlog/coverage에서
+  기존 `source_invalid` 규칙대로 제외한다(dead-letter 아님). PG lane은
+  `projection_state`에 terminal 실패 사유로 기록하고 build 보고서에
+  `skipped_inconsistent`를 더한다. 두 lane 모두 source revision이 바뀌면 다시
+  판정한다.
+
+profile 이름은 코드에 두지 않는다. `HERMES_PROFILE_NAMES`(쉼표 구분)로 주입하며
+기본값은 빈 집합(fail-closed)이다. 운영 profile 목록은 private 배포 설정
+(`neurons-ops`)에서 관리한다.

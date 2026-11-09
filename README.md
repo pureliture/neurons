@@ -533,8 +533,11 @@ memory_candidate_create
 1. `llm-brain-core`는 Neo4j와 cold graph trigger를 함께 구성하고,
    `LLM_BRAIN_GRAPH_ENABLED=true`를 주입한다.
 2. `llm-brain-mcp`는 Neo4j/PG health gate 뒤에 graph-required MCP server를 시작한다.
-3. generic adapter의 `LLM_BRAIN_GRAPH_EXTRACT_ENTITIES=false` 기본값과 달리,
-   cold trigger는 `--extract-entities`를 기본으로 전달한다.
+3. cold trigger가 쓰는 `Session` episode는 provenance/분석용이다. `GraphFirstResolver`는
+   PostgreSQL authority key가 없는 `Session`/`SourceRef`/`LocalEvidenceEdge` 후보를
+   제외하므로, 이 lane의 LLM entity extraction은 `brain.resolve` 결과에 반영되지 않는다.
+   따라서 `LLM_BRAIN_GRAPH_TRIGGER_EXTRACT_ENTITIES`는 기본 `false`이며, 명시적으로
+   `true`로 켤 때만 `--extract-entities`를 전달한다.
 
 Neo4j 연결 불가 시 `UnavailableGraphMemoryAdapter`로 degrade한다. public
 `brain.resolve`의 Graphiti/Neo4j-first router, canonical PostgreSQL join,

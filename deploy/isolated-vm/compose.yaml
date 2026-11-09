@@ -1,0 +1,68 @@
+# Isolated single-VM test stack (synthetic data only, loopback-only ports).
+# Does not include the scheduled graph trigger or any external model wrapper.
+name: neurons-isolated
+services:
+  couchdb:
+    image: couchdb:3.4
+    environment:
+      COUCHDB_USER: ${ISO_COUCHDB_USER:-neurons_test}
+      COUCHDB_PASSWORD: ${ISO_COUCHDB_PASSWORD:?set ISO_COUCHDB_PASSWORD}
+      COUCHDB_SECRET: ${ISO_COUCHDB_SECRET:?set ISO_COUCHDB_SECRET}
+      NODENAME: couchdb
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:5984/_up || exit 1"]
+      interval: 5s
+      retries: 30
+    ports: ["127.0.0.1:${ISO_COUCHDB_PORT:-25984}:5984"]
+    volumes: [couchdb-data:/opt/couchdb/data]
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: ${ISO_PG_DB:-neurons_test}
+      POSTGRES_USER: ${ISO_PG_USER:-neurons_test}
+      POSTGRES_PASSWORD: ${ISO_PG_PASSWORD:?set ISO_PG_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      retries: 30
+    ports: ["127.0.0.1:${ISO_PG_PORT:-25432}:5432"]
+    volumes: [postgres-data:/var/lib/postgresql/data]
+  neo4j:
+    image: neo4j:5.26-community
+    environment:
+      NEO4J_AUTH: neo4j/${ISO_NEO4J_PASSWORD:?set ISO_NEO4J_PASSWORD}
+      NEO4J_server_memory_heap_max__size: 1g
+      NEO4J_server_memory_pagecache_size: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:7474 || exit 1"]
+      interval: 5s
+      retries: 60
+    ports:
+      - "127.0.0.1:${ISO_NEO4J_HTTP_PORT:-27474}:7474"
+      - "127.0.0.1:${ISO_NEO4J_BOLT_PORT:-27687}:7687"
+    volumes: [neo4j-data:/data]
+  # Disposable no-auth Neo4j for worker/tests/test_pg_neo4j_card_e2e.py only.
+  neo4j-e2e:
+    image: neo4j:5.26-community
+    profiles: [e2e]
+    environment:
+      NEO4J_AUTH: none
+      NEO4J_server_memory_heap_max__size: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:7474 || exit 1"]
+      interval: 5s
+      retries: 60
+    ports: ["127.0.0.1:${ISO_NEO4J_E2E_BOLT_PORT:-27688}:7687"]
+    tmpfs: [/data]
+  ollama:
+    image: ollama/ollama:latest
+    environment:
+      OLLAMA_KEEP_ALIVE: 30m
+      OLLAMA_NUM_PARALLEL: "1"
+    ports: ["127.0.0.1:${ISO_OLLAMA_PORT:-21434}:11434"]
+    volumes: [ollama-models:/root/.ollama]
+volumes:
+  couchdb-data:
+  postgres-data:
+  neo4j-data:
+  ollama-models:

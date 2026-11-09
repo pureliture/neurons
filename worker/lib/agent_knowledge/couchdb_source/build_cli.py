@@ -30,6 +30,7 @@ from agent_knowledge.qdrant_write_gateway_runtime import (
     qdrant_write_gateway_generation_from_environment,
 )
 from agent_knowledge.rag_ingress.pg_embedding_chunks import (
+    INCONSISTENT_HERMES_PROJECT_SCOPE,
     PG_INPUT_POLICY_VERSION,
     TERMINAL_INPUT_REASONS,
 )
@@ -83,7 +84,7 @@ def _blocked_source_hash_from_state(state: dict, backend: str) -> str:
 
 
 def _select_sessions_needing_projection(
-    store, limit: int, *, project: str = "", provider: str = "", backend: str = "qdrant"
+    store, limit: int, *, project: str = "", provider: str = "", backend: str = "postgres_pgvector"
 ) -> list[dict]:
     """Return sessions whose projected revision is not the current source revision.
 
@@ -420,7 +421,7 @@ def _select_sessions_incremental(
     limit: int,
     project: str = "",
     provider: str = "",
-    backend: str = "qdrant",
+    backend: str = "postgres_pgvector",
 ) -> tuple[list[dict], dict, int]:
     """Change-feed driven selection.
 
@@ -835,7 +836,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # --- Backend Resolution -------------------------------------------------
-    backend = os.environ.get("SESSION_MEMORY_PROJECTION_BACKEND", "qdrant").strip().lower()
+    backend = os.environ.get("SESSION_MEMORY_PROJECTION_BACKEND", "postgres_pgvector").strip().lower()
 
     # --- Session selection --------------------------------------------------
     explicit_session_ids = _explicit_session_ids(args.session_id_hashes)
@@ -970,6 +971,7 @@ def main(argv: list[str] | None = None) -> int:
     projected = 0
     failed = 0
     skipped = 0
+    skipped_inconsistent = 0
     session_reports: list[dict] = []
 
     try:
@@ -994,6 +996,8 @@ def main(argv: list[str] | None = None) -> int:
                 elif status == "pending" or not result.get("fully_materialized"):
                     skipped += 1
                     outcome = "pending"
+                    if str(projection.get("reason") or "") == INCONSISTENT_HERMES_PROJECT_SCOPE:
+                        skipped_inconsistent += 1
                 else:
                     failed += 1
                     outcome = "failed"
@@ -1022,6 +1026,7 @@ def main(argv: list[str] | None = None) -> int:
                 "projected": projected,
                 "failed": failed,
                 "skipped": skipped,
+                "skipped_inconsistent": skipped_inconsistent,
                 "sessions": session_reports,
             },
             sort_keys=True,

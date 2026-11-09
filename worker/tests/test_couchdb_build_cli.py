@@ -434,7 +434,7 @@ class TestSelectSessionsNeedingProjection:
         )
         store.put(pending)
 
-        selected_pending = _select_sessions_needing_projection(store, limit=0)
+        selected_pending = _select_sessions_needing_projection(store, limit=0, backend="qdrant")
 
         assert [session["session_id_hash"] for session in selected_pending] == [sid]
         assert [session["_id"] for session in selected_pending] == [active.sessions[0]["_id"]]
@@ -444,7 +444,7 @@ class TestSelectSessionsNeedingProjection:
         stale["projected_source_hash"] = dm.sha256_hash("stale current-only projection")
         store.put(stale)
 
-        selected_stale = _select_sessions_needing_projection(store, limit=0)
+        selected_stale = _select_sessions_needing_projection(store, limit=0, backend="qdrant")
 
         assert [session["session_id_hash"] for session in selected_stale] == [sid]
         assert [session["_id"] for session in selected_stale] == [active.sessions[0]["_id"]]
@@ -453,9 +453,9 @@ class TestSelectSessionsNeedingProjection:
         current["projected_source_hash"] = active.source_hash
         store.put(current)
 
-        assert _select_sessions_needing_projection(store, limit=0) == []
-        assert _select_sessions_needing_projection(store, limit=0, project="other") == []
-        assert _select_sessions_needing_projection(store, limit=0, provider="claude") == []
+        assert _select_sessions_needing_projection(store, limit=0, backend="qdrant") == []
+        assert _select_sessions_needing_projection(store, limit=0, project="other", backend="qdrant") == []
+        assert _select_sessions_needing_projection(store, limit=0, provider="claude", backend="qdrant") == []
 
         other_sid = _build_current_only_active_session(
             store,
@@ -464,7 +464,7 @@ class TestSelectSessionsNeedingProjection:
             raw_id="current-only-limit",
         )
 
-        selected_limited = _select_sessions_needing_projection(store, limit=1)
+        selected_limited = _select_sessions_needing_projection(store, limit=1, backend="qdrant")
 
         assert [session["session_id_hash"] for session in selected_limited] == [other_sid]
 
@@ -648,7 +648,7 @@ class TestSelectSessionsNeedingProjection:
         sid2 = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="s2")
         _mark_projected(store, sid1, "claude", "neurons")
 
-        selected = _select_sessions_needing_projection(store, limit=0)
+        selected = _select_sessions_needing_projection(store, limit=0, backend="qdrant")
         sids = {s.get("session_id_hash") for s in selected}
         assert sid1 not in sids
         assert sid2 in sids
@@ -832,7 +832,7 @@ class TestSelectSessionsNeedingProjection:
 
         assert store.get(state_id) == state_before
 
-        selected = _select_sessions_needing_projection(store, limit=0)
+        selected = _select_sessions_needing_projection(store, limit=0, backend="qdrant")
 
         assert [row["session_id_hash"] for row in selected] == [sid]
         raw_source_hash = session_source_revision_from_couchdb_source(
@@ -844,6 +844,7 @@ class TestSelectSessionsNeedingProjection:
             session_id_hash=sid,
             store=store,
             projector=RecordingSessionMemoryProjector(),
+            backend="qdrant",
         )
 
         coverage = store.get(dm.coverage_manifest_doc_id(sid))
@@ -853,7 +854,7 @@ class TestSelectSessionsNeedingProjection:
         assert coverage["conversation_chunk_count"] == 2
         assert coverage["source_hash"] == raw_source_hash
         assert projected["projected_source_hash"] == raw_source_hash
-        assert _select_sessions_needing_projection(store, limit=0) == []
+        assert _select_sessions_needing_projection(store, limit=0, backend="qdrant") == []
 
     def test_exact_duplicate_source_keeps_projected_session_skipped(self) -> None:
         store = InMemoryCouchDBSourceStore()
@@ -874,7 +875,7 @@ class TestSelectSessionsNeedingProjection:
         stored = store.put(dm.build_conversation_chunk_document(chunk=duplicate))
 
         assert stored.outcome == "duplicate"
-        assert _select_sessions_needing_projection(store, limit=0) == []
+        assert _select_sessions_needing_projection(store, limit=0, backend="qdrant") == []
 
     def test_ignores_stale_state_source_hash_when_source_matches_projected_hash(self) -> None:
         store = InMemoryCouchDBSourceStore()
@@ -887,7 +888,7 @@ class TestSelectSessionsNeedingProjection:
         state["source_hash"] = dm.sha256_hash("stale state-only source revision")
         store.put(state)
 
-        assert _select_sessions_needing_projection(store, limit=0) == []
+        assert _select_sessions_needing_projection(store, limit=0, backend="qdrant") == []
 
     def test_reselects_legacy_projected_session_without_matching_source_hash(self) -> None:
         store = InMemoryCouchDBSourceStore()
@@ -976,7 +977,7 @@ class TestSelectSessionsNeedingProjection:
         pending = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="pending")
         store.get_count = 0
 
-        selected = _select_sessions_needing_projection(store, limit=1)
+        selected = _select_sessions_needing_projection(store, limit=1, backend="qdrant")
 
         assert [s.get("session_id_hash") for s in selected] == [pending]
         assert store.get_count == 0
@@ -1049,6 +1050,7 @@ class TestSelectSessionsNeedingProjection:
             limit=0,
             project="neurons",
             provider="claude",
+            backend="qdrant",
         )
 
         assert [s.get("session_id_hash") for s in selected] == [pending]
@@ -1149,6 +1151,112 @@ class TestDryRun:
         rc, report = _run(["--dry-run"], store)
         assert rc == 0
         assert report["selected"] == 1  # only s2 is pending
+
+
+# ---------------------------------------------------------------------------
+# Default projection backend (SESSION_MEMORY_PROJECTION_BACKEND unset)
+# ---------------------------------------------------------------------------
+
+class TestDefaultProjectionBackend:
+    """The code default must match the live lane (``postgres_pgvector``).
+
+    ``qdrant`` stays reachable only when set explicitly; the unset case must
+    never fall into the qdrant branch.
+    """
+
+    _COUCHDB_ENV = {
+        "COUCHDB_URL": "http://localhost:5984",
+        "COUCHDB_USER": "admin",
+        "COUCHDB_PASSWORD": "secret",
+        "COUCHDB_DB": "transcript_source",
+    }
+
+    def _run_without_backend_env(self, argv, store, *, pg_projector, extra_env=None):
+        env = dict(self._COUCHDB_ENV)
+        if extra_env:
+            env.update(extra_env)
+        buf = StringIO()
+
+        def _fail_qdrant(_environ):
+            raise AssertionError("qdrant projector must not be built when the backend env is unset")
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                patch(
+                    "agent_knowledge.couchdb_source.couchdb_http_store.CouchDBHttpSourceStore",
+                    lambda **kw: store,
+                )
+            )
+            stack.enter_context(patch.dict(os.environ, env, clear=True))
+            stack.enter_context(patch("sys.stdout", buf))
+            stack.enter_context(
+                patch("agent_knowledge.couchdb_source.build_cli._build_qdrant_projector", _fail_qdrant)
+            )
+            stack.enter_context(
+                patch(
+                    "agent_knowledge.couchdb_source.build_cli._build_pg_projector",
+                    lambda _environ: pg_projector,
+                )
+            )
+            rc = main(argv)
+        output = buf.getvalue().strip()
+        return rc, (json.loads(output) if output else {})
+
+    def test_function_defaults_are_postgres_pgvector(self) -> None:
+        import inspect
+
+        from agent_knowledge.couchdb_source import build_cli, session_memory_materializer
+
+        for fn in (
+            build_cli._select_sessions_needing_projection,
+            build_cli._select_sessions_incremental,
+            session_memory_materializer.project_session_memory,
+            session_memory_materializer.materialize_and_project,
+            session_memory_materializer._commit_projection_state_if_source_current,
+            session_memory_materializer._projection_state_for_materialization,
+        ):
+            assert inspect.signature(fn).parameters["backend"].default == "postgres_pgvector", fn
+
+    def test_unset_backend_env_uses_postgres_pgvector_projector(self, tmp_path) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sid = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="s1")
+        argv = ["--approval", str(_write_approval(tmp_path, argv=["--approval", str(tmp_path / "approval.json")]))]
+        projector = RecordingSessionMemoryProjector()
+
+        rc, report = self._run_without_backend_env(argv, store, pg_projector=projector)
+
+        assert rc == 0
+        assert report["projected"] == 1
+        assert len(projector.calls) == 1
+        state = store.get(dm.projection_state_doc_id(sid))
+        receipt = (state.get("backend_receipts") or {}).get("postgres_pgvector") or {}
+        assert receipt.get("projection_status") == dm.ProjectionStatus.PROJECTED
+
+    def test_unset_backend_env_fails_closed_on_missing_pg_dsn(self, tmp_path) -> None:
+        store = InMemoryCouchDBSourceStore()
+        _build_synthetic_session(store, provider="claude", project="neurons", raw_id="s1")
+        argv = ["--approval", str(_write_approval(tmp_path, argv=["--approval", str(tmp_path / "approval.json")]))]
+
+        rc, report = self._run_without_backend_env(argv, store, pg_projector=None)
+
+        assert rc == 2
+        assert report["error"] == "env_missing"
+        assert "PGVECTOR_DSN" in report["reason"]
+
+    def test_explicit_qdrant_backend_still_builds_qdrant_projector(self, tmp_path) -> None:
+        store = InMemoryCouchDBSourceStore()
+        sid = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="s1")
+        argv = ["--approval", str(_write_approval(tmp_path, argv=["--approval", str(tmp_path / "approval.json")]))]
+        projector = RecordingSessionMemoryProjector()
+
+        rc, report = _run(argv, store, projector=projector, extra_env={"SESSION_MEMORY_PROJECTION_BACKEND": "qdrant"})
+
+        assert rc == 0
+        assert report["projected"] == 1
+        assert len(projector.calls) == 1
+        state = store.get(dm.projection_state_doc_id(sid))
+        assert state["projection_status"] == dm.ProjectionStatus.PROJECTED
+        assert "backend_receipts" not in state
 
 
 # ---------------------------------------------------------------------------

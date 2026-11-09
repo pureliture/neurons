@@ -40,7 +40,45 @@ from .document_model import (
 
 
 class SourceStoreError(ValueError):
-    """Raised when a document violates the store write contract."""
+    """Raised when a document violates the store write contract.
+
+    Delivery classification: a plain ``SourceStoreError`` is *not* proven
+    deterministic. Its cause may depend on store state that an operator repair
+    or a concurrent writer can still change (for example a non-converging
+    coverage manifest or a malformed active control plane), so delivery keeps
+    it on the uncertain/replayable lane. Only :class:`SourceContractViolation`
+    is terminal for the same input.
+    """
+
+
+class SourceContractViolation(SourceStoreError):
+    """A deterministic source write contract violation.
+
+    Raised only where the check depends solely on the incoming document and on
+    ``transcript_session`` identity fields (``session_id_hash``/``provider``/
+    ``project``/``_id``) that no ingress write path rewrites.  Retrying the same
+    delivery job cannot repair it, so ingress delivery quarantines the job
+    immediately instead of burning replay attempts.
+
+    Known narrow exception, accepted by design: an unpinned legacy
+    ``transcript_session`` can still be replaced wholesale by ``put()`` (e.g. a
+    historical import or an operator correction).  If such a correction lands
+    inside the few-attempt retry window the mismatch would have vanished on the
+    next retry.  Deferring quarantine for that race would also replay every
+    genuine mixed-identity payload to ``max_attempts`` without a recorded
+    reason, so the corrected payload is instead re-ingested after quarantine.
+
+    ``reason_code`` is a fixed, redaction-safe identifier (no field values) that
+    delivery records as ``source_contract_violation:<reason_code>``.
+
+    Anything whose outcome may change with store state (conflicts, CAS races,
+    unresolved active control plane, non-converging aggregates) must stay a
+    plain :class:`SourceStoreError`/:class:`SourceStoreConflict` (fail-closed).
+    """
+
+    def __init__(self, message: str, *, reason_code: str) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
 
 
 class SourceStoreConflict(SourceStoreError):
@@ -462,6 +500,41 @@ def _chronological_bound(values: tuple[object, object], *, latest: bool) -> str:
     return max(fallback_values) if latest else min(fallback_values)
 
 
+def assert_transcript_session_identity(*, existing: dict | None, incoming: dict) -> None:
+    """Reject an incoming ``transcript_session`` envelope whose identity differs
+    from the stored aggregate.
+
+    This is the merge's deterministic identity gate, exposed so ingress can run
+    the same check *before* writing any ``conversation_chunk`` document and so
+    reject a mixed-identity payload without leaving an orphan chunk behind.
+    ``existing is None`` always passes (first write).
+    """
+
+    if existing is None:
+        return
+    if existing.get("doc_type") != SourceDocType.TRANSCRIPT_SESSION:
+        # Store-state corruption under a transcript_session id: not determined
+        # by the incoming payload, so it stays a non-terminal store error.
+        raise SourceStoreError("existing aggregate is not a transcript_session document")
+    if str(existing.get("_id") or "") != str(incoming.get("_id") or ""):
+        raise SourceContractViolation(
+            "transcript session document id changed",
+            reason_code="transcript_session_document_id_changed",
+        )
+    for field in ("session_id_hash", "provider", "project"):
+        old = str(existing.get(field) or "")
+        new = str(incoming.get(field) or "")
+        if old and new and old != new:
+            # Neither this merge nor any other ingress path rewrites identity
+            # fields, so the same incoming envelope fails identically on every
+            # delivery retry.  Only an out-of-band legacy ``put()`` replacement
+            # can change the answer; see SourceContractViolation.
+            raise SourceContractViolation(
+                f"transcript session {field} changed",
+                reason_code=f"transcript_session_{field}_changed",
+            )
+
+
 def merge_transcript_session_documents(
     *,
     existing: dict | None,
@@ -478,7 +551,10 @@ def merge_transcript_session_documents(
 
     validate_for_write(incoming)
     if incoming.get("doc_type") != SourceDocType.TRANSCRIPT_SESSION:
-        raise SourceStoreError("aggregate merge requires a transcript_session document")
+        raise SourceContractViolation(
+            "aggregate merge requires a transcript_session document",
+            reason_code="aggregate_merge_requires_transcript_session",
+        )
 
     if existing is None:
         merged = copy.deepcopy(incoming)
@@ -486,15 +562,7 @@ def merge_transcript_session_documents(
             merged.pop(field, None)
         return merged
 
-    if existing.get("doc_type") != SourceDocType.TRANSCRIPT_SESSION:
-        raise SourceStoreError("existing aggregate is not a transcript_session document")
-    if str(existing.get("_id") or "") != str(incoming.get("_id") or ""):
-        raise SourceStoreError("transcript session document id changed")
-    for field in ("session_id_hash", "provider", "project"):
-        old = str(existing.get(field) or "")
-        new = str(incoming.get(field) or "")
-        if old and new and old != new:
-            raise SourceStoreError(f"transcript session {field} changed")
+    assert_transcript_session_identity(existing=existing, incoming=incoming)
 
     merged = copy.deepcopy(existing)
     for field in ("_rev", "idempotency_key", "payload_hash"):
@@ -938,9 +1006,11 @@ __all__ = [
     "InMemoryCouchDBSourceStore",
     "IMMUTABLE_SOURCE_REVISION_DOC_TYPES",
     "SOURCE_REVISION_MEMBER_SOURCE_DOC_TYPES",
+    "SourceContractViolation",
     "SourceStoreConflict",
     "SourceStoreError",
     "StoredRevision",
+    "assert_transcript_session_identity",
     "merge_transcript_session_documents",
     "payload_hash",
     "validate_for_write",

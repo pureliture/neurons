@@ -32,7 +32,11 @@ from agent_knowledge.couchdb_source.session_memory_materializer import (
     mark_projection_pending_if_source_changed,
 )
 from agent_knowledge.couchdb_source.build_cli import _select_sessions_needing_projection
-from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
+from agent_knowledge.couchdb_source.source_store import (
+    InMemoryCouchDBSourceStore,
+    SourceStoreConflict,
+    SourceStoreError,
+)
 from agent_knowledge.rag_ingress.backfill_apply import apply_backfill_to_state_db
 from agent_knowledge.rag_ingress.couchdb_delivery_backend import (
     CouchDBDeliveryBackend,
@@ -390,7 +394,7 @@ def test_exact_duplicate_preserves_projected_source_hash_and_is_not_reselected(t
     assert after["source_hash"] == source_hash
     assert after["projected_source_hash"] == source_hash
     assert store.get(session_id) == session_before
-    assert _select_sessions_needing_projection(store, limit=0) == []
+    assert _select_sessions_needing_projection(store, limit=0, backend="qdrant") == []
 
 
 def test_distinct_chunk_dirties_projection_changes_source_hash_and_is_reselected(tmp_path):
@@ -424,7 +428,7 @@ def test_distinct_chunk_dirties_projection_changes_source_hash_and_is_reselected
     assert after["projection_status"] == ProjectionStatus.PENDING
     assert after["source_hash"] != first_source_hash
     assert after["projected_source_hash"] == first_source_hash
-    selected = _select_sessions_needing_projection(store, limit=0)
+    selected = _select_sessions_needing_projection(store, limit=0, backend="qdrant")
     assert [row["session_id_hash"] for row in selected] == [SESSION_ID_HASH]
 
 
@@ -733,6 +737,223 @@ def test_executor_quarantines_malformed_persisted_source_without_leaving_lease_e
     assert job["index_run_id"] == "invalid_stored_payload_shape"
     assert job["lease_owner"] == ""
     assert job["lease_until"] == ""
+
+
+# ---------------------------------------------------------------------------
+# 결정론적 source 계약 위반 -> 즉시 quarantine
+# ---------------------------------------------------------------------------
+
+HERMES_SESSION_ID_HASH = sha256_hash("hermes:mixed-project-session")
+
+
+def _seed_hermes_mixed_project(state_db: RAGIngressStateDB) -> None:
+    """같은 session_id_hash 아래 서로 다른 project를 주장하는 두 chunk (합성)."""
+    first = _payload(
+        idempotency_key="hermes_key_1",
+        session_id_hash=HERMES_SESSION_ID_HASH,
+        chunk_id="chunk_hermes_1",
+        provider="hermes",
+        project="alpha-project",
+        body="First hermes chunk under alpha.",
+    )
+    second = _payload(
+        idempotency_key="hermes_key_2",
+        session_id_hash=HERMES_SESSION_ID_HASH,
+        chunk_id="chunk_hermes_2",
+        provider="hermes",
+        project="beta-project",
+        body="Second hermes chunk claiming beta.",
+    )
+    _seed(state_db, first, second)
+
+
+def _session_chunk_docs(store: InMemoryCouchDBSourceStore, session_id_hash: str) -> list[dict]:
+    return [
+        doc
+        for doc in store.all_docs()
+        if doc.get("doc_type") == SourceDocType.CONVERSATION_CHUNK
+        and doc.get("session_id_hash") == session_id_hash
+    ]
+
+
+def test_executor_quarantines_mixed_project_session_on_first_attempt(tmp_path):
+    """aggregate merge의 결정론적 계약 위반은 max_attempts까지 replay하지 않고 즉시 quarantine된다."""
+    class CountingMergeStore(InMemoryCouchDBSourceStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.merge_calls = 0
+
+        def merge_transcript_session_aggregate(self, *, incoming, max_attempts=3, source_hash_authoritative=False):
+            self.merge_calls += 1
+            return super().merge_transcript_session_aggregate(
+                incoming=incoming,
+                max_attempts=max_attempts,
+                source_hash_authoritative=source_hash_authoritative,
+            )
+
+    state_db = _state_db(tmp_path)
+    _seed_hermes_mixed_project(state_db)
+    store = CountingMergeStore()
+    executor = DeliveryExecutor(
+        state_db=state_db,
+        backend=_backend(state_db, store),
+        lease_owner="couchdb-worker",
+    )
+
+    assert executor.execute_once(_job_view(state_db, "hermes_key_1").job_id, max_attempts=3) == "succeeded"
+    merge_calls_after_first = store.merge_calls
+    second_job_id = _job_view(state_db, "hermes_key_2").job_id
+
+    assert executor.execute_once(second_job_id, max_attempts=3) == "quarantined"
+    # pre-check가 merge 이전에 거절하므로 merge 호출도, chunk 기록도 없다
+    # (replayable 상태를 거치지 않음)
+    assert store.merge_calls == merge_calls_after_first
+    assert store.get(conversation_chunk_doc_id(HERMES_SESSION_ID_HASH, "chunk_hermes_2")) is None
+    assert executor.execute_once(second_job_id, max_attempts=3) == "quarantined"
+    assert store.merge_calls == merge_calls_after_first
+
+    job = state_db.get_delivery_job(second_job_id)
+    assert job["status"] == "quarantined"
+    assert job["attempt_count"] == 0  # replay attempt는 기록되지 않는다
+    assert job["next_retry_at"] in ("", None)
+    assert job["last_error_class"] == "delivery_payload_integrity_mismatch"
+    assert job["index_run_id"] == "source_contract_violation:transcript_session_project_changed"
+    assert job["lease_owner"] == ""
+    assert job["lease_until"] == ""
+    # reason code는 고정 식별자여야 하며 payload 값(project 이름)을 담지 않는다
+    assert "beta-project" not in json.dumps(job)
+    assert "alpha-project" not in json.dumps(job)
+    # 기존 aggregate는 첫 chunk의 identity를 유지한다
+    session_doc = store.get(session_doc_id(HERMES_SESSION_ID_HASH))
+    assert session_doc["project"] == "alpha-project"
+    assert session_doc["provider"] == "hermes"
+
+
+def test_identity_precheck_rejects_mixed_project_payload_before_any_chunk_write(tmp_path):
+    """계약 위반 payload는 chunk 문서가 기록되기 전에 거절되어 orphan chunk를 남기지 않는다."""
+    state_db = _state_db(tmp_path)
+    _seed_hermes_mixed_project(state_db)
+    store = InMemoryCouchDBSourceStore()
+    backend = _backend(state_db, store)
+
+    assert backend.submit(_job_view(state_db, "hermes_key_1")).status == "succeeded"
+    second_job = _job_view(state_db, "hermes_key_2")
+    docs_before = {doc["_id"]: doc["_rev"] for doc in store.all_docs()}
+    assert len(_session_chunk_docs(store, HERMES_SESSION_ID_HASH)) == 1
+
+    for _ in range(3):
+        evidence = backend.submit(second_job)
+        assert evidence.status == "payload_integrity_mismatch"
+        assert evidence.run == "source_contract_violation:transcript_session_project_changed"
+
+    # store는 바이트 단위로 변하지 않았다: chunk도, aggregate revision도 그대로
+    assert {doc["_id"]: doc["_rev"] for doc in store.all_docs()} == docs_before
+    assert store.get(conversation_chunk_doc_id(HERMES_SESSION_ID_HASH, "chunk_hermes_2")) is None
+    assert len(_session_chunk_docs(store, HERMES_SESSION_ID_HASH)) == 1
+    assert store.get(session_doc_id(HERMES_SESSION_ID_HASH))["project"] == "alpha-project"
+
+
+def test_aggregate_replaced_between_precheck_and_merge_leaves_single_deterministic_chunk(tmp_path):
+    """pre-check 통과 후 merge 전에 aggregate가 교체되는 경합: merge가 위반을 잡아 quarantine하고,
+    이미 기록된 chunk는 결정론적 id라 재처리해도 중복이 생기지 않는다(이 경우만 orphan 1개가 남는다)."""
+
+    class RaceStore(InMemoryCouchDBSourceStore):
+        """put_if_absent(chunk) 직후, 즉 merge 직전에 legacy put()으로 aggregate project를 바꾼다."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.race_armed = False
+            self.races_fired = 0
+
+        def put_if_absent(self, document):
+            stored = super().put_if_absent(document)
+            if self.race_armed and document.get("doc_type") == SourceDocType.CONVERSATION_CHUNK:
+                self.race_armed = False
+                self.races_fired += 1
+                current = dict(self.get(session_doc_id(HERMES_SESSION_ID_HASH)))
+                current["project"] = "gamma-project"
+                self.put(current)
+            return stored
+
+    state_db = _state_db(tmp_path)
+    first = _payload(
+        idempotency_key="hermes_key_1",
+        session_id_hash=HERMES_SESSION_ID_HASH,
+        chunk_id="chunk_hermes_1",
+        provider="hermes",
+        project="alpha-project",
+        body="First hermes chunk under alpha.",
+    )
+    # 같은 project를 주장하므로 pre-check는 통과한다
+    aligned = _payload(
+        idempotency_key="hermes_key_3",
+        session_id_hash=HERMES_SESSION_ID_HASH,
+        chunk_id="chunk_hermes_3",
+        provider="hermes",
+        project="alpha-project",
+        body="Third hermes chunk still under alpha.",
+    )
+    _seed(state_db, first, aligned)
+    store = RaceStore()
+    backend = _backend(state_db, store)
+
+    assert backend.submit(_job_view(state_db, "hermes_key_1")).status == "succeeded"
+    aligned_job = _job_view(state_db, "hermes_key_3")
+
+    store.race_armed = True
+    raced = backend.submit(aligned_job)
+    assert store.races_fired == 1
+    assert raced.status == "payload_integrity_mismatch"
+    assert raced.run == "source_contract_violation:transcript_session_project_changed"
+
+    orphan_id = conversation_chunk_doc_id(HERMES_SESSION_ID_HASH, "chunk_hermes_3")
+    orphan = store.get(orphan_id)
+    assert orphan is not None  # 경합에서만 남는 orphan chunk
+    assert len(_session_chunk_docs(store, HERMES_SESSION_ID_HASH)) == 2
+    total_docs = len(list(store.all_docs()))
+
+    # 같은 payload 재처리: 이제 pre-check가 거절하며, chunk 문서 수/revision은 변하지 않는다
+    for _ in range(3):
+        retry = backend.submit(aligned_job)
+        assert retry.status == "payload_integrity_mismatch"
+        assert retry.run == "source_contract_violation:transcript_session_project_changed"
+    assert store.races_fired == 1
+    assert len(_session_chunk_docs(store, HERMES_SESSION_ID_HASH)) == 2
+    assert len(list(store.all_docs())) == total_docs
+    assert store.get(orphan_id)["_rev"] == orphan["_rev"]
+    assert store.get(session_doc_id(HERMES_SESSION_ID_HASH))["project"] == "gamma-project"
+
+
+def test_non_deterministic_source_store_errors_stay_uncertain(tmp_path):
+    """SourceStoreConflict/기타 SourceStoreError/CouchDBError는 여전히 uncertain(replayable)이다."""
+
+    class InjectedAggregateFailureStore(InMemoryCouchDBSourceStore):
+        def __init__(self, error: Exception) -> None:
+            super().__init__()
+            self._error = error
+
+        def merge_transcript_session_aggregate(self, *, incoming, max_attempts=3, source_hash_authoritative=False):
+            raise self._error
+
+    for injected in (
+        SourceStoreConflict("conditional source revision changed"),
+        SourceStoreError("coverage manifest did not converge after concurrent source updates"),
+        CouchDBError("PUT failed: 503"),
+    ):
+        state_db = _state_db(tmp_path / injected.__class__.__name__)
+        _seed(state_db, _payload())
+        store = InjectedAggregateFailureStore(injected)
+        backend = _backend(state_db, store)
+        job = _job_view(state_db, "idem_key_1")
+
+        with pytest.raises(DeliveryOutcomeUncertain):
+            backend.submit(job)
+
+        executor = DeliveryExecutor(state_db=state_db, backend=backend, lease_owner="couchdb-worker")
+        assert executor.execute_once(job.job_id, max_attempts=3) == "replayable"
+        row = state_db.get_delivery_job(job.job_id)
+        assert row["status"] == "replayable"
+        assert row["last_error_class"] == "remote_outcome_uncertain"
 
 
 def test_submit_raises_uncertain_on_couchdb_error(tmp_path):

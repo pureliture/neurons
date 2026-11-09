@@ -146,6 +146,83 @@ def test_graphiti_adapter_default_path_inserts_then_reports_duplicate_on_reupser
     assert graphiti.saved_uuids == [episode.episode_id]
 
 
+def test_graphiti_adapter_builds_graph_indices_once_before_first_write():
+    # Graphiti's driver only schedules index creation inside a running loop, so a
+    # fresh Neo4j would lack the fulltext indexes edge search depends on.
+    class _IndexTrackingGraphiti(_FakeGraphiti):
+        def __init__(self) -> None:
+            super().__init__()
+            self.index_builds = 0
+
+        async def build_indices_and_constraints(self, delete_existing: bool = False):
+            assert not self.saved_uuids
+            self.index_builds += 1
+
+    graphiti = _IndexTrackingGraphiti()
+    adapter = GraphitiNeo4jGraphMemoryAdapter(graphiti, default_group_id="/project/neurons")
+
+    for natural_id in ("task:index-a", "task:index-b"):
+        episode = _episode("Task", natural_id, {"brain_id": "/project/neurons", "task": natural_id})
+        assert adapter.upsert_episode(episode) == "inserted"
+
+    assert graphiti.index_builds == 1
+    assert len(graphiti.saved_uuids) == 2
+
+
+def test_graphiti_adapter_waits_for_indices_online_after_build_before_first_write():
+    # CREATE INDEX only schedules population; a fulltext search against a
+    # POPULATING index still fails, so the adapter must await ONLINE before the
+    # first write and must not re-run the wait on later writes.
+    class _AwaitTrackingDriver(_FakeDriver):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list[str] = []
+
+        async def execute_query(self, query, **params):
+            if "db.awaitIndexes" in str(query):
+                assert not self.saved_uuids
+                self.calls.append("await_indexes")
+                return ([], None, None)
+            return await super().execute_query(query, **params)
+
+    class _IndexTrackingGraphiti(_FakeGraphiti):
+        def __init__(self) -> None:
+            super().__init__()
+            self.driver = _AwaitTrackingDriver()
+
+        async def build_indices_and_constraints(self, delete_existing: bool = False):
+            assert not self.driver.calls
+            self.driver.calls.append("build")
+
+    graphiti = _IndexTrackingGraphiti()
+    adapter = GraphitiNeo4jGraphMemoryAdapter(graphiti, default_group_id="/project/neurons")
+
+    for natural_id in ("task:online-a", "task:online-b"):
+        episode = _episode("Task", natural_id, {"brain_id": "/project/neurons", "task": natural_id})
+        assert adapter.upsert_episode(episode) == "inserted"
+
+    assert graphiti.driver.calls == ["build", "await_indexes"]
+    assert len(graphiti.saved_uuids) == 2
+
+
+def test_graphiti_adapter_index_online_wait_failure_does_not_block_write():
+    # Drivers without db.awaitIndexes (or a slow population) must fall through to
+    # the existing fail-closed write path rather than abort projection.
+    class _NoAwaitDriver(_FakeDriver):
+        async def execute_query(self, query, **params):
+            if "db.awaitIndexes" in str(query):
+                raise RuntimeError("procedure not found")
+            return await super().execute_query(query, **params)
+
+    graphiti = _FakeGraphiti()
+    graphiti.driver = _NoAwaitDriver()
+    adapter = GraphitiNeo4jGraphMemoryAdapter(graphiti, default_group_id="/project/neurons")
+
+    episode = _episode("Task", "task:online-c", {"brain_id": "/project/neurons", "task": "c"})
+    assert adapter.upsert_episode(episode) == "inserted"
+    assert len(graphiti.saved_uuids) == 1
+
+
 def test_graphiti_adapter_default_path_does_not_build_entity_extraction_body(monkeypatch):
     graphiti = _FakeGraphiti()
 

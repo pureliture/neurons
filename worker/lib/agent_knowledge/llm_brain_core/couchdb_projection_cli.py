@@ -28,6 +28,8 @@ from .ledger_adapter import (
 from .models import PROJECTION_SCHEMA_VERSION
 from .projection import GraphProjectionWorker
 from .runtime import (
+    INCONSISTENT_HERMES_PROJECT_SCOPE,
+    InconsistentHermesProjectScope,
     session_episode_from_couchdb_source,
     session_source_revision_from_couchdb_source,
 )
@@ -196,6 +198,7 @@ def run_couchdb_projection(
         by_project: Counter[str] = Counter()
         failure_reasons: Counter[str] = Counter()
         projected = duplicates = failed = skipped_resumed = skipped_disabled = 0
+        skipped_inconsistent = 0
         processed = 0
         stopped_after_max_projects = False
         started = time.monotonic()
@@ -271,6 +274,21 @@ def run_couchdb_projection(
                         reason_code=reason,
                         stage="project",
                     )
+            except InconsistentHermesProjectScope:
+                # Deterministic source-scope conflict: retrying cannot succeed,
+                # so count it separately instead of failing/dead-lettering, and
+                # pin the current source revision as source_invalid so resume and
+                # the status CLI stop treating it as backlog until the source
+                # changes.
+                skipped_inconsistent += 1
+                status = "skipped_inconsistent"
+                reason = INCONSISTENT_HERMES_PROJECT_SCOPE
+                _mark_session_source_invalid(
+                    projection_state_store,
+                    session=session,
+                    source_store=source_store,
+                    reason=reason,
+                )
             except Exception as exc:
                 failed += 1
                 status = "failed"
@@ -285,7 +303,12 @@ def run_couchdb_projection(
                 )
             elapsed_ms = int((time.monotonic() - item_started) * 1000)
             durations.append(elapsed_ms)
-            if index == 1 or index % report_every == 0 or status == "failed" or index == len(sessions):
+            if (
+                index == 1
+                or index % report_every == 0
+                or status in ("failed", "skipped_inconsistent")
+                or index == len(sessions)
+            ):
                 _write_jsonl(
                     progress_jsonl,
                     {
@@ -303,6 +326,7 @@ def run_couchdb_projection(
                         "failed": failed,
                         "skipped_resumed": skipped_resumed,
                         "skipped_disabled": skipped_disabled,
+                        "skipped_inconsistent": skipped_inconsistent,
                     },
                 )
             if max_projects and (projected + duplicates) >= max_projects:
@@ -337,6 +361,7 @@ def run_couchdb_projection(
                 "failed": failed,
                 "skipped_resumed": skipped_resumed,
                 "skipped_disabled": skipped_disabled,
+                "skipped_inconsistent": skipped_inconsistent,
                 "elapsed_total_ms": elapsed_total_ms,
                 "project_set": bool(project),
                 "project_ref": _project_ref(project),
@@ -387,6 +412,7 @@ def run_couchdb_projection(
                 "duplicates": duplicates,
                 "skipped_resumed": skipped_resumed,
                 "skipped_disabled": skipped_disabled,
+                "skipped_inconsistent": skipped_inconsistent,
                 "failed": failed,
                 "failure_rate": (failed / attempted) if attempted else 0.0,
                 "failure_reasons": dict(sorted(failure_reasons.items())),
@@ -801,6 +827,28 @@ def _round_robin_rank(
 
 def _session_natural_id(session_id_hash: str) -> str:
     return str(session_id_hash or "").replace(":", "_")
+
+
+def _mark_session_source_invalid(
+    projection_state_store: LedgerGraphProjectionStateStore,
+    *,
+    session: dict[str, Any],
+    source_store: CouchDBSourceStore,
+    reason: str,
+) -> None:
+    session_id_hash = str(session.get("session_id_hash") or "")
+    source_hash = str(session.get("source_hash") or "")
+    if not source_hash and session_id_hash:
+        source_hash = session_source_revision_from_couchdb_source(
+            session_id_hash=session_id_hash,
+            source_store=source_store,
+        )
+    projection_state_store.mark_source_invalid(
+        project=str(session.get("project") or ""),
+        natural_id=_session_natural_id(session_id_hash),
+        source_hash=source_hash,
+        reason=reason,
+    )
 
 
 def _filter_sessions(

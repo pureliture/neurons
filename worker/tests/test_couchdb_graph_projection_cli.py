@@ -415,6 +415,192 @@ def test_partial_projection_continues_and_writes_dead_letter(tmp_path):
     assert lines[0]["stage"] == "project"
 
 
+def test_hermes_profile_vs_profile_session_is_skipped_inconsistent_not_failed(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_PROFILE_NAMES", "profile-a,profile-b")
+    store = InMemoryCouchDBSourceStore()
+    good_sid = _seed_session(store, raw_id="hermes-good", project="profile-a", provider="hermes")
+    mixed_sid = _seed_session(store, raw_id="hermes-mixed", project="profile-a", provider="hermes")
+    chunk = TranscriptChunk.from_text(
+        chunk_id="chunk_hermes-mixed-other-profile",
+        session_id_hash=mixed_sid,
+        provider="hermes",
+        project="profile-b",
+        turn_start_index=1,
+        turn_end_index=1,
+        text="assistant continued under another hermes profile",
+    )
+    store.put(dm.build_conversation_chunk_document(chunk=chunk))
+    dead_letter = tmp_path / "dead-letter.jsonl"
+    progress = tmp_path / "progress.jsonl"
+
+    report = run_couchdb_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=2,
+        project=None,
+        provider="hermes",
+        enable_graph=True,
+        graph_required=False,
+        extract_entities=True,
+        reextract_entities=False,
+        resume=True,
+        dead_letter_jsonl=dead_letter,
+        progress_jsonl=progress,
+        report_every=100,
+        max_projects=0,
+        graph_adapter=_EntityFlagFakeGraph(),
+    )
+
+    assert report["status"] == "ok"
+    assert report["projection"]["attempted"] == 2
+    assert report["projection"]["projected"] == 1
+    assert report["projection"]["skipped_inconsistent"] == 1
+    assert report["projection"]["failed"] == 0
+    assert not dead_letter.exists()
+    events = [json.loads(line) for line in progress.read_text(encoding="utf-8").splitlines()]
+    skipped = [e for e in events if e["event"] == "progress" and e["status"] == "skipped_inconsistent"]
+    assert len(skipped) == 1
+    assert skipped[0]["reason_code"] == "inconsistent_hermes_project_scope"
+    assert good_sid != mixed_sid
+
+
+def _run_hermes_projection(tmp_path, store, *, progress: Path) -> dict[str, Any]:
+    return run_couchdb_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=10,
+        project=None,
+        provider="hermes",
+        enable_graph=True,
+        graph_required=False,
+        extract_entities=True,
+        reextract_entities=False,
+        resume=True,
+        dead_letter_jsonl=tmp_path / "dead-letter.jsonl",
+        progress_jsonl=progress,
+        report_every=100,
+        max_projects=0,
+        graph_adapter=_EntityFlagFakeGraph(),
+    )
+
+
+def _source_invalid_rows(tmp_path) -> list[tuple[str, str, str, str]]:
+    with Ledger(tmp_path / "ledger.sqlite3")._connect() as connection:
+        rows = connection.execute(
+            "SELECT natural_id, source_hash, upsert_result, extraction_level "
+            "FROM llm_brain_graph_projection_state WHERE upsert_result = 'source_invalid' "
+            "ORDER BY natural_id"
+        ).fetchall()
+    return [(r["natural_id"], r["source_hash"], r["upsert_result"], r["extraction_level"]) for r in rows]
+
+
+def test_hermes_inconsistent_session_is_pinned_source_invalid_until_source_changes(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_PROFILE_NAMES", "profile-a,profile-b")
+    store = InMemoryCouchDBSourceStore()
+    _seed_session(store, raw_id="hermes-good", project="profile-a", provider="hermes")
+    mixed_sid = _seed_session(store, raw_id="hermes-mixed", project="profile-a", provider="hermes")
+    store.put(
+        dm.build_conversation_chunk_document(
+            chunk=TranscriptChunk.from_text(
+                chunk_id="chunk_hermes-mixed-other-profile",
+                session_id_hash=mixed_sid,
+                provider="hermes",
+                project="profile-b",
+                turn_start_index=1,
+                turn_end_index=1,
+                text="assistant continued under another hermes profile",
+            )
+        )
+    )
+    mixed_natural_id = mixed_sid.replace(":", "_")
+    first_hash = session_source_revision_from_couchdb_source(session_id_hash=mixed_sid, source_store=store)
+
+    # (1) first run: counted as skipped_inconsistent AND pinned in projection state.
+    first = _run_hermes_projection(tmp_path, store, progress=tmp_path / "p1.jsonl")
+    assert first["projection"]["skipped_inconsistent"] == 1
+    assert first["projection"]["projected"] == 1
+    assert not (tmp_path / "dead-letter.jsonl").exists()
+    assert _source_invalid_rows(tmp_path) == [(mixed_natural_id, first_hash, "source_invalid", "entity")]
+
+    # (2) second resume run: the pinned revision is current, so nothing is re-selected.
+    second = _run_hermes_projection(tmp_path, store, progress=tmp_path / "p2.jsonl")
+    assert second["canonical_counts"]["eligible_sessions"] == 0
+    assert second["projection"]["attempted"] == 0
+    assert second["projection"]["skipped_inconsistent"] == 0
+
+    # (4) status CLI: excluded from valid sources/backlog like any source_invalid row.
+    status = build_graph_projection_status(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        project="profile-a",
+        provider="hermes",
+    )
+    assert status["source"]["session_count"] == 2
+    assert status["projection_state"]["entity_source_invalid"] == 1
+    assert status["projection_state"]["entity_valid_source_sessions"] == 1
+    assert status["projection_state"]["entity_session_projected"] == 1
+    assert status["projection_state"]["entity_session_backlog"] == 0
+    assert status["projection_state"]["entity_coverage_ratio"] == 1.0
+
+    # (3) a new source revision (still inconsistent) is re-evaluated and re-pinned
+    # under the new hash instead of staying hidden behind the old one.
+    store.put(
+        dm.build_conversation_chunk_document(
+            chunk=TranscriptChunk.from_text(
+                chunk_id="chunk_hermes-mixed-more",
+                session_id_hash=mixed_sid,
+                provider="hermes",
+                project="profile-b",
+                turn_start_index=2,
+                turn_end_index=2,
+                text="more text under the other profile",
+            )
+        )
+    )
+    second_hash = session_source_revision_from_couchdb_source(session_id_hash=mixed_sid, source_store=store)
+    assert second_hash != first_hash
+    third = _run_hermes_projection(tmp_path, store, progress=tmp_path / "p3.jsonl")
+    assert third["projection"]["attempted"] == 1
+    assert third["projection"]["skipped_inconsistent"] == 1
+    assert _source_invalid_rows(tmp_path) == [(mixed_natural_id, second_hash, "source_invalid", "entity")]
+
+
+def test_hermes_inconsistent_session_recovers_when_source_becomes_consistent(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_PROFILE_NAMES", "profile-a,profile-b")
+    store = InMemoryCouchDBSourceStore()
+    mixed_sid = _seed_session(store, raw_id="hermes-mixed", project="profile-a", provider="hermes")
+    bad_chunk = dm.build_conversation_chunk_document(
+        chunk=TranscriptChunk.from_text(
+            chunk_id="chunk_hermes-mixed-other-profile",
+            session_id_hash=mixed_sid,
+            provider="hermes",
+            project="profile-b",
+            turn_start_index=1,
+            turn_end_index=1,
+            text="assistant continued under another hermes profile",
+        )
+    )
+    store.put(bad_chunk)
+    first = _run_hermes_projection(tmp_path, store, progress=tmp_path / "p1.jsonl")
+    assert first["projection"]["skipped_inconsistent"] == 1
+
+    # Source correction (the stray profile chunk is removed) changes the revision,
+    # so the session is selected again and now projects.
+    store.delete(bad_chunk["_id"])
+    recovered = _run_hermes_projection(tmp_path, store, progress=tmp_path / "p2.jsonl")
+    assert recovered["projection"]["attempted"] == 1
+    assert recovered["projection"]["projected"] == 1
+    assert recovered["projection"]["skipped_inconsistent"] == 0
+    status = build_graph_projection_status(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        project="profile-a",
+        provider="hermes",
+    )
+    assert status["projection_state"]["entity_source_invalid"] == 0
+    assert status["projection_state"]["entity_session_backlog"] == 0
+
+
 def test_graph_disabled_reports_skipped_disabled_not_duplicate(tmp_path):
     store = InMemoryCouchDBSourceStore()
     _seed_session(store, raw_id="disabled")

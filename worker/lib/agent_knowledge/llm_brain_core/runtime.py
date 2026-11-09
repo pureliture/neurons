@@ -12,7 +12,9 @@ from agent_knowledge.couchdb_source.document_model import (
     observed_time_bounds,
 )
 from agent_knowledge.couchdb_source.hermes_project_scope import (
-    normalize_hermes_project_scope,
+    INCONSISTENT_HERMES_PROJECT_SCOPE,
+    InconsistentHermesProjectScope,
+    decide_hermes_project_scope,
 )
 from agent_knowledge.couchdb_source.source_revision import (
     resolve_active_source_revision,
@@ -44,6 +46,8 @@ from .source_ref import SourceRefCatalog, SourceRefResolver
 # back into this adapter/runtime module. It is re-exported here so existing
 # `from .runtime import episode_from_memory_card` call sites keep working.
 __all__ = [
+    "INCONSISTENT_HERMES_PROJECT_SCOPE",
+    "InconsistentHermesProjectScope",
     "episode_from_memory_card",
     "materialize_artifact_from_couchdb_source",
     "session_source_revision_from_couchdb_source",
@@ -159,7 +163,7 @@ def _materialize_artifact_from_couchdb_source_once(
         raise ValueError("session source docs are required")
     provider = str((sessions[0] if sessions else chunks[0]).get("provider") or "")
     project = str((sessions[0] if sessions else chunks[0]).get("project") or "")
-    scope = normalize_hermes_project_scope(
+    scope = decide_hermes_project_scope(
         sessions + chunks + evidence,
         provider=provider,
         session_project=project,
@@ -167,8 +171,7 @@ def _materialize_artifact_from_couchdb_source_once(
             str(doc.get("_id") or "") for doc in sessions if doc.get("_id")
         ),
     )
-    if scope.inconsistent:
-        raise ValueError("session source docs have inconsistent hermes project scope")
+    scope.raise_if_inconsistent()
     _validate_session_doc_scope(
         list(scope.documents),
         provider=provider,

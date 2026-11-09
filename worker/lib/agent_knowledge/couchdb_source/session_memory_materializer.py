@@ -37,6 +37,10 @@ from .document_model import (
     projection_state_doc_id,
     sha256_hash,
 )
+from .hermes_project_scope import (
+    INCONSISTENT_HERMES_PROJECT_SCOPE,
+    decide_hermes_project_scope,
+)
 from .source_revision import resolve_active_source_revision
 from .source_store import CouchDBSourceStore, SourceStoreConflict, SourceStoreError
 
@@ -365,6 +369,17 @@ def materialize_session_memory(*, session_id_hash: str, store: CouchDBSourceStor
 
     provider = sessions[0].get("provider", "") if sessions else (chunks[0].get("provider", "") if chunks else "")
     project = sessions[0].get("project", "") if sessions else (chunks[0].get("project", "") if chunks else "")
+    # Same policy as the graph lane (llm_brain_core.runtime): one session must
+    # not be admitted here and refused there. Inconsistent scope is recorded as
+    # a note and fails materialization closed below.
+    scope = decide_hermes_project_scope(
+        sessions + chunks + bundles,
+        provider=str(provider or ""),
+        session_project=str(project or ""),
+        session_doc_ids=frozenset(str(doc.get("_id") or "") for doc in sessions if doc.get("_id")),
+    )
+    if not scope.inconsistent:
+        project = scope.canonical_project
 
     chunks = sorted(chunks, key=lambda d: (d.get("turn_start_index", 0), d.get("_id", "")))
     bundles = sorted(bundles, key=lambda d: d.get("part_index", 0))
@@ -392,6 +407,11 @@ def materialize_session_memory(*, session_id_hash: str, store: CouchDBSourceStor
     body = "\n".join(lines).rstrip() + "\n"
 
     notes: list[str] = []
+    if scope.inconsistent:
+        notes.append(INCONSISTENT_HERMES_PROJECT_SCOPE)
+        notes.extend(scope.notes)
+    elif scope.normalized_projects:
+        notes.extend(scope.notes)
     if overlap_report["dropped_count"]:
         # Audit counter: how many stored chunks were de-overlapped out of the body
         # (subsumed/exact-dup). Counts/coverage below stay on the stored chunk list.
@@ -408,6 +428,8 @@ def materialize_session_memory(*, session_id_hash: str, store: CouchDBSourceStor
     if not chunks:
         fully_materialized = False
         notes.append("no_conversation_source")
+    if scope.inconsistent:
+        fully_materialized = False
 
     observed_at_start, observed_at_end = _observed_bounds(
         sessions=sessions,
@@ -477,7 +499,7 @@ def _projection_state_for_materialization(
     failure_reason: str = "",
     failure_source_hash: str = "",
     ref: str = "",
-    backend: str = "qdrant",
+    backend: str = "postgres_pgvector",
     embedding_profile: str = "",
 ) -> dict:
     if backend == "postgres_pgvector_local":
@@ -667,7 +689,7 @@ def _commit_projection_state_if_source_current(
     failure_reason: str = "",
     failure_source_hash: str = "",
     ref: str = "",
-    backend: str = "qdrant",
+    backend: str = "postgres_pgvector",
     representation_receipt: dict | None = None,
     embedding_profile: str = "",
 ) -> tuple[str, dict]:
@@ -913,7 +935,7 @@ def project_session_memory(
     store: CouchDBSourceStore,
     projector: SessionMemoryProjector,
     mirror_sink: "QdrantMirrorSink | None" = None,
-    backend: str = "qdrant",
+    backend: str = "postgres_pgvector",
 ) -> dict:
     """Project a materialized session-memory to RetiredIndexBridge, recording projection_state.
 
@@ -935,6 +957,28 @@ def project_session_memory(
         if backend == "postgres_pgvector" and projector_profile == LOCAL_EMBEDDING_PROFILE_ID
         else backend
     )
+
+    if INCONSISTENT_HERMES_PROJECT_SCOPE in materialized.notes:
+        # Deterministic source-scope conflict: a terminal input outcome, recorded
+        # with the blocked source revision so the selector leaves the session
+        # out of the queue until its source changes.
+        commit_status, _state = _commit_projection_state_if_source_current(
+            materialized=materialized,
+            store=store,
+            projection_status=ProjectionStatus.FAILED,
+            failure_reason=INCONSISTENT_HERMES_PROJECT_SCOPE,
+            failure_source_hash=materialized.source_hash,
+            backend=effective_backend,
+            embedding_profile=projector_profile,
+        )
+        result = {
+            "status": ProjectionStatus.FAILED,
+            "reason": INCONSISTENT_HERMES_PROJECT_SCOPE,
+            "ref": "",
+        }
+        if commit_status == "source_revision_changed":
+            result["state_write_skipped"] = commit_status
+        return result
 
     if not materialized.fully_materialized:
         commit_status, _state = _commit_projection_state_if_source_current(
@@ -1079,7 +1123,7 @@ def materialize_and_project(
     store: CouchDBSourceStore,
     projector: SessionMemoryProjector | None = None,
     mirror_sink: "QdrantMirrorSink | None" = None,
-    backend: str = "qdrant",
+    backend: str = "postgres_pgvector",
 ) -> dict:
     """End-to-end M3 step for one session: refresh coverage, materialize, project."""
 
