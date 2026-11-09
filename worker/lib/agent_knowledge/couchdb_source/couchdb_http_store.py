@@ -789,12 +789,14 @@ class CouchDBHttpSourceStore:
         }
         size = min(SESSION_QUERY_MAX_PAGE_SIZE, max(1, int(page_size)))
         bookmark = ""
+        use_sort = True
         while True:
             body: dict = {
                 "selector": query_selector,
-                "sort": [{"_id": "asc"}],
                 "limit": size,
             }
+            if use_sort:
+                body["sort"] = [{"_id": "asc"}]
             if fields:
                 body["fields"] = list(fields)
             if bookmark:
@@ -805,10 +807,13 @@ class CouchDBHttpSourceStore:
                 json_body=body,
                 max_response_bytes=max_page_bytes,
             )
-            if status == 400 and _is_no_usable_index(payload) and "sort" in body:
+            if status == 400 and _is_no_usable_index(payload) and use_sort:
                 # Some databases have no index matching the sort, so _find
                 # rejects the request. Drop the sort and retry without it
-                # (CouchDB returns documents in its default order).
+                # (CouchDB returns documents in its default order). The index
+                # does not appear mid-iteration, so remember the decision and
+                # stop paying a rejected request on every later page.
+                use_sort = False
                 body = dict(body)
                 body.pop("sort", None)
                 status, payload = self._request(
