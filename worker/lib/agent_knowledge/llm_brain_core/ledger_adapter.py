@@ -26,6 +26,11 @@ from .source_ref import SourceRefResolver
 EXTRACTION_LEVEL_EPISODIC = "episodic"
 EXTRACTION_LEVEL_ENTITY = "entity"
 
+# Durable "this source revision cannot be projected" marker. The status CLI
+# (SOURCE_INVALID_UPSERT_RESULTS) and resume (include_source_invalid) already
+# understand this value; mark_source_invalid is the single writer.
+SOURCE_INVALID_UPSERT_RESULT = "source_invalid"
+
 
 class LedgerSessionMemoryArtifactStore:
     """SessionMemoryArtifact persistence backed by the existing neurons Ledger."""
@@ -329,8 +334,10 @@ class LedgerGraphProjectionStateStore:
     Same shape as LedgerSourceRefCatalog / LedgerSessionMemoryArtifactStore: it
     ensures its schema on construction (skipped for a read-only ledger) and uses
     the ledger's own connection. It records only successful projections (inserted
-    / duplicate); skips and failures live on a different plane and are not stored
-    here. A re-run reads list_projected_ids to resume without an upsert round-trip.
+    / duplicate) plus durable ``source_invalid`` pins (mark_source_invalid) for
+    source revisions that can never project; other skips and failures live on a
+    different plane and are not stored here. A re-run reads list_projected_ids /
+    has_projected_source_hash to resume without an upsert round-trip.
     """
 
     def __init__(self, ledger: Any) -> None:
@@ -382,6 +389,54 @@ class LedgerGraphProjectionStateStore:
                     episode.ontology_version,
                     episode.extractor_version,
                     str(upsert_result or ""),
+                ),
+            )
+
+    def mark_source_invalid(
+        self,
+        *,
+        project: str,
+        natural_id: str,
+        source_hash: str,
+        entity_type: str = "Session",
+        reason: str = "",
+    ) -> None:
+        """Record a durable ``source_invalid`` row for one exact source revision.
+
+        The row shares the semantics the status CLI already applies to
+        ``SOURCE_INVALID_UPSERT_RESULTS``: the session is excluded from the
+        valid-source set and the entity backlog while its source hash is the
+        current one, and ``has_projected_source_hash`` treats it as current for
+        resume. A new source revision (different hash) is re-evaluated. Nothing
+        is written to the graph; ``extractor_version`` carries the reason code.
+        """
+        if not natural_id or not source_hash:
+            return
+        with self._ledger._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO llm_brain_graph_projection_state (
+                    episode_id, extraction_level, project, entity_type,
+                    natural_id, group_id, brain_id, content_hash, source_hash,
+                    ontology_version, extractor_version, upsert_result,
+                    projected_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, '', '', '', ?, '', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(episode_id, extraction_level) DO UPDATE SET
+                    upsert_result=excluded.upsert_result,
+                    source_hash=excluded.source_hash,
+                    extractor_version=excluded.extractor_version,
+                    projected_at=excluded.projected_at,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    f"source-invalid:{natural_id}",
+                    EXTRACTION_LEVEL_ENTITY,
+                    str(project or ""),
+                    str(entity_type or "Session"),
+                    str(natural_id),
+                    str(source_hash),
+                    str(reason or ""),
+                    SOURCE_INVALID_UPSERT_RESULT,
                 ),
             )
 

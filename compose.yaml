@@ -4,6 +4,9 @@ x-ingress-java-env: &ingress-java-env
 x-llm-brain-worker-env: &llm-brain-worker-env
   COUCHDB_URL: http://llm-brain-couchdb:5984
   COUCHDB_DB: ${LLM_BRAIN_COUCHDB_DB:-transcript_source}
+  # Hermes profile labels (comma-separated). Empty = fail-closed: any Hermes
+  # session mixing project labels is skipped as inconsistent by every build lane.
+  HERMES_PROFILE_NAMES: ${HERMES_PROFILE_NAMES:-}
   COUCHDB_USER: ${LLM_BRAIN_COUCHDB_USER:-neurons}
   COUCHDB_PASSWORD: ${LLM_BRAIN_COUCHDB_PASSWORD:?set LLM_BRAIN_COUCHDB_PASSWORD}
   NEURON_LEDGER_PG_DSN: postgresql://${LLM_BRAIN_LEDGER_POSTGRES_USER:-neurons}:${LLM_BRAIN_LEDGER_POSTGRES_PASSWORD:?set LLM_BRAIN_LEDGER_POSTGRES_PASSWORD}@llm-brain-ledger-postgres:5432/${LLM_BRAIN_LEDGER_POSTGRES_DB:-neurons_ledger}

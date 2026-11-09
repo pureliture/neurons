@@ -30,6 +30,7 @@ from agent_knowledge.qdrant_write_gateway_runtime import (
     qdrant_write_gateway_generation_from_environment,
 )
 from agent_knowledge.rag_ingress.pg_embedding_chunks import (
+    INCONSISTENT_HERMES_PROJECT_SCOPE,
     PG_INPUT_POLICY_VERSION,
     TERMINAL_INPUT_REASONS,
 )
@@ -938,6 +939,7 @@ def main(argv: list[str] | None = None) -> int:
     projected = 0
     failed = 0
     skipped = 0
+    skipped_inconsistent = 0
 
     try:
         for session in sessions:
@@ -959,6 +961,8 @@ def main(argv: list[str] | None = None) -> int:
                     projected += 1
                 elif status == "pending" or not result.get("fully_materialized"):
                     skipped += 1
+                    if str(projection.get("reason") or "") == INCONSISTENT_HERMES_PROJECT_SCOPE:
+                        skipped_inconsistent += 1
                 else:
                     failed += 1
             except Exception:
@@ -976,6 +980,7 @@ def main(argv: list[str] | None = None) -> int:
                 "projected": projected,
                 "failed": failed,
                 "skipped": skipped,
+                "skipped_inconsistent": skipped_inconsistent,
             },
             sort_keys=True,
         )
