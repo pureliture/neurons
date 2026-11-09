@@ -133,7 +133,9 @@ def _resolve_backfill_target(
     """
 
     couchdb_url = str(environ.get("COUCHDB_URL") or "").strip().rstrip("/")
-    couchdb_db = str(environ.get("COUCHDB_DB") or "neurons_transcript_source").strip()
+    from agent_knowledge.couchdb_source.couchdb_http_store import DEFAULT_COUCHDB_DB
+
+    couchdb_db = str(environ.get("COUCHDB_DB") or DEFAULT_COUCHDB_DB).strip()
     return _ResolvedBackfillTarget(
         couchdb_url=couchdb_url,
         couchdb_db=couchdb_db,

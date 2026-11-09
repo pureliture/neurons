@@ -45,8 +45,11 @@ QDRANT_MUTATION_SOURCE = QdrantMutationSource.PROJECTION
 
 
 def _build_auth_header(user: str, password: str) -> str:
-    token = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
-    return f"Basic {token}"
+    if not user:
+        return ""
+    from .couchdb_http_store import basic_auth_header
+
+    return basic_auth_header(user=user, password=password)
 
 
 def _blocked_source_hash_from_state(state: dict, backend: str) -> str:

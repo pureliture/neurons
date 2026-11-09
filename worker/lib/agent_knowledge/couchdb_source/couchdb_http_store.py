@@ -17,6 +17,7 @@ the RetiredIndexBridge token).
 
 from __future__ import annotations
 
+import base64
 import copy
 import json
 import time
@@ -48,6 +49,15 @@ from .source_store import (
 
 class CouchDBError(RuntimeError):
     """Raised on a non-success CouchDB HTTP response or connection failure."""
+
+
+def basic_auth_header(*, user: str, password: str) -> str:
+    """Single shared implementation for CouchDB Basic auth headers."""
+    token = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
+    return f"Basic {token}"
+
+
+DEFAULT_COUCHDB_DB = "transcript_source"
 
 
 class CouchDBResponseTooLarge(CouchDBError):
