@@ -1668,33 +1668,62 @@ def _card_identity(card: Mapping[str, Any]) -> tuple[str, str]:
     )
 
 
-def _rank_fuse(primary: list[dict[str, Any]], secondary: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Reciprocal rank fusion of two ranked lanes with memory_id/content_hash dedupe.
+def _content_fingerprint(text: Any) -> str:
+    """본문 정규화(공백 압축 + 소문자) 후 sha256. 비어 있으면 빈 문자열."""
+    normalized = " ".join(str(text or "").split()).lower()
+    if not normalized:
+        return ""
+    return "fp:" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
-    동점이면 primary(권위 card) lane이 먼저 온다. 두 lane에 같은 항목이 있으면
-    점수를 합산하되 한 번만 돌려준다.
+
+def _dedupe_keys(card: Mapping[str, Any]) -> set[str]:
+    """card↔chunk 교차 중복 판정 키.
+
+    권위 card의 `content_hash`는 card payload 전체의 hash이고 session chunk의
+    `content_hash`는 세션 본문의 sha256이라 계산 방식이 다르다. 따라서 두 기준을
+    모두 쓴다: (1) `content_hash` 문자열 일치, (2) 본문 정규화 후 sha256 일치
+    (`_content_fingerprint`; card는 `summary`, chunk는 헤더를 제거한 세션 본문).
+    """
+    keys: set[str] = set()
+    content_hash = str(card.get("content_hash") or "")
+    if content_hash:
+        keys.add("hash:" + content_hash)
+    fingerprint = _content_fingerprint(card.get("summary"))
+    if fingerprint:
+        keys.add(fingerprint)
+    return keys
+
+
+def _rank_fuse(primary: list[dict[str, Any]], secondary: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Reciprocal rank fusion of two ranked lanes with cross-lane dedupe.
+
+    동점이면 primary(권위 card) lane이 먼저 온다. 권위 card는 `memory_id`가
+    식별자다. session chunk가 `_dedupe_keys` 기준으로 어떤 권위 card와 같은 내용이면
+    card 1건만 남기고 chunk는 제거하되 RRF 점수는 합산한다. chunk끼리는 같은 키로
+    1건만 남긴다(동일 본문이 legacy/local chunk_id로 이중 저장된 경우).
     """
     scores: dict[str, float] = {}
     order: dict[str, int] = {}
     chosen: dict[str, dict[str, Any]] = {}
-    hash_to_key: dict[str, str] = {}
+    alias: dict[str, str] = {}
     position = 0
     for lane in (primary, secondary):
         for rank, card in enumerate(lane, start=1):
-            memory_id, content_hash = _card_identity(card)
+            memory_id, _content_hash = _card_identity(card)
             if not memory_id:
                 continue
-            # 권위 card는 memory_id가 식별자다. content_hash 중복 제거는 동일 본문이
-            # 다른 chunk_id로 저장될 수 있는 session-memory 항목에만 적용한다.
+            dedupe_keys = _dedupe_keys(card)
             is_chunk = card.get("source") == SOURCE_SESSION_MEMORY
-            key = hash_to_key.get(content_hash) if (is_chunk and content_hash) else None
-            key = key or memory_id
+            key = memory_id
+            if is_chunk:
+                matched = next((alias[k] for k in sorted(dedupe_keys) if k in alias), None)
+                key = matched or memory_id
             if key not in chosen:
                 chosen[key] = _copy_card(card)
                 order[key] = position
                 position += 1
-                if is_chunk and content_hash:
-                    hash_to_key.setdefault(content_hash, key)
+            for dedupe_key in dedupe_keys:
+                alias.setdefault(dedupe_key, key)
             scores[key] = scores.get(key, 0.0) + 1.0 / (_RRF_K + rank)
     ranked = sorted(chosen, key=lambda key: (-scores[key], order[key]))
     return [chosen[key] for key in ranked]

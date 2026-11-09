@@ -337,3 +337,30 @@ def test_shared_brain_reports_pending_session_memory_as_freshness_gap(tmp_path):
     assert freshness["session_memory_pending_chunks"] == 1
     assert freshness["session_memory_pending_sessions"] == 1
     assert "pending-chunk" not in json.dumps(payload["items"], ensure_ascii=False)
+
+
+def test_shared_brain_shows_only_the_approved_card_when_session_chunk_has_same_content(tmp_path):
+    couch = InMemoryCouchDBSourceStore()
+    pg = InMemorySharedBrainPgStore()
+    embed = SyntheticEmbedProvider()
+    session_id_hash = agent_a_records_decision_via_ingress(tmp_path, couch)
+    chunk_id = build_session_memory(couch, pg, embed, session_id_hash=session_id_hash)
+    chunk = pg.chunks[chunk_id]
+    # 에이전트 A의 세션 본문이 그대로 승인 card가 되었다(content_hash 동일).
+    episode = _approved_card(pg, memory_id="mem_from_agent_a", summary="세션 본문에서 승인된 결정")
+    pg.cards[-1]["content_hash"] = chunk.content_hash
+    pg.projected.add(("mem_from_agent_a", chunk.content_hash))
+    episode = OntologyEpisode.from_payload(
+        event_id="event:mem_from_agent_a", entity_type="Decision", natural_id="mem_from_agent_a",
+        payload={"authority_memory_id": "mem_from_agent_a", "content_hash": chunk.content_hash,
+                 "brain_id": f"/project/{PROJECT}", "summary": "그래프의 추론 문구", "provider": PROVIDER_A},
+    )
+    graph = SimpleNamespace(search_context=lambda **kw: GraphMemoryResult(status="available", episodes=(episode,)))
+
+    payload = agent_b_resolves(agent_b_service(tmp_path, pg, embed, graph_adapter=graph), query="authority 저장소 결정")
+
+    assert [(item["id"], item["source"]) for item in payload["items"]] == [("mem_from_agent_a", "graph_card")]
+    assert payload["metadata"]["sources"] == {"graph_card": 1, "session_memory": 0}
+    assert payload["metadata"]["session_memory_merged"] is True
+    assert payload["metadata"]["freshness"]["session_memory_pending_chunks"] == 0
+    assert f"chunk:{chunk_id[:56]}" not in json.dumps(payload, ensure_ascii=False)

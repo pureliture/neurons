@@ -503,7 +503,8 @@ memory_candidate_create
 
 - `query`가 있으면 기본 `mode=query`다. Graphiti/Neo4j 후보를 PostgreSQL 권위(승인 card의
   `content_hash` join)로 검증한 뒤, 다른 에이전트 세션에서 만들어진 `session_memory_chunks`
-  결과를 **항상** rank fusion으로 병합하고 `content_hash` 기준으로 중복을 제거한다.
+  결과를 **항상** rank fusion으로 병합하고 중복을 제거한다(chunk끼리는 `content_hash`,
+  card↔chunk는 `content_hash` 일치 또는 본문 정규화 sha256 일치 시 권위 card만 남김).
   각 항목은 `source=graph_card|session_memory`를 가진다. `query`가 비어 있으면 `mode=context`로
   내려가며, 명시 `mode=context|list` 호출은 그대로 동작한다.
 - `metadata.freshness`는 계산 가능한 반영 상태만 담는다: `projection_lag_ms`, `unprojected_cards`,

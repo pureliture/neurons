@@ -788,3 +788,35 @@ def test_query_embeds_once_per_request_even_when_fallback_and_session_memory_run
     assert [item["id"] for item in result["items"]] == ["mem_a", "chunk:chk_x"]
     assert result["metadata"]["retrieval_path"] == "pgvector_fallback"
     assert result["metadata"]["session_memory_merged"] is True
+
+
+def test_session_chunk_matching_approved_card_content_hash_is_folded_into_the_card():
+    store = SharedBrainStore(
+        cards=[_card("mem_a", HASH_A)],
+        chunks=[_chunk_row("chk_same", "user: 같은 결정 본문\n", HASH_A, 0.05),
+                _chunk_row("chk_other", "user: authority 다른 세션 지식\n", HASH_C, 0.2)],
+        freshness={"last_built_at": "2026-11-09T01:05:00+00:00", "last_observed_at": None,
+                   "pending_chunks": 0, "pending_sessions": 0},
+    )
+    result = GraphFirstResolver(store, Graph([_episode("mem_a", HASH_A)]), lambda _: [0.1]).resolve(
+        project="neurons", query="authority 결정"
+    )
+    assert [(item["id"], item["source"]) for item in result["items"]] == [
+        ("mem_a", "graph_card"), ("chunk:chk_other", "session_memory"),
+    ]
+    assert result["metadata"]["sources"] == {"graph_card": 1, "session_memory": 1}
+    assert result["metadata"]["session_memory_merged"] is True
+
+
+def test_session_chunk_with_same_normalized_body_as_card_summary_is_folded_despite_hash_mismatch():
+    summary = "Authority 저장소는   PostgreSQL로 확정한다."
+    store = SharedBrainStore(
+        cards=[{**_card("mem_a", HASH_A), "summary": summary}],
+        chunks=[_chunk_row("chk_body", "authority 저장소는 postgresql로 확정한다.", HASH_B, 0.05)],
+    )
+    result = GraphFirstResolver(store, Graph([_episode("mem_a", HASH_A)]), lambda _: [0.1]).resolve(
+        project="neurons", query="authority"
+    )
+    assert [(item["id"], item["source"]) for item in result["items"]] == [("mem_a", "graph_card")]
+    assert result["metadata"]["sources"] == {"graph_card": 1, "session_memory": 0}
+    assert result["metadata"]["session_memory_merged"] is True
