@@ -11,6 +11,9 @@ from agent_knowledge.couchdb_source.document_model import (
     normalize_observed_interval,
     observed_time_bounds,
 )
+from agent_knowledge.couchdb_source.hermes_project_scope import (
+    normalize_hermes_project_scope,
+)
 from agent_knowledge.couchdb_source.source_revision import (
     resolve_active_source_revision,
     resolve_active_source_revision_from_snapshot,
@@ -155,7 +158,22 @@ def _materialize_artifact_from_couchdb_source_once(
         raise ValueError("session source docs are required")
     provider = str((sessions[0] if sessions else chunks[0]).get("provider") or "")
     project = str((sessions[0] if sessions else chunks[0]).get("project") or "")
-    _validate_session_doc_scope(sessions + chunks + evidence, provider=provider, project=project)
+    scope = normalize_hermes_project_scope(
+        sessions + chunks + evidence,
+        provider=provider,
+        session_project=project,
+        session_doc_ids=frozenset(
+            str(doc.get("_id") or "") for doc in sessions if doc.get("_id")
+        ),
+    )
+    if scope.inconsistent:
+        raise ValueError("session source docs have inconsistent hermes project scope")
+    _validate_session_doc_scope(
+        list(scope.documents),
+        provider=provider,
+        project=scope.canonical_project,
+    )
+    project = scope.canonical_project
     chunks = sorted(chunks, key=lambda doc: (doc.get("turn_start_index", 0), doc.get("_id", "")))
     evidence = sorted(evidence, key=lambda doc: (doc.get("part_index", 0), doc.get("_id", "")))
     observed_at_start, observed_at_end = _source_observed_bounds(
