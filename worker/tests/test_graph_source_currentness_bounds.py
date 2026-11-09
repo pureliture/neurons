@@ -15,6 +15,7 @@ from agent_knowledge.couchdb_source.source_revision import (
     activate_source_revision,
     resolve_active_source_revision,
     resolve_active_source_revision_from_snapshot,
+    resolve_source_hash_for_currentness,
 )
 from agent_knowledge.couchdb_source.source_store import (
     CouchDBSourceStore,
@@ -475,4 +476,81 @@ def test_same_session_change_during_paging_discards_mixed_attempt_and_retries():
     ).source_hash
 
     assert changed is True
+    assert actual == expected
+
+
+class _ActivatingLegacyStore:
+    def __init__(self, inner: InMemoryCouchDBSourceStore, on_legacy_scan: Callable[[], None]):
+        self._inner = inner
+        self._on_legacy_scan = on_legacy_scan
+        self.legacy_scans = 0
+
+    def __getattr__(self, name: str):
+        return getattr(self._inner, name)
+
+    def iter_by_session(self, *, doc_type: str, **kwargs):
+        if doc_type == dm.SourceDocType.CONVERSATION_CHUNK:
+            self.legacy_scans += 1
+            self._on_legacy_scan()
+        return self._inner.iter_by_session(doc_type=doc_type, **kwargs)
+
+
+def test_legacy_currentness_rechecks_pointer_published_between_matching_scans():
+    session_id_hash = dm.build_session_id_hash("codex", "legacy-to-active-race")
+    inner = InMemoryCouchDBSourceStore()
+    session = dm.build_transcript_session_document(
+        session=TranscriptSession(
+            session_id_hash=session_id_hash,
+            provider="codex",
+            project="neurons",
+            started_at="2026-11-01T00:00:00Z",
+            ended_at="2026-11-01T00:01:00Z",
+        )
+    )
+    chunks = [
+        dm.build_conversation_chunk_document(
+            chunk=TranscriptChunk.from_text(
+                chunk_id=f"legacy-race-chunk-{index}",
+                session_id_hash=session_id_hash,
+                provider="codex",
+                project="neurons",
+                turn_start_index=index,
+                turn_end_index=index,
+                text=f"legacy race body {index}",
+            )
+        )
+        for index in range(3)
+    ]
+    inner.put(session)
+    for chunk in chunks:
+        inner.put(chunk)
+    legacy_hash = resolve_active_source_revision_from_snapshot(
+        session_id_hash=session_id_hash,
+        documents=inner.find_by_session(session_id_hash=session_id_hash),
+    ).source_hash
+
+    def activate_subset_after_second_scan():
+        if store.legacy_scans != 2:
+            return
+        activated.append(True)
+        activate_source_revision(
+            store=inner,
+            session_id_hash=session_id_hash,
+            source_document_ids=(str(session["_id"]), str(chunks[0]["_id"])),
+        )
+
+    activated: list[bool] = []
+    store = _ActivatingLegacyStore(inner, activate_subset_after_second_scan)
+
+    actual = resolve_source_hash_for_currentness(
+        session_id_hash=session_id_hash,
+        store=cast(CouchDBSourceStore, store),
+    )
+
+    expected = resolve_active_source_revision(
+        store=inner,
+        session_id_hash=session_id_hash,
+    ).source_hash
+    assert activated == [True]
+    assert expected != legacy_hash
     assert actual == expected

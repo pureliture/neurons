@@ -1646,9 +1646,10 @@ def resolve_source_hash_for_currentness(
 
     Active revisions are validated against their immutable manifest/member
     descriptors while each full source document is resident in one bounded
-    page. Legacy scans use the database update sequence before/after paging; an
-    unrelated database write can cause one safe retry, and continued global
-    churn returns an explicit pending/blocked error rather than mixed hashes.
+    page. Legacy scans run twice and must agree, then re-check that no active
+    pointer appeared mid-read; a same-session change causes one safe retry, and
+    continued churn returns an explicit pending/blocked error rather than mixed
+    or superseded hashes.
     """
 
     dm.assert_hash_like("session_id_hash", session_id_hash)
@@ -1675,7 +1676,18 @@ def resolve_source_hash_for_currentness(
                 )
             )
             if first_hash == second_hash:
-                return first_hash
+                # Activation keeps the legacy origin documents and only adds
+                # immutable copies plus a pointer, so two matching legacy scans
+                # cannot see a revision that was published mid-read. Re-read the
+                # pointer before trusting the legacy hash; a pointer that appeared
+                # means the active path must decide.
+                _, parsed_pointer_after = _read_currentness_pointer(
+                    store=store,
+                    session_id_hash=session_id_hash,
+                    budget=budget,
+                )
+                if parsed_pointer_after is None:
+                    return first_hash
             if attempt >= SOURCE_CURRENTNESS_MAX_RETRIES:
                 break
             continue
