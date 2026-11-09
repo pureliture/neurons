@@ -1100,3 +1100,42 @@ def test_http_aggregate_merge_propagates_contract_violation_without_put():
     current = store.get(_session_doc()["_id"])
     assert current["_rev"] == stored.rev
     assert current["project"] == "neurons"
+
+
+def test_iter_by_session_remembers_no_sort_fallback_across_pages():
+    # A database without an index for the `_id` sort rejects the first page with
+    # no_usable_index. The index cannot appear mid-iteration, so later pages must
+    # skip the sort up front instead of paying a rejected request per page.
+    fake = FakeCouch()
+    store = _store(fake)
+    store.ensure_database()
+    for i in range(5):
+        fake.dbs["transcript_source"][f"conversation_chunk:{i}"] = {
+            "_id": f"conversation_chunk:{i}",
+            "doc_type": dm.SourceDocType.CONVERSATION_CHUNK,
+            "session_id_hash": "s0",
+        }
+    real_request = store._request
+    rejected = []
+
+    def _request(method, path, json_body=None, **kwargs):
+        if path.endswith("/_find") and json_body is not None and "sort" in json_body:
+            rejected.append(dict(json_body))
+            return 400, {"error": "no_usable_index", "reason": "no index exists for this sort"}
+        return real_request(method, path, json_body=json_body, **kwargs)
+
+    store._request = _request
+
+    docs = list(
+        store.iter_by_session(
+            session_id_hash="s0",
+            doc_type=dm.SourceDocType.CONVERSATION_CHUNK,
+            fields=["_id"],
+            page_size=2,
+        )
+    )
+
+    assert [doc["_id"] for doc in docs] == [f"conversation_chunk:{i}" for i in range(5)]
+    assert len(rejected) == 1
+    assert all("sort" not in body for body in fake.find_bodies)
+    assert [body["limit"] for body in fake.find_bodies] == [2, 2, 2]
