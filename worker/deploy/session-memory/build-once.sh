@@ -1,7 +1,8 @@
 #!/bin/bash
 # session-memory builder 1사이클(컨테이너).
 set -euo pipefail
-cd /app
+# SESSION_MEMORY_APP_DIR: 컨테이너 밖(격리 검증)에서 같은 스크립트를 돌릴 때만 바꾼다.
+cd "${SESSION_MEMORY_APP_DIR:-/app}"
 mkdir -p state/runtime
 chmod 700 state state/runtime 2>/dev/null || true
 

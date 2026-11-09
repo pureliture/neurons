@@ -19,7 +19,7 @@ services:
     # 유지돼 contract 일치. 호스트-cron과 동일 동작.
     network_mode: host
     environment:
-      # cron(기본) | watch(CouchDB _changes 이벤트 기반, opt-in) | build
+      # cron(기본) | watch(NATS JetStream 이벤트 기반, opt-in) | build
       RUN_MODE: ${RUN_MODE:-cron}
       NEURON_LEDGER_PG_DSN: ${NEURON_LEDGER_PG_DSN:-}
       # watch(JetStream consumer) 설정. 기본값은 couchdb-session-memory-watch와 동일.
