@@ -95,11 +95,38 @@ def _object_indicates_local_mode(obj: Any) -> bool:
     return False
 
 
+def _pinned_local_mode(obj: Any) -> bool | None:
+    """Explicit per-instance decision (``local_embedding_mode`` bool), or None."""
+    if obj is None:
+        return None
+    pinned = getattr(obj, "local_embedding_mode", None)
+    if isinstance(pinned, bool):
+        return pinned
+    for attr in ("driver", "embedder", "clients"):
+        nested = getattr(obj, attr, None)
+        if nested is None or nested is obj:
+            continue
+        pinned = getattr(nested, "local_embedding_mode", None)
+        if isinstance(pinned, bool):
+            return pinned
+    return None
+
+
 def is_local_embedding_mode(*objects: Any, environ: dict[str, str] | None = None) -> bool:
-    """Return True when Graphiti should use the 256-dim local Model2Vec property contract."""
+    """Return True when Graphiti should use the 256-dim local Model2Vec property contract.
+
+    An adapter that built its Graphiti instance from config pins the decision on
+    the instance (``local_embedding_mode``); that pin wins over the process env so
+    two adapters in one process (or a test next to an exported local profile) do
+    not share a verdict. Objects without a pin keep the object/env inspection.
+    """
     ctx_override = _LOCAL_EMBEDDING_MODE_VAR.get()
     if ctx_override is not None:
         return ctx_override
+
+    pins = [pin for pin in (_pinned_local_mode(obj) for obj in objects) if pin is not None]
+    if pins:
+        return any(pins)
 
     for obj in objects:
         if _object_indicates_local_mode(obj):
