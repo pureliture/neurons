@@ -80,7 +80,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(json.dumps(report, sort_keys=True))
-    return 0
+    # `partial` means at least one source session could not be resolved
+    # (corrupt/limit-exceeded). Mirror couchdb-graph-project: the report is
+    # still printed, but the exit code must not read as a clean pass.
+    return 1 if str(report.get("status") or "") == "partial" else 0
 
 
 def build_graph_projection_status(

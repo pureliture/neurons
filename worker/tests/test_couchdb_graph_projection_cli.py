@@ -1679,3 +1679,17 @@ def test_status_keeps_unresolved_sessions_in_coverage_denominator(tmp_path):
     assert state["entity_coverage_ratio"] == 0.9
     assert report["dead_letter"]["count"] == 1
     assert report["dead_letter"]["failure_reasons"] == {"SourceRevisionResolutionError": 1}
+
+
+def test_status_cli_exit_code_is_nonzero_for_partial_report(tmp_path, monkeypatch, capsys):
+    from agent_knowledge.llm_brain_core import graph_projection_status_cli as status_cli
+
+    monkeypatch.setattr(status_cli, "_build_source_store", lambda **kwargs: object())
+    reports = iter([{"status": "ok", "source": {}}, {"status": "partial", "source": {}}])
+    monkeypatch.setattr(status_cli, "build_graph_projection_status", lambda **kwargs: next(reports))
+    argv = ["--ledger", str(tmp_path / "ledger.sqlite"), "--couchdb-url", "http://127.0.0.1:1"]
+
+    assert status_cli.main(argv) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "ok"
+    assert status_cli.main(argv) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "partial"
