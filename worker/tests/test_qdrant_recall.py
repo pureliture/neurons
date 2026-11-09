@@ -96,7 +96,7 @@ def _seed_projected(
         def project(self, *, target_profile, document):
             return "mem_" + str(document.get("content_hash", "")).split(":")[-1][:12]
 
-    materialize_and_project(session_id_hash=sid, store=store, projector=_P())
+    materialize_and_project(session_id_hash=sid, store=store, projector=_P(), backend="qdrant")
 
 
 def _adapter(client):

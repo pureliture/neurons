@@ -390,7 +390,7 @@ def test_exact_duplicate_preserves_projected_source_hash_and_is_not_reselected(t
     assert after["source_hash"] == source_hash
     assert after["projected_source_hash"] == source_hash
     assert store.get(session_id) == session_before
-    assert _select_sessions_needing_projection(store, limit=0) == []
+    assert _select_sessions_needing_projection(store, limit=0, backend="qdrant") == []
 
 
 def test_distinct_chunk_dirties_projection_changes_source_hash_and_is_reselected(tmp_path):
@@ -424,7 +424,7 @@ def test_distinct_chunk_dirties_projection_changes_source_hash_and_is_reselected
     assert after["projection_status"] == ProjectionStatus.PENDING
     assert after["source_hash"] != first_source_hash
     assert after["projected_source_hash"] == first_source_hash
-    selected = _select_sessions_needing_projection(store, limit=0)
+    selected = _select_sessions_needing_projection(store, limit=0, backend="qdrant")
     assert [row["session_id_hash"] for row in selected] == [SESSION_ID_HASH]
 
 

@@ -95,7 +95,7 @@ class _Projector:
 def _seed_projected_session(store, sid, **kw):
     _seed_session(store, sid, **kw)
     store_tool_evidence_bundles([_record(sid, 0)], store=store)
-    materialize_and_project(session_id_hash=sid, store=store, projector=_Projector())
+    materialize_and_project(session_id_hash=sid, store=store, projector=_Projector(), backend="qdrant")
 
 
 def _adapter(client, *, collection="parity_mirror"):
