@@ -21,6 +21,7 @@ from agent_knowledge.couchdb_source.source_revision import (
 )
 from agent_knowledge.couchdb_source.source_store import (
     CouchDBSourceStore,
+    SourceContractViolation,
     SourceStoreConflict,
     SourceStoreError,
 )
@@ -1082,6 +1083,23 @@ def test_expired_deadline_still_blocks_before_transport(monkeypatch):
         store._request("PUT", "/x")
 
     assert called is False
+
+
+def test_http_aggregate_merge_propagates_contract_violation_without_put():
+    fake = FakeCouch()
+    store = _store(fake)
+    store.ensure_database()
+    stored = store.put(_session_doc())
+
+    drifted = dict(_session_doc())
+    drifted["project"] = "other-project"
+    with pytest.raises(SourceContractViolation) as raised:
+        store.merge_transcript_session_aggregate(incoming=drifted)
+
+    assert raised.value.reason_code == "transcript_session_project_changed"
+    current = store.get(_session_doc()["_id"])
+    assert current["_rev"] == stored.rev
+    assert current["project"] == "neurons"
 
 
 def test_iter_by_session_remembers_no_sort_fallback_across_pages():

@@ -143,6 +143,54 @@ RAG document delivery에 필요한 만큼만. Kafka 식 replay/topic/partition�
   `deliveryAttempt`가 `MAX_DELIVER(5)`를 넘으면 `ack` 후 **quarantine candidate**(= `DEAD_LETTER`).
 - 검증 실패한 큐 payload는 `ack` 후 quarantine(무한 재전송 방지).
 
+### CouchDB delivery 실패 분류 (`CouchDBDeliveryBackend.submit`)
+
+legacy/unpinned transcript 경로의 순서는 다음과 같다.
+
+1. 기존 `transcript_session` aggregate를 읽고 `assert_transcript_session_identity`로
+   **identity pre-check** (아직 write 없음)
+2. 결정론적 id의 `conversation_chunk` 문서 write (`put_if_absent`)
+3. `transcript_session` aggregate CAS merge (merge 내부에서 1과 같은 identity 검사를 반복)
+
+실패는 두 lane 중 하나로만 분류한다(fail-closed: 애매하면 uncertain).
+
+| 예외 | lane | 처리 |
+|---|---|---|
+| `SourceContractViolation` | terminal | 즉시 `payload_integrity_mismatch` evidence → executor가 `quarantined`. `run = source_contract_violation:<reason_code>` |
+| `CouchDBError` (네트워크/HTTP) | uncertain | `DeliveryOutcomeUncertain` → `replayable`, `max_attempts`까지 재시도 |
+| `SourceStoreConflict` (CAS/동시성 경합) | uncertain | 위와 동일 |
+| 그 외 `SourceStoreError` (coverage 미수렴, active control plane 미해결, store 상태 손상) | uncertain | 위와 동일 |
+| 예상 못 한 예외 | uncertain | 위와 동일 |
+
+`SourceContractViolation`은 **같은 delivery job을 재시도해도 항상 같은 이유로 실패**하는
+검증에서만 raise한다. 판단 기준: 검사가 incoming payload와, 어떤 ingress write 경로도
+다시 쓰지 않는 session identity field(`transcript_session`의
+`session_id_hash`/`provider`/`project`/`_id`)에만 의존해야 한다. 현재 분류된 reason code:
+
+- `transcript_session_session_id_hash_changed` / `transcript_session_provider_changed` /
+  `transcript_session_project_changed` — 기존 aggregate와 incoming envelope의 identity 불일치
+  (예: 같은 `session_id_hash` 아래 다른 project를 주장하는 mixed-project payload)
+- `transcript_session_document_id_changed` — aggregate 문서 id 불일치
+- `aggregate_merge_requires_transcript_session` — aggregate merge에 `transcript_session`이 아닌 문서 전달
+
+반대로 "existing aggregate is not a transcript_session document"(store 상태 손상),
+coverage manifest 미수렴, `SourceRevisionResolutionError` 등 **store 상태가 바뀌면 결과가
+바뀔 수 있는** 실패는 plain `SourceStoreError`로 남겨 uncertain lane을 유지한다.
+`reason_code`는 고정 식별자(`[a-z0-9_]`)이며 payload 값(project 이름 등)을 담지 않는다.
+
+**의도적으로 받아들인 좁은 경합.** unpinned legacy `transcript_session`은 ingress가 아닌
+경로(`historical_import`의 `store.put(session_doc)`, 운영자 교정)로 문서 전체가 교체될 수
+있어 identity가 엄밀히 불변은 아니다. 그런 교정이 delivery retry 사이(기본 `max_attempts`
+3회)에 들어오면 다음 retry가 성공했을 수도 있지만, 이 경우에도 즉시 quarantine하고 교정
+이후 payload를 **재적재**로 처리한다. 이 경합을 위해 quarantine을 미루면 진짜
+mixed-identity payload를 모두 `max_attempts`까지 사유 없이 replay하게 되기 때문이다.
+
+**orphan chunk 문서.** pre-check(1)가 계약 위반 payload를 chunk write(2) 이전에 거절하므로
+일반적인 경우 store에는 아무것도 남지 않는다. pre-check 통과 후 merge(3) 사이에 aggregate가
+동시 교체되는 경합에서만 이미 기록된 chunk가 orphan으로 남을 수 있다. 그 chunk도 결정론적
+`_id`를 가지므로 같은 payload를 재처리해도 두 번째 chunk 문서가 생기지 않는다(idempotent
+duplicate). 이미 존재하는 orphan chunk의 정리(GC)는 이 계약의 범위 밖이다.
+
 ## 6. 금지 / 범위 (이번 slice)
 
 - live RetiredIndexBridge upload/parse 금지(contract/test/dry-run 중심).
