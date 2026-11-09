@@ -65,11 +65,12 @@ run_watch_loop() {
   trap stop_watch TERM INT
   echo "[entrypoint] watch started (debounce=${SESSION_MEMORY_WATCH_DEBOUNCE_SECONDS:-2}s, idle_sweep=${SESSION_MEMORY_WATCH_IDLE_SWEEP_SECONDS:-900}s, max_deliver=${SESSION_MEMORY_WATCH_MAX_DELIVER:-5})"
   while watch_should_continue; do
-    if run_interruptible watch_cli --consume; then
+    rc=0
+    run_interruptible watch_cli --consume || rc=$?
+    if [ "$rc" -eq 0 ]; then
       failures=0
       continue
     fi
-    rc=$?
     failures=$((failures + 1))
     backoff=$(failure_backoff_seconds "$failures" "$backoff_max")
     echo "[watch] consumer rc=${rc} consecutive_failures=${failures} backoff=${backoff}s"

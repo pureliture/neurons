@@ -164,17 +164,21 @@ def test_entrypoint_watch_failure_backoff_is_bounded() -> None:
 
 def test_entrypoint_watch_loop_restarts_consumer_with_backoff(tmp_path: Path) -> None:
     log_path = tmp_path / "calls.log"
+    count_path = tmp_path / "count"
+    count_path.write_text("0", encoding="utf-8")
     script = "\n".join(
         [
             "set -euo pipefail",
             "source deploy/session-memory/entrypoint.sh",
             f"log={log_path}",
-            "count=0",
+            f"count_file={count_path}",
+            # run_interruptible backgrounds watch_cli, so state must live in files.
             "watch_cli() {",
-            '  count=$((count + 1)); echo "consume $*" >> "$log"',
+            '  local count; count=$(( $(cat "$count_file") + 1 )); echo "$count" > "$count_file"',
+            '  echo "consume $*" >> "$log"',
             '  [ "$count" -ne 2 ]',
             "}",
-            'watch_should_continue() { [ "$count" -lt 3 ]; }',
+            'watch_should_continue() { [ "$(cat "$count_file")" -lt 3 ]; }',
             'sleep() { echo "sleep $1" >> "$log"; }',
             "SESSION_MEMORY_WATCH_FAILURE_BACKOFF_MAX_SECONDS=300 run_watch_loop",
         ]
