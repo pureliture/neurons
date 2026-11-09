@@ -63,7 +63,8 @@ jobs:
         # 전체 worker 회귀는 MCP transport wiring도 import하므로 mcp-http extra를
         # 같이 설치해 optional dependency 누락을 fail-closed로 드러낸다.
         # Model2Vec 로컬 임베딩 검증을 위해 local-embedding extra를 함께 설치한다.
-        run: uv run --group dev --extra mcp-http --extra local-embedding pytest -q
+        timeout-minutes: 12
+        run: uv run --group dev --extra mcp-http --extra local-embedding pytest -v -p no:randomly -o faulthandler_timeout=60
 
       - name: Local Model2Vec service & eval verification (M1, M3)
         working-directory: worker
