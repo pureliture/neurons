@@ -415,6 +415,54 @@ def test_partial_projection_continues_and_writes_dead_letter(tmp_path):
     assert lines[0]["stage"] == "project"
 
 
+def test_hermes_profile_vs_profile_session_is_skipped_inconsistent_not_failed(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    good_sid = _seed_session(store, raw_id="hermes-good", project="tyche", provider="hermes")
+    mixed_sid = _seed_session(store, raw_id="hermes-mixed", project="tyche", provider="hermes")
+    chunk = TranscriptChunk.from_text(
+        chunk_id="chunk_hermes-mixed-other-profile",
+        session_id_hash=mixed_sid,
+        provider="hermes",
+        project="ddalkak",
+        turn_start_index=1,
+        turn_end_index=1,
+        text="assistant continued under another hermes profile",
+    )
+    store.put(dm.build_conversation_chunk_document(chunk=chunk))
+    dead_letter = tmp_path / "dead-letter.jsonl"
+    progress = tmp_path / "progress.jsonl"
+
+    report = run_couchdb_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=2,
+        project=None,
+        provider="hermes",
+        enable_graph=True,
+        graph_required=False,
+        extract_entities=True,
+        reextract_entities=False,
+        resume=True,
+        dead_letter_jsonl=dead_letter,
+        progress_jsonl=progress,
+        report_every=100,
+        max_projects=0,
+        graph_adapter=_EntityFlagFakeGraph(),
+    )
+
+    assert report["status"] == "ok"
+    assert report["projection"]["attempted"] == 2
+    assert report["projection"]["projected"] == 1
+    assert report["projection"]["skipped_inconsistent"] == 1
+    assert report["projection"]["failed"] == 0
+    assert not dead_letter.exists()
+    events = [json.loads(line) for line in progress.read_text(encoding="utf-8").splitlines()]
+    skipped = [e for e in events if e["event"] == "progress" and e["status"] == "skipped_inconsistent"]
+    assert len(skipped) == 1
+    assert skipped[0]["reason_code"] == "inconsistent_hermes_project_scope"
+    assert good_sid != mixed_sid
+
+
 def test_graph_disabled_reports_skipped_disabled_not_duplicate(tmp_path):
     store = InMemoryCouchDBSourceStore()
     _seed_session(store, raw_id="disabled")
