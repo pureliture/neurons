@@ -312,9 +312,12 @@ Hermes는 한 세션 안에서 profile이 바뀔 수 있어 같은 세션의 Cou
   `hermes_profile_normalized_to_workspace`를 남긴다. CouchDB 문서는 바꾸지 않는다.
 - 그 외(profile-vs-profile, profile 세션에 workspace 혼입, 미등록 label):
   `inconsistent_hermes_project_scope`로 두 lane 모두 거부한다. graph lane은
-  `skipped_inconsistent`, PG lane은 `projection_state`에 terminal 실패 사유로
-  기록해 소스가 바뀌기 전까지 다시 선택하지 않으며 build 보고서에
-  `skipped_inconsistent`를 더한다.
+  `skipped_inconsistent`로 집계하고 현재 source hash를 ledger projection state에
+  `source_invalid`로 기록해 resume과 `couchdb-graph-status` backlog/coverage에서
+  기존 `source_invalid` 규칙대로 제외한다(dead-letter 아님). PG lane은
+  `projection_state`에 terminal 실패 사유로 기록하고 build 보고서에
+  `skipped_inconsistent`를 더한다. 두 lane 모두 source revision이 바뀌면 다시
+  판정한다.
 
 profile 이름은 코드에 두지 않는다. `HERMES_PROFILE_NAMES`(쉼표 구분)로 주입하며
 기본값은 빈 집합(fail-closed)이다. 운영 profile 목록은 private 배포 설정

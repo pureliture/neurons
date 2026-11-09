@@ -28,6 +28,7 @@ from .ledger_adapter import (
 from .models import PROJECTION_SCHEMA_VERSION
 from .projection import GraphProjectionWorker
 from .runtime import (
+    INCONSISTENT_HERMES_PROJECT_SCOPE,
     InconsistentHermesProjectScope,
     session_episode_from_couchdb_source,
     session_source_revision_from_couchdb_source,
@@ -275,10 +276,19 @@ def run_couchdb_projection(
                     )
             except InconsistentHermesProjectScope:
                 # Deterministic source-scope conflict: retrying cannot succeed,
-                # so count it separately instead of failing/dead-lettering.
+                # so count it separately instead of failing/dead-lettering, and
+                # pin the current source revision as source_invalid so resume and
+                # the status CLI stop treating it as backlog until the source
+                # changes.
                 skipped_inconsistent += 1
                 status = "skipped_inconsistent"
-                reason = "inconsistent_hermes_project_scope"
+                reason = INCONSISTENT_HERMES_PROJECT_SCOPE
+                _mark_session_source_invalid(
+                    projection_state_store,
+                    session=session,
+                    source_store=source_store,
+                    reason=reason,
+                )
             except Exception as exc:
                 failed += 1
                 status = "failed"
@@ -817,6 +827,28 @@ def _round_robin_rank(
 
 def _session_natural_id(session_id_hash: str) -> str:
     return str(session_id_hash or "").replace(":", "_")
+
+
+def _mark_session_source_invalid(
+    projection_state_store: LedgerGraphProjectionStateStore,
+    *,
+    session: dict[str, Any],
+    source_store: CouchDBSourceStore,
+    reason: str,
+) -> None:
+    session_id_hash = str(session.get("session_id_hash") or "")
+    source_hash = str(session.get("source_hash") or "")
+    if not source_hash and session_id_hash:
+        source_hash = session_source_revision_from_couchdb_source(
+            session_id_hash=session_id_hash,
+            source_store=source_store,
+        )
+    projection_state_store.mark_source_invalid(
+        project=str(session.get("project") or ""),
+        natural_id=_session_natural_id(session_id_hash),
+        source_hash=source_hash,
+        reason=reason,
+    )
 
 
 def _filter_sessions(

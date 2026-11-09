@@ -12,6 +12,7 @@ from agent_knowledge.couchdb_source.document_model import (
     observed_time_bounds,
 )
 from agent_knowledge.couchdb_source.hermes_project_scope import (
+    INCONSISTENT_HERMES_PROJECT_SCOPE,
     InconsistentHermesProjectScope,
     decide_hermes_project_scope,
 )
@@ -45,6 +46,7 @@ from .source_ref import SourceRefCatalog, SourceRefResolver
 # back into this adapter/runtime module. It is re-exported here so existing
 # `from .runtime import episode_from_memory_card` call sites keep working.
 __all__ = [
+    "INCONSISTENT_HERMES_PROJECT_SCOPE",
     "InconsistentHermesProjectScope",
     "episode_from_memory_card",
     "materialize_artifact_from_couchdb_source",
