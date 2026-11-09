@@ -313,6 +313,7 @@ def test_session_extraction_text_orders_multipart_chunks_by_turn_part():
                 text,
             ]
         )
+        doc["content_hash"] = dm.sha256_hash(doc["body"])
         store.put(doc)
 
     prose = extraction_text_from_couchdb_chunks(
@@ -357,6 +358,7 @@ def test_session_extraction_text_strips_couchdb_chunk_metadata_headers():
             chunk.redacted_text,
         ]
     )
+    doc["content_hash"] = dm.sha256_hash(doc["body"])
     store.put(doc)
 
     prose = extraction_text_from_couchdb_chunks(

@@ -358,6 +358,14 @@ def _chunk_to_view(chunk: dict) -> ChunkView:
 
 
 def materialize_session_memory(*, session_id_hash: str, store: CouchDBSourceStore) -> MaterializedSessionMemory:
+    """Materialize the resolved source revision into one session-memory body.
+
+    Resolution re-hashes every resident conversation chunk and tool evidence
+    bundle body against its ``content_hash`` and fails closed on mismatch; the
+    bounded currentness path (``resolve_source_hash_for_currentness``) only
+    compares stored hash metadata and relies on this step for content checks.
+    """
+
     resolved = resolve_active_source_revision(
         session_id_hash=session_id_hash,
         store=store,

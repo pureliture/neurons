@@ -26,6 +26,10 @@ _SOURCE_MEMBER_TYPES = frozenset(
         dm.SourceDocType.TOOL_EVIDENCE_BUNDLE,
     }
 )
+_BODY_MATERIAL_DOC_TYPES = (
+    dm.SourceDocType.CONVERSATION_CHUNK,
+    dm.SourceDocType.TOOL_EVIDENCE_BUNDLE,
+)
 _PROVENANCE_HASH_KEYS = frozenset(
     {"source_snapshot_hash", "predecessor_manifest_hash"}
 )
@@ -547,6 +551,32 @@ def _manifest_hash(
     )
 
 
+def _assert_material_body_integrity(document: Mapping[str, object]) -> None:
+    """Fail closed when a resolved body-bearing member no longer hashes to its content_hash.
+
+    Conversation chunks and tool evidence bundles both store ``content_hash =
+    sha256(body)``; a bundle's ``coverage_hash`` covers its member records, not
+    the body, so it never substitutes for the body check. Only full documents
+    reach here: bounded currentness and the redacted inventory never load
+    bodies and compare stored hash metadata by design, so content validation
+    is this check at materialize time.
+    """
+
+    doc_type = str(document.get("doc_type") or "")
+    if doc_type not in _BODY_MATERIAL_DOC_TYPES:
+        return
+    content_hash = str(document.get("content_hash") or "")
+    if not content_hash:
+        raise SourceRevisionResolutionError(
+            "active source revision source is missing its material hash"
+        )
+    body = document.get("body")
+    if not isinstance(body, str) or not body or dm.sha256_hash(body) != content_hash:
+        raise SourceRevisionResolutionError(
+            "active source revision source body does not match its material hash"
+        )
+
+
 def _source_hash(documents: Iterable[Mapping[str, object]]) -> str:
     items = list(documents)
     sessions = [item for item in items if item.get("doc_type") == dm.SourceDocType.TRANSCRIPT_SESSION]
@@ -570,8 +600,11 @@ def _source_hash(documents: Iterable[Mapping[str, object]]) -> str:
 
 
 def _resolved_source_hash(documents: Iterable[Mapping[str, object]]) -> str:
+    items = list(documents)
+    for item in items:
+        _assert_material_body_integrity(item)
     try:
-        return _source_hash(documents)
+        return _source_hash(items)
     except (TypeError, ValueError) as exc:
         raise SourceRevisionResolutionError(
             "active source revision source is invalid"
@@ -1385,15 +1418,22 @@ def _currentness_component(
 ) -> dict[str, str]:
     doc_type = str(document.get("doc_type") or "")
     if validated_descriptor is None:
-        material_hash_field, _ = _material_identity(document)
-        if material_hash_field == "document_hash" and doc_type != dm.SourceDocType.TRANSCRIPT_SESSION:
-            raise SourceRevisionResolutionError(
-                "source revision currentness requires a material hash for body-free source types"
+        try:
+            material_hash_field, _ = _material_identity(document)
+            if material_hash_field == "document_hash" and doc_type != dm.SourceDocType.TRANSCRIPT_SESSION:
+                raise SourceRevisionResolutionError(
+                    "source revision currentness requires a material hash for body-free source types"
+                )
+            revision_token = _revision_fingerprint(
+                document,
+                material_hash_field=material_hash_field,
             )
-        revision_token = _revision_fingerprint(
-            document,
-            material_hash_field=material_hash_field,
-        )
+        except SourceRevisionResolutionError:
+            raise
+        except (TypeError, ValueError) as exc:
+            raise SourceRevisionResolutionError(
+                "source revision currentness material is invalid"
+            ) from exc
     else:
         revision_token = str(validated_descriptor.get("member_revision_hash") or "")
     component = {
@@ -1663,6 +1703,11 @@ def resolve_source_hash_for_currentness(
     pointer appeared mid-read; a same-session change causes one safe retry, and
     continued churn returns an explicit pending/blocked error rather than mixed
     or superseded hashes.
+
+    This is a hash-metadata comparison only: bodies are never loaded, so a
+    stored body that no longer matches its ``content_hash`` still reads as
+    "unchanged" here. Content validation belongs to the materialize path, where
+    ``resolve_active_source_revision`` re-hashes each resident body.
     """
 
     dm.assert_hash_like("session_id_hash", session_id_hash)
