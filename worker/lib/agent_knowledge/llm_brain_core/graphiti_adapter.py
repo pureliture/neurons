@@ -1132,13 +1132,21 @@ def _resolve_embedding_dim(embedding_model: str, configured_dim: int) -> int:
 
 
 def _stamp_local_embedding_profile(graphiti_instance: Any, *, is_local: bool) -> Any:
+    # Pin the config-derived verdict on the instance so graphiti_core's
+    # is_local_embedding_mode() never falls back to the process env for it.
+    driver = getattr(graphiti_instance, "driver", None)
+    embedder = getattr(graphiti_instance, "embedder", None)
+    for target in (graphiti_instance, driver, embedder):
+        if target is not None:
+            try:
+                target.local_embedding_mode = is_local
+            except (AttributeError, TypeError, ValueError):
+                pass
     if not is_local:
         return graphiti_instance
     graphiti_instance.local_embedding_profile = LOCAL_EMBEDDING_PROFILE_ID
-    driver = getattr(graphiti_instance, "driver", None)
     if driver is not None:
         driver.local_embedding_profile = LOCAL_EMBEDDING_PROFILE_ID
-    embedder = getattr(graphiti_instance, "embedder", None)
     if embedder is not None:
         embedder.local_embedding_profile = LOCAL_EMBEDDING_PROFILE_ID
     return graphiti_instance
