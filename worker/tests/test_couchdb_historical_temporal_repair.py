@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -853,10 +854,21 @@ def test_candidate_collection_times_out_inside_flat_directory_scan_before_sortin
 
         def __next__(self):
             nonlocal scan_count
+            if scan_count >= 10_000:
+                raise StopIteration
             scan_count += 1
             return FakeEntry(scan_count)
 
-    monkeypatch.setattr(temporal_repair.os, "scandir", lambda _path: FakeScanner())
+    real_scandir = os.scandir
+    monkeypatch.setattr(
+        temporal_repair.os,
+        "scandir",
+        lambda path: (
+            FakeScanner()
+            if not isinstance(path, int) and Path(path) == tmp_path
+            else real_scandir(path)
+        ),
+    )
 
     documents, report, timed_out = collect_historical_candidates(
         provider=PROVIDER,
