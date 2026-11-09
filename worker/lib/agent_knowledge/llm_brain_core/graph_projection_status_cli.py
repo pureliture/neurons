@@ -93,9 +93,10 @@ def build_graph_projection_status(
     dead_letter_jsonl: list[Path] | None = None,
 ) -> dict[str, Any]:
     ledger = Ledger(ledger_path, read_only=True)
-    source_sessions, unresolved_reasons = _source_sessions(
+    source_sessions, unresolved_sessions, unresolved_reasons = _source_sessions(
         source_store, project=project, provider=provider
     )
+    unresolved_count = len(unresolved_sessions)
     source_natural_ids = {
         _session_natural_id(str(session.get("session_id_hash") or ""))
         for session in source_sessions
@@ -118,7 +119,7 @@ def build_graph_projection_status(
                 "source_hash": str(session.get("source_hash") or ""),
                 "materialized_at": str(session.get("materialized_at") or ""),
             }
-            for session in source_sessions
+            for session in (*source_sessions, *unresolved_sessions)
             if str(session.get("session_id_hash") or "")
         ],
     )
@@ -243,8 +244,13 @@ def build_graph_projection_status(
     )
     latest_entity_run["dead_letter_count"] = int(entity_dead_letter["count"])
 
-    source_count = len(source_sessions)
+    # Unresolved sessions stay in the source denominators (session_count,
+    # backlog, coverage) so one corrupted session lowers coverage instead of
+    # vanishing; they are excluded from entity_valid_source_sessions like
+    # source_invalid because they have no hash to project against.
+    source_count = len(source_sessions) + unresolved_count
     valid_source_count = len(valid_source_natural_ids)
+    coverage_denominator = valid_source_count + unresolved_count
     entity_projected = len(valid_source_natural_ids & entity_ids)
     episodic_projected = len(source_natural_ids & episodic_ids)
     now = datetime.now(timezone.utc)
@@ -255,7 +261,7 @@ def build_graph_projection_status(
     )
     return {
         "schema_version": GRAPH_PROJECTION_STATUS_SCHEMA_VERSION,
-        "status": "ok",
+        "status": "partial" if unresolved_count else "ok",
         "filters": {
             "project_set": bool(project),
             "project_ref": _project_ref(project),
@@ -263,7 +269,7 @@ def build_graph_projection_status(
         },
         "source": {
             "session_count": source_count,
-            "unresolved_sessions": sum(unresolved_reasons.values()),
+            "unresolved_sessions": unresolved_count,
             "unresolved_reasons": dict(sorted(unresolved_reasons.items())),
         },
         "projection_state": {
@@ -276,10 +282,12 @@ def build_graph_projection_status(
             "episodic_session_projected": episodic_projected,
             "episodic_session_noncurrent": source_count - episodic_projected,
             "entity_session_projected": entity_projected,
-            "entity_session_backlog": len(entity_backlog),
+            "entity_session_backlog": len(entity_backlog) + unresolved_count,
             "entity_source_invalid": len(invalid_entity_ids),
             "entity_valid_source_sessions": valid_source_count,
-            "entity_coverage_ratio": (entity_projected / valid_source_count) if valid_source_count else 0.0,
+            "entity_coverage_ratio": (
+                (entity_projected / coverage_denominator) if coverage_denominator else 0.0
+            ),
             "source_hash_mismatch_count": len(mismatch_ids),
             "stale_projected_session_count": len(stale_ids),
             "session_memory_projection_current_count": len(
@@ -315,9 +323,12 @@ def _source_sessions(
     *,
     project: str,
     provider: str,
-) -> tuple[list[dict[str, Any]], Counter[str]]:
-    """Resolve source hashes per session; unresolved sessions are counted, not fatal.
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], Counter[str]]:
+    """Resolve source hashes per session; unresolved sessions are returned, not fatal.
 
+    Returns ``(resolved, unresolved, unresolved_reasons)``. Unresolved sessions
+    carry ``source_hash=""`` so callers can keep them in source denominators
+    without comparing them against projections.
     ``SourceRevisionSnapshotChangedError`` still propagates because it signals
     database-wide churn rather than one session's corruption.
     """
@@ -335,6 +346,7 @@ def _source_sessions(
     )
     unresolved_reasons: Counter[str] = Counter()
     resolved: list[dict[str, Any]] = []
+    unresolved: list[dict[str, Any]] = []
     for session in _filter_sessions(sessions, project=project, provider=provider):
         session_id_hash = str(session.get("session_id_hash") or "")
         try:
@@ -346,10 +358,13 @@ def _source_sessions(
             raise
         except SourceRevisionResolutionError as exc:
             unresolved_reasons[_selection_error_code(exc)] += 1
+            session["source_hash"] = ""
+            unresolved.append(session)
             continue
         resolved.append(session)
     resolved.sort(key=lambda session: str(session.get("session_id_hash") or ""))
-    return resolved, unresolved_reasons
+    unresolved.sort(key=lambda session: str(session.get("session_id_hash") or ""))
+    return resolved, unresolved, unresolved_reasons
 
 
 def _session_memory_projection_states(

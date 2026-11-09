@@ -1631,10 +1631,51 @@ def test_status_counts_unresolved_source_sessions_instead_of_failing(tmp_path):
         provider=PROVIDER,
     )
 
-    assert report["status"] == "ok"
+    assert report["status"] == "partial"
     assert report["source"] == {
-        "session_count": 2,
+        "session_count": 3,
         "unresolved_sessions": 1,
         "unresolved_reasons": {"SourceRevisionResolutionError": 1},
     }
     assert report["projection_state"]["entity_valid_source_sessions"] == 2
+    assert report["projection_state"]["entity_session_backlog"] == 3
+    assert report["projection_state"]["episodic_session_noncurrent"] == 3
+    assert report["projection_state"]["entity_coverage_ratio"] == 0.0
+
+
+def test_status_keeps_unresolved_sessions_in_coverage_denominator(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    for index in range(9):
+        _seed_session(store, raw_id=f"coverage-healthy-{index}")
+    corrupted = _seed_session(store, raw_id="coverage-corrupted")
+    _corrupt_session_material_hash(store, corrupted)
+    dead_letter = tmp_path / "dead-letter.jsonl"
+    projection = _project(
+        tmp_path=tmp_path,
+        store=store,
+        graph_adapter=_EntityFlagFakeGraph(),
+        limit=10,
+        dead_letter_jsonl=dead_letter,
+    )
+    assert projection["status"] == "partial"
+    assert projection["projection"]["projected"] == 9
+
+    report = build_graph_projection_status(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        project=PROJECT,
+        provider=PROVIDER,
+        dead_letter_jsonl=[dead_letter],
+    )
+
+    assert report["status"] == "partial"
+    assert report["source"]["session_count"] == 10
+    assert report["source"]["unresolved_sessions"] == 1
+    state = report["projection_state"]
+    assert state["entity_session_projected"] == 9
+    assert state["entity_valid_source_sessions"] == 9
+    assert state["entity_source_invalid"] == 0
+    assert state["entity_session_backlog"] == 1
+    assert state["entity_coverage_ratio"] == 0.9
+    assert report["dead_letter"]["count"] == 1
+    assert report["dead_letter"]["failure_reasons"] == {"SourceRevisionResolutionError": 1}
