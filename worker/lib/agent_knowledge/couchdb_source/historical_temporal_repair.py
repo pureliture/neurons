@@ -146,8 +146,10 @@ def _target_fingerprint(value: Mapping[str, object]) -> str:
 
 
 def _resolve_target(environ: Mapping[str, str]) -> _Target:
+    from .couchdb_http_store import DEFAULT_COUCHDB_DB
+
     url = str(environ.get("COUCHDB_URL") or "").strip().rstrip("/")
-    database = str(environ.get("COUCHDB_DB") or "neurons_transcript_source").strip()
+    database = str(environ.get("COUCHDB_DB") or DEFAULT_COUCHDB_DB).strip()
     return _Target(
         couchdb_url=url,
         couchdb_db=database,
@@ -174,8 +176,9 @@ class _SourceEntryLimitExceeded(RuntimeError):
 def _auth_header(user: str, password: str) -> str:
     if not user:
         return ""
-    token = base64.b64encode(f"{user}:{password}".encode()).decode("ascii")
-    return f"Basic {token}"
+    from .couchdb_http_store import basic_auth_header
+
+    return basic_auth_header(user=user, password=password)
 
 
 def _optional_int(value: object | None) -> int | None:

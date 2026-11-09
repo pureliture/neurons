@@ -250,16 +250,15 @@ def convert_gemini_json_to_fixture(path: Path, runtime_dir: Path) -> Path:
 
 
 def build_store_from_env():
+    from .couchdb_http_store import DEFAULT_COUCHDB_DB, basic_auth_header
+
     url = os.environ.get("COUCHDB_URL")
-    db = os.environ.get("COUCHDB_DB", "transcript_source")
+    db = os.environ.get("COUCHDB_DB", DEFAULT_COUCHDB_DB)
     user = os.environ.get("COUCHDB_USER", "")
     password = os.environ.get("COUCHDB_PASSWORD", "")
     if not url:
         raise ValueError("COUCHDB_URL is required for a live migration (or use --dry-run)")
-    auth_header = ""
-    if user and password:
-        token = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
-        auth_header = f"Basic {token}"
+    auth_header = basic_auth_header(user=user, password=password) if user and password else ""
     store = CouchDBHttpSourceStore(base_url=url, db=db, auth_header=auth_header)
     store.ensure_database()
     return store

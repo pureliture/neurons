@@ -630,8 +630,11 @@ def _sha256(value: str) -> str:
 
 
 def _auth_header(user: str, password: str) -> str:
-    token = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
-    return f"Basic {token}"
+    if not user:
+        return ""
+    from .couchdb_http_store import basic_auth_header
+
+    return basic_auth_header(user=user, password=password)
 
 
 def _per_request_timeout_seconds(max_runtime_seconds: float) -> float:
