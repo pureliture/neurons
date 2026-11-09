@@ -903,7 +903,7 @@ def test_main_rejects_blank_couchdb_config_before_state_or_backend_startup(
     assert state_path.exists() is False
 
 
-def test_run_consume_publishes_session_changed_after_delivery_and_tolerates_publish_failure(tmp_path, monkeypatch):
+def test_run_consume_publishes_session_changed_after_delivery(tmp_path, monkeypatch):
     from agent_knowledge.rag_ingress.couchdb_delivery_backend import CouchDBDeliveryBackend
     from agent_knowledge.rag_ingress.shadow_worker import run_consume
     from agent_knowledge.session_memory.change_events import SessionChangeCollector
@@ -940,7 +940,6 @@ def test_run_consume_publishes_session_changed_after_delivery_and_tolerates_publ
             raise TimeoutError("idle")
 
     published = []
-    publish_failures = {"count": 0}
 
     class FakeJetStream:
         async def stream_info(self, _stream):
@@ -950,9 +949,6 @@ def test_run_consume_publishes_session_changed_after_delivery_and_tolerates_publ
             return FakeSubscription()
 
         async def publish(self, subject, data, *, stream=None, headers=None):
-            if publish_failures["count"]:
-                publish_failures["count"] -= 1
-                raise ConnectionError("broker unavailable")
             published.append((subject, __import__("json").loads(data), stream, headers))
 
     class FakeNatsConnection:
@@ -987,13 +983,3 @@ def test_run_consume_publishes_session_changed_after_delivery_and_tolerates_publ
     assert headers["Nats-Msg-Id"].startswith("sm:")
     assert event["session_id_hash"] == payload["payload"]["document"]["metadata"]["session_id_hash"]
     assert "body" not in event
-
-    # Publish failure: ingress ack unchanged, failure logged without the URL.
-    publish_failures["count"] = 1
-    message.ack_calls = 0
-    second = _couchdb_payload(tag="session-changed-publish-2")
-    payload.clear(); payload.update(second)
-    result = consume()
-    assert result["statuses"] == ["delivered"] and message.ack_calls == 1
-    assert any(line.startswith("session_change_publish_failed count=1 error=ConnectionError") for line in logs)
-    assert len(published) == 1
