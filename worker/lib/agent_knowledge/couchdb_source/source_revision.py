@@ -1654,43 +1654,47 @@ def resolve_source_hash_for_currentness(
     dm.assert_hash_like("session_id_hash", session_id_hash)
     for attempt in range(SOURCE_CURRENTNESS_MAX_RETRIES + 1):
         budget = {"rows": 0, "compact_bytes": 0}
-        before_sequence = str(store.read_change_sequence())
         pointer, parsed_pointer = _read_currentness_pointer(
             store=store,
             session_id_hash=session_id_hash,
             budget=budget,
         )
         if parsed_pointer is None:
-            components = _legacy_currentness_components(
-                store=store,
-                session_id_hash=session_id_hash,
-                budget=budget,
+            first_hash = _source_hash_from_currentness_components(
+                _legacy_currentness_components(
+                    store=store,
+                    session_id_hash=session_id_hash,
+                    budget={"rows": 0, "compact_bytes": 0},
+                )
             )
-        else:
-            components = _active_currentness_components(
-                store=store,
-                session_id_hash=session_id_hash,
-                parsed_pointer=parsed_pointer,
-                budget=budget,
+            second_hash = _source_hash_from_currentness_components(
+                _legacy_currentness_components(
+                    store=store,
+                    session_id_hash=session_id_hash,
+                    budget={"rows": 0, "compact_bytes": 0},
+                )
             )
-        source_hash = _source_hash_from_currentness_components(components)
-        if parsed_pointer is not None and source_hash != parsed_pointer["source_hash"]:
-            raise SourceRevisionResolutionError("active source revision hash changed")
-        after_sequence = str(store.read_change_sequence())
-        pointer_after = (
-            _get_bounded_currentness_document(
-                store=store,
-                document_id=dm.active_source_revision_pointer_doc_id(session_id_hash),
-                max_response_bytes=SOURCE_CURRENTNESS_MAX_POINTER_BYTES,
-                reason_code="source_revision_pointer_bytes_exceeded",
-            )
-            if pointer is not None
-            else None
+            if first_hash == second_hash:
+                return first_hash
+            if attempt >= SOURCE_CURRENTNESS_MAX_RETRIES:
+                break
+            continue
+        components = _active_currentness_components(
+            store=store,
+            session_id_hash=session_id_hash,
+            parsed_pointer=parsed_pointer,
+            budget=budget,
         )
-        if (
-            before_sequence == after_sequence
-            and (pointer is None or pointer_after == pointer)
-        ):
+        source_hash = _source_hash_from_currentness_components(components)
+        if source_hash != parsed_pointer["source_hash"]:
+            raise SourceRevisionResolutionError("active source revision hash changed")
+        pointer_after = _get_bounded_currentness_document(
+            store=store,
+            document_id=dm.active_source_revision_pointer_doc_id(session_id_hash),
+            max_response_bytes=SOURCE_CURRENTNESS_MAX_POINTER_BYTES,
+            reason_code="source_revision_pointer_bytes_exceeded",
+        )
+        if pointer_after == pointer:
             return source_hash
         if attempt >= SOURCE_CURRENTNESS_MAX_RETRIES:
             break
