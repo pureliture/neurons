@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
+from graphiti_core.local_profile import is_local_embedding_mode
 
 from ._util import (
     PRIVATE_OUTPUT_RE,
@@ -1055,7 +1056,7 @@ async def _safe_delete_graph_element(
     *,
     target_kind: str = "entity",
 ) -> None:
-    if getattr(driver, "local_embedding_profile", None) == LOCAL_EMBEDDING_PROFILE_ID:
+    if is_local_embedding_mode(driver):
         target_uuid = str(getattr(element, "uuid", "") or "").strip()
         group_id = str(getattr(element, "group_id", "") or "").strip()
         if target_uuid and group_id:
@@ -1186,6 +1187,18 @@ def _stamp_local_embedding_profile(graphiti_instance: Any, *, is_local: bool) ->
             except (AttributeError, TypeError, ValueError):
                 pass
     if not is_local:
+        for target in (graphiti_instance, driver, embedder):
+            if target is None:
+                continue
+            if getattr(target, "local_embedding_profile", None) != LOCAL_EMBEDDING_PROFILE_ID:
+                continue
+            try:
+                delattr(target, "local_embedding_profile")
+            except (AttributeError, TypeError, ValueError):
+                try:
+                    target.local_embedding_profile = None
+                except (AttributeError, TypeError, ValueError):
+                    pass
         return graphiti_instance
     graphiti_instance.local_embedding_profile = LOCAL_EMBEDDING_PROFILE_ID
     if driver is not None:
