@@ -39,23 +39,27 @@ Fail-closed gate (the backend-neutral payload gate in :mod:`.delivery_payload_ga
 4. build_conversation_chunk_document calls assert_source_text_clean internally.
 5. Any CouchDBError or unexpected exception mid-flight -> DeliveryOutcomeUncertain
    (the PUT may have succeeded before the exception).
-6. A :class:`..couchdb_source.source_store.SourceContractViolation` raised by the
-   store mid-flight -> immediate ``payload_integrity_mismatch`` evidence with
+6. A :class:`..couchdb_source.source_store.SourceContractViolation` (from the
+   pre-write identity check or from the store mid-flight) -> immediate
+   ``payload_integrity_mismatch`` evidence with
    ``run="source_contract_violation:<reason_code>"`` (the executor quarantines).
 
-Mid-flight failure classification (fail-closed)
------------------------------------------------
-The transcript path writes the deterministic chunk document first and then
-merges the ``transcript_session`` aggregate. Failures after the first write are
+Failure classification (fail-closed)
+------------------------------------
+On the legacy/unpinned path the transcript flow is: read the existing
+``transcript_session`` aggregate and run ``assert_transcript_session_identity``
+(**pre-check, no write yet**), write the deterministic chunk document, then
+CAS-merge the aggregate (which re-runs the same identity check). Failures are
 sorted into exactly two lanes:
 
 - **Terminal (quarantine now)**: ``SourceContractViolation`` only. It is raised
-  solely where the same input fails identically on every retry because the check
-  depends on the incoming payload and on session identity fields the store never
-  rewrites (``transcript_session`` ``session_id_hash``/``provider``/``project``
-  mismatch against the existing aggregate). Replaying it to ``max_attempts``
-  cannot change the outcome; it only delays the quarantine. The
-  ``reason_code`` is a fixed identifier and never carries field values.
+  solely where the same input fails identically on every delivery retry because
+  the check depends on the incoming payload and on session identity fields that
+  no ingress write path rewrites (``transcript_session``
+  ``session_id_hash``/``provider``/``project``/``_id`` mismatch against the
+  existing aggregate). Replaying it to ``max_attempts`` cannot change the
+  outcome; it only delays the quarantine. The ``reason_code`` is a fixed
+  identifier and never carries field values.
 - **Uncertain (replay/reconcile)**: ``CouchDBError`` (network/HTTP),
   ``SourceStoreConflict`` (CAS/concurrency races), every other
   ``SourceStoreError`` (non-converging coverage, unresolved active control
@@ -63,9 +67,19 @@ sorted into exactly two lanes:
   could depend on store state another writer or an operator repair may change,
   it stays here.
 
-An already written chunk document before a terminal violation is harmless for
-reprocessing: its ``_id`` is deterministic, so a later submit of the same
-payload is an idempotent duplicate rather than a second chunk.
+Accepted narrow race: an unpinned legacy aggregate may still be replaced
+wholesale by ``put()`` (historical import, operator correction). A correction
+landing between two delivery retries would have let the retry succeed; this
+path quarantines anyway and the corrected payload is re-ingested afterwards.
+Deferring quarantine for that race would replay every genuine mixed-identity
+payload to ``max_attempts`` with no recorded reason.
+
+Orphan chunk documents: the pre-check rejects a mixed-identity payload before
+its chunk is written, so the common case leaves nothing behind. Only when the
+aggregate is replaced between the pre-check and the merge (concurrent legacy
+``put()``) can a chunk already be stored when the merge raises; its ``_id`` is
+deterministic, so reprocessing the same payload is an idempotent duplicate,
+never a second chunk, and that single orphan is the only residue.
 
 doc_ref convention: ``session_doc_id(session_id_hash)`` so status() can look
 up the authoritative session document.  dataset_ref: ``couchdb:<db>``.
@@ -106,6 +120,7 @@ from ..couchdb_source.source_store import (
     CouchDBSourceStore,
     SourceContractViolation,
     SourceStoreConflict,
+    assert_transcript_session_identity,
     payload_hash,
     payload_hash as source_payload_hash,
 )
@@ -615,6 +630,16 @@ class CouchDBDeliveryBackend:
                 # activation can publish its pointer after this pre-read but
                 # before our raw source write; recheck below so the later
                 # writer creates the required explicit successor.
+                #
+                # Identity pre-check before the first write: a payload whose
+                # session identity contradicts the stored aggregate is rejected
+                # here, so it never leaves an orphan chunk document behind. The
+                # merge below repeats the same check for the concurrent-replace
+                # race.
+                assert_transcript_session_identity(
+                    existing=self._store.get(str(session_doc["_id"])),
+                    incoming=session_doc,
+                )
                 chunk_revision = self._store.put_if_absent(chunk_doc)
                 upsert_transcript_session_aggregate(
                     store=self._store,
@@ -801,9 +826,13 @@ class CouchDBDeliveryBackend:
         except SourceContractViolation as exc:
             # Deterministic contract violation (e.g. the existing aggregate's
             # project differs from this payload). The same input fails the same
-            # way on every retry, so quarantine now instead of replaying to
-            # max_attempts. Any chunk already written under its deterministic
-            # id is an idempotent duplicate on reprocessing, not a second copy.
+            # way on every delivery retry, so quarantine now instead of
+            # replaying to max_attempts. Usually raised by the pre-check above
+            # before any write; if the merge raises it instead (aggregate
+            # replaced concurrently), the chunk already written under its
+            # deterministic id is an idempotent duplicate on reprocessing, not
+            # a second copy. See the module docstring for the accepted legacy
+            # put() correction race.
             return _payload_integrity_evidence(
                 job,
                 run="source_contract_violation:" + _redacted_reason_code(exc),

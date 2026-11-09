@@ -54,12 +54,19 @@ class SourceStoreError(ValueError):
 class SourceContractViolation(SourceStoreError):
     """A deterministic source write contract violation.
 
-    Raised only where the same incoming document fails for the same reason on
-    every retry because the check depends solely on the incoming document and
-    on source identity fields that the store never mutates once written
-    (``transcript_session`` ``session_id_hash``/``provider``/``project``).
-    Retrying cannot repair it, so ingress delivery may quarantine the job
+    Raised only where the check depends solely on the incoming document and on
+    ``transcript_session`` identity fields (``session_id_hash``/``provider``/
+    ``project``/``_id``) that no ingress write path rewrites.  Retrying the same
+    delivery job cannot repair it, so ingress delivery quarantines the job
     immediately instead of burning replay attempts.
+
+    Known narrow exception, accepted by design: an unpinned legacy
+    ``transcript_session`` can still be replaced wholesale by ``put()`` (e.g. a
+    historical import or an operator correction).  If such a correction lands
+    inside the few-attempt retry window the mismatch would have vanished on the
+    next retry.  Deferring quarantine for that race would also replay every
+    genuine mixed-identity payload to ``max_attempts`` without a recorded
+    reason, so the corrected payload is instead re-ingested after quarantine.
 
     ``reason_code`` is a fixed, redaction-safe identifier (no field values) that
     delivery records as ``source_contract_violation:<reason_code>``.
@@ -493,6 +500,41 @@ def _chronological_bound(values: tuple[object, object], *, latest: bool) -> str:
     return max(fallback_values) if latest else min(fallback_values)
 
 
+def assert_transcript_session_identity(*, existing: dict | None, incoming: dict) -> None:
+    """Reject an incoming ``transcript_session`` envelope whose identity differs
+    from the stored aggregate.
+
+    This is the merge's deterministic identity gate, exposed so ingress can run
+    the same check *before* writing any ``conversation_chunk`` document and so
+    reject a mixed-identity payload without leaving an orphan chunk behind.
+    ``existing is None`` always passes (first write).
+    """
+
+    if existing is None:
+        return
+    if existing.get("doc_type") != SourceDocType.TRANSCRIPT_SESSION:
+        # Store-state corruption under a transcript_session id: not determined
+        # by the incoming payload, so it stays a non-terminal store error.
+        raise SourceStoreError("existing aggregate is not a transcript_session document")
+    if str(existing.get("_id") or "") != str(incoming.get("_id") or ""):
+        raise SourceContractViolation(
+            "transcript session document id changed",
+            reason_code="transcript_session_document_id_changed",
+        )
+    for field in ("session_id_hash", "provider", "project"):
+        old = str(existing.get(field) or "")
+        new = str(incoming.get(field) or "")
+        if old and new and old != new:
+            # Neither this merge nor any other ingress path rewrites identity
+            # fields, so the same incoming envelope fails identically on every
+            # delivery retry.  Only an out-of-band legacy ``put()`` replacement
+            # can change the answer; see SourceContractViolation.
+            raise SourceContractViolation(
+                f"transcript session {field} changed",
+                reason_code=f"transcript_session_{field}_changed",
+            )
+
+
 def merge_transcript_session_documents(
     *,
     existing: dict | None,
@@ -520,25 +562,7 @@ def merge_transcript_session_documents(
             merged.pop(field, None)
         return merged
 
-    if existing.get("doc_type") != SourceDocType.TRANSCRIPT_SESSION:
-        # Store-state corruption under a transcript_session id: not determined
-        # by the incoming payload, so it stays a non-terminal store error.
-        raise SourceStoreError("existing aggregate is not a transcript_session document")
-    if str(existing.get("_id") or "") != str(incoming.get("_id") or ""):
-        raise SourceContractViolation(
-            "transcript session document id changed",
-            reason_code="transcript_session_document_id_changed",
-        )
-    for field in ("session_id_hash", "provider", "project"):
-        old = str(existing.get(field) or "")
-        new = str(incoming.get(field) or "")
-        if old and new and old != new:
-            # Identity fields are never rewritten by this merge, so the same
-            # incoming envelope fails identically on every retry.
-            raise SourceContractViolation(
-                f"transcript session {field} changed",
-                reason_code=f"transcript_session_{field}_changed",
-            )
+    assert_transcript_session_identity(existing=existing, incoming=incoming)
 
     merged = copy.deepcopy(existing)
     for field in ("_rev", "idempotency_key", "payload_hash"):
@@ -986,6 +1010,7 @@ __all__ = [
     "SourceStoreConflict",
     "SourceStoreError",
     "StoredRevision",
+    "assert_transcript_session_identity",
     "merge_transcript_session_documents",
     "payload_hash",
     "validate_for_write",

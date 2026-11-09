@@ -805,10 +805,12 @@ def test_executor_quarantines_mixed_project_session_on_first_attempt(tmp_path):
     second_job_id = _job_view(state_db, "hermes_key_2").job_id
 
     assert executor.execute_once(second_job_id, max_attempts=3) == "quarantined"
-    # 한 번의 merge 시도로 끝난다 (replayable 상태를 거치지 않음)
-    assert store.merge_calls == merge_calls_after_first + 1
+    # pre-check가 merge 이전에 거절하므로 merge 호출도, chunk 기록도 없다
+    # (replayable 상태를 거치지 않음)
+    assert store.merge_calls == merge_calls_after_first
+    assert store.get(conversation_chunk_doc_id(HERMES_SESSION_ID_HASH, "chunk_hermes_2")) is None
     assert executor.execute_once(second_job_id, max_attempts=3) == "quarantined"
-    assert store.merge_calls == merge_calls_after_first + 1
+    assert store.merge_calls == merge_calls_after_first
 
     job = state_db.get_delivery_job(second_job_id)
     assert job["status"] == "quarantined"
@@ -827,8 +829,8 @@ def test_executor_quarantines_mixed_project_session_on_first_attempt(tmp_path):
     assert session_doc["provider"] == "hermes"
 
 
-def test_quarantined_contract_violation_leaves_no_duplicate_chunk_on_reprocess(tmp_path):
-    """merge 이전에 기록된 chunk 문서는 결정론적 id라서 재처리해도 중복이 생기지 않는다."""
+def test_identity_precheck_rejects_mixed_project_payload_before_any_chunk_write(tmp_path):
+    """계약 위반 payload는 chunk 문서가 기록되기 전에 거절되어 orphan chunk를 남기지 않는다."""
     state_db = _state_db(tmp_path)
     _seed_hermes_mixed_project(state_db)
     store = InMemoryCouchDBSourceStore()
@@ -836,29 +838,90 @@ def test_quarantined_contract_violation_leaves_no_duplicate_chunk_on_reprocess(t
 
     assert backend.submit(_job_view(state_db, "hermes_key_1")).status == "succeeded"
     second_job = _job_view(state_db, "hermes_key_2")
+    docs_before = {doc["_id"]: doc["_rev"] for doc in store.all_docs()}
+    assert len(_session_chunk_docs(store, HERMES_SESSION_ID_HASH)) == 1
 
-    first_attempt = backend.submit(second_job)
-    assert first_attempt.status == "payload_integrity_mismatch"
-    assert first_attempt.run == "source_contract_violation:transcript_session_project_changed"
-
-    orphan_id = conversation_chunk_doc_id(HERMES_SESSION_ID_HASH, "chunk_hermes_2")
-    orphan_before = store.get(orphan_id)
-    assert orphan_before is not None  # chunk was written before the aggregate merge
-    chunk_docs_before = _session_chunk_docs(store, HERMES_SESSION_ID_HASH)
-    assert len(chunk_docs_before) == 2
-    total_docs_before = len(list(store.all_docs()))
-
-    # 운영자가 같은 job을 다시 밀어넣어도 (executor는 quarantined를 건너뛰지만
-    # backend 재호출 경로를 직접 고정한다) 같은 결론이며 chunk 문서는 늘지 않는다.
     for _ in range(3):
-        retry = backend.submit(second_job)
+        evidence = backend.submit(second_job)
+        assert evidence.status == "payload_integrity_mismatch"
+        assert evidence.run == "source_contract_violation:transcript_session_project_changed"
+
+    # store는 바이트 단위로 변하지 않았다: chunk도, aggregate revision도 그대로
+    assert {doc["_id"]: doc["_rev"] for doc in store.all_docs()} == docs_before
+    assert store.get(conversation_chunk_doc_id(HERMES_SESSION_ID_HASH, "chunk_hermes_2")) is None
+    assert len(_session_chunk_docs(store, HERMES_SESSION_ID_HASH)) == 1
+    assert store.get(session_doc_id(HERMES_SESSION_ID_HASH))["project"] == "alpha-project"
+
+
+def test_aggregate_replaced_between_precheck_and_merge_leaves_single_deterministic_chunk(tmp_path):
+    """pre-check 통과 후 merge 전에 aggregate가 교체되는 경합: merge가 위반을 잡아 quarantine하고,
+    이미 기록된 chunk는 결정론적 id라 재처리해도 중복이 생기지 않는다(이 경우만 orphan 1개가 남는다)."""
+
+    class RaceStore(InMemoryCouchDBSourceStore):
+        """put_if_absent(chunk) 직후, 즉 merge 직전에 legacy put()으로 aggregate project를 바꾼다."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.race_armed = False
+            self.races_fired = 0
+
+        def put_if_absent(self, document):
+            stored = super().put_if_absent(document)
+            if self.race_armed and document.get("doc_type") == SourceDocType.CONVERSATION_CHUNK:
+                self.race_armed = False
+                self.races_fired += 1
+                current = dict(self.get(session_doc_id(HERMES_SESSION_ID_HASH)))
+                current["project"] = "gamma-project"
+                self.put(current)
+            return stored
+
+    state_db = _state_db(tmp_path)
+    first = _payload(
+        idempotency_key="hermes_key_1",
+        session_id_hash=HERMES_SESSION_ID_HASH,
+        chunk_id="chunk_hermes_1",
+        provider="hermes",
+        project="alpha-project",
+        body="First hermes chunk under alpha.",
+    )
+    # 같은 project를 주장하므로 pre-check는 통과한다
+    aligned = _payload(
+        idempotency_key="hermes_key_3",
+        session_id_hash=HERMES_SESSION_ID_HASH,
+        chunk_id="chunk_hermes_3",
+        provider="hermes",
+        project="alpha-project",
+        body="Third hermes chunk still under alpha.",
+    )
+    _seed(state_db, first, aligned)
+    store = RaceStore()
+    backend = _backend(state_db, store)
+
+    assert backend.submit(_job_view(state_db, "hermes_key_1")).status == "succeeded"
+    aligned_job = _job_view(state_db, "hermes_key_3")
+
+    store.race_armed = True
+    raced = backend.submit(aligned_job)
+    assert store.races_fired == 1
+    assert raced.status == "payload_integrity_mismatch"
+    assert raced.run == "source_contract_violation:transcript_session_project_changed"
+
+    orphan_id = conversation_chunk_doc_id(HERMES_SESSION_ID_HASH, "chunk_hermes_3")
+    orphan = store.get(orphan_id)
+    assert orphan is not None  # 경합에서만 남는 orphan chunk
+    assert len(_session_chunk_docs(store, HERMES_SESSION_ID_HASH)) == 2
+    total_docs = len(list(store.all_docs()))
+
+    # 같은 payload 재처리: 이제 pre-check가 거절하며, chunk 문서 수/revision은 변하지 않는다
+    for _ in range(3):
+        retry = backend.submit(aligned_job)
         assert retry.status == "payload_integrity_mismatch"
         assert retry.run == "source_contract_violation:transcript_session_project_changed"
-
+    assert store.races_fired == 1
     assert len(_session_chunk_docs(store, HERMES_SESSION_ID_HASH)) == 2
-    assert len(list(store.all_docs())) == total_docs_before
-    assert store.get(orphan_id)["_rev"] == orphan_before["_rev"]
-    assert store.get(session_doc_id(HERMES_SESSION_ID_HASH))["project"] == "alpha-project"
+    assert len(list(store.all_docs())) == total_docs
+    assert store.get(orphan_id)["_rev"] == orphan["_rev"]
+    assert store.get(session_doc_id(HERMES_SESSION_ID_HASH))["project"] == "gamma-project"
 
 
 def test_non_deterministic_source_store_errors_stay_uncertain(tmp_path):
