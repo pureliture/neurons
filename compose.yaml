@@ -266,7 +266,7 @@ services:
         echo "[llm-brain-graph-trigger] scheduler start"
         while true; do
           graph_extract_args=""
-          if [ "$${LLM_BRAIN_GRAPH_TRIGGER_EXTRACT_ENTITIES:-true}" = "true" ]; then
+          if [ "$${LLM_BRAIN_GRAPH_TRIGGER_EXTRACT_ENTITIES:-false}" = "true" ]; then
             graph_extract_args="--extract-entities"
           fi
           if ! neuron-knowledge couchdb-graph-trigger \
@@ -291,9 +291,10 @@ services:
       LLM_BRAIN_GRAPH_TRIGGER_PROJECT: ${LLM_BRAIN_GRAPH_TRIGGER_PROJECT:-}
       LLM_BRAIN_GRAPH_TRIGGER_PROVIDER: ${LLM_BRAIN_GRAPH_TRIGGER_PROVIDER:-}
       LLM_BRAIN_GRAPH_TRIGGER_REPORT_EVERY: ${LLM_BRAIN_GRAPH_TRIGGER_REPORT_EVERY:-25}
-      # This is a cold projection lane, so entity/relation extraction is on by
-      # default. Set false only for an explicitly episodic-only maintenance run.
-      LLM_BRAIN_GRAPH_TRIGGER_EXTRACT_ENTITIES: ${LLM_BRAIN_GRAPH_TRIGGER_EXTRACT_ENTITIES:-true}
+      # Session episodes are provenance only: GraphFirstResolver never serves
+      # Session-derived entities (no PostgreSQL authority key), so LLM extraction
+      # here costs tokens without changing brain.resolve. Off by default.
+      LLM_BRAIN_GRAPH_TRIGGER_EXTRACT_ENTITIES: ${LLM_BRAIN_GRAPH_TRIGGER_EXTRACT_ENTITIES:-false}
     depends_on:
       llm-brain-couchdb:
         condition: service_started

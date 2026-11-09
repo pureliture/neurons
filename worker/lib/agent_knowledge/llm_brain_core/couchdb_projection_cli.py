@@ -28,6 +28,7 @@ from .ledger_adapter import (
 from .models import PROJECTION_SCHEMA_VERSION
 from .projection import GraphProjectionWorker
 from .runtime import (
+    InconsistentHermesProjectScope,
     session_episode_from_couchdb_source,
     session_source_revision_from_couchdb_source,
 )
@@ -196,6 +197,7 @@ def run_couchdb_projection(
         by_project: Counter[str] = Counter()
         failure_reasons: Counter[str] = Counter()
         projected = duplicates = failed = skipped_resumed = skipped_disabled = 0
+        skipped_inconsistent = 0
         processed = 0
         stopped_after_max_projects = False
         started = time.monotonic()
@@ -271,6 +273,12 @@ def run_couchdb_projection(
                         reason_code=reason,
                         stage="project",
                     )
+            except InconsistentHermesProjectScope:
+                # Deterministic source-scope conflict: retrying cannot succeed,
+                # so count it separately instead of failing/dead-lettering.
+                skipped_inconsistent += 1
+                status = "skipped_inconsistent"
+                reason = "inconsistent_hermes_project_scope"
             except Exception as exc:
                 failed += 1
                 status = "failed"
@@ -285,7 +293,12 @@ def run_couchdb_projection(
                 )
             elapsed_ms = int((time.monotonic() - item_started) * 1000)
             durations.append(elapsed_ms)
-            if index == 1 or index % report_every == 0 or status == "failed" or index == len(sessions):
+            if (
+                index == 1
+                or index % report_every == 0
+                or status in ("failed", "skipped_inconsistent")
+                or index == len(sessions)
+            ):
                 _write_jsonl(
                     progress_jsonl,
                     {
@@ -303,6 +316,7 @@ def run_couchdb_projection(
                         "failed": failed,
                         "skipped_resumed": skipped_resumed,
                         "skipped_disabled": skipped_disabled,
+                        "skipped_inconsistent": skipped_inconsistent,
                     },
                 )
             if max_projects and (projected + duplicates) >= max_projects:
@@ -337,6 +351,7 @@ def run_couchdb_projection(
                 "failed": failed,
                 "skipped_resumed": skipped_resumed,
                 "skipped_disabled": skipped_disabled,
+                "skipped_inconsistent": skipped_inconsistent,
                 "elapsed_total_ms": elapsed_total_ms,
                 "project_set": bool(project),
                 "project_ref": _project_ref(project),
@@ -387,6 +402,7 @@ def run_couchdb_projection(
                 "duplicates": duplicates,
                 "skipped_resumed": skipped_resumed,
                 "skipped_disabled": skipped_disabled,
+                "skipped_inconsistent": skipped_inconsistent,
                 "failed": failed,
                 "failure_rate": (failed / attempted) if attempted else 0.0,
                 "failure_reasons": dict(sorted(failure_reasons.items())),

@@ -80,6 +80,10 @@ _CHUNK_METADATA_HEADER_KEYS = frozenset(
 )
 
 
+class InconsistentHermesProjectScope(ValueError):
+    """A Hermes session mixes two profile projects; no faithful scope exists."""
+
+
 def materialize_artifact_from_couchdb_source(
     *,
     session_id_hash: str,
@@ -168,7 +172,7 @@ def _materialize_artifact_from_couchdb_source_once(
         ),
     )
     if scope.inconsistent:
-        raise ValueError("session source docs have inconsistent hermes project scope")
+        raise InconsistentHermesProjectScope("session source docs have inconsistent hermes project scope")
     _validate_session_doc_scope(
         list(scope.documents),
         provider=provider,
