@@ -172,9 +172,9 @@ def test_entrypoint_watch_loop_restarts_consumer_with_backoff(tmp_path: Path) ->
             "count=0",
             "watch_cli() {",
             '  count=$((count + 1)); echo "consume $*" >> "$log"',
-            '  if [ "$count" -ge 3 ]; then kill -TERM "$$"; fi',
             '  [ "$count" -ne 2 ]',
             "}",
+            'watch_should_continue() { [ "$count" -lt 3 ]; }',
             'sleep() { echo "sleep $1" >> "$log"; }',
             "SESSION_MEMORY_WATCH_FAILURE_BACKOFF_MAX_SECONDS=300 run_watch_loop",
         ]

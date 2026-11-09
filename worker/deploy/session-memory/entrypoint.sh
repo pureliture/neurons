@@ -54,6 +54,9 @@ stop_watch() {
 # RUN_MODE=watch: JetStream durable consumer(Python 상주)를 감싸는 재기동 루프.
 # consumer는 정상 동작 중 종료하지 않으며, NATS 오류(rc=1)나 설정 오류(rc=2)로
 # 끝나면 bounded backoff 후 다시 띄운다. build 실행은 consumer 안에서 build-once.sh로 한다.
+# 테스트 훅: 기본은 무한 루프. 테스트에서 재정의해 반복 횟수를 제한한다.
+watch_should_continue() { return 0; }
+
 run_watch_loop() {
   local backoff_max failures rc backoff
   backoff_max=$(positive_int_or_default "${SESSION_MEMORY_WATCH_FAILURE_BACKOFF_MAX_SECONDS:-}" 300)
@@ -61,7 +64,7 @@ run_watch_loop() {
   watch_child=""
   trap stop_watch TERM INT
   echo "[entrypoint] watch started (debounce=${SESSION_MEMORY_WATCH_DEBOUNCE_SECONDS:-2}s, idle_sweep=${SESSION_MEMORY_WATCH_IDLE_SWEEP_SECONDS:-900}s, max_deliver=${SESSION_MEMORY_WATCH_MAX_DELIVER:-5})"
-  while true; do
+  while watch_should_continue; do
     if run_interruptible watch_cli --consume; then
       failures=0
       continue
