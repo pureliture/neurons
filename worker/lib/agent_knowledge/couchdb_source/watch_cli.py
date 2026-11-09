@@ -199,7 +199,7 @@ def run_build_script(
         env.pop("SESSION_MEMORY_BUILD_SESSION_IDS", None)
     try:
         completed = subprocess.run(
-            [settings.build_script],
+            ["bash", settings.build_script],
             env=env,
             capture_output=True,
             text=True,
