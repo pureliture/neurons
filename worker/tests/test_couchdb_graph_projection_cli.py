@@ -415,15 +415,16 @@ def test_partial_projection_continues_and_writes_dead_letter(tmp_path):
     assert lines[0]["stage"] == "project"
 
 
-def test_hermes_profile_vs_profile_session_is_skipped_inconsistent_not_failed(tmp_path):
+def test_hermes_profile_vs_profile_session_is_skipped_inconsistent_not_failed(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_PROFILE_NAMES", "profile-a,profile-b")
     store = InMemoryCouchDBSourceStore()
-    good_sid = _seed_session(store, raw_id="hermes-good", project="tyche", provider="hermes")
-    mixed_sid = _seed_session(store, raw_id="hermes-mixed", project="tyche", provider="hermes")
+    good_sid = _seed_session(store, raw_id="hermes-good", project="profile-a", provider="hermes")
+    mixed_sid = _seed_session(store, raw_id="hermes-mixed", project="profile-a", provider="hermes")
     chunk = TranscriptChunk.from_text(
         chunk_id="chunk_hermes-mixed-other-profile",
         session_id_hash=mixed_sid,
         provider="hermes",
-        project="ddalkak",
+        project="profile-b",
         turn_start_index=1,
         turn_end_index=1,
         text="assistant continued under another hermes profile",
