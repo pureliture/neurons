@@ -2374,6 +2374,11 @@ class KnowledgeSearchService:
             store=self.pgvector_store,
             graph_adapter=self.graph_adapter,
             embed_query=getattr(self._semantic_ranker, "embed_query", None),
+            session_memory_search=getattr(
+                self._mirror_search,
+                "search_session_memory_segments",
+                None,
+            ),
         ).resolve(**arguments)
 
     def get_temporal_coverage_metrics(self, project: str) -> dict[str, Any]:
