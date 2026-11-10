@@ -1349,6 +1349,44 @@ class TestApprovalGate:
 # ---------------------------------------------------------------------------
 
 class TestLiveRun:
+    @pytest.mark.parametrize(
+        ("resolution", "expected_count"),
+        [
+            ("new_local_v1_over_unverifiable_legacy", 1),
+            ("local_v1_preferred", 0),
+        ],
+    )
+    def test_live_run_counts_only_new_local_identity_conflicts(
+        self,
+        tmp_path,
+        resolution: str,
+        expected_count: int,
+    ) -> None:
+        class AutoResolvingProjector(RecordingSessionMemoryProjector):
+            last_local_identity_resolution = ""
+            last_local_identity_bypassed_rows = 0
+
+            def project(self, *, target_profile: str, document: dict) -> str:
+                chunk_id = super().project(
+                    target_profile=target_profile,
+                    document=document,
+                )
+                self.last_local_identity_resolution = resolution
+                return chunk_id
+
+        store = InMemoryCouchDBSourceStore()
+        _build_synthetic_session(store, provider="claude", project="neurons", raw_id="s1")
+        approval_path = tmp_path / "approval.json"
+        argv = ["--approval", str(approval_path)]
+        _write_approval(tmp_path, argv=argv)
+
+        rc, report = _run(argv, store, projector=AutoResolvingProjector())
+
+        assert rc == 0
+        assert report["selected"] == 1
+        assert report["projected"] == 1
+        assert report["identity_conflicts_auto_resolved"] == expected_count
+
     def test_live_run_projects_pending_sessions(self, tmp_path) -> None:
         store = InMemoryCouchDBSourceStore()
         _build_synthetic_session(store, provider="claude", project="neurons", raw_id="s1")
@@ -1399,7 +1437,15 @@ class TestLiveRun:
         rc, report = _run(argv, store, projector=projector)
 
         # Report must have all required keys
-        for key in ("schema_version", "dry_run", "selected", "projected", "failed", "skipped"):
+        for key in (
+            "schema_version",
+            "dry_run",
+            "selected",
+            "projected",
+            "failed",
+            "skipped",
+            "identity_conflicts_auto_resolved",
+        ):
             assert key in report, f"missing key: {key}"
 
     def test_live_run_records_projection_state_in_store(self, tmp_path) -> None:

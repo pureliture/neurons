@@ -11,8 +11,8 @@ Approval gate (fail-closed):
   redaction_required true, timeout_seconds > 0, rollback_or_abort_criteria, and
   command.argv matching the actual argv passed to main().
 
-Output: one JSON line (sorted keys) with keys: dry_run, failed, projected,
-schema_version, selected, skipped.
+Output: one JSON line (sorted keys) with keys: dry_run, failed,
+identity_conflicts_auto_resolved, projected, schema_version, selected, skipped.
 """
 
 from __future__ import annotations
@@ -1075,6 +1075,7 @@ def main(argv: list[str] | None = None) -> int:
     failed = 0
     skipped = 0
     skipped_inconsistent = 0
+    identity_conflicts_auto_resolved = 0
     session_reports: list[dict] = []
 
     try:
@@ -1084,6 +1085,9 @@ def main(argv: list[str] | None = None) -> int:
                 skipped += 1
                 continue
             try:
+                if hasattr(projector, "last_local_identity_resolution"):
+                    projector.last_local_identity_resolution = ""
+                    projector.last_local_identity_bypassed_rows = 0
                 result = materialize_and_project(
                     session_id_hash=session_id_hash,
                     store=store,
@@ -1116,6 +1120,11 @@ def main(argv: list[str] | None = None) -> int:
                         "error_class": type(exc).__name__,
                     }
                 )
+            if (
+                str(getattr(projector, "last_local_identity_resolution", "") or "")
+                == "new_local_v1_over_unverifiable_legacy"
+            ):
+                identity_conflicts_auto_resolved += 1
     finally:
         _close_if_supported(mirror_sink)
         _close_if_supported(projector)
@@ -1130,6 +1139,7 @@ def main(argv: list[str] | None = None) -> int:
                 "failed": failed,
                 "skipped": skipped,
                 "skipped_inconsistent": skipped_inconsistent,
+                "identity_conflicts_auto_resolved": identity_conflicts_auto_resolved,
                 "sessions": session_reports,
             },
             sort_keys=True,
