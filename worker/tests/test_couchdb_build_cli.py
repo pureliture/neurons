@@ -150,7 +150,14 @@ def _build_current_only_active_session(
     return sid
 
 
-def _mark_projected(store: InMemoryCouchDBSourceStore, sid: str, provider: str, project: str) -> None:
+def _mark_projected(
+    store: InMemoryCouchDBSourceStore,
+    sid: str,
+    provider: str,
+    project: str,
+    *,
+    include_pg_receipt: bool = True,
+) -> None:
     """Mark a session as already projected (PROJECTED status)."""
     source_hash = session_source_revision_from_couchdb_source(
         session_id_hash=sid,
@@ -166,6 +173,15 @@ def _mark_projected(store: InMemoryCouchDBSourceStore, sid: str, provider: str, 
     )
     state["source_hash"] = source_hash
     state["projected_source_hash"] = source_hash
+    if include_pg_receipt:
+        state["backend_receipts"] = {
+            "postgres_pgvector": {
+                "projection_status": dm.ProjectionStatus.PROJECTED,
+                "projected_source_hash": source_hash,
+                "session_memory_knowledge_id": "pg-ref-fake",
+                "active_content_hash": "sha256:" + "a" * 64,
+            }
+        }
     store.put(state)
 
 
@@ -286,8 +302,7 @@ def _run_main(
         "COUCHDB_USER": "admin",
         "COUCHDB_PASSWORD": "secret",
         "COUCHDB_DB": "transcript_source",
-        "SESSION_MEMORY_PROJECTION_BACKEND": "qdrant",
-        "QDRANT_URL": "http://localhost:6333",
+        "SESSION_MEMORY_PROJECTION_BACKEND": "postgres_pgvector",
     }
     if extra_env:
         env.update(extra_env)
@@ -350,8 +365,7 @@ def _run(argv: list[str], store: InMemoryCouchDBSourceStore, *, projector=None, 
         "COUCHDB_USER": "admin",
         "COUCHDB_PASSWORD": "secret",
         "COUCHDB_DB": "transcript_source",
-        "SESSION_MEMORY_PROJECTION_BACKEND": "qdrant",
-        "QDRANT_URL": "http://localhost:6333",
+        "SESSION_MEMORY_PROJECTION_BACKEND": "postgres_pgvector",
     }
     if extra_env:
         env.update(extra_env)
@@ -395,11 +409,10 @@ def _run(argv: list[str], store: InMemoryCouchDBSourceStore, *, projector=None, 
         stack.enter_context(patch.dict(os.environ, env))
         stack.enter_context(patch("sys.stdout", buf))
         if projector is not None:
-            # Patch the qdrant projector factory: it is the only live projection
-            # target now that the retired external index bridge is gone.
+            # Patch the PostgreSQL projector factory, the live projection target.
             stack.enter_context(
                 patch(
-                    "agent_knowledge.couchdb_source.build_cli._build_qdrant_projector",
+                    "agent_knowledge.couchdb_source.build_cli._build_pg_projector",
                     lambda _environ: projector,
                 )
             )
@@ -434,7 +447,7 @@ class TestSelectSessionsNeedingProjection:
         )
         store.put(pending)
 
-        selected_pending = _select_sessions_needing_projection(store, limit=0, backend="qdrant")
+        selected_pending = _select_sessions_needing_projection(store, limit=0, backend="postgres_pgvector")
 
         assert [session["session_id_hash"] for session in selected_pending] == [sid]
         assert [session["_id"] for session in selected_pending] == [active.sessions[0]["_id"]]
@@ -444,18 +457,24 @@ class TestSelectSessionsNeedingProjection:
         stale["projected_source_hash"] = dm.sha256_hash("stale current-only projection")
         store.put(stale)
 
-        selected_stale = _select_sessions_needing_projection(store, limit=0, backend="qdrant")
+        selected_stale = _select_sessions_needing_projection(store, limit=0, backend="postgres_pgvector")
 
         assert [session["session_id_hash"] for session in selected_stale] == [sid]
         assert [session["_id"] for session in selected_stale] == [active.sessions[0]["_id"]]
 
         current = dict(stale)
         current["projected_source_hash"] = active.source_hash
+        current["backend_receipts"] = {
+            "postgres_pgvector": {
+                "projection_status": dm.ProjectionStatus.PROJECTED,
+                "projected_source_hash": active.source_hash,
+            }
+        }
         store.put(current)
 
-        assert _select_sessions_needing_projection(store, limit=0, backend="qdrant") == []
-        assert _select_sessions_needing_projection(store, limit=0, project="other", backend="qdrant") == []
-        assert _select_sessions_needing_projection(store, limit=0, provider="claude", backend="qdrant") == []
+        assert _select_sessions_needing_projection(store, limit=0, backend="postgres_pgvector") == []
+        assert _select_sessions_needing_projection(store, limit=0, project="other", backend="postgres_pgvector") == []
+        assert _select_sessions_needing_projection(store, limit=0, provider="claude", backend="postgres_pgvector") == []
 
         other_sid = _build_current_only_active_session(
             store,
@@ -464,7 +483,7 @@ class TestSelectSessionsNeedingProjection:
             raw_id="current-only-limit",
         )
 
-        selected_limited = _select_sessions_needing_projection(store, limit=1, backend="qdrant")
+        selected_limited = _select_sessions_needing_projection(store, limit=1, backend="postgres_pgvector")
 
         assert [session["session_id_hash"] for session in selected_limited] == [other_sid]
 
@@ -648,7 +667,7 @@ class TestSelectSessionsNeedingProjection:
         sid2 = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="s2")
         _mark_projected(store, sid1, "claude", "neurons")
 
-        selected = _select_sessions_needing_projection(store, limit=0, backend="qdrant")
+        selected = _select_sessions_needing_projection(store, limit=0, backend="postgres_pgvector")
         sids = {s.get("session_id_hash") for s in selected}
         assert sid1 not in sids
         assert sid2 in sids
@@ -832,7 +851,7 @@ class TestSelectSessionsNeedingProjection:
 
         assert store.get(state_id) == state_before
 
-        selected = _select_sessions_needing_projection(store, limit=0, backend="qdrant")
+        selected = _select_sessions_needing_projection(store, limit=0, backend="postgres_pgvector")
 
         assert [row["session_id_hash"] for row in selected] == [sid]
         raw_source_hash = session_source_revision_from_couchdb_source(
@@ -844,7 +863,7 @@ class TestSelectSessionsNeedingProjection:
             session_id_hash=sid,
             store=store,
             projector=RecordingSessionMemoryProjector(),
-            backend="qdrant",
+            backend="postgres_pgvector",
         )
 
         coverage = store.get(dm.coverage_manifest_doc_id(sid))
@@ -853,8 +872,8 @@ class TestSelectSessionsNeedingProjection:
         assert projected is not None
         assert coverage["conversation_chunk_count"] == 2
         assert coverage["source_hash"] == raw_source_hash
-        assert projected["projected_source_hash"] == raw_source_hash
-        assert _select_sessions_needing_projection(store, limit=0, backend="qdrant") == []
+        assert projected["backend_receipts"]["postgres_pgvector"]["projected_source_hash"] == raw_source_hash
+        assert _select_sessions_needing_projection(store, limit=0, backend="postgres_pgvector") == []
 
     def test_exact_duplicate_source_keeps_projected_session_skipped(self) -> None:
         store = InMemoryCouchDBSourceStore()
@@ -875,7 +894,7 @@ class TestSelectSessionsNeedingProjection:
         stored = store.put(dm.build_conversation_chunk_document(chunk=duplicate))
 
         assert stored.outcome == "duplicate"
-        assert _select_sessions_needing_projection(store, limit=0, backend="qdrant") == []
+        assert _select_sessions_needing_projection(store, limit=0, backend="postgres_pgvector") == []
 
     def test_ignores_stale_state_source_hash_when_source_matches_projected_hash(self) -> None:
         store = InMemoryCouchDBSourceStore()
@@ -888,7 +907,7 @@ class TestSelectSessionsNeedingProjection:
         state["source_hash"] = dm.sha256_hash("stale state-only source revision")
         store.put(state)
 
-        assert _select_sessions_needing_projection(store, limit=0, backend="qdrant") == []
+        assert _select_sessions_needing_projection(store, limit=0, backend="postgres_pgvector") == []
 
     def test_reselects_legacy_projected_session_without_matching_source_hash(self) -> None:
         store = InMemoryCouchDBSourceStore()
@@ -977,7 +996,7 @@ class TestSelectSessionsNeedingProjection:
         pending = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="pending")
         store.get_count = 0
 
-        selected = _select_sessions_needing_projection(store, limit=1, backend="qdrant")
+        selected = _select_sessions_needing_projection(store, limit=1, backend="postgres_pgvector")
 
         assert [s.get("session_id_hash") for s in selected] == [pending]
         assert store.get_count == 0
@@ -1050,7 +1069,7 @@ class TestSelectSessionsNeedingProjection:
             limit=0,
             project="neurons",
             provider="claude",
-            backend="qdrant",
+            backend="postgres_pgvector",
         )
 
         assert [s.get("session_id_hash") for s in selected] == [pending]
@@ -1058,7 +1077,6 @@ class TestSelectSessionsNeedingProjection:
             call for call in store.find_calls if call["doc_type"] == dm.SourceDocType.PROJECTION_STATE
         )
         assert state_call["selector"] == {
-            "projection_status": dm.ProjectionStatus.PROJECTED,
             "project": "neurons",
             "provider": "claude",
         }
@@ -1160,8 +1178,7 @@ class TestDryRun:
 class TestDefaultProjectionBackend:
     """The code default must match the live lane (``postgres_pgvector``).
 
-    ``qdrant`` stays reachable only when set explicitly; the unset case must
-    never fall into the qdrant branch.
+    Only PostgreSQL is a supported projection backend; the unset case uses it.
     """
 
     _COUCHDB_ENV = {
@@ -1177,8 +1194,8 @@ class TestDefaultProjectionBackend:
             env.update(extra_env)
         buf = StringIO()
 
-        def _fail_qdrant(_environ):
-            raise AssertionError("qdrant projector must not be built when the backend env is unset")
+        def _fail_projector(_environ):
+            raise AssertionError("projection projector must not be built when the backend env is unset")
 
         with contextlib.ExitStack() as stack:
             stack.enter_context(
@@ -1190,7 +1207,7 @@ class TestDefaultProjectionBackend:
             stack.enter_context(patch.dict(os.environ, env, clear=True))
             stack.enter_context(patch("sys.stdout", buf))
             stack.enter_context(
-                patch("agent_knowledge.couchdb_source.build_cli._build_qdrant_projector", _fail_qdrant)
+                patch("agent_knowledge.couchdb_source.build_cli._build_pg_projector", _fail_projector)
             )
             stack.enter_context(
                 patch(
@@ -1243,20 +1260,24 @@ class TestDefaultProjectionBackend:
         assert report["error"] == "env_missing"
         assert "PGVECTOR_DSN" in report["reason"]
 
-    def test_explicit_qdrant_backend_still_builds_qdrant_projector(self, tmp_path) -> None:
+    def test_explicit_postgres_backend_builds_pg_projector(self, tmp_path) -> None:
         store = InMemoryCouchDBSourceStore()
         sid = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="s1")
         argv = ["--approval", str(_write_approval(tmp_path, argv=["--approval", str(tmp_path / "approval.json")]))]
         projector = RecordingSessionMemoryProjector()
 
-        rc, report = _run(argv, store, projector=projector, extra_env={"SESSION_MEMORY_PROJECTION_BACKEND": "qdrant"})
+        rc, report = _run(argv, store, projector=projector, extra_env={"SESSION_MEMORY_PROJECTION_BACKEND": "postgres_pgvector"})
 
         assert rc == 0
         assert report["projected"] == 1
         assert len(projector.calls) == 1
         state = store.get(dm.projection_state_doc_id(sid))
-        assert state["projection_status"] == dm.ProjectionStatus.PROJECTED
-        assert "backend_receipts" not in state
+        receipt = state["backend_receipts"]["postgres_pgvector"]
+        assert receipt["projection_status"] == dm.ProjectionStatus.PROJECTED
+        assert receipt["projected_source_hash"] == session_source_revision_from_couchdb_source(
+            session_id_hash=sid,
+            source_store=store,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1479,7 +1500,12 @@ class TestLiveRun:
 
         state = store.get(dm.projection_state_doc_id(sid))
         assert state is not None
-        assert state["projection_status"] == dm.ProjectionStatus.PROJECTED
+        receipt = state["backend_receipts"]["postgres_pgvector"]
+        assert receipt["projection_status"] == dm.ProjectionStatus.PROJECTED
+        assert receipt["projected_source_hash"] == session_source_revision_from_couchdb_source(
+            session_id_hash=sid,
+            source_store=store,
+        )
 
     def test_live_run_projector_target_profile_is_session_memory(self, tmp_path) -> None:
         store = InMemoryCouchDBSourceStore()
@@ -1871,32 +1897,6 @@ class TestProjectionAttemptAudit:
         assert [session["session_id_hash"] for session in selected] == [sid]
 
 
-def test_pg_missing_reselects_even_if_qdrant_current() -> None:
-    store = InMemoryCouchDBSourceStore()
-
-    # 1) insert session
-    session = TranscriptSession(
-        session_id_hash="sha256:" + "a" * 64,
-        provider="anthropic",
-        project="brain",
-        started_at="2026-09-19T00:00:00Z"
-    )
-    store.put(dm.build_transcript_session_document(session=session))
-
-    # 2) mark projected for Qdrant
-    _mark_projected(store, session.session_id_hash, "anthropic", "brain")
-
-    # Verify qdrant skips it
-    qdrant_selected = _select_sessions_needing_projection(
-        store, limit=10, project="", provider="", backend="qdrant"
-    )
-    assert len(qdrant_selected) == 0
-
-    # Verify pg selects it
-    pg_selected = _select_sessions_needing_projection(
-        store, limit=10, project="", provider="", backend="postgres_pgvector"
-    )
-    assert len(pg_selected) == 1
 
 
 # ---------------------------------------------------------------------------

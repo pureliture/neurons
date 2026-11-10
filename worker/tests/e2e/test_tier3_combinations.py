@@ -1,7 +1,7 @@
 """Tier 3 Feature Combination Coverage Test Suite (Simulation).
 
-Pure simulation suite running against InMemoryPostgresStore, InMemoryQdrantStore,
-and MockMCPServer with isolated legacy 1536-dim simulation profile.
+Pure simulation suite running against InMemoryPostgresStore and MockMCPServer
+with isolated legacy 1536-dim simulation profile.
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ import pytest
 
 from .conftest import (
     InMemoryPostgresStore,
-    InMemoryQdrantStore,
     MemoryCard,
     MemoryEdge,
     MockMCPServer,
@@ -264,57 +263,6 @@ def test_tier3_06_f7_f9_f10_concurrent_card_update_dag_cas(pg_store: InMemoryPos
     assert tree[0]["dst_id"] == "node_parent"
 
 
-def test_tier3_07_f11_f12_backfill_and_dual_read_benchmark(qdrant_store: InMemoryQdrantStore, pg_store: InMemoryPostgresStore):
-    """
-    Combination: F11 (Qdrant backfill) + F12 (Dual-Read Shadow Benchmark)
-    Backfilled data from Qdrant into Postgres verified with Recall@5 >= 0.95 benchmark.
-    """
-    # Seed 15 items in Qdrant
-    for i in range(15):
-        vec = make_dummy_vector(200 + i)
-        qdrant_store.upsert(
-            f"chunk_{i}",
-            vec,
-            {
-                "memory_id": f"chunk_{i}",
-                "project": "neurons",
-                "title": f"Chunk Title {i}",
-                "summary": f"Summary {i}",
-                "content_hash": sha256_str(f"chunk_{i}"),
-                "lifecycle_state": "human_accepted",
-                "authorization_status": "active",
-            },
-        )
-
-    # Execute backfill migration
-    for pid, (vec, p) in qdrant_store.vectors.items():
-        pg_store.insert_card(
-            MemoryCard(
-                memory_id=pid,
-                project=p["project"],
-                card_type="decision",
-                title=p["title"],
-                summary=p["summary"],
-                typed_payload={},
-                content_hash=p["content_hash"],
-                lifecycle_state=p["lifecycle_state"],
-                authorization_status=p["authorization_status"],
-                embedding=vec,
-                embedding_state="ready",
-            )
-        )
-
-    # Run Dual-Read Shadow Benchmark across 15 query vectors
-    recall_values = []
-    for i in range(15):
-        query_v = make_dummy_vector(200 + i)
-        q_results = [r["id"] for r in qdrant_store.search(query_v, limit=5)]
-        pg_results = [r["memory_id"] for r in pg_store.hybrid_vector_search(query_v, project="neurons", limit=5)]
-        overlap = len(set(q_results).intersection(set(pg_results)))
-        recall_values.append(overlap / len(q_results))
-
-    avg_recall = sum(recall_values) / len(recall_values)
-    assert avg_recall >= 0.95, f"Dual-read benchmark Recall@5 {avg_recall} < 0.95"
 
 
 def test_tier3_08_f1_f2_f3_f7_f8_f9_full_lifecycle(mcp_server: MockMCPServer, pg_store: InMemoryPostgresStore):

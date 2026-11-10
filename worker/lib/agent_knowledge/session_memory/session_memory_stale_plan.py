@@ -185,7 +185,7 @@ class SessionMemoryStalePlanner:
         pg_store: Any,
         embedding_profile: str,
     ) -> Any:
-        from ..rag_ingress.qdrant_couchdb_authority import (
+        from ..rag_ingress.couchdb_authority import (
             CouchDBProjectionStateAuthorityResolver,
         )
 

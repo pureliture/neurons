@@ -19,7 +19,7 @@ COPY pyproject.toml ./
 COPY lib ./lib
 
 RUN pip install --no-cache-dir ".[mcp-client]" \
-    && pip install --no-cache-dir "qdrant-client>=1.10" "openai>=1.0"
+    && pip install --no-cache-dir "openai>=1.0"
 
 RUN python - <<'PY'
 from mcp import ClientSession

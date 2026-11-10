@@ -17,7 +17,6 @@ import uuid
 import pytest
 
 from agent_knowledge.ledger import Ledger
-from agent_knowledge.postgres_store.dual_read_shadow import DualReadShadowHarness
 from agent_knowledge.postgres_store.outbox_worker import OutboxWorker
 from agent_knowledge.model_connectors import DEFAULT_EMBEDDING_PROFILE_ID
 from agent_knowledge.postgres_store.pgvector_store import (
@@ -243,30 +242,6 @@ def test_candidate_upsert_sql_has_authority_collision_guard():
     assert "lifecycle_state NOT IN ('accepted', 'human_accepted', 'auto_accepted')" in _CARD_UPSERT_SQL
 
 
-class _BenchmarkQdrant:
-    def __init__(self, ids: list[str] | None = None, error: Exception | None = None):
-        self.ids = ids or []
-        self.error = error
-
-    def search(self, **_kwargs):
-        if self.error is not None:
-            raise self.error
-        return [{"id": item} for item in self.ids]
-
-    def query_points(self, **_kwargs):
-        # New Qdrant SDK seam used by DualReadShadowHarness._query_qdrant.
-        if self.error is not None:
-            raise self.error
-
-        class _Point:
-            def __init__(self, memory_id: str):
-                self.payload = {"memory_id": memory_id}
-
-        class _Response:
-            def __init__(self, points):
-                self.points = points
-
-        return _Response([_Point(item) for item in self.ids])
 
 
 class _BenchmarkPg:
@@ -280,43 +255,10 @@ class _BenchmarkPg:
         return [{"memory_id": item} for item in self.ids]
 
 
-def test_shadow_benchmark_does_not_hide_backend_errors_or_empty_fixtures():
-    harness = DualReadShadowHarness(
-        qdrant_client=_BenchmarkQdrant(error=TimeoutError("qdrant timeout")),
-        pg_store=_BenchmarkPg(ids=["memory-1"]),
-        minimum_queries_for_cutover=1,
-    )
-
-    result = harness.execute_query([0.1] * 3072)
-    # Backend exceptions are normalized to reason codes (redaction contract),
-    # never raw exception text — but the failure must stay explicit.
-    assert result.qdrant_error == "qdrant_query_failed"
-    assert result.recall_at_k == 0.0
-    assert result.discrepancies
-
-    with pytest.raises(ValueError, match="at least one query fixture"):
-        harness.run_benchmark([])
 
 
-def test_shadow_benchmark_requires_cutover_sample_size():
-    harness = DualReadShadowHarness(
-        qdrant_client=_BenchmarkQdrant(ids=["memory-1"]),
-        pg_store=_BenchmarkPg(ids=["memory-1"]),
-    )
-    summary = harness.run_benchmark([[0.1] * 3072])
-    assert summary.benchmark_valid is True
-    assert summary.sample_size_gate_passed is False
-    assert summary.overall_gate_passed is False
-    assert summary.evidence_class == "test_harness"
 
 
-def test_live_cutover_evidence_rejects_dict_qdrant_double():
-    with pytest.raises(ValueError, match="in-memory Qdrant"):
-        DualReadShadowHarness(
-            qdrant_client=type("DictQdrant", (), {"vectors": {}})(),
-            pg_store=_BenchmarkPg(ids=["memory-1"]),
-            evidence_class="live_cutover",
-        )
 
 
 class _OutboxProbe:

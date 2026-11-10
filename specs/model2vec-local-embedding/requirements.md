@@ -9,7 +9,7 @@
   - 상세 설계 정본: `specs/model2vec-local-embedding/design.md` (원본 초안 `design-v2.md` SHA-256 `fa9b4574cdc4811305f88eeeb13247608553eb2e15bcfa8c2416b05ceb2640cb` 기반)
   - 마일스톤 및 인계 정본: `specs/model2vec-local-embedding/milestones.md`
   - 심사 이력: `specs/model2vec-local-embedding/review.md`
-- **선행 스펙과의 관계**: `specs/lbrain-architecture-rationalization/` (`requirements.md`, `design.md`)의 권위 경계(PostgreSQL SoT), Graph-first 조회 구조, MCP 2-Tier 계약, Qdrant 이관 이력은 그대로 유지한다. 단, `lbrain-architecture-rationalization` R1.2, AC1, design §3.1, §5.1의 Gemini 3,072차원 단일 임베딩 프로필 조항에 대해, 본 스펙은 기존 3,072차원 데이터(`lbrain-memory-gemini-embedding-2-v1`, `lbrain-memory-gemini-embedding-2-v2-bounded8k`)를 삭제·변조하지 않고 보존한 채 로컬 Model2Vec 256차원 프로필(`lbrain-memory-model2vec-256-v1`)을 가산적(additive)으로 도입·전환하는 정본 계약이다.
+- **선행 스펙과의 관계**: `specs/lbrain-architecture-rationalization/` (`requirements.md`, `design.md`)의 권위 경계(PostgreSQL SoT), Graph-first 조회 구조, MCP 2-Tier 계약, retired-vector-index 이관 이력은 그대로 유지한다. 단, `lbrain-architecture-rationalization` R1.2, AC1, design §3.1, §5.1의 Gemini 3,072차원 단일 임베딩 프로필 조항에 대해, 본 스펙은 기존 3,072차원 데이터(`lbrain-memory-gemini-embedding-2-v1`, `lbrain-memory-gemini-embedding-2-v2-bounded8k`)를 삭제·변조하지 않고 보존한 채 로컬 Model2Vec 256차원 프로필(`lbrain-memory-model2vec-256-v1`)을 가산적(additive)으로 도입·전환하는 정본 계약이다.
 
 ---
 
@@ -40,7 +40,7 @@ Gemini 임베딩 사용료를 지속 지불하지 않고 Neurons의 기억 저�
 ## 기존 정본(`specs/lbrain-architecture-rationalization/`)과의 관계 및 정본 읽기 규칙
 
 1. **보존되는 기존 계약**:
-   - `specs/lbrain-architecture-rationalization/requirements.md` 및 `design.md`가 정의한 PostgreSQL 권위 저장소(R1.1, R1.3, R1.7), Graphiti/Neo4j 유지 및 Graph-first 조회(R2), MCP 2-Tier 및 3KB slim serializer(R3), Thin client 및 재구축 가능성(R4), 기존 Qdrant 이관 이력(§3)은 삭제하거나 무효화하지 않는다.
+   - `specs/lbrain-architecture-rationalization/requirements.md` 및 `design.md`가 정의한 PostgreSQL 권위 저장소(R1.1, R1.3, R1.7), Graphiti/Neo4j 유지 및 Graph-first 조회(R2), MCP 2-Tier 및 3KB slim serializer(R3), Thin client 및 재구축 가능성(R4), 기존 retired-vector-index 이관 이력(§3)은 삭제하거나 무효화하지 않는다.
 2. **임베딩 프로필 조항의 관계**:
    - 기존 `lbrain-architecture-rationalization` R1.2, AC1, design §3.1, §5.1은 Gemini 3,072차원 프로필(`lbrain-memory-gemini-embedding-2-v1`, `halfvec(3072)`)을 초기 정본으로 정의했다.
    - 본 스펙(`specs/model2vec-local-embedding/`)은 기존 `memory_cards.embedding`, `session_memory_chunks.embedding`, `embedding_outbox`, Neo4j `name_embedding`/`fact_embedding`, representation receipt v1/v2를 그대로 보존한 상태에서, 로컬 Model2Vec 256차원 프로필(`lbrain-memory-model2vec-256-v1`, `local-model2vec-256-v1`)을 별도 테이블·속성·큐·receipt v3로 가산(additive) 도입한다.

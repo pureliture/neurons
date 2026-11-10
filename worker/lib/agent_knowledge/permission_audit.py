@@ -59,7 +59,6 @@ _SENTINEL_KEYS = frozenset(
         "authority_ledger",
         "corpus",
         "queue",
-        "index",
         "product_db",
     }
 )
@@ -92,7 +91,6 @@ _SENTINEL_PLANE_NAMES = (
     "authority_ledger",
     "corpus",
     "queue",
-    "index",
     "product_db",
 )
 _MARKER_SNAPSHOT_KEYS = frozenset(
@@ -123,7 +121,6 @@ _MARKER_IN_FLIGHT_STATUS = {
     "authority_ledger": "clear",
     "corpus": "atomic_commit_boundary",
     "queue": "atomic_commit_boundary",
-    "index": "clear",
     "product_db": "atomic_commit_boundary",
 }
 
@@ -375,9 +372,9 @@ class IndependentProductMutationSentinelReader:
 
 
 class IndependentProductMutationMarkerReader:
-    """Hold the PostgreSQL no-writer fence around one exact five-plane audit."""
+    """Hold the PostgreSQL no-writer fence around one exact four-plane audit."""
 
-    _NATIVE_PLANES = ("corpus", "queue", "index", "product_db")
+    _NATIVE_PLANES = ("corpus", "queue", "product_db")
 
     def __init__(
         self,
@@ -769,7 +766,7 @@ def _validated_product_sentinel(value: Mapping[str, Any]) -> dict[str, Any]:
     if value.get("schema_version") != "product_mutation_sentinel.v1":
         raise ValueError("permission audit product sentinel is malformed")
     normalized: dict[str, Any] = {"schema_version": "product_mutation_sentinel.v1"}
-    for name in ("authority_ledger", "corpus", "queue", "index", "product_db"):
+    for name in ("authority_ledger", "corpus", "queue", "product_db"):
         item = value.get(name)
         if not isinstance(item, Mapping) or set(item) != _SENTINEL_VALUE_KEYS:
             raise ValueError("permission audit product sentinel is malformed")

@@ -1484,131 +1484,8 @@ def test_mcp_source_to_candidate_runtime_readiness_collects_shadow_evidence(tmp_
     )
 
 
-@pytest.mark.skip(
-    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
-)
-def test_mcp_source_to_candidate_runtime_readiness_collects_live_projection_join_read_path(tmp_path: Path):
-    graph = FakeGraphMemoryAdapter(
-        [
-            _episode(
-                "RepoDocument",
-                "projection-join-graph-hit",
-                {
-                    "brain_id": "/project/neurons",
-                    "summary": "Graph projection hit for source-to-candidate join.",
-                },
-            )
-        ]
-    )
-    service = KnowledgeSearchService(
-        ledger=_ledger(tmp_path),
-        retired_index_bridge=DisabledRetiredIndexBridgeClient(),
-        dataset_ids=[],
-        graph_adapter=graph,
-        mirror_search=lambda query, brain_id: [
-            {
-                "memory_id": "qdrant-hit-1",
-                "summary": "Qdrant projection hit for source-to-candidate join.",
-                "score": 0.81,
-            }
-        ],
-    )
-
-    response = handle_jsonrpc_message(
-        {
-            "jsonrpc": "2.0",
-            "id": 125,
-            "method": "tools/call",
-            "params": {
-                "name": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
-                "arguments": {
-                    "collect_shadow_evidence": True,
-                    "evidence_collection_mode": "post_deploy_read_only_smoke",
-                    "evidence_collection_network_used": True,
-                    "repository": "pureliture/neurons",
-                    "branch": "main",
-                    "consumer": "codex",
-                },
-            },
-        },
-        service,
-    )
-
-    packet = response["result"]["structuredContent"]
-    assert packet["collector"]["readiness_claim"] == "runtime_read_path_evidence"
-    assert packet["evidence_provenance"]["collection_mode"] == "post_deploy_read_only_smoke"
-    assert packet["evidence_provenance"]["network_used"] is True
-    projection = packet["projection_join"]
-    assert projection["schema_version"] == "object_extraction_projection_join_preview.v1"
-    assert projection["evidence_class"] == "runtime_projection_join"
-    assert projection["status"] == "pass"
-    assert projection["edge_count"] >= 2
-    assert projection["runtime_read_path"]["graph_hit_count"] >= 1
-    assert projection["runtime_read_path"]["qdrant_hit_count"] >= 1
-    assert projection["production_mutation_performed"] is False
-    assert projection["postcheck"]["status"] == "validated"
-    assert "graph_projection_hit_missing" not in projection["gaps"]
-    assert "qdrant_projection_hit_missing" not in projection["gaps"]
 
 
-@pytest.mark.skip(
-    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
-)
-def test_mcp_source_to_candidate_runtime_readiness_excludes_synthetic_canary_graph_episode(
-    tmp_path: Path,
-):
-    graph = FakeGraphMemoryAdapter(
-        [
-            _episode(
-                "GraphFact",
-                "projection-join-synthetic-canary",
-                {
-                    "brain_id": "/project/neurons",
-                    "source_providers": ["lbrain-temporal-canary"],
-                    "summary": "Synthetic source candidate graph projection join probe.",
-                },
-            )
-        ]
-    )
-    service = KnowledgeSearchService(
-        ledger=_ledger(tmp_path),
-        retired_index_bridge=DisabledRetiredIndexBridgeClient(),
-        dataset_ids=[],
-        graph_adapter=graph,
-        mirror_search=lambda query, brain_id: [
-            {
-                "memory_id": "qdrant-hit-1",
-                "summary": "Qdrant projection hit for source-to-candidate join.",
-                "score": 0.81,
-            }
-        ],
-    )
-
-    response = handle_jsonrpc_message(
-        {
-            "jsonrpc": "2.0",
-            "id": 126,
-            "method": "tools/call",
-            "params": {
-                "name": BRAIN_SOURCE_TO_CANDIDATE_RUNTIME_READINESS_TOOL_NAME,
-                "arguments": {
-                    "collect_shadow_evidence": True,
-                    "evidence_collection_mode": "post_deploy_read_only_smoke",
-                    "evidence_collection_network_used": True,
-                    "repository": "pureliture/neurons",
-                    "branch": "main",
-                    "consumer": "codex",
-                },
-            },
-        },
-        service,
-    )
-
-    projection = response["result"]["structuredContent"]["projection_join"]
-    assert projection["runtime_read_path"]["graph_hit_count"] == 0
-    assert projection["runtime_read_path"]["qdrant_hit_count"] >= 1
-    assert projection["status"] == "pass_with_gaps"
-    assert "graph_projection_hit_missing" in projection["gaps"]
 
 
 def _brain_objects_query_smoke(route: str, *, gaps: list[str] | None = None) -> dict:
@@ -7565,72 +7442,8 @@ def test_mcp_brain_context_resolve_roundtrip_uses_core_without_retired_index_bri
     assert "/Users/" not in json.dumps(result, sort_keys=True)
 
 
-@pytest.mark.skip(
-    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
-)
-def test_mcp_brain_context_resolve_carries_context_authority_block(tmp_path: Path):
-    service = _service(tmp_path)
-    response = handle_jsonrpc_message(
-        {
-            "jsonrpc": "2.0",
-            "id": 14,
-            "method": "tools/call",
-            "params": {
-                "name": BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
-                "arguments": {
-                    "repository": FIXTURE_REPOSITORY,
-                    "branch": FIXTURE_BRANCH,
-                    "current_request": "Context Authority Pack",
-                    "current_files": ["specs/context-authority-roadmap/design.md"],
-                    "project": PROJECT,
-                },
-            },
-        },
-        service,
-    )
-
-    result = response["result"]["structuredContent"]
-    authority = result["authority"]
-    assert authority["schema_version"] == "context_authority_pack.v1"
-    assert authority["preferences"][0]["rule"] == "한국어로 응답한다"
-    assert authority["projection"]["neo4j"]["authority"] == "derived_authority_graph"
-    assert authority["search_mirror"]["qdrant_docling"]["status"] == "unverified"
-    assert "agents_use_brain_context_resolve" in authority["boundary_guardrails"]
 
 
-@pytest.mark.skip(
-    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
-)
-def test_mcp_brain_context_resolve_reports_configured_unverified_search_mirror(tmp_path: Path):
-    service = KnowledgeSearchService(
-        ledger=_ledger(tmp_path),
-        retired_index_bridge=DisabledRetiredIndexBridgeClient(),
-        dataset_ids=[],
-        mirror_search=lambda query, brain_id: [],
-    )
-    response = handle_jsonrpc_message(
-        {
-            "jsonrpc": "2.0",
-            "id": 15,
-            "method": "tools/call",
-            "params": {
-                "name": BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
-                "arguments": {
-                    "repository": FIXTURE_REPOSITORY,
-                    "branch": FIXTURE_BRANCH,
-                    "current_request": "Context Authority Pack",
-                    "current_files": [],
-                    "project": PROJECT,
-                },
-            },
-        },
-        service,
-    )
-
-    mirror = response["result"]["structuredContent"]["authority"]["search_mirror"]["qdrant_docling"]
-    assert mirror["status"] == "configured_unverified"
-    assert mirror["evidence_ref"] == "service:mirror_search_configured"
-    assert mirror["requires_document_authority_join"] is True
 
 
 @pytest.mark.skip(
@@ -7767,6 +7580,37 @@ def test_session_card_cache_isolates_nested_mutation_via_deepcopy(tmp_path: Path
     assert again[0]["meta"]["nested"]["flag"] == "original"
     assert again[0]["evidence_refs"] == [{"knowledge_id": "kn", "content_hash": "sha256:2e7d2c03a9507ae265ecf5b5356885a53393a2029d241394997265a1a25aefc6"}]
     assert again[0]["tags"] == ["original-tag"]
+
+
+@pytest.mark.skip(
+    reason="obsolete: removed in M3 MCP surface rationalization (M3 surface restricted to brain.resolve and memory_candidate_create)",
+)
+def test_mcp_brain_context_resolve_carries_context_authority_block(tmp_path: Path):
+    service = _service(tmp_path)
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 14,
+            "method": "tools/call",
+            "params": {
+                "name": BRAIN_CONTEXT_RESOLVE_TOOL_NAME,
+                "arguments": {
+                    "repository": FIXTURE_REPOSITORY,
+                    "branch": FIXTURE_BRANCH,
+                    "current_request": "Context Authority Pack",
+                    "current_files": ["specs/context-authority-roadmap/design.md"],
+                    "project": PROJECT,
+                },
+            },
+        },
+        service,
+    )
+
+    authority = response["result"]["structuredContent"]["authority"]
+    assert authority["schema_version"] == "context_authority_pack.v1"
+    assert authority["preferences"][0]["rule"] == "한국어로 응답한다"
+    assert authority["projection"]["neo4j"]["authority"] == "derived_authority_graph"
+    assert "agents_use_brain_context_resolve" in authority["boundary_guardrails"]
 
 
 @pytest.mark.skip(

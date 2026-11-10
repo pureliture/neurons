@@ -66,7 +66,7 @@ flowchart TD
 |---|---|---|:---:|
 | **B1 (P0)** | "PostgreSQL pgvector storage layer 구현 완료" | `PgVectorStore` 내부가 `self.cards = {}`, `self.chunks = {}` 등 **순수 Python dict로만 동작**. 실제 SQL INSERT/SELECT 경로가 전혀 작성되지 않음 | 🔴 **치명적 (운영 불가)** |
 | **B2 (P0)** | "DB 연결 실패 시 안전하게 동작" | `_get_pg_conn()` 실패 시 `logger.warning`만 남기고 **조용히 in-memory 모드로 전환 (Fail-Silent)**. DB 장애 시 모든 데이터가 프로세스 메모리로 들어가고 프로세스 재시작 시 영구 유실됨 | 🔴 **치명적 (데이터 유실)** |
-| **B3 (P0)** | "Phase 2.5 섀도우 벤치마크 Recall@5=1.0, P95=0.84ms 달성" | 실제 DB/임베딩이 아닌 **`MockQdrantClient` + `sin(hash)` 더미 벡터 + Python dict 순차 순회** 측정치. 컷오버 증거로 완전히 무효 | 🔴 **치명적 (증거 무효)** |
+| **B3 (P0)** | "Phase 2.5 섀도우 벤치마크 Recall@5=1.0, P95=0.84ms 달성" | 실제 DB/임베딩이 아닌 **`Mockretired-vector-indexClient` + `sin(hash)` 더미 벡터 + Python dict 순차 순회** 측정치. 컷오버 증거로 완전히 무효 | 🔴 **치명적 (증거 무효)** |
 | **B4 (P0)** | "에이전트가 새 pgvector 하이브리드 검색을 사용" | `brain.resolve`가 새 `PgVectorStore`를 전혀 호출하지 않고, 기존 `ledger`에서 100개 카드를 읽어 `in` 문자열 검색을 수행 중 | 🔴 **치명적 (미연결)** |
 | **B5 (P1)** | "Outbox CAS 완벽 구현" | `memory_card`에는 CAS가 들어갔으나, `session_chunk` 분기(`pgvector_store.py:404`)에는 **`enqueued_content_hash` 검사가 누락**되어 청크 덮어쓰기 레이스 방어 실패 | 🟠 **높음 (정합성 결함)** |
 | **B6 (P1)** | "565개 테스트 전건 통과" | 신규 작성된 42개 인메모리 테스트만 통과했을 뿐, 엄격한 해시 검증으로 인해 **기존 worker 테스트 275건이 깨짐** (회귀 발생) | 🟠 **높음 (기존 회귀)** |
@@ -110,11 +110,11 @@ flowchart TD
 
 1. `mcp_jsonrpc`의 `brain.resolve`와 `KnowledgeSearchService.brain_query`는 아직 legacy ledger/mirror 경로를 포함한다. 실제 Graphiti/Neo4j-first 후보 검색과 PostgreSQL authority join은 별도 실행 milestone이다.
 2. `graph_projection_outbox` DDL 계약은 추가했지만, 현재 graph trigger의 SQLite ledger-backed projection cursor를 PG writer/consumer로 전환하지 않았다.
-3. 실제 PostgreSQL/Neo4j/Qdrant를 사용한 live benchmark와 Graphiti index/read regression은 이 로컬 정합성 작업의 증거가 아니다. Docker Compose plugin과 live DSN이 없는 환경에서는 통과를 주장하지 않는다.
+3. 실제 PostgreSQL/Neo4j/retired-vector-index를 사용한 live benchmark와 Graphiti index/read regression은 이 로컬 정합성 작업의 증거가 아니다. Docker Compose plugin과 live DSN이 없는 환경에서는 통과를 주장하지 않는다.
 
 ### 추가 리뷰에서 보류한 항목
 
-- `dual_read_shadow`는 `evidence_class=test_harness|live_cutover`를 기록하고 dict Qdrant double을 live mode에서 거부하도록 보정했다. Qdrant migrator의 in-memory seam과 실제 backend/profile preflight는 여전히 live migration milestone에서 닫아야 한다.
+- `dual_read_shadow`는 `evidence_class=test_harness|live_cutover`를 기록하고 dict retired-vector-index double을 live mode에서 거부하도록 보정했다. retired-vector-index migrator의 in-memory seam과 실제 backend/profile preflight는 여전히 live migration milestone에서 닫아야 한다.
 - 현재 레거시 테스트 중 `PgVectorStore(use_in_memory=True)`, 1536차원, 암묵적 dummy worker를 전제로 하는 묶음은 새 authority 계약과 충돌한다. 이를 한 번에 대량 수정하거나 “전건 통과”로 포장하지 않고, 실제 SQL integration test와 legacy compatibility inventory로 분리한다.
 - public `brain.resolve` 응답에 graph/authority metadata를 연결하는 일은 Graph-first router 구현과 함께 처리해야 한다. 현재 legacy route에 임의의 `graph_neo4j` 성공 상태를 추가하지 않았다.
 

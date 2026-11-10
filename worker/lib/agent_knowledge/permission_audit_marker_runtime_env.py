@@ -1,4 +1,4 @@
-"""Production environment boundary for exact-five permission-audit markers.
+"""Production environment boundary for exact-four permission-audit markers.
 
 The process entrypoint parses one fixed, non-secret activation manifest.  Storage
 credentials stay in fixed environment keys and are never copied into errors.  SDK
@@ -24,7 +24,6 @@ import tempfile
 from typing import Any
 import urllib.parse
 import urllib.request
-import uuid
 
 from .permission_audit import IndependentProductMutationMarkerReader
 from .native_exact_mutation_markers import (
@@ -39,21 +38,6 @@ from .postgres_exact_mutation_marker import (
     PostgresExactMutationMarkerReader,
     build_source_owned_postgres_exact_marker_contract,
 )
-from .qdrant_write_gateway import QdrantMutationRoute
-from .qdrant_write_gateway_runtime import (
-    ACTIVE_QDRANT_MUTATION_SOURCES,
-    QDRANT_EXACT_MARKER_METADATA_KEYS,
-    QDRANT_EXACT_MARKER_METADATA_SCHEMA,
-    QDRANT_MARKER_EVENT_RECORD_KIND,
-    QDRANT_MARKER_PHASE_START,
-    QDRANT_MARKER_PHASE_TERMINAL,
-    QDRANT_MARKER_REQUIRED_PAYLOAD_INDEX_FIELDS,
-    QdrantMutationSource,
-    RenderedQdrantWriter,
-    build_qdrant_coverage_activation_anchor,
-    build_qdrant_coverage_manifest_from_activation_anchor,
-    build_qdrant_exact_marker_hash,
-)
 
 
 _CONFIG_ENV = "NEURONS_PERMISSION_AUDIT_MARKER_CONFIG"
@@ -61,13 +45,11 @@ _SECRET_ENV_KEYS = (
     "NEURONS_PERMISSION_AUDIT_PG_DSN",
     "NEURONS_PERMISSION_AUDIT_COUCHDB_AUTH_HEADER",
     "NEURONS_PERMISSION_AUDIT_NATS_TOKEN",
-    "NEURONS_PERMISSION_AUDIT_QDRANT_API_KEY",
 )
 _PLANES = (
     "authority_ledger",
     "corpus",
     "queue",
-    "index",
     "product_db",
 )
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -110,30 +92,11 @@ _QUEUE_KEYS = _NATIVE_COMMON_KEYS | {
     "durable_generation_hashes",
     "publisher_authorization_anchor_hash",
 }
-_INDEX_KEYS = frozenset(
-    {
-        "credential_scope",
-        "url",
-        "marker_collection",
-        "metadata_point_id",
-        "generation",
-        "rendered_inventory",
-        "previous_generation_hash",
-        "activation_hash",
-        "auth_boundary_status",
-        "network_policy_status",
-        "direct_write_credentials_zero",
-        "read_endpoint_write_denied_status",
-        "event_position_floor",
-        "marker_hash_at_floor",
-    }
-)
 _SQLITE_KEYS = _NATIVE_COMMON_KEYS | {"path", "expected_schema_version"}
 _EXPECTED_CREDENTIAL_SCOPES = {
     "authority_ledger": "postgres_exact_marker_read_only",
     "corpus": "couchdb_db_info_read_only",
     "queue": "nats_stream_consumer_metadata_read_only",
-    "index": "qdrant_marker_metadata_read_only",
     "product_db": "sqlite_mode_ro_query_only",
 }
 
@@ -149,7 +112,6 @@ class ProductionMarkerAdapterFactories:
     postgres_connection: Callable[..., object]
     couchdb_adapter: Callable[[Mapping[str, Any], str], object]
     nats_adapter: Callable[[Mapping[str, Any], str, str], object]
-    qdrant_adapter: Callable[[Mapping[str, Any], str, object], object]
     sqlite_connector: Callable[[], object]
     sqlite_file_inspector: Callable[[], object]
 
@@ -248,7 +210,6 @@ def _parse_environment(environ: Mapping[str, str]) -> dict[str, Any]:
         _validate_scope(scopes["authority_ledger"], _PG_KEYS, "authority_ledger")
         _validate_scope(scopes["corpus"], _CORPUS_KEYS, "corpus")
         _validate_scope(scopes["queue"], _QUEUE_KEYS, "queue")
-        _validate_scope(scopes["index"], _INDEX_KEYS, "index")
         _validate_scope(scopes["product_db"], _SQLITE_KEYS, "product_db")
         _validate_postgres_scope(scopes["authority_ledger"])
         _validate_native_scope(scopes["corpus"])
@@ -268,13 +229,10 @@ def _parse_environment(environ: Mapping[str, str]) -> dict[str, Any]:
             raise ValueError
         for value in durable_hashes:
             _validate_hash(value)
-        _validate_identifier(scopes["index"]["marker_collection"])
         _validated_base_url(scopes["corpus"]["base_url"], schemes={"https"})
         _validated_base_url(
             scopes["queue"]["server_url"], schemes={"nats", "tls"}
         )
-        _validated_qdrant_url(scopes["index"]["url"])
-        _validate_qdrant_scope(scopes["index"])
         _validate_bounded_text(scopes["product_db"]["path"])
         expected_schema = scopes["product_db"]["expected_schema_version"]
         if type(expected_schema) is not int or not 0 <= expected_schema < 2**63:
@@ -317,34 +275,6 @@ def _validate_native_scope(value: dict[str, Any]) -> None:
     _validate_string_list(value["writer_registry"])
 
 
-def _validate_qdrant_scope(value: dict[str, Any]) -> None:
-    anchor = _qdrant_activation_anchor(value)
-    coverage = build_qdrant_coverage_manifest_from_activation_anchor(anchor)
-    event_position_floor = value["event_position_floor"]
-    if (
-        type(event_position_floor) is not int
-        or not 0 <= event_position_floor < 2**63
-    ):
-        raise ValueError
-    marker_hash_at_floor = value["marker_hash_at_floor"]
-    if (
-        not isinstance(marker_hash_at_floor, str)
-        or not _RAW_SHA256.fullmatch(marker_hash_at_floor)
-        or marker_hash_at_floor
-        != build_qdrant_exact_marker_hash(
-            generation=anchor.generation,
-            event_position=event_position_floor,
-            in_flight_count=0,
-            coverage_hash=coverage.coverage_hash,
-        )
-    ):
-        raise ValueError
-    try:
-        point_id = uuid.UUID(str(value["metadata_point_id"]))
-    except (ValueError, TypeError, AttributeError) as exc:
-        raise ValueError from exc
-    if str(point_id) != value["metadata_point_id"]:
-        raise ValueError
 
 
 def _validate_hash(value: object) -> None:
@@ -383,7 +313,6 @@ def _build_runtime(
     pg_scope = scopes["authority_ledger"]
     corpus_scope = scopes["corpus"]
     queue_scope = scopes["queue"]
-    index_scope = scopes["index"]
     sqlite_scope = scopes["product_db"]
     resources: list[object] = []
     try:
@@ -403,8 +332,6 @@ def _build_runtime(
         couch_contract = _native_contract("corpus", corpus_scope)
         queue_contract = _native_contract("queue", queue_scope)
         sqlite_contract = _native_contract("product_db", sqlite_scope)
-        expected_coverage = _qdrant_coverage(index_scope)
-
         couch_adapter = factories.couchdb_adapter(
             corpus_scope,
             environ["NEURONS_PERMISSION_AUDIT_COUCHDB_AUTH_HEADER"],
@@ -415,12 +342,6 @@ def _build_runtime(
             queue_contract.generation_hash,
         )
         resources.append(nats_adapter)
-        qdrant_adapter = factories.qdrant_adapter(
-            index_scope,
-            environ["NEURONS_PERMISSION_AUDIT_QDRANT_API_KEY"],
-            expected_coverage,
-        )
-        resources.append(qdrant_adapter)
         sqlite_connector = factories.sqlite_connector()
         resources.append(sqlite_connector)
         sqlite_inspector = factories.sqlite_file_inspector()
@@ -461,9 +382,6 @@ def _build_runtime(
             couchdb_provider=couch_provider,
             nats_provider=nats_provider,
             sqlite_provider=sqlite_provider,
-            qdrant_metadata_reader=qdrant_adapter.read_marker_metadata,
-            qdrant_coverage_reader=qdrant_adapter.read_coverage_manifest,
-            qdrant_expected_coverage=expected_coverage,
         )
         return _RuntimeBundle(
             reader=reader,
@@ -493,55 +411,8 @@ def _native_contract(
     )
 
 
-def _qdrant_coverage(scope: Mapping[str, Any]):
-    return build_qdrant_coverage_manifest_from_activation_anchor(
-        _qdrant_activation_anchor(scope)
-    )
 
 
-def _qdrant_activation_anchor(scope: Mapping[str, Any]):
-    inventory = scope["rendered_inventory"]
-    if not isinstance(inventory, list):
-        raise ValueError
-    rendered: list[RenderedQdrantWriter] = []
-    expected_keys = {
-        "source",
-        "route",
-        "writer_ref_hash",
-        "active_caller",
-        "workload_ref_hash",
-        "image_ref_hash",
-        "network_policy_ref_hash",
-        "route_set_hash",
-    }
-    for item in inventory:
-        if not isinstance(item, dict) or set(item) != expected_keys:
-            raise ValueError
-        rendered.append(
-            RenderedQdrantWriter(
-                source=QdrantMutationSource(item["source"]),
-                route=QdrantMutationRoute(item["route"]),
-                writer_ref_hash=item["writer_ref_hash"],
-                active_caller=item["active_caller"],
-                workload_ref_hash=item["workload_ref_hash"],
-                image_ref_hash=item["image_ref_hash"],
-                network_policy_ref_hash=item["network_policy_ref_hash"],
-                route_set_hash=item["route_set_hash"],
-            )
-        )
-    return build_qdrant_coverage_activation_anchor(
-        generation=scope["generation"],
-        marker_collection=scope["marker_collection"],
-        rendered_inventory=tuple(rendered),
-        previous_generation_hash=scope["previous_generation_hash"],
-        auth_boundary_status=scope["auth_boundary_status"],
-        network_policy_status=scope["network_policy_status"],
-        direct_write_credentials_zero=scope["direct_write_credentials_zero"],
-        read_endpoint_write_denied_status=scope[
-            "read_endpoint_write_denied_status"
-        ],
-        activation_hash=scope["activation_hash"],
-    )
 
 
 def _default_factories() -> ProductionMarkerAdapterFactories:
@@ -550,7 +421,6 @@ def _default_factories() -> ProductionMarkerAdapterFactories:
         postgres_connection=_open_postgres_read_only,
         couchdb_adapter=_build_couchdb_adapter,
         nats_adapter=_build_nats_adapter,
-        qdrant_adapter=_build_qdrant_adapter,
         sqlite_connector=lambda: _SQLiteReadOnlyConnector(sqlite_pin),
         sqlite_file_inspector=lambda: _SQLiteFileInspector(sqlite_pin),
     )
@@ -678,50 +548,6 @@ def _validated_base_url(value: object, *, schemes: set[str]) -> str:
     return value.rstrip("/")
 
 
-def _validated_qdrant_url(value: object) -> str:
-    if (
-        not isinstance(value, str)
-        or not 1 <= len(value) <= 2_048
-        or any(character < " " or character == "\x7f" for character in value)
-        or "\\" in value
-        or "%" in value
-    ):
-        raise ValueError
-    try:
-        parsed = urllib.parse.urlsplit(value)
-        hostname = parsed.hostname
-        port = parsed.port
-    except (TypeError, ValueError):
-        raise ValueError from None
-    if (
-        parsed.scheme != "https"
-        or not hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.path
-        or parsed.query
-        or parsed.fragment
-        or port != 6333
-        or parsed.netloc != f"{hostname}:6333"
-        or hostname == "localhost"
-        or hostname.startswith("0x")
-    ):
-        raise ValueError
-    if set(hostname) <= set("0123456789."):
-        try:
-            address = ipaddress.IPv4Address(hostname)
-        except ipaddress.AddressValueError:
-            raise ValueError from None
-        if str(address) != hostname:
-            raise ValueError
-        return value
-    labels = hostname.split(".")
-    if (
-        len(hostname) > 253
-        or any(not label or not _DNS_LABEL.fullmatch(label) for label in labels)
-    ):
-        raise ValueError
-    return value
 
 
 class _SQLitePragmaConnection:
@@ -1810,311 +1636,10 @@ def _open_postgres_read_only(
         ) from exc
 
 
-class _QdrantMarkerMetadataAdapter:
-    """Exact count/filter plus one fixed marker-metadata point read."""
-
-    _METADATA_KEYS = QDRANT_EXACT_MARKER_METADATA_KEYS
-
-    def __init__(
-        self,
-        scope: Mapping[str, Any],
-        credential: str,
-        expected_coverage: object,
-        *,
-        client: object | None = None,
-    ) -> None:
-        self._url = _validated_qdrant_url(scope["url"])
-        self._collection = str(scope["marker_collection"])
-        _validate_identifier(self._collection)
-        self._metadata_point_id = str(scope["metadata_point_id"])
-        uuid.UUID(self._metadata_point_id)
-        self._activation_anchor = _qdrant_activation_anchor(scope)
-        self._expected_coverage = expected_coverage
-        if (
-            build_qdrant_coverage_manifest_from_activation_anchor(
-                self._activation_anchor
-            )
-            != expected_coverage
-        ):
-            raise ValueError
-        self._event_position_floor = scope["event_position_floor"]
-        self._marker_hash_at_floor = scope["marker_hash_at_floor"]
-        self._previous_event_position: int | None = None
-        self._previous_marker_hash: str | None = None
-        self._last_coverage = None
-        if not isinstance(credential, str) or not credential:
-            raise ValueError
-        if client is None:
-            from qdrant_client import QdrantClient
-
-            client = QdrantClient(
-                url=self._url,
-                port=6333,
-                https=True,
-                api_key=credential,
-                timeout=5,
-                prefer_grpc=False,
-                trust_env=False,
-                follow_redirects=False,
-            )
-        if (
-            not callable(getattr(client, "get_collection", None))
-            or not callable(getattr(client, "count", None))
-            or not callable(getattr(client, "retrieve", None))
-        ):
-            raise ValueError
-        self._client = client
-
-    def read_marker_metadata(self) -> Mapping[str, object]:
-        try:
-            from qdrant_client import models
-
-            def exact_filter(**values: object):
-                return models.Filter(
-                    must=[
-                        models.FieldCondition(
-                            key=key,
-                            match=models.MatchValue(value=value),
-                        )
-                        for key, value in values.items()
-                    ]
-                )
-
-            event_filter = exact_filter(
-                record_kind=QDRANT_MARKER_EVENT_RECORD_KIND,
-            )
-            generation_filter = exact_filter(
-                record_kind=QDRANT_MARKER_EVENT_RECORD_KIND,
-                generation=self._activation_anchor.generation,
-            )
-            start_filter = exact_filter(
-                record_kind=QDRANT_MARKER_EVENT_RECORD_KIND,
-                generation=self._activation_anchor.generation,
-                phase=QDRANT_MARKER_PHASE_START,
-            )
-            terminal_filter = exact_filter(
-                record_kind=QDRANT_MARKER_EVENT_RECORD_KIND,
-                generation=self._activation_anchor.generation,
-                phase=QDRANT_MARKER_PHASE_TERMINAL,
-            )
-            bypass_clear_filter = exact_filter(
-                record_kind=QDRANT_MARKER_EVENT_RECORD_KIND,
-                bypass=False,
-            )
-            pod_present_filter = models.Filter(
-                must=[
-                    models.FieldCondition(
-                        key="record_kind",
-                        match=models.MatchValue(
-                            value=QDRANT_MARKER_EVENT_RECORD_KIND
-                        ),
-                    )
-                ],
-                must_not=[
-                    models.IsEmptyCondition(
-                        is_empty=models.PayloadField(key="pod_ref_hash")
-                    )
-                ],
-            )
-            unresolved_filter = exact_filter(
-                record_kind=QDRANT_MARKER_EVENT_RECORD_KIND,
-                generation=self._activation_anchor.generation,
-                phase=QDRANT_MARKER_PHASE_START,
-                unresolved=True,
-                bypass=False,
-            )
-            source_filters = tuple(
-                exact_filter(
-                    record_kind=QDRANT_MARKER_EVENT_RECORD_KIND,
-                    generation=self._activation_anchor.generation,
-                    route=item.route.value,
-                    writer_ref_hash=item.writer_ref_hash,
-                    workload_ref_hash=item.workload_ref_hash,
-                    route_set_hash=item.route_set_hash,
-                    bypass=False,
-                )
-                for item in self._activation_anchor.rendered_inventory
-                if item.source in ACTIVE_QDRANT_MUTATION_SOURCES
-            )
-            self._validate_payload_indexes()
-            point_count = self._strict_count(None)
-            event_count = self._strict_count(event_filter)
-            generation_count = self._strict_count(generation_filter)
-            start_count = self._strict_count(start_filter)
-            terminal_count = self._strict_count(terminal_filter)
-            bypass_clear_count = self._strict_count(bypass_clear_filter)
-            pod_present_count = self._strict_count(pod_present_filter)
-            source_count = sum(
-                self._strict_count(source_filter)
-                for source_filter in source_filters
-            )
-            unresolved_count = self._strict_count(unresolved_filter)
-            if (
-                point_count != event_count + 1
-                or generation_count != event_count
-                or start_count + terminal_count != event_count
-                or bypass_clear_count != event_count
-                or pod_present_count != event_count
-                or source_count != event_count
-                or unresolved_count > start_count
-            ):
-                raise ValueError
-            points = self._client.retrieve(  # type: ignore[attr-defined]
-                collection_name=self._collection,
-                ids=[self._metadata_point_id],
-                with_payload=True,
-                with_vectors=False,
-                consistency=models.ReadConsistencyType.ALL,
-            )
-            if not isinstance(points, list) or len(points) != 1:
-                raise ValueError
-            if str(getattr(points[0], "id", "")) != self._metadata_point_id:
-                raise ValueError
-            payload = getattr(points[0], "payload", None)
-            if not isinstance(payload, Mapping) or set(payload) != self._METADATA_KEYS:
-                raise ValueError
-            if payload["schema_version"] != QDRANT_EXACT_MARKER_METADATA_SCHEMA:
-                raise ValueError
-            if (
-                payload["generation"] != self._activation_anchor.generation
-                or payload["coverage_hash"]
-                != self._expected_coverage.coverage_hash
-                or payload["coverage_status"] != "complete"
-                or payload["bypass_count"] != 0
-                or payload["activation_hash"]
-                != self._activation_anchor.activation_hash
-                or payload["previous_generation_hash"]
-                != self._activation_anchor.previous_generation_hash
-            ):
-                raise ValueError
-            marker_hash = _qdrant_marker_hash(
-                generation=payload["generation"],
-                event_count=event_count,
-                unresolved_count=unresolved_count,
-                coverage_hash=payload["coverage_hash"],
-            )
-            if self._previous_event_position is None:
-                if (
-                    event_count != self._event_position_floor
-                    or marker_hash != self._marker_hash_at_floor
-                ):
-                    raise ValueError
-            elif event_count < self._previous_event_position or (
-                event_count == self._previous_event_position
-                and marker_hash != self._previous_marker_hash
-            ):
-                raise ValueError
-            self._previous_event_position = event_count
-            self._previous_marker_hash = marker_hash
-            self._last_coverage = self._expected_coverage
-            return {
-                "generation": payload["generation"],
-                "event_position": event_count,
-                "marker_hash": marker_hash,
-                "in_flight_count": unresolved_count,
-                "coverage_hash": payload["coverage_hash"],
-                "coverage_status": "complete",
-                "count_status": "exact",
-                "reset_count": 0,
-                "bypass_count": 0,
-            }
-        except Exception as exc:
-            raise PermissionAuditMarkerEnvironmentError(
-                "Qdrant exact marker metadata read failed"
-            ) from exc
-
-    def _validate_payload_indexes(self) -> None:
-        info = self._client.get_collection(  # type: ignore[attr-defined]
-            collection_name=self._collection
-        )
-        config = _member(info, "config")
-        params = _member(config, "params")
-        for field in (
-            "shard_number",
-            "replication_factor",
-            "write_consistency_factor",
-        ):
-            if _member(params, field) != 1:
-                raise ValueError
-        schema = _member(info, "payload_schema")
-        if not isinstance(schema, Mapping):
-            raise ValueError
-        expected_types = {
-            "record_kind": "keyword",
-            "phase": "keyword",
-            "unresolved": "bool",
-            "generation": "integer",
-            "route": "keyword",
-            "writer_ref_hash": "keyword",
-            "pod_ref_hash": "keyword",
-            "workload_ref_hash": "keyword",
-            "route_set_hash": "keyword",
-            "bypass": "bool",
-        }
-        if tuple(expected_types) != QDRANT_MARKER_REQUIRED_PAYLOAD_INDEX_FIELDS:
-            raise ValueError
-        for field, expected_type in expected_types.items():
-            entry = _member(schema, field)
-            data_type = _member(entry, "data_type")
-            normalized = getattr(data_type, "value", data_type)
-            if str(normalized).casefold().rsplit(".", 1)[-1] != expected_type:
-                raise ValueError
-
-    def _strict_count(self, filter_value: object) -> int:
-        result = self._client.count(  # type: ignore[attr-defined]
-            collection_name=self._collection,
-            count_filter=filter_value,
-            exact=True,
-        )
-        count = getattr(result, "count", None)
-        if type(count) is not int or not 0 <= count < 2**63:
-            raise ValueError
-        return count
-
-    def read_coverage_manifest(self):
-        if self._last_coverage is None:
-            raise PermissionAuditMarkerEnvironmentError(
-                "Qdrant exact marker coverage unavailable"
-            )
-        return self._last_coverage
-
-    def close(self) -> None:
-        close = getattr(self._client, "close", None)
-        if callable(close):
-            try:
-                close()
-            except Exception as exc:
-                raise PermissionAuditMarkerEnvironmentError(
-                    "Qdrant exact marker connection close failed"
-                ) from exc
 
 
-def _qdrant_marker_hash(
-    *,
-    generation: int,
-    event_count: int,
-    unresolved_count: int,
-    coverage_hash: str,
-) -> str:
-    try:
-        return build_qdrant_exact_marker_hash(
-            generation=generation,
-            event_position=event_count,
-            in_flight_count=unresolved_count,
-            coverage_hash=coverage_hash,
-        )
-    except ValueError as exc:
-        raise PermissionAuditMarkerEnvironmentError(
-            "Qdrant exact marker metadata is malformed"
-        ) from exc
 
 
-def _build_qdrant_adapter(
-    scope: Mapping[str, Any],
-    credential: str,
-    expected_coverage: object,
-) -> _QdrantMarkerMetadataAdapter:
-    return _QdrantMarkerMetadataAdapter(scope, credential, expected_coverage)
 
 
 class _NatsStreamMetadataAdapter:

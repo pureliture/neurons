@@ -33,11 +33,11 @@ Three questions decided every row:
 | --- | --- | --- |
 | `rag_ingress/retired_index_bridge.py` — RAGFlow adapter class | 제거 | The only implementation of the `IndexAdapter` protocol that spoke the retired wire protocol. The live worker built it for the `retired_index_bridge` backend, which had no reachable target. |
 | `rag_ingress/delivery_backend.py` — `RetiredIndexBridgeDeliveryBackend` | 제거 | Never constructed outside tests: `state_cli._build_live_backend` returned `None` for the `retired_index_bridge` selection, so the live drain path was already blocked. Its backend-neutral part (the payload hash gate) was kept and moved. |
-| `rag_ingress/retired_index_bridge.py` → `rag_ingress/index_adapter.py` | 중립화 | The protocol (`IndexAdapter`, `IndexStatus`, `BackendDocumentHandle`, `BackendSubmitResult`, `BackendStatusDetail`) is backend-neutral and is implemented by the CouchDB and Qdrant adapters. Renamed so the module name no longer claims to be the retired bridge. |
+| `rag_ingress/retired_index_bridge.py` → `rag_ingress/index_adapter.py` | 중립화 | The protocol (`IndexAdapter`, `IndexStatus`, `BackendDocumentHandle`, `BackendSubmitResult`, `BackendStatusDetail`) is backend-neutral and is implemented by the CouchDB adapter. Renamed so the module name no longer claims to be the retired bridge. |
 | `rag_ingress/couchdb_retired_index_bridge.py` → `rag_ingress/couchdb_index_adapter.py` | 중립화 | The content was already a CouchDB implementation of the adapter protocol; only the name carried the retired-bridge wording. Class and factory renamed with it. |
 | `rag_ingress/delivery_backend.py` → `rag_ingress/delivery_payload_gate.py` | 중립화 | Only the backend-neutral payload gate survived the removal; it is still used by the CouchDB delivery backend, the drain and the temporal rebuild tools. |
 | `src/main/java/.../adapter/ext/retired_index_bridge/**` (10 files) | 제거 | Both beans were `@Profile("retired-index-bridge")`. No compose file in this repo sets that profile, and the k3s workload inventory records the Java worker as `activation: retired-profile`, `migrateToK3s: false`, `scaleCategory: not-a-target`; the compose service was already behind the `retired` compose profile. The live k3s ingress-api **canary** does set it (`SPRING_PROFILES_ACTIVE=api,retired-index-bridge`), but with no bridge credential it already failed every delivery (`isConfigured()==false` → `failed("retired_index_bridge delivery unavailable")`) and reported `closed("pressure_read_failed")` pressure — behaviorally identical to the `UnavailableTargetAdapter` that replaces it. `UnavailableTargetAdapterConfiguration` was widened to `api & !worker` so that canary keeps a `RagTargetAdapter` bean after the package is deleted. |
-| `couchdb_source/index_projector.py` | 제거 | The RAGFlow session-memory projector. The live build lane projects into Postgres+pgvector (`SESSION_MEMORY_PROJECTION_BACKEND=postgres_pgvector`); the RAGFlow branch was only reachable when the env var was unset, because the code default was `retired_index_bridge`. The code default is now `postgres_pgvector`, matching the live lane; `qdrant` remains available only when set explicitly. |
+| `couchdb_source/index_projector.py` | 제거 | The RAGFlow session-memory projector. The live build lane projects into Postgres+pgvector (`SESSION_MEMORY_PROJECTION_BACKEND=postgres_pgvector`); the RAGFlow branch was only reachable when the env var was unset, because the code default was `retired_index_bridge`. The code default is now `postgres_pgvector`, the only supported projection backend. |
 | `couchdb_source/index_fallback.py` | 제거 | A RAGFlow HTTP reader used to reconstruct sessions whose originals were gone. With no bridge there is nothing to recover from. (The repo's own audit had classified it as *archive/recovery compatibility surface*; the recovery-path contract is retired here.) |
 | `scripts/live-index-verify.py` | 제거 | An operator script that verified a live RAGFlow instance. |
 | `worker/deploy/session-memory/gc-run.py`, `backfill.py` | 제거 | The container's gc/backfill lanes read the bridge and, for gc, issued a hard delete against it under a self-generated standing approval. A retired backend must not be the target of an automatically approved live delete. The container now runs the build lane only. |
@@ -50,7 +50,7 @@ Three questions decided every row:
 ## Operator tooling — kept, but quarantined
 
 These modules exist only to operate a retired backend, so they cannot be
-"repointed" to CouchDB or Qdrant without becoming different tools. They keep
+"repointed" to CouchDB without becoming different tools. They keep
 working against the retired protocol, but the transport now lives in an
 explicitly-legacy package and is not importable from any runtime path.
 
@@ -80,7 +80,7 @@ explicitly-legacy package and is not importable from any runtime path.
 | `couchdb_source/document_model.py` — `RETIRED_TRANSCRIPT_MEMORY_PROFILE` (renamed from `RETIRED_RETIRED_INDEX_BRIDGE_PROFILE`) | 중립화 | A pre-existing double-prefixed name (a leftover of an earlier rename), not introduced here. The value (`transcript-memory`) is unchanged; only the constant name became backend-neutral. |
 | `ledger.py`, `rag_ingress/state_db.py` — legacy `ragflow_*` column names | 유지 | The data-preserving migration that copies historical `ragflow_dataset_id` / `ragflow_document_id` / `ragflow_run` / `ragflow_datasets` into their `index_*` equivalents. Renaming the source column names would break the migration. |
 | `knowledge_search_service.py`, `llm_brain_core/objects/*` — `ragflow_dataset:` / `ragflow_document:` redaction patterns | 유지 | Secret-like key-name *detection* patterns for values that must never reach a public surface. They reference no product and can select or reach nothing. |
-| `worker/docs/qdrant-readiness/**` | 유지 | Point-in-time audit documents. Their "RetiredIndexBridge" wording describes the state at the time; the live status is `docs/retired/ragflow-retirement.md`. |
+| `worker/docs/retired-vector-index-readiness/**` | 삭제 | These readiness documents describe a vector-index runtime that has been removed and are not current operational guidance. |
 
 ## Guards added
 

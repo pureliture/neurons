@@ -423,12 +423,3 @@ def test_bulk_semantic_batcher_normalizes_model_to_canonical_alias() -> None:
     )
     assert batcher.is_local_profile
     assert batcher._model == "local-model2vec-256-v1"
-
-
-
-
-
-
-
-
-

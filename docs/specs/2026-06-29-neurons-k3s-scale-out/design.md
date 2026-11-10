@@ -94,7 +94,6 @@ public/private 경계와 단일 노드 cutover 안전 게이트를 깨지 않는
   | couchdb-source-store | singleton-stateful | singleton | 단일 NODENAME |
   | ledger-postgres | singleton-stateful | singleton | 단일 primary write |
   | neo4j-graph-store | singleton-stateful | singleton | Community Edition, 클러스터 불가 |
-  | searchable-mirror(qdrant) | singleton-stateful | singleton | profile-gated 단일 |
   | llm-brain-tools | not-a-target | singleton | operator exec 전용 |
   | retired-java-ingress-worker | not-a-target | singleton | 은퇴 profile, k3s 비대상 |
 
@@ -119,8 +118,8 @@ public/private 경계와 단일 노드 cutover 안전 게이트를 깨지 않는
     `topologyKey: kubernetes.io/hostname`(single-node Pending 방지 위해 required 아님).
   - `scale_out_manifest_bundle(*, workloads, namespace, access_policy)` — 각 워크로드 scaleCategory에
     따라 위 리소스를 조합. `not-a-target` 제외, singleton-stateful은 StatefulSet single-writer로만 생성.
-- `reject_capacity_integers(resource: dict)` — **신규, key-scoped 가드**. `ensure_public_safe`(문자열
-  path/secret 전용, `public_safe_util.py`)는 **오버로드하지 않는다**(qdrant_mirror 등 공유 호출부의
+`reject_capacity_integers(resource: dict)` — **신규, key-scoped 가드**. `ensure_public_safe`(문자열
+path/secret 전용, `public_safe_util.py`)는 **오버로드하지 않는다**(공유 호출부의
   포트 정수 false-positive 위험). 새 함수는 `replicas`/`minReplicas`/`maxReplicas`/`averageUtilization`/
   `minAvailable`/`maxUnavailable` 키의 값이 두 자리 이상 정수면 거부한다. `containerPort`(8080·6333·
   7687·8765 등)는 검사 대상 키가 아니므로 통과. `scale_out_manifest_bundle`이 반환 직전 모든 리소스에

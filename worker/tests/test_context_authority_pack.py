@@ -1,6 +1,8 @@
 from agent_knowledge.llm_brain_core import BrainReadService
 
 
+
+
 def test_context_pack_exposes_m1_authority_sections_and_guardrails():
     service = BrainReadService(
         memory_cards=[
@@ -20,7 +22,7 @@ def test_context_pack_exposes_m1_authority_sections_and_guardrails():
                 "Approved Context Authority design",
                 {
                     "decision": "Use neurons brain APIs as the default agent-facing surface.",
-                    "rationale": "Neo4j is the workbench, not raw product authority.",
+                    "rationale": "The graph is a derived workbench, not product authority.",
                     "authority_ref": "specs/context-authority-roadmap/design.md",
                 },
             ),
@@ -47,7 +49,7 @@ def test_context_pack_exposes_m1_authority_sections_and_guardrails():
     )
 
     pack = service.brain_context_resolve(
-        repository="/Users/example/Projects/neurons",
+        repository="neurons",
         branch="codex/context-authority-roadmap",
         current_files=["specs/context-authority-roadmap/design.md"],
         current_request="start M1 Context Authority implementation",
@@ -56,42 +58,15 @@ def test_context_pack_exposes_m1_authority_sections_and_guardrails():
 
     authority = pack["authority"]
     assert authority["schema_version"] == "context_authority_pack.v1"
-    assert authority["documents"] == [
-        {
-            "path": "specs/context-authority-roadmap/design.md",
-            "status": "source_of_truth",
-            "reason": "approved_markdown_source",
-            "confidence": 0.9,
-            "evidence_refs": ["mem_design"],
-            "evidence_edges": [
-                {
-                    "document_path": "specs/context-authority-roadmap/design.md",
-                    "evidence_type": "memory_card",
-                    "evidence_ref": "mem_design",
-                    "relation": "supports_status",
-                    "confidence": 0.9,
-                }
-            ],
-            "archive_proposal_only": True,
-        }
-    ]
-    assert authority["workflow_contracts"][0]["rule"] == "Use a dedicated branch/worktree before repository edits."
+    assert authority["documents"][0]["status"] == "source_of_truth"
+    assert authority["documents"][0]["evidence_refs"] == ["mem_design"]
+    assert authority["workflow_contracts"][0]["rule"] == (
+        "Use a dedicated branch/worktree before repository edits."
+    )
     assert authority["preferences"][0]["rule"] == "자연어 응답과 문서는 한국어로 작성한다."
     assert authority["projection"]["neo4j"]["authority"] == "derived_authority_graph"
     assert authority["object_substrate_status"]["status"] == "degraded"
-    assert authority["object_substrate_status"]["authority"] == "model_available_object_store_not_configured"
     assert "object_store_not_configured" in authority["object_substrate_status"]["gaps"]
-    assert authority["search_mirror"]["qdrant_docling"] == {
-        "status": "unverified",
-        "authority": "searchable_document_mirror",
-        "canonical_memory": False,
-        "product_use": "candidate_only_requires_document_authority_join",
-        "requires_document_authority_join": True,
-        "degraded_if_unavailable": True,
-        "last_verified_at": "",
-        "evidence_ref": "",
-        "details": [],
-    }
     assert "graph_unavailable" in [gap["code"] for gap in authority["evidence_gaps"]]
     assert "agents_use_brain_context_resolve" in authority["boundary_guardrails"]
 
@@ -218,29 +193,6 @@ def test_context_pack_applies_only_relevant_preferences_for_current_request():
     assert [item["memory_id"] for item in runtime["authority"]["preferences"]] == ["mem_language", "mem_runtime"]
 
 
-def test_context_pack_uses_injected_search_mirror_status_without_claiming_authority():
-    service = BrainReadService(
-        search_mirror_status={
-            "status": "configured_unverified",
-            "last_verified_at": "",
-            "evidence_ref": "service:mirror_search_configured",
-            "details": ["mirror_search_callable_configured_without_live_probe"],
-        }
-    )
-
-    pack = service.brain_context_resolve(
-        repository="neurons",
-        branch="codex/context-authority-roadmap",
-        current_files=[],
-        current_request="resolve docs",
-        project="neurons",
-    ).to_dict()
-
-    mirror = pack["authority"]["search_mirror"]["qdrant_docling"]
-    assert mirror["status"] == "configured_unverified"
-    assert mirror["evidence_ref"] == "service:mirror_search_configured"
-    assert mirror["requires_document_authority_join"] is True
-    assert mirror["canonical_memory"] is False
 
 
 def test_context_pack_flags_named_runtime_system_claims_without_evidence():

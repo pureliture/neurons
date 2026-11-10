@@ -52,7 +52,7 @@ public 산출물에는 어떤 capacity count도 넣지 않는다.
 - `serialized-worker` — ingress-worker, graph-trigger, bulk-semantic-trigger, session-memory-worker.
   단일 Pod 고정. ingress-worker 다중 replica는 WorkQueue retention/consumer 모델 전환, 공유 state
   store, ack 튜닝이 모두 끝난 별도 후속 작업의 대상이다.
-- `singleton-stateful` — nats, couchdb, ledger postgres, neo4j, qdrant. StatefulSet single-writer.
+- `singleton-stateful` — nats, couchdb, ledger postgres, neo4j. StatefulSet single-writer.
   실제 클러스터링은 별도 이니셔티브로 분리한다.
 - `not-a-target` — llm-brain-tools, retired java ingress worker.
 

@@ -30,6 +30,8 @@ def _resource(bundle, kind, name):
     return None
 
 
+
+
 def test_compose_baseline_report_keeps_compose_target_and_safe_delivery_defaults():
     compose = {
         "services": {
@@ -51,13 +53,6 @@ def test_compose_baseline_report_keeps_compose_target_and_safe_delivery_defaults
                 "security_opt": ["no-new-privileges:true"],
                 "volumes": ["rag-ingress-live-state:/var/lib/agent-knowledge/ingest-state"],
             },
-            "qdrant": {
-                "profiles": ["searchable-mirror"],
-                "image": "qdrant/qdrant:latest",
-                "restart": "unless-stopped",
-                "ports": ["127.0.0.1:6333:6333"],
-                "volumes": ["qdrant_data:/qdrant/storage"],
-            },
         }
     }
 
@@ -72,18 +67,18 @@ def test_compose_baseline_report_keeps_compose_target_and_safe_delivery_defaults
         "runtime_target": "compose",
         "k3s_migration_implied": False,
         "dockerfiles": ["Dockerfile", "worker/Dockerfile"],
-        "services": ["ingress-worker-py", "nats-jetstream", "qdrant"],
-        "profile_gated_services": ["qdrant"],
+        "services": ["ingress-worker-py", "nats-jetstream"],
+        "profile_gated_services": [],
         "healthchecked_services": ["nats-jetstream"],
-        "restart_policy_services": ["ingress-worker-py", "nats-jetstream", "qdrant"],
-        "volume_services": ["ingress-worker-py", "nats-jetstream", "qdrant"],
+        "restart_policy_services": ["ingress-worker-py", "nats-jetstream"],
+        "volume_services": ["ingress-worker-py", "nats-jetstream"],
         "loopback_published_ports": True,
         "safe_delivery_defaults": {
             "shadow_stream_default": "RAG_INGRESS_SHADOW",
             "allow_live_queue_default": "0",
             "deliver_default": "0",
         },
-        "warnings": ["service_missing_healthcheck:ingress-worker-py", "service_missing_healthcheck:qdrant"],
+        "warnings": ["service_missing_healthcheck:ingress-worker-py"],
     }
 
 

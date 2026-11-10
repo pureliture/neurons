@@ -1,11 +1,8 @@
 """Shared test fixtures and in-memory simulation doubles for E2E suites.
 
 Note:
-    Tier 1-4 tests run as pure simulations against InMemoryPostgresStore,
-    InMemoryQdrantStore, and MockMCPServer.
-    The default vector dimension (1536) and embedding model ('text-embedding-3-small')
-    represent the isolated legacy simulation profile, kept distinct from the
-    shared 3072-dim profile used in live production stores.
+    Tier 1-4 tests run as pure simulations against InMemoryPostgresStore and
+    MockMCPServer, using the isolated legacy 1536-dim simulation profile.
 """
 
 from __future__ import annotations
@@ -364,25 +361,6 @@ class InMemoryPostgresStore:
         ]
 
 
-class InMemoryQdrantStore:
-    def __init__(self):
-        self.vectors: dict[str, tuple[list[float], dict[str, Any]]] = {}
-
-    def upsert(self, point_id: str, vector: list[float], payload: dict[str, Any]) -> None:
-        self.vectors[point_id] = (list(vector), copy.deepcopy(payload))
-
-    def search(self, query_vector: list[float], limit: int = 5, project_filter: str | None = None) -> list[dict[str, Any]]:
-        scored = []
-        for pid, (vec, payload) in self.vectors.items():
-            if project_filter and payload.get("project") != project_filter:
-                continue
-            sim = compute_cosine_similarity(query_vector, vec)
-            scored.append((sim, pid, payload))
-        scored.sort(key=lambda x: (-x[0], x[1]))
-        return [
-            {"id": pid, "score": round(sim, 4), "payload": payload}
-            for sim, pid, payload in scored[:limit]
-        ]
 
 
 class SlimSerializer:
@@ -748,9 +726,6 @@ def pg_store() -> InMemoryPostgresStore:
     return InMemoryPostgresStore()
 
 
-@pytest.fixture
-def qdrant_store() -> InMemoryQdrantStore:
-    return InMemoryQdrantStore()
 
 
 @pytest.fixture

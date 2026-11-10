@@ -37,7 +37,7 @@ In-memory store도 selector, limit, iteration semantics를 같은 방식으로 �
 
 아니다. 이번 작업은 public repo code와 tests만 바꾼다.
 
-라이브 CouchDB read/write, graph/Qdrant mutation, deployment, K8s/Docker/systemd 변경, credential/env 편집은 범위 밖이다. 필요한 증거는 local tests와 GitHub/PR 상태로 제한한다.
+라이브 CouchDB read/write, graph mutation, deployment, K8s/Docker/systemd 변경, credential/env 편집은 범위 밖이다. 필요한 증거는 local tests와 GitHub/PR 상태로 제한한다.
 
 ## 기능 요구사항
 
@@ -61,7 +61,7 @@ In-memory store도 selector, limit, iteration semantics를 같은 방식으로 �
 | Source control | `main`이 아니라 `codex/62-paginate-couchdb-session-memory-projection` branch와 전용 worktree에서만 수정한다. |
 | TDD | code-changing milestone은 focused failing tests를 먼저 추가하고 red -> green -> refactor로 진행한다. |
 | Compatibility | `find_by_type(doc_type, fields=...)` 기존 caller와 runtime protocol compatibility를 유지한다. |
-| Safety | live CouchDB/graph/Qdrant/K8s mutation, deployment, credential edit, Docker/systemd mutation은 하지 않는다. |
+| Safety | live CouchDB/graph/K8s mutation, deployment, credential edit, Docker/systemd mutation은 하지 않는다. |
 | Pagination | single request cap에 의존하지 않고 bookmark를 따라가야 한다. |
 | Bounded selection | `--limit`이 작은 경우 session corpus 전체를 materialize하지 않아야 한다. |
 | Review | `codebase_architecture_manager`와 `code_simplifier`를 중간 품질 보정에 사용한다. |

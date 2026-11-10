@@ -214,7 +214,7 @@ def agent_b_service(tmp_path, pg, embed, *, graph_adapter=None) -> KnowledgeSear
         ledger=ledger, retired_index_bridge=DisabledRetiredIndexBridgeClient(), dataset_ids=[],
         pgvector_store=pg, graph_adapter=graph_adapter,
         semantic_ranker=SimpleNamespace(embed_query=embed.embed),
-        mirror_search=lambda *_args: pytest.fail("Qdrant public read forbidden"),
+        pg_search=lambda *_args: pytest.fail("unexpected PostgreSQL callback"),
     )
 
 

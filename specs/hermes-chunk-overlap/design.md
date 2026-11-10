@@ -48,7 +48,7 @@ flowchart LR
   CAN -->|exact-dup 제거 + subsumption drop| KEEP[남은 chunk]
   KEEP --> SORT[sort by turn_start_index, _id]
   SORT --> BODY[concat -> session-memory body]
-  BODY --> PROJ[project (RetiredIndexBridge/Qdrant)]
+  BODY --> PROJ[project (RetiredIndexBridge/retired-vector-index)]
   REGEN[memory_regeneration<br/>_canonicalize_session_chunks_for_memory] -. 같은 정책 .-> CAN
 ```
 

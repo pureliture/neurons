@@ -36,9 +36,6 @@ The comprehensive 4-Tier E2E test suite for LBrain Architecture Rationalization 
 | **F8** | GUC `relaxed_order` | 5 | 5 | 2 | 1 | 13 |
 | **F9** | Outbox Worker Concurrency & CAS | 5 | 5 | 4 | 2 | 16 |
 | **F10** | Recursive DAG Traversal CTE | 5 | 5 | 3 | 2 | 15 |
-| **F11** | Qdrant -> PostgreSQL Backfill | 5 | 5 | 2 | 2 | 14 |
-| **F12** | Dual-Read Shadow Benchmark | 5 | 5 | 2 | 2 | 14 |
-
 ---
 
 ## 3. Verification Execution & Results
@@ -72,8 +69,8 @@ cd worker && uv run pytest -q tests/e2e
    - Compare-And-Swap (CAS) write-back (`WHERE content_hash = :enqueued_hash`) prevents stale embedding generation races.
 5. **Cycle-Safe Recursive DAG Traversal**:
    - Recursive CTE traverses `memory_edges` with `depth < 5` and visited path array preventing infinite loops.
-6. **Dual-Read Shadow Verification**:
-   - Quantitative gate validates `Recall@5 >= 0.95` and `P95 <= 20ms` before retiring Qdrant.
+6. **Historical Dual-Read Shadow Verification**:
+   - The completed cutover gate recorded `Recall@5 >= 0.95` and `P95 <= 20ms`; the vector-index runtime has since been removed.
 
 ---
 

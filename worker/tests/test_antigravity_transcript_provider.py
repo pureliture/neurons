@@ -349,4 +349,3 @@ def test_extraction_text_from_evidence_is_empty_without_bundles():
 
     assert _extraction_text_from_evidence([]) == ""
     assert _extraction_text_from_evidence([{"body": "# Tool Evidence Summary\n"}]) == ""
-

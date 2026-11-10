@@ -612,7 +612,7 @@ def _build_source_store(environ: Mapping[str, str]) -> Any:
 
 
 def _build_embedding_provider(environ: Mapping[str, str]) -> Any:
-    from ..rag_ingress.qdrant_embedding import build_openai_embedding_provider
+    from ..rag_ingress.embedding_provider import build_openai_embedding_provider
 
     return build_openai_embedding_provider(environ=environ)
 

@@ -24,12 +24,6 @@ import os
 import sys
 from types import SimpleNamespace
 
-from agent_knowledge.qdrant_write_gateway_runtime import (
-    QdrantMutationSource,
-    QdrantWriteActivation,
-    qdrant_write_activation_from_environment,
-    qdrant_write_gateway_generation_from_environment,
-)
 from agent_knowledge.rag_ingress.pg_embedding_chunks import (
     INCONSISTENT_HERMES_PROJECT_SCOPE,
     PG_INPUT_POLICY_VERSION,
@@ -43,7 +37,6 @@ BUILD_CLI_OPERATION = "couchdb_session_memory_build"
 # proceed (no-progress guard). Its change-feed entry re-enters if the source
 # still differs from the projected revision.
 MAX_PENDING_ATTEMPTS = 6
-QDRANT_MUTATION_SOURCE = QdrantMutationSource.PROJECTION
 
 
 def _build_auth_header(user: str, password: str) -> str:
@@ -975,7 +968,7 @@ def main(argv: list[str] | None = None) -> int:
     if backend == "postgres_pgvector":
         try:
             from ..rag_ingress.pg_backfill import validated_pg_embedding_profile
-            from ..rag_ingress.qdrant_embedding import resolve_embedding_config
+            from ..rag_ingress.embedding_provider import resolve_embedding_config
 
             cfg = resolve_embedding_config(os.environ)
             embedding_profile = validated_pg_embedding_profile(
@@ -1043,14 +1036,14 @@ def main(argv: list[str] | None = None) -> int:
     from .session_memory_materializer import materialize_and_project
     # Fail-closed: 오타 등으로 알 수 없는 backend가 들어오면 조용히 fallback하지 않고
     # 명시적으로 거부한다.
-    if backend not in {"qdrant", "postgres_pgvector"}:
+    if backend != "postgres_pgvector":
         print(
             json.dumps(
                 {
                     "schema_version": BUILD_CLI_SCHEMA_VERSION,
                     "error": "env_invalid",
                     "reason": (
-                        "SESSION_MEMORY_PROJECTION_BACKEND는 'qdrant' 또는 'postgres_pgvector'여야 한다"
+                        "SESSION_MEMORY_PROJECTION_BACKEND는 'postgres_pgvector'여야 한다"
                     ),
                     "dry_run": False,
                     "selected": 0,
@@ -1062,32 +1055,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 2
-    if backend == "qdrant":
-        # Qdrant-direct write path (retired-index-bridge-free): project each session-memory
-        # straight into the Qdrant searchable mirror as the CANONICAL target. No
-        # RetiredIndexBridge URL/token required. A submit failure marks the projection FAILED
-        # (retried next run), not best-effort. mirror_sink stays None -- the projector
-        # IS the Qdrant writer, so there is no separate best-effort forward hook.
-        projector = _build_qdrant_projector(os.environ)
-        if projector is None:
-            print(
-                json.dumps(
-                    {
-                        "schema_version": BUILD_CLI_SCHEMA_VERSION,
-                        "error": "env_missing",
-                        "reason": "QDRANT_URL (and a reachable mirror collection) is required for the qdrant projection backend",
-                        "dry_run": False,
-                        "selected": selected_count,
-                        "projected": 0,
-                        "failed": 0,
-                        "skipped": 0,
-                    },
-                    sort_keys=True,
-                )
-            )
-            return 2
-        mirror_sink = None
-    elif backend == "postgres_pgvector":
+    if backend == "postgres_pgvector":
         try:
             projector = _build_pg_projector(os.environ)
         except Exception:
@@ -1134,7 +1102,6 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
             return 2
-        mirror_sink = None
     projected = 0
     failed = 0
     skipped = 0
@@ -1159,7 +1126,6 @@ def main(argv: list[str] | None = None) -> int:
                     session_id_hash=session_id_hash,
                     store=store,
                     projector=projector,
-                    mirror_sink=mirror_sink,
                     backend=backend,
                 )
                 projection = result.get("projection") or {}
@@ -1196,7 +1162,6 @@ def main(argv: list[str] | None = None) -> int:
             segments_reused += int(getattr(projector, "last_segments_reused", 0) or 0)
             segments_embedded += int(getattr(projector, "last_segments_embedded", 0) or 0)
     finally:
-        _close_if_supported(mirror_sink)
         _close_if_supported(projector)
 
     print(
@@ -1249,73 +1214,6 @@ def _close_if_supported(resource) -> None:
         return
 
 
-def _build_qdrant_projector(environ):
-    """Build the Qdrant-direct session-memory projector, or None when unbuildable.
-
-    Requires ``QDRANT_URL`` and a reachable, already-existing mirror collection
-    (``ensure_collection=False`` -- never create implicitly). Reuses the
-    OpenAI-compatible embedding provider (``LLM_BRAIN_EMBEDDING_*``) and the
-    passthrough normalizer. Returns None on missing url / unbuildable adapter so the
-    caller fails closed (the qdrant backend then reports env_missing and projects
-    nothing this run rather than silently dropping sessions).
-    """
-
-    try:
-        activation = qdrant_write_activation_from_environment(environ)
-        if activation is QdrantWriteActivation.FOUNDATION_INACTIVE:
-            return None
-        url = str(environ.get("QDRANT_URL") or "").strip()
-        if not url:
-            return None
-        from ..rag_ingress.qdrant_backfill import (
-            QdrantSessionMemoryMirrorSink,
-            QdrantSessionMemoryProjector,
-        )
-        from ..rag_ingress.qdrant_docling_mirror import (
-            DEFAULT_COLLECTION_NAME,
-            FOUNDATION_DIRECT_WRITE_CONTRACT,
-            PassthroughMarkdownNormalizer,
-            build_remote_qdrant_docling_mirror_adapter,
-            build_remote_qdrant_docling_sidecar_adapter,
-        )
-        from ..rag_ingress.qdrant_embedding import build_openai_embedding_provider
-
-        collection = str(environ.get("QDRANT_COLLECTION") or DEFAULT_COLLECTION_NAME).strip()
-        common = {
-            "collection_name": collection,
-            "embedding_provider": build_openai_embedding_provider(environ=environ),
-            "normalizer": PassthroughMarkdownNormalizer(),
-        }
-        if activation is QdrantWriteActivation.FOUNDATION_DIRECT:
-            adapter = build_remote_qdrant_docling_mirror_adapter(
-                url=url,
-                direct_write_contract=FOUNDATION_DIRECT_WRITE_CONTRACT,
-                **common,
-            )
-        else:
-            adapter = build_remote_qdrant_docling_sidecar_adapter(
-                read_url=url,
-                read_api_key_path=str(environ.get("QDRANT_READ_API_KEY_FILE") or ""),
-                gateway_endpoint=str(
-                    environ.get("QDRANT_WRITE_GATEWAY_ENDPOINT") or ""
-                ),
-                gateway_token_path=str(
-                    environ.get("QDRANT_WRITE_GATEWAY_TOKEN_FILE") or ""
-                ),
-                gateway_ca_path=str(
-                    environ.get("QDRANT_WRITE_GATEWAY_CA_FILE") or ""
-                ),
-                gateway_generation=qdrant_write_gateway_generation_from_environment(
-                    environ
-                ),
-                source=QDRANT_MUTATION_SOURCE,
-                **common,
-            )
-        return QdrantSessionMemoryProjector(QdrantSessionMemoryMirrorSink(adapter))
-    except Exception:
-        return None
-
-
 def _build_pg_projector(environ):
     dsn = (
         environ.get("NEURON_LBRAIN_PGVECTOR_DSN", "")
@@ -1326,7 +1224,7 @@ def _build_pg_projector(environ):
         return None
     from ..rag_ingress.pg_backfill import PgSessionMemoryProjector
     from ..postgres_store.pgvector_store import PgVectorStore
-    from ..rag_ingress.qdrant_embedding import build_openai_embedding_provider, resolve_embedding_config
+    from ..rag_ingress.embedding_provider import build_openai_embedding_provider, resolve_embedding_config
     from ..rag_ingress.pg_embedding_chunks import BoundedPgEmbedding
 
     store = PgVectorStore(dsn=dsn, pgvector_version=environ.get("LLM_BRAIN_PGVECTOR_VERSION", "0.8.0"))

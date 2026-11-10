@@ -153,7 +153,7 @@ SoT:
 - evidence:
   - `compose.yaml` now has `x-retired-index-bridge-env` for RetiredIndexBridge base URL, API key, and all seven per-profile dataset ids
   - `x-ingress-java-env` merges the shared RetiredIndexBridge anchor while keeping Java-only NATS, delivery-enabled, and pressure env local
-  - `ingress-worker-py` merges the shared RetiredIndexBridge anchor while keeping Python-only live/shadow queue, state DB, pressure URL, Qdrant, and embedding env local
+  - `ingress-worker-py` merges the shared RetiredIndexBridge anchor while keeping Python-only live/shadow queue, state DB, pressure URL, retired-vector-index, and embedding env local
   - `ComposeConfigTest.retiredIndexBridgeEnvAnchorIsSharedByJavaAndPythonWorkers` captured the missing shared anchor as a RED test before the compose change
   - targeted `ComposeConfigTest` passed
   - PyYAML merge inspection confirmed `ingress-api`, `ingress-worker`, and `ingress-worker-py` all resolve the shared RetiredIndexBridge env keys

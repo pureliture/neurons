@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..couchdb_source.build_cli import (
-    _build_qdrant_projector,
+    _build_pg_projector,
     _select_sessions_needing_projection,
 )
 from ..couchdb_source.document_model import (
@@ -141,10 +141,13 @@ def _resolved_path(value: object) -> Path:
     return Path(str(value or "")).expanduser().resolve(strict=False)
 
 
-def _resolved_qdrant_collection(environ: Mapping[str, str]) -> str:
-    # Keep this default identical to build_cli._build_qdrant_projector without
-    # loading optional Qdrant/Docling dependencies during plan construction.
-    return str(environ.get("QDRANT_COLLECTION") or "neurons_searchable_mirror_poc").strip()
+def _resolved_pg_dsn(environ: Mapping[str, str]) -> str:
+    return str(
+        environ.get("NEURON_LBRAIN_PGVECTOR_DSN")
+        or environ.get("LLM_BRAIN_PGVECTOR_DSN")
+        or environ.get("NEURON_LEDGER_PG_DSN")
+        or ""
+    ).strip()
 
 
 def _resolve_canary_targets(
@@ -191,11 +194,10 @@ def _resolve_canary_targets(
                 "database": couchdb_db,
             }
         ),
-        "qdrant_collection": _target_fingerprint(
+        "postgres_pgvector": _target_fingerprint(
             {
-                "kind": "qdrant_collection",
-                "base_url": str(frozen_environ.get("QDRANT_URL") or "").strip().rstrip("/"),
-                "collection": _resolved_qdrant_collection(frozen_environ),
+                "kind": "postgres_pgvector",
+                "dsn": _resolved_pg_dsn(frozen_environ),
             }
         ),
         "graph_store": _target_fingerprint(
@@ -509,6 +511,7 @@ def _run_session_memory_lane(
     *,
     source_store: CouchDBSourceStore,
     projector: Any,
+    session_id_hash: str,
     project: str,
     provider: str,
 ) -> tuple[int, int, str]:
@@ -517,7 +520,7 @@ def _run_session_memory_lane(
         1,
         project=project,
         provider=provider,
-        backend="qdrant",
+        backend="postgres_pgvector",
     )
     projected = 0
     projected_source_hash = ""
@@ -527,12 +530,20 @@ def _run_session_memory_lane(
             session_id_hash=session_id_hash,
             store=source_store,
             projector=projector,
-            backend="qdrant",
+            backend="postgres_pgvector",
         )
         projection = result.get("projection") or {}
         if str(projection.get("status") or "") == ProjectionStatus.PROJECTED:
             projected += 1
             projected_source_hash = str(result.get("source_hash") or "")
+    state = source_store.get(projection_state_doc_id(session_id_hash)) or {}
+    receipt = (
+        (state.get("backend_receipts") or {}).get("postgres_pgvector")
+        or {}
+    )
+    receipt_source_hash = str(receipt.get("projected_source_hash") or "")
+    if receipt_source_hash:
+        projected_source_hash = receipt_source_hash
     return len(selected), projected, projected_source_hash
 
 
@@ -698,6 +709,7 @@ def run_projection_invalidation_canary(
         lambda: _run_session_memory_lane(
             source_store=source_store,
             projector=session_memory_projector,
+            session_id_hash=session_id_hash,
             project=str(validated["project"]),
             provider=str(validated["provider"]),
         ),
@@ -705,17 +717,7 @@ def run_projection_invalidation_canary(
     baseline_session_current = (
         baseline_session_selected in {0, 1}
         and baseline_session_projected == baseline_session_selected
-        and (
-            baseline_session_hash == baseline_source_hash
-            if baseline_session_selected
-            else str(
-                (
-                    source_store.get(projection_state_doc_id(session_id_hash)) or {}
-                ).get("projected_source_hash")
-                or ""
-            )
-            == baseline_source_hash
-        )
+        and baseline_session_hash == baseline_source_hash
     )
     _require(
         baseline_session_current,
@@ -778,10 +780,15 @@ def run_projection_invalidation_canary(
         and distinct_source_hash != baseline_source_hash
     )
     state_after_distinct = source_store.get(projection_state_doc_id(session_id_hash)) or {}
+    projected_pg_receipt = (
+        (state_after_distinct.get("backend_receipts") or {}).get("postgres_pgvector")
+        or {}
+    )
     projection_dirty_observed = (
         str(state_after_distinct.get("projection_status") or "") == ProjectionStatus.PENDING
         and str(state_after_distinct.get("source_hash") or "") == distinct_source_hash
-        and str(state_after_distinct.get("projected_source_hash") or "") == baseline_source_hash
+        and str(projected_pg_receipt.get("projected_source_hash") or "")
+        == baseline_source_hash
     )
     _require(
         source_hash_changed and projection_dirty_observed,
@@ -793,6 +800,7 @@ def run_projection_invalidation_canary(
         lambda: _run_session_memory_lane(
             source_store=source_store,
             projector=session_memory_projector,
+            session_id_hash=session_id_hash,
             project=str(validated["project"]),
             provider=str(validated["provider"]),
         ),
@@ -852,11 +860,14 @@ def run_projection_invalidation_canary(
     )
     duplicate_source_hash_unchanged = duplicate_source_hash == distinct_source_hash
     state_after_duplicate = source_store.get(projection_state_doc_id(session_id_hash)) or {}
+    duplicate_pg_receipt = (
+        (state_after_duplicate.get("backend_receipts") or {}).get("postgres_pgvector")
+        or {}
+    )
     projection_state_remained_projected = (
-        str(state_after_duplicate.get("projection_status") or "") == ProjectionStatus.PROJECTED
+        str(duplicate_pg_receipt.get("projection_status") or "") == ProjectionStatus.PROJECTED
         and str(state_after_duplicate.get("source_hash") or "") == distinct_source_hash
-        and str(state_after_duplicate.get("projected_source_hash") or "")
-        == distinct_source_hash
+        and str(duplicate_pg_receipt.get("projected_source_hash") or "") == distinct_source_hash
     )
     duplicate_session_selected = len(
         _select_sessions_needing_projection(
@@ -864,7 +875,7 @@ def run_projection_invalidation_canary(
             1,
             project=str(validated["project"]),
             provider=str(validated["provider"]),
-            backend="qdrant",
+            backend="postgres_pgvector",
         )
     )
     duplicate_graph_selected, duplicate_graph_projected = _run_stage(
@@ -1011,8 +1022,8 @@ def _execute_live(
         raise CanaryExecutionError(
             stage="target_binding", error_class="ResolvedTargetDrift"
         )
-    if str(targets.environ.get("SESSION_MEMORY_PROJECTION_BACKEND") or "").strip().lower() != "qdrant":
-        raise CanaryExecutionError(stage="runtime_setup", error_class="CanonicalBackendNotQdrant")
+    if str(targets.environ.get("SESSION_MEMORY_PROJECTION_BACKEND") or "").strip().lower() != "postgres_pgvector":
+        raise CanaryExecutionError(stage="runtime_setup", error_class="CanonicalBackendNotPostgres")
     source_store = _build_source_store(
         couchdb_url=targets.couchdb_url,
         couchdb_db=targets.couchdb_db,
@@ -1020,9 +1031,9 @@ def _execute_live(
         couchdb_password_env=targets.couchdb_password_env,
         couchdb_password=targets.couchdb_password,
     )
-    projector = _build_qdrant_projector(targets.environ)
+    projector = _build_pg_projector(targets.environ)
     if projector is None:
-        raise CanaryExecutionError(stage="runtime_setup", error_class="QdrantProjectorUnavailable")
+        raise CanaryExecutionError(stage="runtime_setup", error_class="PgProjectorUnavailable")
     graph_environ = dict(targets.environ)
     graph_environ["LLM_BRAIN_GRAPH_EXTRACT_ENTITIES"] = "false"
     graph_adapter = build_graph_adapter_from_env(

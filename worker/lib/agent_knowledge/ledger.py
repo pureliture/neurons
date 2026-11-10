@@ -1176,17 +1176,6 @@ class Ledger(
                     enabled INTEGER DEFAULT 1,
                     disabled_at TEXT DEFAULT ''
                 );
-                CREATE TABLE IF NOT EXISTS qdrant_collections (
-                    logical_name TEXT PRIMARY KEY,
-                    collection TEXT NOT NULL,
-                    embedding_model TEXT DEFAULT '',
-                    vector_size INTEGER DEFAULT 0,
-                    distance TEXT DEFAULT '',
-                    payload_index_version TEXT DEFAULT '',
-                    created_at TEXT DEFAULT '',
-                    enabled INTEGER DEFAULT 1,
-                    disabled_at TEXT DEFAULT ''
-                );
                 CREATE TABLE IF NOT EXISTS transcript_sessions (
                     session_id_hash TEXT PRIMARY KEY,
                     provider TEXT NOT NULL,
@@ -1736,8 +1725,6 @@ class Ledger(
                 VALUES ('agent_knowledge_native_memory_mirror.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
                 VALUES ('agent_knowledge_memory_gc_audit.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
-                INSERT INTO schema_migrations(version, applied_at)
-                VALUES ('agent_knowledge_qdrant_collections.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 INSERT INTO schema_migrations(version, applied_at)
                 VALUES ('agent_knowledge_graph_projection_state.v1', CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING;
                 """

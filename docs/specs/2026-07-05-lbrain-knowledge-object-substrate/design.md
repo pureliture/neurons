@@ -29,7 +29,7 @@ LBrain을 feature별 임시 기억 도구가 아니라 repo 작업 지식을 다
 
 1. 채택: ledger-backed object substrate
    - `KnowledgeObjectEnvelope`, `KnowledgeEdge`, `EvidenceRef`, `ReferenceCorpus` 계열 object를 additive ledger tables와 pure model modules로 도입한다.
-   - graph/Qdrant/search mirror는 `derived_projection` lane으로만 join한다.
+   - graph/PG search projection은 `derived_projection` lane으로만 join한다.
    - existing `MemoryCard`, `SourceRefRecord`, `OntologyEpisode`, `DocumentAuthorityCard`, `PreferenceRuleCard`, `RepoStyleProfile`, `ContextPack`은 새 substrate로 감싸서 재사용한다.
    - 장점: authority lane이 분명하고 기존 Brain Steward restricted gate를 살릴 수 있다.
    - 단점: 첫 milestone에서 object envelope와 기존 card 모델 사이 adapter가 필요하다.
@@ -554,7 +554,7 @@ Existing modules remain active:
   - remains restricted authority gate.
 - `mcp_tools.py` and `mcp_jsonrpc.py`
   - expose read/proposal-safe object tools.
-- `rag_ingress/qdrant_*` and graph adapters
+- graph adapters
   - remain derived mirrors and must join through object/evidence authority.
 
 No migration may remove or rename existing MCP tools in the first program.

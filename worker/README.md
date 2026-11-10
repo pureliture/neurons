@@ -16,14 +16,6 @@ index bridge는 runtime에서 사라졌으므로 다른 backend option은 없다
 `docs/retired/ragflow-retirement.md`). 이 문서는 source/CI 계약만 설명하며
 production activation 증거는 아니다.
 
-`INGRESS_DELIVERY_BACKEND=couchdb`에서만 `MIRROR_DUAL_WRITE=1`은 Qdrant mirror를
-선택적으로 구성한다. mirror는 완전히 server-redacted 되고 leak gate를 통과한
-`RagReadyDocument`을 **권위 있는 CouchDB write와 aggregate reconciliation이 성공한 뒤에만**
-best-effort로 받는다. `QDRANT_URL`이 없거나 mirror 구성·write가 실패해도 CouchDB
-성공과 canonical delivery 상태는 바뀌지 않으며, 실패 관측값은 status와 exception class만
-남긴다. 플래그가 없거나 `1`이 아니면 primary-only 동작은 변경되지 않는다. 이 source
-경계는 production 활성화나 runtime mutation을 뜻하지 않는다.
-
 - 출처(provenance): `agent-knowledge` advisor source revision `d571800`의 벤더링 사본.
 - 외부 의존: `nats-py>=2.6` 하나(런타임). 그 외 표준 라이브러리만 사용.
 
@@ -79,7 +71,7 @@ vendored (`lib/agent_knowledge/`):
   dendrite/client dependency.
 - `rag_ingress/shadow_worker.py` — NATS JetStream pull-consume worker 엔트리포인트
 - `rag_ingress/server_runtime.py` — `apply_server_redaction` / `normalize_ingest_job_payload` / `document_from_ingress_payload` / `public_ingress_leak_violations`
-- `rag_ingress/index_adapter.py` — backend-neutral `IndexAdapter` 계약 (`IndexStatus`, natural-key 규칙). concrete adapter는 `couchdb_index_adapter.py` / `qdrant_docling_mirror.py`가 구현한다.
+- `rag_ingress/index_adapter.py` — backend-neutral `IndexAdapter` 계약 (`IndexStatus`, natural-key 규칙). 현재 구현은 `couchdb_index_adapter.py`다.
 - `rag_ingress/rag_ready_document.py` — backend-neutral 문서 모델 + content_hash/idempotency_key 빌더
 - `rag_ingress/idempotency.py` / `state_db.py` / `domain_state.py` / `ingress_journal.py`
   — server-owned durable ingress state primitives and byte-faithful replay
@@ -325,7 +317,7 @@ Hermes는 한 세션 안에서 profile이 바뀔 수 있어 같은 세션의 Cou
 `project` 값에 서로 다른 label(profile 이름 / workspace 이름)을 가질 수 있다.
 판정은 `couchdb_source/hermes_project_scope.py`의
 `decide_hermes_project_scope()` 하나로 하고, graph projection lane
-(`llm_brain_core/runtime.py`)과 PG/Qdrant session-memory build lane
+(`llm_brain_core/runtime.py`)과 PostgreSQL pgvector session-memory build lane
 (`couchdb_source/session_memory_materializer.py`)이 같은 결과를 따른다.
 
 - workspace-vs-profile: session 문서의 workspace로 정규화하고 note

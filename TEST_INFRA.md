@@ -49,9 +49,6 @@ This document defines the complete end-to-end verification infrastructure for th
 | **F8** | GUC `relaxed_order` | `SET LOCAL hnsw.iterative_scan = 'relaxed_order';` support for accelerated filtered vector search | M3 |
 | **F9** | Outbox Worker Concurrency & CAS | `FOR UPDATE SKIP LOCKED` lease claiming and Compare-And-Swap write-back (`WHERE content_hash = :enqueued_hash`) | M3 |
 | **F10** | Recursive DAG Traversal CTE | Cycle-safe recursive CTE query traversing `memory_edges` with `depth < 5` and visited path array | M3 |
-| **F11** | Qdrant -> PostgreSQL Backfill | One-shot migration script backfilling existing session chunks and cards into PostgreSQL | M4 |
-| **F12** | Dual-Read Shadow Benchmark | Dual-read verification harness comparing Qdrant vs pgvector hybrid search (`Recall@5 >= 0.95`, `P95 <= 20ms`) | M4 |
-
 ---
 
 ## 3. Test Suite Mapping & Detailed Test Matrix
@@ -110,17 +107,6 @@ This document defines the complete end-to-end verification infrastructure for th
 | `test_f10_03` | F10 | `test_dag_cte_multi_parent_convergence` | Card derived from 2 parents returns both ancestry branches. |
 | `test_f10_04` | F10 | `test_dag_cte_temporal_edge_filtering` | Point-in-time traversal filters edges outside `valid_from/valid_to`. |
 | `test_f10_05` | F10 | `test_dag_cte_relation_types_classification` | Correctly differentiates `supersedes`, `derived_from`, `contradicts`, `supports`. |
-| `test_f11_01` | F11 | `test_backfill_read_qdrant_collection` | Migration script reads vectors and payloads from source Qdrant collection. |
-| `test_f11_02` | F11 | `test_backfill_map_session_chunks` | Maps Qdrant session chunks into `session_memory_chunks` preserving IDs and vectors. |
-| `test_f11_03` | F11 | `test_backfill_map_memory_cards` | Maps cards into `memory_cards` table preserving content hashes and metadata. |
-| `test_f11_04` | F11 | `test_backfill_dry_run_mode` | Dry-run mode outputs count and sample records without writing to Postgres. |
-| `test_f11_05` | F11 | `test_backfill_outbox_enqueue_unvectorized` | Enqueues missing embeddings to `embedding_outbox` for unvectorized cards. |
-| `test_f12_01` | F12 | `test_dual_read_execute_both_stores` | Dual-read harness executes search against both Qdrant and pgvector stores. |
-| `test_f12_02` | F12 | `test_dual_read_top5_overlap_calculation` | Calculates top-5 rank overlap and Recall@5 metric between stores. |
-| `test_f12_03` | F12 | `test_dual_read_recall_at_5_threshold` | Asserts `Recall@5 >= 0.95` across authority query fixtures corpus. |
-| `test_f12_04` | F12 | `test_dual_read_latency_percentiles` | Measures P50, P95, P99 latency for both backends; asserts P95 <= 20ms. |
-| `test_f12_05` | F12 | `test_dual_read_discrepancy_reporting` | Generates detailed report on rank shifts and score divergences. |
-
 ---
 
 ### 3.2. Tier 2: Boundary & Corner Cases Matrix (60 Test Cases)
@@ -177,17 +163,6 @@ This document defines the complete end-to-end verification infrastructure for th
 | `test_f10_b03` | F10 | `test_dag_isolated_node_no_edges` | Isolated node with no edges returns depth 1 without crashing. |
 | `test_f10_b04` | F10 | `test_dag_self_referential_edge` | Self-loop edge (A -> A) safely detected and skipped. |
 | `test_f10_b05` | F10 | `test_dag_diamond_dependency_convergence` | Diamond graph (A -> B -> D, A -> C -> D) handles convergent nodes cleanly. |
-| `test_f11_b01` | F11 | `test_backfill_empty_qdrant_collection` | Migrating empty Qdrant collection succeeds with 0 records copied. |
-| `test_f11_b02` | F11 | `test_backfill_missing_optional_payload_fields` | Payload with missing optional fields defaults cleanly in Postgres. |
-| `test_f11_b03` | F11 | `test_backfill_idempotent_rerun` | Re-running migration on same dataset is idempotent (no duplicate rows). |
-| `test_f11_b04` | F11 | `test_backfill_corrupted_vector_quarantine` | Corrupted vector (NaN/wrong dim) routed to dead letter without failing batch. |
-| `test_f11_b05` | F11 | `test_backfill_network_retry_resumption` | Network failure during migration triggers retry and resumes from checkpoint. |
-| `test_f12_b01` | F12 | `test_dual_read_single_store_timeout_resilience`| Qdrant timeout does not crash dual-read harness (records error). |
-| `test_f12_b02` | F12 | `test_dual_read_zero_match_recall` | Query returning zero matches in both stores yields Recall@5 = 1.0. |
-| `test_f12_b03` | F12 | `test_dual_read_score_tie_breaking` | Equal similarity scores resolved with deterministic secondary sort (memory_id). |
-| `test_f12_b04` | F12 | `test_dual_read_large_corpus_memory_bound` | Benchmark on 200+ queries executes in bounded memory. |
-| `test_f12_b05` | F12 | `test_dual_read_strict_gate_failure` | Hard assertion fails cleanly when Recall@5 drops below 0.95 threshold. |
-
 ---
 
 ### 3.3. Tier 3: Cross-Feature Combinations (Pairwise & Multi-Way)
@@ -200,7 +175,6 @@ This document defines the complete end-to-end verification infrastructure for th
 | `test_tier3_04` | F2 + F9 | Agent creates candidate -> automatically enqueued to `embedding_outbox` -> worker claims via SKIP LOCKED and writes embedding with CAS. |
 | `test_tier3_05` | F7 + F8 + F1 | Pgvector DDL schema queried via `brain.resolve` using `relaxed_order` iterative scan. |
 | `test_tier3_06` | F7 + F9 + F10 | Concurrent card modification during outbox embedding update preserves DAG edge consistency and CAS integrity. |
-| `test_tier3_07` | F11 + F12 | Migration script backfills Qdrant data to PostgreSQL -> Dual-read benchmark verifies `Recall@5 >= 0.95`. |
 | `test_tier3_08` | F1 + F2 + F3 + F7 + F8 + F9 | Full End-to-End Knowledge Lifecycle: Proposal -> Outbox Embed -> Admin Approval -> PGVector Indexing -> Slim Resolve. |
 
 ---
@@ -213,7 +187,6 @@ This document defines the complete end-to-end verification infrastructure for th
 | `test_tier4_scenario_2` | **Admin Review & Supersession Workflow** | 1. Operator queries pending review queue via admin surface.<br>2. Operator approves candidate, promoting it to `active/human_accepted`.<br>3. Operator creates superseding edge in `memory_edges` replacing older decision card.<br>4. Agent calls `brain.resolve(slim)`; verifies new decision is active and superseded card is excluded. |
 | `test_tier4_scenario_3` | **Outbox Concurrency & Stale Generation Protection** | 1. Multiple agents create candidates simultaneously.<br>2. 3 worker threads process outbox concurrently with `FOR UPDATE SKIP LOCKED`.<br>3. One card is modified concurrently before embedding write-back.<br>4. CAS update detects hash mismatch, skips stale embedding write, and preserves consistency. |
 | `test_tier4_scenario_4` | **Provenance Audit & Temporal Investigation** | 1. Auditor queries `brain.resolve(with_evidence, as_of="2026-08-15T00:00:00Z")`.<br>2. System traverses 4-hop recursive DAG ancestry chain.<br>3. Validates point-in-time state and full SHA-256 evidence hash chain back to root decision. |
-| `test_tier4_scenario_5` | **Zero-Downtime Qdrant to PGVector Cutover** | 1. Qdrant store contains active session chunks and card vectors.<br>2. Migration backfill script runs and populates PostgreSQL pgvector store.<br>3. Dual-read shadow harness executes 50 benchmark queries asserting `Recall@5 >= 0.95` and `P95 <= 20ms`.<br>4. Worker search backend switched to `postgres_pgvector` with zero downtime. |
 
 ---
 

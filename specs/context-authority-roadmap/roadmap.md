@@ -16,8 +16,8 @@ Primary references:
 - `specs/llm-brain-core-v1/implementation-matrix.md`
 - `specs/llm-brain-bulk-semantic-lane/requirements.md`
 - `specs/llm-brain-bulk-semantic-lane/design.md`
-- `docs/specs/2026-06-21-qdrant-docling-searchable-mirror/requirements.md`
-- `docs/specs/2026-06-24-qdrant-mirror-cutover/requirements.md`
+- `docs/specs/2026-06-21-retired-vector-index-docling-searchable-mirror/requirements.md`
+- `docs/specs/2026-06-24-retired-vector-index-mirror-cutover/requirements.md`
 - GitHub issues #25 and #27 for container baseline and k3s PoC
 
 Historical migration docs may still mention retired RetiredIndexBridge lanes. This roadmap
@@ -66,7 +66,7 @@ current, relevant, superseded, stale, generated, private, or actionable.
   retired document bridge runtime.
 - `BrainReadService` and MCP/stdio expose backend-neutral read APIs.
 - Graphiti/Neo4j exists as a derived graph index, not raw source of truth.
-- Qdrant/Docling is scoped as a searchable mirror for PDF/doc/document support,
+- retired-vector-index/Docling is scoped as a searchable mirror for PDF/doc/document support,
   not canonical authority.
 - Dendrite owns local capture and source resolution; `neurons` owns server-side
   brain authority.
@@ -84,7 +84,7 @@ top of it.
 | Ledger / current state adapter | Current lifecycle, replay, accepted memory, approval state | Current implementation seam; PG/SQLite are storage adapters to hide behind authority-card stores |
 | Neo4j | Queryable relationship graph and Authority Graph Workbench surface | Derived index and inspection UI, never raw truth by itself |
 | Graphiti | Graph episode/entity/relation extraction and Neo4j writer/reader adapter | Extraction/projection layer, not product authority |
-| Qdrant | Searchable mirror for document/PDF/doc support and fuzzy recall | Mirror only, must authority-join before product use |
+| retired-vector-index | Searchable mirror for document/PDF/doc support and fuzzy recall | Mirror only, must authority-join before product use |
 | Dendrite | Local capture, tool/file/git event sensing, same-device source resolve | Sensor, not brain |
 | neurons-local | Per-PC local index, file/session graph, offline recall, sync artifact | Local authority for that device's observed facts |
 | neurons-central | Cross-device federation, dedupe, authority synthesis, context pack | Product authority layer |
@@ -95,13 +95,13 @@ top of it.
 These guardrails apply to every milestone. Each milestone's done criteria must
 include a short boundary cross-check.
 
-- Agent-facing products call `neurons` brain APIs, not Graphiti/Neo4j/Qdrant
+- Agent-facing products call `neurons` brain APIs, not Graphiti/Neo4j/retired-vector-index
   directly.
 - Neo4j is a derived relationship substrate and Authority Graph Workbench
   surface. It does not replace `neurons`.
 - Graphiti is the semantic extraction/projection path. It is not the product
   authority layer.
-- Qdrant is a searchable document mirror. It is not canonical memory.
+- retired-vector-index is a searchable document mirror. It is not canonical memory.
 - Retired RetiredIndexBridge lanes must not be reintroduced as core Context Authority.
 - Dendrite captures local evidence and source locators. It does not make
   authority decisions.
@@ -144,7 +144,7 @@ The right position:
 ```text
 Neo4j = derived relationship substrate + authority workbench
 Graphiti = semantic projection / extraction path
-Qdrant = searchable document mirror
+retired-vector-index = searchable document mirror
 neurons = authority synthesis and agent-facing brain API
 ```
 
@@ -303,7 +303,7 @@ Initial contracts:
 - keep TDD-first and evidence-gated act/observe/adjust loops for code work;
 - use dedicated worktree/branch before edits;
 - verify `neurons` runtime claims against `ops-host`;
-- keep backend boundaries: Neo4j/Qdrant/Graphiti behind brain APIs.
+- keep backend boundaries: Neo4j/retired-vector-index/Graphiti behind brain APIs.
 
 Core objects:
 
@@ -389,7 +389,7 @@ Scope:
 - compact/full output modes;
 - token budget handling;
 - freshness and degraded-mode fields;
-- graph/Qdrant/document-mirror unavailable behavior;
+- graph/retired-vector-index/document-mirror unavailable behavior;
 - evidence gap response contract;
 - backend boundary hiding.
 
@@ -537,7 +537,7 @@ Scope:
 - Dockerfile and compose baseline;
 - healthcheck, restart, volumes, config checks;
 - image tag and CI build/config validation;
-- Qdrant/document-mirror/external state-store contract clarity;
+- retired-vector-index/document-mirror/external state-store contract clarity;
 - safe shadow/delivery-off defaults.
 
 Done when:
@@ -590,7 +590,7 @@ Parallel infra:
 - Do not centrally replicate all PC files.
 - Do not sync graph DB files between PCs.
 - Do not make Neo4j the raw source of truth.
-- Do not make Qdrant canonical memory.
+- Do not make retired-vector-index canonical memory.
 - Do not reintroduce RetiredIndexBridge as a core Context Authority dependency.
 - Do not let Graphiti semantic extraction sit in the hot path.
 - Do not auto-delete archive candidates.

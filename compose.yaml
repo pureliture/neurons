@@ -129,16 +129,6 @@ services:
       INGEST_STATE_DB_PATH: /var/lib/agent-knowledge/ingest-state/ingest-state.sqlite
       # Reuse the ingress-api's own pressure verdict (single source, fail-open).
       RAG_INGRESS_PRESSURE_URL: ${RAG_INGRESS_PRESSURE_URL:-http://ingress-api:8080/status}
-      # M6 dual-write shadow — OFF by default. Set MIRROR_DUAL_WRITE=1 + QDRANT_URL
-      # to ALSO mirror each delivery into Qdrant (best-effort; a mirror failure never
-      # affects the authoritative RetiredIndexBridge/CouchDB write). Needs the `qdrant` service
-      # (profile searchable-mirror) and the OpenAI-compatible embedding env below.
-      MIRROR_DUAL_WRITE: ${MIRROR_DUAL_WRITE:-0}
-      QDRANT_URL: ${QDRANT_URL:-}
-      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-}
-      # Embedding endpoint reused from the graph adapter (LLM_BRAIN_EMBEDDING_*).
-      # QDRANT_URL and MIRROR_DUAL_WRITE remain empty/off by default, so this
-      # profile does not activate a Qdrant write merely by resolving the model.
       LLM_BRAIN_EMBEDDING_MODEL: ${LLM_BRAIN_EMBEDDING_MODEL:-gemini-embedding-2}
       LLM_BRAIN_EMBEDDING_BASE_URL: ${LLM_BRAIN_EMBEDDING_BASE_URL:-}
       LLM_BRAIN_EMBEDDING_API_KEY: ${LLM_BRAIN_EMBEDDING_API_KEY:-}
@@ -152,25 +142,6 @@ services:
     depends_on:
       - nats-jetstream
       - ingress-api
-
-  qdrant:
-    # Searchable-mirror store (M6 dual-write target). Profile-gated so a bare
-    # `compose up` does NOT start it. Opt-in:
-    #   docker compose --profile searchable-mirror up -d qdrant
-    # Loopback-only bind. Keep the shadow source on a tested, explicit tag;
-    # production may override this only after the migration compatibility gate.
-    profiles: ["searchable-mirror"]
-    image: ${QDRANT_IMAGE:-qdrant/qdrant:v1.19.0}
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:6333:6333"
-    volumes:
-      - qdrant_data:/qdrant/storage
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:6333/healthz"]
-      interval: 30s
-      timeout: 5s
-      retries: 10
 
   llm-brain-couchdb:
     profiles: ["llm-brain-core"]
@@ -478,5 +449,4 @@ volumes:
   llm-brain-ledger-postgres-data:
   llm-brain-neo4j-data:
   llm-brain-neo4j-logs:
-  qdrant_data:
   llm-brain-runtime:

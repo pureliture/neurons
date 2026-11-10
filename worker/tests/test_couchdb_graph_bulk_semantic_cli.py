@@ -821,4 +821,3 @@ def test_embedding_batcher_chunks_inputs_by_max_batch_size():
     assert vectors[0] == [1.0, 0.0]
     assert vectors[2] == [2.0, 0.0]
     assert vectors[4] == [3.0, 0.0]
-

@@ -36,7 +36,6 @@
   <img src="https://img.shields.io/badge/Gradle-02303A?style=for-the-badge&logo=gradle&logoColor=white" alt="Gradle" />
   <img src="https://img.shields.io/badge/uv-Python-DE5FE9?style=for-the-badge&logo=astral&logoColor=white" alt="uv" />
   <img src="https://img.shields.io/badge/Docker_Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white" alt="Docker" />
-  <img src="https://img.shields.io/badge/Qdrant_mirror-adapter-f97316?style=for-the-badge" alt="Qdrant mirror" />
   <img src="https://img.shields.io/badge/Graph_memory-OFF_by_default-64748b?style=for-the-badge" alt="graph off" />
 </p>
 

@@ -17,7 +17,7 @@
 
 - `x-retired-index-bridge-env` now owns the shared RetiredIndexBridge base URL, API key, and seven per-profile dataset ids.
 - `x-ingress-java-env` merges that shared anchor and keeps Java-only NATS, delivery-enabled, and pressure-threshold env.
-- `ingress-worker-py` merges the shared RetiredIndexBridge anchor while keeping Python-only live/shadow queue, state DB, pressure URL, Qdrant, and embedding env local to the service.
+- `ingress-worker-py` merges the shared RetiredIndexBridge anchor while keeping Python-only live/shadow queue, state DB, pressure URL, retired-vector-index, and embedding env local to the service.
 - `ComposeConfigTest.retiredIndexBridgeEnvAnchorIsSharedByJavaAndPythonWorkers` guards:
   - common anchor declaration
   - Java/Python merge usage

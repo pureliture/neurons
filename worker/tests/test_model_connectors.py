@@ -183,20 +183,6 @@ def test_ollama_embedding_defaults_keep_native_nomic_profile():
     assert embedding.dim == 768
 
 
-def test_shared_reranker_client_feeds_qdrant_and_graphiti_consumers():
-    shared = FunctionRerankerClient(lambda _q, texts: [float(len(text)) for text in texts])
-    qdrant = CandidateReranker(shared)
-    graphiti = GraphitiCrossEncoderAdapter(shared)
-
-    qdrant_ranked = qdrant.rerank(
-        query="ledger",
-        candidates=[{"summary": "tiny"}, {"summary": "largest candidate"}],
-        top_n=2,
-    )
-    graphiti_ranked = asyncio.run(graphiti.rank("ledger", ["tiny", "largest candidate"]))
-
-    assert [item["summary"] for item in qdrant_ranked] == ["largest candidate", "tiny"]
-    assert graphiti_ranked == [("largest candidate", 17.0), ("tiny", 4.0)]
 
 
 def test_shared_graphiti_cross_encoder_rejects_score_count_mismatch():

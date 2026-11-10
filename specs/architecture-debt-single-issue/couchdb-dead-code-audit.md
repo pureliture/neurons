@@ -1,6 +1,6 @@
 # CouchDB / Session-Memory Dead-Code Audit
 
-This audit is the M4 read-only classification for GitHub issue #40. It does not delete files and it does not perform live CouchDB, graph, Qdrant, GC, deploy, Docker, systemd, or firewall mutation.
+This audit is the M4 read-only classification for GitHub issue #40. It does not delete files and it does not perform live CouchDB, graph, retired-vector-index, GC, deploy, Docker, systemd, or firewall mutation.
 
 ## Finding
 
@@ -14,7 +14,7 @@ The current CouchDB/session-memory surface is not a single dead-code island. It 
 | `worker/lib/agent_knowledge/couchdb_source/source_store.py` | active runtime/test seam | Imported by delivery backend, projection code, build CLI tests, and in-memory store tests. | High; store protocol and fake are broad test/runtime seams. |
 | `worker/lib/agent_knowledge/couchdb_source/couchdb_http_store.py` | active runtime adapter | Used by build CLI, delivery backend factories, graph/status projection CLIs, and tests. | High; live adapter surface. |
 | `worker/lib/agent_knowledge/couchdb_source/build_cli.py` | active CLI | Routed as `neuron-knowledge couchdb-session-memory-build`; session-memory deploy script tests reference this command. | High; current builder entrypoint. |
-| `worker/lib/agent_knowledge/couchdb_source/session_memory_materializer.py` | active builder core | Used by build CLI, qdrant backfill, graph projection tests, and retirement verifier tests. | High; materialization seam. |
+| `worker/lib/agent_knowledge/couchdb_source/session_memory_materializer.py` | active builder core | Used by build CLI, retired-vector-index backfill, graph projection tests, and retirement verifier tests. | High; materialization seam. |
 | `worker/lib/agent_knowledge/couchdb_source/tool_evidence_bundler.py` | active builder helper | Used by materialization and CouchDB tests. | Medium; helper can move only with materializer refactor. |
 | `worker/lib/agent_knowledge/couchdb_source/project_authority.py` | active safety helper | Used by historical import and tested directly; affects retirement eligibility. | Medium; deletion risks unsafe project attribution. |
 | `worker/lib/agent_knowledge/couchdb_source/retention.py` | active policy helper | Tested directly and re-exported from package. | Medium; no deletion without retention policy decision. |

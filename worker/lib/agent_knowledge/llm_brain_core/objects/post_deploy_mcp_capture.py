@@ -1604,6 +1604,7 @@ def _temporal_mismatch_probe_summary(
 def _nonsense_brain_query_summary(value: Mapping[str, Any], *, query: str) -> dict[str, Any]:
     safe = _remote_mapping_or_failure(value)
     audit = safe.get("audit") if isinstance(safe.get("audit"), Mapping) else {}
+    results = safe.get("results") if isinstance(safe.get("results"), list) else []
     return {
         "query_hash": hash_payload(query),
         "result_count": len(safe.get("results")) if isinstance(safe.get("results"), list) else -1,
@@ -1611,6 +1612,10 @@ def _nonsense_brain_query_summary(value: Mapping[str, Any], *, query: str) -> di
         "accepted_count": len(safe.get("accepted")) if isinstance(safe.get("accepted"), list) else -1,
         "semantic_ranker_bound": audit.get("semantic_ranker_bound") is True,
         "semantic_ranker_used": audit.get("semantic_ranker_used") is True,
+        "pgvector_semantic_result_lane_used": any(
+            isinstance(result, Mapping) and result.get("retrieval_lane") == "pg_semantic"
+            for result in results
+        ),
     }
 
 
@@ -1640,9 +1645,6 @@ def _semantic_brain_query_summary(
         "minimum_score": TEMPORAL_SEMANTIC_RESULT_MIN_SCORE,
         "semantic_ranker_bound": audit.get("semantic_ranker_bound") is True,
         "semantic_ranker_used": audit.get("semantic_ranker_used") is True,
-        "qdrant_semantic_result_lane_used": (
-            result.get("retrieval_lane") == "qdrant_semantic"
-        ),
     }
 
 

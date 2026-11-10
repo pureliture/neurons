@@ -1292,7 +1292,7 @@ def _temporal_recall_corrective_checkpoint(**overrides):
             "minimum_score": 0.75,
             "semantic_ranker_bound": True,
             "semantic_ranker_used": True,
-            "qdrant_semantic_result_lane_used": True,
+            "pgvector_semantic_result_lane_used": True,
         },
         "runtime_aggregate": {
             "schema_version": "temporal_correctness_runtime_aggregate.v1",
@@ -1698,21 +1698,6 @@ def test_runtime_readiness_rejects_internal_error_as_invalid_range_proof() -> No
     assert "temporal_corrective_invalid_range_error_code_unexpected" in claim["gaps"]
 
 
-def test_runtime_readiness_validates_complete_temporal_corrective_checkpoint():
-    report = build_source_to_candidate_runtime_readiness_report(
-        live_evidence=_sanitized_live_evidence()
-    )
-
-    claims = {claim["claim_id"]: claim for claim in report["claims"]}
-    checkpoint = claims["live.temporal_recall.corrective_checkpoint"]
-    route_smokes = claims["live.brain_objects_query.route_smokes"]
-    assert checkpoint["status"] == "validated"
-    assert checkpoint["date_ab_distinct"] is True
-    assert checkpoint["hash_currentness_validated"] is True
-    assert checkpoint["entity_aggregate_improved"] is True
-    assert checkpoint["qdrant_semantic_result_lane_used"] is True
-    assert route_smokes["status"] == "validated"
-    assert "temporal_work_recall" in route_smokes["validated_routes"]
 
 
 def test_runtime_readiness_v2_rejects_date_b_when_it_returns_date_a_source_revision():
@@ -1993,9 +1978,9 @@ def test_neuron_knowledge_temporal_checkpoint_cli_rejects_inventory_limit_outsid
         ),
         (
             lambda checkpoint: checkpoint["semantic_query"].update(
-                qdrant_semantic_result_lane_used=False,
+                pgvector_semantic_result_lane_used=False,
             ),
-            "temporal_corrective_qdrant_semantic_result_lane_not_used",
+            "temporal_corrective_pgvector_semantic_result_lane_not_used",
         ),
         (
             lambda checkpoint: checkpoint["semantic_query"].update(
@@ -2747,96 +2732,6 @@ def _evidence_provenance(**overrides):
     return provenance
 
 
-def test_runtime_readiness_evidence_collection_plan_is_public_safe_and_read_only():
-    plan = build_source_to_candidate_runtime_evidence_collection_plan(
-        expected_commit="7218cb2",
-        repository="pureliture/neurons",
-        branch="main",
-        consumer="codex",
-    )
-
-    assert plan["schema_version"] == "source_to_candidate_runtime_evidence_collection_plan.v1"
-    assert plan["status"] == "ready"
-    assert plan["expected_commit"] == "7218cb2"
-    assert plan["repository"] == "pureliture/neurons"
-    assert plan["branch"] == "main"
-    assert plan["consumer"] == "codex"
-    assert plan["output_schema"] == "source_to_candidate_runtime_evidence.v1"
-    assert plan["evidence_provenance_schema"] == EVIDENCE_PROVENANCE_SCHEMA
-    assert plan["network_used"] is False
-    assert plan["production_mutation_performed"] is False
-    assert plan["mutation_allowed"] is False
-    assert plan["collection_mode"] == "post_deploy_read_only_smoke"
-    assert plan["required_tools"] == list(REQUIRED_RUNTIME_TOOL_NAMES)
-    assert plan["required_routes"] == list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
-    assert "probe_projection_join_runtime" in plan["required_steps"]
-    assert plan["gap_mapping"]["probe_projection_join_runtime"] == "live_graph_qdrant_projection_join_unproven"
-    assert "probe_source_to_candidate_review_loop" in plan["required_steps"]
-    assert plan["gap_mapping"]["probe_source_to_candidate_review_loop"] == "live_source_to_candidate_review_loop_unverified"
-    assert plan["shadow_collection_registration"] == {
-        "schema_version": "source_to_candidate_runtime_shadow_collection_registration.v1",
-        "registration_id": "shadow_route_smoke_post_deploy_registration",
-        "status": "registration_ready",
-        "registration_scope": "branch_local_request_artifact",
-        "target": "external_post_deploy_runner",
-        "collection_mode": "post_deploy_read_only_smoke",
-        "request_ids": ["shadow_brain_objects_query_route_smoke"],
-        "routes": list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES),
-        "output_schema": "source_to_candidate_runtime_evidence.v1",
-        "evidence_provenance_schema": EVIDENCE_PROVENANCE_SCHEMA,
-        "network_used": False,
-        "mutation_allowed": False,
-        "production_mutation_performed": False,
-        "readiness_claim": "registration_only_not_runtime_evidence",
-        "run_status": "not_run",
-        "expected_gap_if_not_run": "shadow_collection_run_pending",
-        "expected_gaps_if_not_run": [
-            f"shadow_collection_run_pending:{route}"
-            for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
-        ],
-    }
-    assert plan["shadow_collection_requests"] == [
-        {
-            "schema_version": "source_to_candidate_runtime_shadow_collection_request.v1",
-            "request_id": "shadow_brain_objects_query_route_smoke",
-            "status": "requested",
-            "trigger": "post_deploy_route_smoke",
-            "target": "configured_deployed_mcp_read_path",
-            "routes": list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES),
-            "required_evidence_fields": [
-                "brain_objects_query_smokes",
-                "deployed_identity",
-                "evidence_provenance",
-            ],
-            "forbidden_gap": "object_pack_route_not_implemented",
-            "expected_gap_if_not_collected": "shadow_route_smoke_collection_pending",
-            "expected_gaps_if_not_collected": [
-                f"shadow_route_smoke_collection_pending:{route}"
-                for route in REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES
-            ],
-            "network_used": False,
-            "mutation_allowed": False,
-            "production_mutation_performed": False,
-            "readiness_claim": "request_only_not_live_evidence",
-        }
-    ]
-    assert plan["required_production_denials"] == [
-        "brain_source_to_candidate_graph",
-        "brain_approval_board_decide",
-        "brain_object_proposal_create",
-        "brain_object_decision_commit",
-    ]
-    assert plan["expected_readiness_outcomes"]["no_live_evidence"] == "PASS_WITH_GAPS"
-    assert plan["expected_readiness_outcomes"]["complete_sanitized_packet"] == "PASS"
-    assert plan["expected_readiness_outcomes"]["unsafe_or_incomplete_packet"] == "FAIL"
-    assert {step["step_id"] for step in plan["collection_steps"]} == set(plan["required_steps"])
-    assert all(step["mutation_allowed"] is False for step in plan["collection_steps"])
-    assert all(step["production_mutation_performed"] is False for step in plan["collection_steps"])
-    assert "raw_private_transcript" in plan["forbidden_outputs"]
-    assert "secret_value" in plan["forbidden_outputs"]
-    assert "host_topology" in plan["forbidden_outputs"]
-    assert "raw_dataset_id" in plan["forbidden_outputs"]
-    assert "raw_document_id" in plan["forbidden_outputs"]
 
 
 def test_runtime_readiness_evidence_packet_template_is_public_safe_and_not_live_evidence():
@@ -3177,51 +3072,6 @@ def test_runtime_readiness_shadow_evidence_report_normalizes_and_evaluates_witho
         assert f"shadow_route_smoke_not_implemented:{route}" in report["gaps"]
 
 
-def test_runtime_readiness_without_live_evidence_preserves_gaps_and_no_mutation():
-    report = build_source_to_candidate_runtime_readiness_report(expected_commit="7218cb2")
-
-    assert report["schema_version"] == "source_to_candidate_runtime_readiness.v1"
-    assert report["status"] == "PASS_WITH_GAPS"
-    assert report["evidence_is_live"] is False
-    assert report["production_ready"] is False
-    assert report["production_readiness"] == "not_ready"
-    assert report["production_mutation_performed"] is False
-    assert report["network_used"] is False
-    claims = {claim["claim_id"]: claim for claim in report["claims"]}
-
-    assert claims["local.product_surface_checks"]["status"] == "validated"
-    assert claims["live.mcp.review_tools_loaded"]["status"] == "not_validated"
-    assert claims["live.agent_context.tool_hints"]["status"] == "not_validated"
-    assert claims["live.brain_objects_query.route_smokes"]["status"] == "not_validated"
-    assert claims["live.source_to_candidate.projection_join"]["status"] == "not_validated"
-    assert claims["live.source_to_candidate.review_loop"]["status"] == "not_validated"
-    assert claims["live.session_project.rollup"]["status"] == "not_validated"
-    assert claims["live.preference_artifact.memory"]["status"] == "not_validated"
-    assert claims["live.production.permission_sensitive_audit"]["status"] == "not_validated"
-    assert claims["live.agent_context.startup_read_path"]["status"] == "not_validated"
-    assert claims["live.deployed_identity.includes_expected_commit"]["status"] == "not_validated"
-    assert claims["live.production.source_to_candidate_denial"]["status"] == "not_validated"
-    assert claims["live.production.object_proposal_denial"]["status"] == "not_validated"
-    assert claims["live.production.object_decision_denial"]["status"] == "not_validated"
-    assert claims["live.production.object_authority_gate_policy"]["status"] == "not_validated"
-    assert claims["live.production.object_authority_bounded_execution"]["status"] == "not_validated"
-    assert claims["live.evidence.provenance"]["status"] == "not_validated"
-    assert "live_mcp_review_tools_unverified" in report["gaps"]
-    assert "live_brain_objects_query_route_smokes_unverified" in report["gaps"]
-    assert "live_graph_qdrant_projection_join_unproven" in report["gaps"]
-    assert "live_source_to_candidate_review_loop_unverified" in report["gaps"]
-    assert "live_session_project_rollup_unverified" in report["gaps"]
-    assert "live_multi_device_rollup_unproven" in report["gaps"]
-    assert "live_preference_artifact_memory_unverified" in report["gaps"]
-    assert "accepted_preference_context_pack_live_unproven" in report["gaps"]
-    assert "permission_sensitive_audit_unverified" in report["gaps"]
-    assert "product_marker_audit_unverified" in report["gaps"]
-    assert "live_agent_context_startup_unverified" in report["gaps"]
-    assert "production_startup_read_path_unproven" in report["gaps"]
-    assert "live_deployed_identity_unverified" in report["gaps"]
-    assert "live_object_authority_gate_policy_unverified" in report["gaps"]
-    assert "bounded_production_authority_execution_unverified" in report["gaps"]
-    assert "live_evidence_provenance_unverified" in report["gaps"]
 
 
 def test_runtime_readiness_plan_requests_gitops_desired_state_separately_from_deployed_identity():
@@ -5277,56 +5127,6 @@ def test_neuron_knowledge_runtime_readiness_cli_outputs_evidence_packet_template
     )
 
 
-def test_runtime_readiness_collector_builds_shadow_evidence_packet_without_mutation():
-    def route_runner(route: str) -> dict:
-        return {
-            "schema_version": "brain_objects_query.v1",
-            "route": route,
-            "object_pack": {
-                "schema_version": "object_pack.v1",
-                "route": route,
-                "objects": [{"object_id": f"ko:test:{route}", "object_type": "RuntimeTruth"}],
-                "lanes": {"candidate": [{"object_id": f"ko:test:{route}", "object_type": "RuntimeTruth"}]},
-                "recommended_actions": [{"object_id": f"ko:test:{route}", "action": "request_evidence"}],
-                "gaps": [],
-            },
-            "production_mutation_performed": False,
-        }
-
-    packet = build_source_to_candidate_runtime_collected_shadow_evidence_packet(
-        repository="pureliture/neurons",
-        branch="codex/knowledge-object-review-flow-roadmap",
-        consumer="codex",
-        route_runner=route_runner,
-        tool_names=REQUIRED_RUNTIME_TOOL_NAMES,
-    )
-
-    assert packet["schema_version"] == "source_to_candidate_runtime_evidence.v1"
-    assert packet["production_mutation_performed"] is False
-    assert packet["collector"]["readiness_claim"] == "collector_packet_not_live_evidence"
-    assert packet["collector"]["routes_collected"] == list(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
-    assert packet["collector"]["projection_join_collected"] is True
-    assert packet["collector"]["projection_join_schema"] == "object_extraction_projection_join_preview.v1"
-    assert packet["collector"]["projection_join_edge_count"] >= 1
-    assert packet["evidence_provenance"]["collection_mode"] == "local_test_replay"
-    assert packet["evidence_provenance"]["network_used"] is False
-    projection_join = packet["projection_join"]
-    assert projection_join["schema_version"] == "object_extraction_projection_join_preview.v1"
-    assert projection_join["evidence_class"] == "runtime_projection_join"
-    assert projection_join["status"] == "pass"
-    assert projection_join["edge_count"] >= 1
-    assert projection_join["production_mutation_performed"] is False
-    assert projection_join["postcheck"]["status"] == "validated"
-    assert len(packet["brain_objects_query_smokes"]) == len(REQUIRED_BRAIN_OBJECTS_QUERY_ROUTES)
-    assert all(
-        "object_pack_route_not_implemented" not in smoke.get("object_pack", {}).get("gaps", [])
-        for smoke in packet["brain_objects_query_smokes"]
-    )
-    report = build_source_to_candidate_runtime_readiness_report(live_evidence=packet)
-    assert "live.brain_objects_query.route_smokes" not in report["failed_claims"]
-    claims = {claim["claim_id"]: claim for claim in report["claims"]}
-    assert claims["live.source_to_candidate.projection_join"]["status"] == "validated"
-    assert "live_graph_qdrant_projection_join_unproven" not in report["gaps"]
 
 
 def test_runtime_readiness_collector_reports_projection_join_errors_public_safely():

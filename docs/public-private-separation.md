@@ -15,7 +15,7 @@ Public repo에 둘 수 있는 것은 제품 코드와 샘플 실행 경로다.
 - `dendrite`와 맞물리는 public ingest/MCP contract
 - `MemoryCard` schema and recall policy code
 - session ingest schema and contract tests
-- local/dev compose for CouchDB, Qdrant, queue, workers, and MCP
+- local/dev compose for CouchDB, PostgreSQL, Neo4j, queue, workers, and MCP
 - `.env.example` with placeholder values only
 - sample data, synthetic fixtures, and fake/local adapters
 - sanitized architecture docs, install guide, and local demo runbook
@@ -27,7 +27,7 @@ Private repo 또는 private storage에만 둘 것은 실제 운영 권위와 증
 - private user preference and private source refs
 - live deployment evidence and private runbook execution logs
 - production k3s values, overlays, and host topology
-- real queue state, DB backup, Qdrant payload, and RetiredIndexBridge mappings
+- real queue state, DB backups, and RetiredIndexBridge mappings
 - secret, token, cookie, bearer string, API key, raw `dataset_id`, and raw `document_id`
 
 ## Repo Roles
@@ -49,7 +49,7 @@ session-memory promotion, or GC.
 ## Compose And Configuration
 
 Public compose files may expose the shape of the stack: CouchDB or compatible
-local store, Qdrant, queue, MCP, ingest worker, session-memory worker, and
+local store, queue, MCP, ingest worker, session-memory worker, and
 sample LLM adapter.
 
 Public compose files must not embed real credentials, production volumes, live

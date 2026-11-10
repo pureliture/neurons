@@ -333,9 +333,9 @@ def build_sanitized_eval_corpus() -> tuple[EvalCorpusCard, ...]:
         (
             "mem_eval_29",
             "decision",
-            "CouchDB 권위 스토어와 PostgreSQL 투영 결합: QdrantCouchDBAuthorityReconciler 로컬 어댑터",
+            "CouchDB 권위 스토어와 PostgreSQL 투영 결합: CouchDB authority resolver 로컬 어댑터",
             "CouchDB 권위 문서를 PostgreSQL/pgvector로 투영할 때 LOCAL_EMBEDDING_PROFILE_ID가 설정되면 "
-            "LocalModel2VecQdrantAdapter(256차원)를 사용하여 유료 Gemini 호출 없이 투영한다.",
+            "LocalModel2VecEmbeddingAdapter(256차원)를 사용하여 유료 Gemini 호출 없이 투영한다.",
         ),
         (
             "mem_eval_30",
@@ -541,7 +541,7 @@ def build_sanitized_eval_queries() -> tuple[EvalQueryCase, ...]:
         EvalQueryCase("q38", "code", "neurons", "INTERNAL_GRAPH_METADATA_PROPS record_parsers.py 엔티티 attributes 내부 메타데이터 제거", "mem_eval_26"),
         EvalQueryCase("q39", "code", "neurons", "OpenAICompatibleEmbeddingBatcher DeterministicGraphitiSemanticWriter bulk_semantic 로컬 임베딩", "mem_eval_27"),
         EvalQueryCase("q40", "code", "neurons", "requeue_local_dead_letters dead_letter 작업 재큐잉 시 incarnation 및 content_hash 검증", "mem_eval_28"),
-        EvalQueryCase("q41", "mixed", "neurons", "QdrantCouchDBAuthorityReconciler LocalModel2VecQdrantAdapter 256차원 CouchDB 투영 연동", "mem_eval_29"),
+        EvalQueryCase("q41", "mixed", "neurons", "CouchDB authority resolver LocalModel2VecEmbeddingAdapter 256차원 투영 연동", "mem_eval_29"),
         EvalQueryCase("q42", "mixed", "neurons", "specs/model2vec-local-embedding 정본 스펙 등록과 lbrain-architecture-rationalization 3072차원 조항 관계", "mem_eval_30"),
         EvalQueryCase("q43", "mixed", "neurons", "Java 25 gradle test 루트 서비스 검증과 Python worker 호환성 게이트", "mem_eval_31"),
         EvalQueryCase("q44", "mixed", "neurons", "dendrite Mac 클라이언트 캡처 책임과 neurons 서버 인제스트·메모리·GC 경계 분리", "mem_eval_32"),
@@ -590,7 +590,7 @@ def build_sanitized_entity_dedup_pairs() -> tuple[EvalEntityPairCase, ...]:
         EvalEntityPairCase("ep17", "HTTP 413 payload_too_large", "HTTP 429 queue_saturated", "ErrorCode", "ErrorCode", False, "Input size limit error vs queue backpressure error"),
         EvalEntityPairCase("ep18", "PaidEmbeddingFallbackBlockedError", "CommunityDisabledInLocalModeError", "Exception", "Exception", False, "Paid fallback block vs community disabled error"),
         EvalEntityPairCase("ep19", "lbrain-memory-gemini-embedding-2-v1", "lbrain-memory-model2vec-256-v1", "Profile", "Profile", False, "Legacy 3072 profile vs local 256 profile"),
-        EvalEntityPairCase("ep20", "CouchDB Authority Store", "Qdrant Derived Index", "Storage", "Storage", False, "Authoritative document store vs derived vector index"),
+        EvalEntityPairCase("ep20", "CouchDB Authority Store", "Derived Vector Index", "Storage", "Storage", False, "Authoritative document store vs derived vector index"),
         # Canonical/case-normalized identical entities that SHOULD match (should_merge=True)
         EvalEntityPairCase("ep21", "LocalEmbeddingOutboxWorker", "localembeddingoutboxworker", "Worker", "Worker", True, "Case-insensitive exact entity name match"),
         EvalEntityPairCase("ep22", "minishlab/potion-multilingual-128M", "  minishlab/potion-multilingual-128m  ", "Model", "Model", True, "Whitespace and case normalized model identifier"),

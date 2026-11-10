@@ -31,7 +31,7 @@ def lane(monkeypatch, tmp_path, capsys):
     couch = InMemoryCouchDBSourceStore()
     project = "pg-e2e-" + uuid.uuid4().hex
     sid = _build_synthetic_session(couch, provider="codex", project=project, raw_id=project)
-    _mark_projected(couch, sid, "codex", project)
+    _mark_projected(couch, sid, "codex", project, include_pg_receipt=False)
     legacy = couch.get(dm.projection_state_doc_id(sid))
     embeds = []
 
@@ -41,7 +41,7 @@ def lane(monkeypatch, tmp_path, capsys):
         return provider
 
     monkeypatch.setattr("agent_knowledge.couchdb_source.couchdb_http_store.CouchDBHttpSourceStore", lambda **kw: couch)
-    monkeypatch.setattr("agent_knowledge.rag_ingress.qdrant_embedding.build_openai_embedding_provider", embedding_factory)
+    monkeypatch.setattr("agent_knowledge.rag_ingress.embedding_provider.build_openai_embedding_provider", embedding_factory)
     monkeypatch.setenv("SESSION_MEMORY_PROJECTION_BACKEND", "postgres_pgvector")
     monkeypatch.setenv("NEURON_LBRAIN_PGVECTOR_DSN", dsn)
     monkeypatch.setenv("COUCHDB_URL", "http://synthetic.invalid")
@@ -246,7 +246,7 @@ def test_source_change_during_receipt_commit_fails_closed(lane, monkeypatch):
 def test_configured_projection_factory_error_is_redacted(lane, monkeypatch):
     def fail(*, environ):
         raise ValueError("private-secret-must-not-escape")
-    monkeypatch.setattr("agent_knowledge.rag_ingress.qdrant_embedding.build_openai_embedding_provider", fail)
+    monkeypatch.setattr("agent_knowledge.rag_ingress.embedding_provider.build_openai_embedding_provider", fail)
     rc, report = lane["run"]()
     assert rc == 2
     assert report["error"] == "pg_projector_unavailable"
@@ -255,20 +255,11 @@ def test_configured_projection_factory_error_is_redacted(lane, monkeypatch):
 
 
 def test_recall_factory_rejects_wrong_profile(lane, monkeypatch):
-    monkeypatch.setattr("agent_knowledge.rag_ingress.qdrant_embedding.build_openai_embedding_provider", lambda **kw: SyntheticEmbedProvider(model="wrong"))
+    monkeypatch.setattr("agent_knowledge.rag_ingress.embedding_provider.build_openai_embedding_provider", lambda **kw: SyntheticEmbedProvider(model="wrong"))
     with pytest.raises(RuntimeError, match="^PG recall construction failed$"):
         build_pg_brain_query_search_from_env(os.environ)
 
 
-def test_qdrant_receipt_alone_never_authorizes_pg_hit(lane):
-    assert lane["run"]()[0] == 0
-    state = lane["couch"].get(dm.projection_state_doc_id(lane["sid"]))
-    receipt = state.pop("backend_receipts")["postgres_pgvector"]
-    state.update(receipt)
-    lane["couch"].put(state)
-    assert lane["query"]()["archive"] == []
-    assert lane["run"]()[1]["selected"] == 1
-    assert len(lane["query"]()["archive"]) == 1
 
 
 def test_canary_is_excluded_after_authority_join(lane):
@@ -356,17 +347,6 @@ def test_recall_embedding_failure_does_not_fallback(lane, monkeypatch):
     assert lane["query"]()["archive"] == []
 
 
-def test_legacy_projection_update_preserves_pg_receipt(lane):
-    from agent_knowledge.couchdb_source.session_memory_materializer import materialize_and_project, RecordingSessionMemoryProjector
-    assert lane["run"]()[0] == 0
-    previous = dict(_receipt(lane))
-    _change_source(lane)
-    result = materialize_and_project(session_id_hash=lane["sid"], store=lane["couch"], projector=RecordingSessionMemoryProjector(), backend="qdrant")
-    assert result["projection"]["status"] == "projected"
-    assert _receipt(lane) == previous
-    assert lane["query"]()["archive"] == []
-    assert lane["run"]()[0] == 0
-    assert len(lane["query"]()["archive"]) == 1
 
 
 def test_scoped_id_has_no_delimiter_alias():
@@ -390,7 +370,7 @@ def c2_lane(isolated_pg_store, monkeypatch, tmp_path):
             return list(vector)
 
     monkeypatch.setattr("agent_knowledge.couchdb_source.couchdb_http_store.CouchDBHttpSourceStore", lambda **kw: couch)
-    monkeypatch.setattr("agent_knowledge.rag_ingress.qdrant_embedding.build_openai_embedding_provider", lambda **kw: AxisEmbedding())
+    monkeypatch.setattr("agent_knowledge.rag_ingress.embedding_provider.build_openai_embedding_provider", lambda **kw: AxisEmbedding())
     monkeypatch.setenv("NEURON_LBRAIN_PGVECTOR_DSN", isolated_pg_store.dsn)
     monkeypatch.setenv("COUCHDB_URL", "http://synthetic.invalid")
     ledger_path = str(tmp_path / "c2-ledger.sqlite")
@@ -588,4 +568,3 @@ def test_c2_expanded_candidates_preserve_authority_guards(c2_lane, rejection):
     response = c2_lane["query"]()
     assert [h["memory_id"] for h in response["archive"]] == [current.chunk_id]
     assert response["projection_state"]["status"] == "fresh"
-

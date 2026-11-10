@@ -63,7 +63,7 @@ class K3sMigrationContractTest {
         long workloadBlocks = inventory.lines().filter(line -> line.strip().equals("composeServices:")).count();
         long scaleCategoryCount = inventory.lines().filter(line -> line.strip().startsWith("scaleCategory:")).count();
         long replicaPolicyCount = inventory.lines().filter(line -> line.strip().startsWith("replicaPolicy:")).count();
-        assertThat(workloadBlocks).isEqualTo(14L);
+        assertThat(workloadBlocks).isEqualTo(13L);
         assertThat(scaleCategoryCount).isEqualTo(workloadBlocks);
         assertThat(replicaPolicyCount).isEqualTo(workloadBlocks);
 
@@ -144,7 +144,6 @@ class K3sMigrationContractTest {
         assertThat(backup).contains("CouchDB");
         assertThat(backup).contains("Postgres ledger");
         assertThat(backup).contains("Neo4j");
-        assertThat(backup).contains("Qdrant");
         assertThat(backup).contains("restore rehearsal");
         assertThat(backup).contains("redacted evidence");
 

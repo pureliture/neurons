@@ -530,4 +530,3 @@ def test_auto_accept_work_items_promotes_valid_candidates_and_redacts_paths():
     assert "/Users/alice" not in steward.calls[0]["source_span"]["title"]
     assert len(steward.auto_accepts) == 1
     assert steward.auto_accepts[0]["candidate_memory_id"] == "mem_steward_test"
-

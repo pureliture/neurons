@@ -2,7 +2,7 @@
 
 By default, PG candidates remain joined to CouchDB projection receipts. During
 the explicit migrated-reader cutover, ``PG_RECALL_DIRECT_MIGRATED=true`` serves
-ready, integrity-valid PostgreSQL rows directly. No path falls back to Qdrant.
+ready, integrity-valid PostgreSQL rows directly. No path falls back to an external vector service.
 """
 
 from __future__ import annotations
@@ -71,8 +71,8 @@ from ..couchdb_source.document_model import sha256_hash
 from .pg_backfill import validated_pg_embedding_profile
 from .pg_embedding_privacy import assert_pg_embedding_egress_safe
 from ..session_memory.brain_query import project_from_brain_id
-from .qdrant_authority_join import join_mirror_hits_to_authority
-from .qdrant_couchdb_authority import CouchDBProjectionStateAuthorityResolver
+from .authority_join import join_mirror_hits_to_authority
+from .couchdb_authority import CouchDBProjectionStateAuthorityResolver
 
 
 def _direct_migrated_reader_enabled(environ: Any) -> bool:
@@ -145,7 +145,7 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
                 db=str(environ.get("COUCHDB_DB") or "transcript_source"),
                 auth_header=auth_header,
             )
-        from .qdrant_embedding import build_openai_embedding_provider
+        from .embedding_provider import build_openai_embedding_provider
 
         pg_store = PgVectorStore(
             dsn=dsn,

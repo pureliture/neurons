@@ -81,7 +81,7 @@ sequenceDiagram
 ### Retirement Record
 
 - Path: `docs/retired/index-retirement.md`
-- Purpose: explain why RAGFlow was removed and why Qdrant/graph is the live runtime baseline.
+- Purpose: explain why RAGFlow was removed and document the PostgreSQL/pgvector and graph runtime baseline.
 - Constraint: this is the only allowed repo-wide keyword match for the approved keyword set.
 
 ### Local MCP Cleanup
@@ -103,7 +103,7 @@ sequenceDiagram
 
 - Unit tests for schema migration mapping and read/write compatibility after rename.
 - Focused CLI tests proving removed RAGFlow flags/commands are no longer accepted.
-- Repo instruction tests proving active docs describe Qdrant/graph runtime, not RAGFlow.
+- Repo instruction tests proving active docs describe the PostgreSQL/pgvector and graph runtime, not RAGFlow.
 - Search gate test or script proving approved keyword set appears only in the retirement record.
 - Local cleanup dry-run proof listing stale MCP process/config targets before kill/edit execution.
 
@@ -113,7 +113,7 @@ Use red -> green -> refactor for code-changing work.
 
 - Red: add failing tests/search gate for forbidden active RAGFlow references and schema naming.
 - Green: remove active references and implement backend-neutral migration.
-- Refactor: simplify dead code left by removal and tighten docs/tests around the Qdrant/graph runtime baseline.
+- Refactor: simplify dead code left by removal and tighten docs/tests around the current PostgreSQL/pgvector and graph runtime.
 
 Local process cleanup is operational, not unit-testable. Substitute evidence is a dry-run target list before execution and a post-cleanup process/config scan after execution.
 
@@ -123,7 +123,7 @@ Local process cleanup is operational, not unit-testable. Substitute evidence is 
 - M2: Active surface deletion — done when active code/docs/tests/config no longer expose RAGFlow as a runtime, CLI, env, or backend option.
 - M3: Schema/data migration — done when old `index_*` names are replaced by backend-neutral names and existing data is preserved with rollback evidence.
 - M4: Local MCP cleanup — done when stale local MCP config is edited and stale local processes are terminated according to the approved target list.
-- M5: Final proof — done when the approved keyword set matches only `docs/retired/index-retirement.md` and live `neurons` runtime proof still shows Qdrant/graph baseline.
+- M5: Final proof — done when the approved keyword set matches only `docs/retired/index-retirement.md` and live `neurons` runtime proof shows PostgreSQL/pgvector and graph.
 
 ## Open Questions
 

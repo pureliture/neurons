@@ -33,7 +33,7 @@ def setup_job(tmp_path, *, bare=False):
     db.create_delivery_job(job_id='original-job', command_id='original-command', idempotency_key=payload['idempotencyKey'], payload_hash=h, target_profile=payload['targetProfile'], document_kind=payload['kind'], now=NOW)
     db.record_delivery_payload(payload, now=NOW)
     store = InMemoryCouchDBSourceStore()
-    backend = CouchDBDeliveryBackend(state_db=db, store=store, mirror=object())
+    backend = CouchDBDeliveryBackend(state_db=db, store=store)
     executor = DeliveryExecutor(state_db=db, backend=backend, lease_owner='synthetic-owner')
     return db, store, backend, executor, payload
 

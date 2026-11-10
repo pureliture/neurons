@@ -260,4 +260,3 @@ def test_slim_serializer_preferences_fields_present():
     assert pref["title"] == "Use Python uv"
     assert pref["rule"] == "Use uv for python"
     assert pref["scope"] == "tooling"
-

@@ -9,7 +9,7 @@
 - 코드 식별자, CLI 이름, 파일명, endpoint 이름은 영어 원문을 유지한다.
 - `neurons`를 server/brain repo로 다룬다. Mac thin-client 책임은 `dendrite`로
   보낸다.
-- Qdrant/graph health, queue/NATS state, worker delivery, ledger/state authority,
+- graph health, queue/NATS state, worker delivery, ledger/state authority,
   recall/product surface를 서로 다른 plane으로 분리해서 판단한다.
 
 ## Claude Guardrails

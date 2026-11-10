@@ -59,7 +59,7 @@ def test_mid_batch_database_error_preserves_confirmed_progress(monkeypatch, caps
 
 def test_injected_timeout_is_the_actual_sdk_timeout(monkeypatch):
     import sys
-    from agent_knowledge.rag_ingress.qdrant_embedding import build_openai_embedding_provider
+    from agent_knowledge.rag_ingress.embedding_provider import build_openai_embedding_provider
     settings = []
 
     def sdk(**kwargs):

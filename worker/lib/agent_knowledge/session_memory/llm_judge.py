@@ -7,7 +7,7 @@ Two axes:
   1. relevance    — is each retrieved passage relevant to the query?
   2. groundedness — does the retrieved context support answering the query?
 
-The judge does NOT mutate MemoryCards, Qdrant, Neo4j, or eval_queries.
+The judge does NOT mutate MemoryCards, derived indexes, Neo4j, or eval_queries.
 It returns structured scores that the eval loop stores in eval_runs.metrics_json.
 """
 from __future__ import annotations

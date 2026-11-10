@@ -64,7 +64,7 @@ flowchart LR
 
 - One local Ubuntu primary cluster target.
 - Workload families map from current compose services:
-  ingress/NATS, Python worker, API/MCP, CouchDB, Postgres ledger, Neo4j, Qdrant, graph/semantic
+  ingress/NATS, Python worker, API/MCP, CouchDB, Postgres ledger, Neo4j, graph/semantic
   worker lanes, vertex wrapper/tooling where still required.
 - Stateful services require explicit PVC/storage, backup, restore, readiness, and rollback gates.
 - k3s live apply is blocked until dry-run, backup/restore rehearsal, postcheck plan, and user
@@ -99,7 +99,7 @@ flowchart LR
 2. Define public safe contracts in `neurons`.
 3. Define private overlay contract expected from `neurons-ops`.
 4. Validate k3s objects with dry-run gates before live apply.
-5. Rehearse backup/restore for CouchDB, Postgres ledger, Neo4j, and Qdrant.
+5. Rehearse backup/restore for CouchDB, Postgres ledger, and Neo4j.
 6. Launch k3s canary only after explicit approval.
 7. Run redacted health, API/MCP, worker, state readiness, and read/write canary checks.
 8. Approve cutover only with evidence.

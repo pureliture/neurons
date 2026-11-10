@@ -184,4 +184,3 @@ def test_sync_queue_metadata_includes_final_knowledge_id(tmp_path):
         assert call["metadata"]["type"] == "tool_evidence_summary"
         assert call["metadata"]["knowledge_id"]
         assert call["metadata"]["knowledge_id"] == call["metadata"]["chunk_id"]
-

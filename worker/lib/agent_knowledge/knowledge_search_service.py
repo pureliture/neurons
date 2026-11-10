@@ -960,7 +960,7 @@ class KnowledgeSearchService:
         graph_adapter: GraphMemoryAdapter | None = None,
         authorized_reader: AuthorizedMemoryReader | None = None,
         read_pipeline: AuthorizedMemoryReader | None = None,
-        mirror_search=None,
+        pg_search=None,
         semantic_ranker=None,
         pgvector_store=None,
         allow_restricted_steward: bool = False,
@@ -997,11 +997,7 @@ class KnowledgeSearchService:
         self._permission_audit_product_sentinel_reader = (
             permission_audit_product_sentinel_reader
         )
-        # M8 read cutover: a Qdrant-backed (query, brain_id) -> list[dict] callable
-        # that fills brain.query's archive/evidence lanes from the Qdrant searchable
-        # mirror. When set it REPLACES the RetiredIndexBridge archive search (which is off in the
-        # live MCP anyway). None -> legacy behaviour (RetiredIndexBridge if dataset_ids, else empty).
-        self._mirror_search = mirror_search
+        self._pg_search = pg_search
         self._semantic_ranker = semantic_ranker
         self.pgvector_store = pgvector_store
         self.authorized_reader = authorized_reader or read_pipeline or MemoryReadPipeline(
@@ -2010,41 +2006,17 @@ class KnowledgeSearchService:
                     )
             except Exception as exc:  # pragma: no cover - defensive live read guard
                 graph_status = public_safe_text(f"error:{type(exc).__name__}", max_chars=80)
-        qdrant_status = "not_configured"
-        if self._mirror_search is not None:
-            try:
-                qdrant_hits = self._mirror_search(query, brain_id)
-                qdrant_status = "available"
-                for index, hit in enumerate(qdrant_hits or [], start=1):
-                    if not isinstance(hit, Mapping):
-                        continue
-                    projection_hits.append(
-                        {
-                            "hit_id": f"qdrant:{short_hash(str(hit.get('memory_id') or hit.get('content_hash') or index))}",
-                            "source": "search",
-                            "object_ref": target_object_id,
-                            "summary": public_safe_text(str(hit.get("summary") or "Derived search mirror hit."), max_chars=280),
-                            "score": _safe_float(hit.get("score"), default=0.64),
-                        }
-                    )
-            except Exception as exc:  # pragma: no cover - defensive live read guard
-                qdrant_status = public_safe_text(f"error:{type(exc).__name__}", max_chars=80)
         preview = run_graph_search_projection_join_preview(
             objects=[target_object],
             projection_hits=projection_hits,
             repository=safe_repository,
         )
         graph_hit_count = int(preview.get("pack_preview", {}).get("graph_hit_count") or 0)
-        search_hit_count = int(preview.get("pack_preview", {}).get("search_hit_count") or 0)
         gaps = [str(gap) for gap in preview.get("gaps") or [] if gap]
         if graph_hit_count < 1:
             gaps.append("graph_projection_hit_missing")
-        if search_hit_count < 1:
-            gaps.append("qdrant_projection_hit_missing")
         if graph_status not in {"available", "degraded"}:
             gaps.append("graph_projection_read_unavailable")
-        if qdrant_status != "available":
-            gaps.append("qdrant_projection_read_unavailable")
         gaps = sorted(set(public_safe_text(gap, max_chars=120) for gap in gaps))
         status = "pass" if int(preview.get("edge_count") or 0) > 0 and not gaps else "pass_with_gaps"
         preview["status"] = status
@@ -2055,8 +2027,6 @@ class KnowledgeSearchService:
             "graph_status": graph_status,
             "graph_detail_count": graph_detail_count,
             "graph_hit_count": graph_hit_count,
-            "qdrant_status": qdrant_status,
-            "qdrant_hit_count": search_hit_count,
             "production_mutation_performed": False,
         }
         preview["postcheck"] = {
@@ -2169,24 +2139,8 @@ class KnowledgeSearchService:
             source_catalog=LedgerSourceRefCatalog(self.ledger),
             graph_adapter=self.graph_adapter,
             document_bridge=RetiredIndexBridgeDocumentBridge(retired_index_bridge=self.retired_index_bridge, dataset_ids=self.dataset_ids),
-            search_mirror_status=self._search_mirror_status(),
             reference_corpus_status_reader=self.ledger.reference_corpus_status,
         )
-
-    def _search_mirror_status(self) -> dict:
-        if self._mirror_search is None:
-            return {
-                "status": "unverified",
-                "last_verified_at": "",
-                "evidence_ref": "",
-                "details": ["mirror_search_not_configured_for_context_authority"],
-            }
-        return {
-            "status": "configured_unverified",
-            "last_verified_at": "",
-            "evidence_ref": "service:mirror_search_configured",
-            "details": ["mirror_search_callable_configured_without_live_probe"],
-        }
 
     def search(
         self,
@@ -2278,7 +2232,7 @@ class KnowledgeSearchService:
             if self.pgvector_store is not None
             else LegacyLedgerBrainReadModel(self.ledger)
         )
-        index_search = self._mirror_search or (
+        index_search = self._pg_search or (
             self._brain_query_index_search if self.dataset_ids else None
         )
         semantic_hits: list[dict] = []
@@ -2375,7 +2329,7 @@ class KnowledgeSearchService:
             graph_adapter=self.graph_adapter,
             embed_query=getattr(self._semantic_ranker, "embed_query", None),
             session_memory_search=getattr(
-                self._mirror_search,
+                self._pg_search,
                 "search_session_memory_segments",
                 None,
             ),

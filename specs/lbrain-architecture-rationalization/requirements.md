@@ -10,14 +10,14 @@
 
 ## 1. 최종 결정 요약
 
-이번 결정은 모든 것을 PostgreSQL 하나로 합치는 결정이 아니다. **관계형 권위 저장소와 그래프 우선 조회를 분리하되, 임베딩 벡터의 운영 경로만 Qdrant에서 PostgreSQL로 수렴**하는 결정이다.
+이번 결정은 모든 것을 PostgreSQL 하나로 합치는 결정이 아니다. **관계형 권위 저장소와 그래프 우선 조회를 분리하되, 임베딩 벡터의 운영 경로만 retired-vector-index에서 PostgreSQL로 수렴**하는 결정이다.
 
 | 책임 | 정본/주요 경로 | 역할 |
 |---|---|---|
 | 승인·권한·currentness·content hash·명시적 근거 | PostgreSQL | 변경과 권위의 정본(SoT) |
 | 엔티티·관계·시간·다단계 경로 | Graphiti → Neo4j | Graph-first 조회와 temporal graph |
 | 카드·세션 청크의 의미 벡터 | PostgreSQL `halfvec(3072)` | 그래프 미투영 데이터와 graph 장애 시 명시적 fallback |
-| 기존 벡터 색인 | Qdrant | 이관 및 dual-read shadow 기간에만 사용, 공개 조회 경로에서는 제거 |
+| 기존 벡터 색인 | retired-vector-index | 이관 및 dual-read shadow 기간에만 사용, 공개 조회 경로에서는 제거 |
 | 코드 구조 분석 | 사용하지 않음 | AST/Graphify는 제품 런타임 범위에서 제외 |
 
 중요한 원칙은 **조회 우선순위와 데이터 권위는 다른 축**이라는 점이다. Neo4j가 먼저 후보를 찾더라도 승인 여부, currentness, 프로젝트 범위, content hash는 PostgreSQL을 다시 확인한다. 반대로 PostgreSQL은 권위 저장소이지만 모든 일반 조회의 첫 번째 검색 엔진은 아니다.
@@ -51,7 +51,7 @@
 - **R2.3 (Hot/Cold 분리)**: MCP hot path는 Graphiti의 LLM entity extraction을 기다리지 않는다. episode 수신과 권위 write는 빠르게 끝내고, Graphiti extraction과 Neo4j projection은 비동기 cold worker가 수행한다. 이미 투영된 Neo4j graph read는 hot path에서 허용한다.
 - **R2.4 (단방향 파생)**: write flow는 `PostgreSQL transaction → graph_projection_outbox → Graph Projection Worker → Graphiti → Neo4j`이다. PostgreSQL commit과 Neo4j write 사이에는 분산 ACID를 주장하지 않고 projection lag를 관찰한다.
 - **R2.5 (두 종류의 관계)**: PostgreSQL `memory_edges`는 승인된 명시적 관계와 법적·운영적 lineage를 보존한다. Graphiti/Neo4j의 inferred entity/relationship graph는 재생성 가능한 파생 색인이다. 양쪽의 edge를 조용히 합치지 말고 provenance와 source revision을 구분한다.
-- **R2.6 (장애 의미와 공개 상태 계약)**: 공개 응답의 `graph_status`는 `available`, `degraded`, `unavailable`, `projection_lag` 중 하나로 고정한다. 내부 예외 문자열(`error`)을 외부 상태로 그대로 노출하지 않는다. `retrieval_path`는 `graph_neo4j`, `pgvector_fallback`, `none` 중 하나이고, `authority_join_status`는 `verified`, `mismatch`, `unavailable` 중 하나이다. 지연은 `projection_lag_ms`(0 이상의 정수 또는 `null`)로만 표현한다. PG fallback을 선택하면 `fallback_used=true`를 반환하며 Qdrant로 자동 우회하지 않는다.
+- **R2.6 (장애 의미와 공개 상태 계약)**: 공개 응답의 `graph_status`는 `available`, `degraded`, `unavailable`, `projection_lag` 중 하나로 고정한다. 내부 예외 문자열(`error`)을 외부 상태로 그대로 노출하지 않는다. `retrieval_path`는 `graph_neo4j`, `pgvector_fallback`, `none` 중 하나이고, `authority_join_status`는 `verified`, `mismatch`, `unavailable` 중 하나이다. 지연은 `projection_lag_ms`(0 이상의 정수 또는 `null`)로만 표현한다. PG fallback을 선택하면 `fallback_used=true`를 반환하며 retired-vector-index로 자동 우회하지 않는다.
 - **R2.7 (버전 고정)**: Graphiti는 부동 범위(`>=`)만으로 최신화를 주장하지 않는다. 호환성 검증을 통과한 정확한 `graphiti-core` lock version과 Neo4j image/major version을 함께 고정하고, 업그레이드 때 Graphiti schema/index/retrieval 회귀를 검증한다.
 
 ### 2.3. R3 — MCP 2-Tier와 Slim Payload
@@ -72,13 +72,13 @@
 
 ---
 
-## 3. Qdrant 이관 및 cutover 요구사항
+## 3. retired-vector-index 이관 및 cutover 요구사항
 
-1. **Preflight**: 각 Qdrant collection의 실제 `dimension`, distance, model, point 수, payload schema, 삭제·중복 상태를 운영 read-only probe로 확인한다. 문서의 `3072` 기본값만으로 기존 데이터 차원을 추정하지 않는다.
+1. **Preflight**: 각 retired-vector-index collection의 실제 `dimension`, distance, model, point 수, payload schema, 삭제·중복 상태를 운영 read-only probe로 확인한다. 문서의 `3072` 기본값만으로 기존 데이터 차원을 추정하지 않는다.
 2. **Vector migration**: source vector가 `gemini-embedding-2 / 3072 / cosine`과 일치하면 PostgreSQL `halfvec(3072)` fallback 색인으로 복사할 수 있다. 차원이 다르면 zero-padding이나 임의 projection으로 섞지 말고 quarantine 후 동일 profile로 re-embed한다.
-3. **Graph migration**: Qdrant point를 PG로 복사하는 것만으로 Graphiti의 entity, relation, temporal validity, provenance가 복원되지 않는다. 원본 episode 또는 권위 card를 replay하여 Graphiti가 Neo4j graph를 다시 만든다.
-4. **Dual-read shadow**: 실제 PostgreSQL과 실제 Qdrant를 비교하되, vector Recall@5뿐 아니라 Neo4j relation/temporal fact correctness, PG authority false-positive rate, p50/p95 latency, projection lag, fallback rate를 함께 기록한다. cutover 판정은 실제 양쪽 backend, 최소 50개 query fixture, 동일한 10분 관찰 창을 사용한다. `mean Recall@5 >= 0.95`, relation/temporal correctness `>= 0.95`, backend error `0건`, PG p95 `<= 20ms`를 기본 gate로 삼고, false-positive와 fallback rate는 측정값과 승인된 상한을 함께 기록한다. 실행 결과에는 `evidence_class`를 `test_harness` 또는 `live_cutover`로 명시하며, `live_cutover`는 실제 backend preflight를 통과해야 한다. Mock client, dummy vector, Python dict scan은 cutover 증거로 인정하지 않는다.
-5. **Cutover**: Graph-first query의 품질·지연·권위 join·장애 표기가 모두 통과한 뒤에만 공개 read path를 전환한다. 전환 전까지 Qdrant는 rollback/shadow용으로 보존하되, 정상 Agent 조회의 기본 경로로 남겨두지 않는다.
+3. **Graph migration**: retired-vector-index point를 PG로 복사하는 것만으로 Graphiti의 entity, relation, temporal validity, provenance가 복원되지 않는다. 원본 episode 또는 권위 card를 replay하여 Graphiti가 Neo4j graph를 다시 만든다.
+4. **Dual-read shadow**: 실제 PostgreSQL과 실제 retired-vector-index를 비교하되, vector Recall@5뿐 아니라 Neo4j relation/temporal fact correctness, PG authority false-positive rate, p50/p95 latency, projection lag, fallback rate를 함께 기록한다. cutover 판정은 실제 양쪽 backend, 최소 50개 query fixture, 동일한 10분 관찰 창을 사용한다. `mean Recall@5 >= 0.95`, relation/temporal correctness `>= 0.95`, backend error `0건`, PG p95 `<= 20ms`를 기본 gate로 삼고, false-positive와 fallback rate는 측정값과 승인된 상한을 함께 기록한다. 실행 결과에는 `evidence_class`를 `test_harness` 또는 `live_cutover`로 명시하며, `live_cutover`는 실제 backend preflight를 통과해야 한다. Mock client, dummy vector, Python dict scan은 cutover 증거로 인정하지 않는다.
+5. **Cutover**: Graph-first query의 품질·지연·권위 join·장애 표기가 모두 통과한 뒤에만 공개 read path를 전환한다. 전환 전까지 retired-vector-index는 rollback/shadow용으로 보존하되, 정상 Agent 조회의 기본 경로로 남겨두지 않는다.
 
 ---
 
@@ -89,7 +89,7 @@
 - [ ] 신규 schema가 `gemini-embedding-2`, `halfvec(3072)`, `halfvec_cosine_ops`를 사용한다. (단, 로컬 Model2Vec 256차원 전환 및 가산 스키마·프로필 분리 계약은 `specs/model2vec-local-embedding/requirements.md` 및 `design.md`를 정본으로 따른다.)
 - [ ] 카드와 세션 청크의 vector/query/worker/migration dimension이 하나의 shared constant와 profile을 따른다. (프로필별 불변 descriptor 및 3,072차원/256차원 무혼합 격리 규칙은 `specs/model2vec-local-embedding/design.md` D2–D3 참조.)
 - [ ] `pgvector/pgvector:pg17` 또는 동등하게 검증된 image에서 `pgvector >= 0.8.0`, extension 설치/활성화, HNSW, `hnsw.iterative_scan` 설정을 실제 PostgreSQL로 검증한다.
-- [ ] 기존 Qdrant collection의 실제 차원·distance·model preflight 결과와 quarantine/re-embed 결과가 남는다.
+- [ ] 기존 retired-vector-index collection의 실제 차원·distance·model preflight 결과와 quarantine/re-embed 결과가 남는다.
 
 ### AC2. 정합성과 graph read
 

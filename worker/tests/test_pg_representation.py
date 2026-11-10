@@ -8,9 +8,10 @@ from agent_knowledge.couchdb_source import document_model as dm
 from agent_knowledge.couchdb_source.session_memory_materializer import materialize_session_memory
 from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
 from agent_knowledge.model_connectors import DEFAULT_EMBEDDING_PROFILE_ID
+from agent_knowledge.public_safe_util import public_safe_mask_body
 from agent_knowledge.rag_ingress import pg_backfill
 from agent_knowledge.rag_ingress.pg_recall import build_pg_brain_query_search_from_env
-from agent_knowledge.rag_ingress.qdrant_backfill import public_safe_mask_body
+from agent_knowledge.rag_ingress.pg_representation import REPRESENTATION_KIND
 from test_couchdb_build_cli import _build_synthetic_session
 from test_pg_backfill import CountingEmbedProvider, SyntheticEmbedProvider
 
@@ -25,7 +26,7 @@ def representation_lane(isolated_pg_store, monkeypatch):
     couch.put(chunk)
     embed = CountingEmbedProvider()
     monkeypatch.setattr("agent_knowledge.couchdb_source.couchdb_http_store.CouchDBHttpSourceStore", lambda **kw: couch)
-    monkeypatch.setattr("agent_knowledge.rag_ingress.qdrant_embedding.build_openai_embedding_provider", lambda **kw: SyntheticEmbedProvider())
+    monkeypatch.setattr("agent_knowledge.rag_ingress.embedding_provider.build_openai_embedding_provider", lambda **kw: SyntheticEmbedProvider())
     search = build_pg_brain_query_search_from_env({"NEURON_LBRAIN_PGVECTOR_DSN": isolated_pg_store.dsn, "COUCHDB_URL": "http://synthetic.invalid"})
     return dict(sql=isolated_pg_store, couch=couch, sid=sid, embed=embed, query=lambda: search("session context", "/project/representation-test"))
 
@@ -163,6 +164,28 @@ def test_same_body_new_revision_needs_receipt_renewal_not_embedding(representati
     assert lane["sql"].get_chunk(second["ref"]).embedding == before.embedding
 
 
+def test_masked_representation_sql_receipt_recall(representation_lane):
+    lane = representation_lane
+    original = materialize(lane)
+    result = publish(lane)
+    assert result["status"] == "projected"
+    mapping = receipt(lane)
+    row = lane["sql"].get_chunk(result["ref"])
+    assert mapping["receipt_version"] == 2
+    assert mapping["representation_kind"] == REPRESENTATION_KIND
+    assert mapping["embedding_profile"] == DEFAULT_EMBEDDING_PROFILE_ID
+    assert mapping["active_content_hash"] == original.content_hash
+    assert mapping["projected_source_hash"] == original.source_hash
+    assert mapping["representation_content_hash"] == row.content_hash == dm.sha256_hash(row.content_markdown)
+    assert row.content_hash != original.content_hash
+    assert row.content_markdown == public_safe_mask_body(original.body)
+    assert original.body == materialize(lane).body
+    assert [
+        (hit["memory_id"], hit["summary"], hit["content_hash"])
+        for hit in lane["query"]()
+    ] == [(row.chunk_id, row.content_markdown, row.content_hash)]
+
+
 @pytest.mark.parametrize("field,value", [
     ("body", "arbitrary body"), ("content_hash", dm.sha256_hash("wrong")),
     ("source_hash", dm.sha256_hash("wrong")), ("project", "wrong"),
@@ -205,14 +228,11 @@ def test_corrupt_sql_collision_never_overwritten(representation_lane, field, val
     assert lane["embed"].calls == 1
 
 
-@pytest.mark.parametrize("kind", ["orphan", "qdrant-only"])
-def test_unreceipted_sql_is_invisible(representation_lane, kind):
+def test_unreceipted_sql_is_invisible(representation_lane):
     lane = representation_lane
     publish(lane)
     state = lane["couch"].get(dm.projection_state_doc_id(lane["sid"]))
-    previous = state.pop("backend_receipts")["postgres_pgvector"]
-    if kind == "qdrant-only":
-        state.update(previous)
+    state.pop("backend_receipts")
     lane["couch"].put(state)
     assert lane["query"]() == []
 
@@ -427,23 +447,3 @@ def test_malformed_nonidentity_metadata_rejected(representation_lane, field):
     state["backend_receipts"]["postgres_pgvector"][field] = {"invalid": True}
     lane["couch"].put(state)
     assert lane["query"]() == []
-
-
-def test_masked_representation_sql_receipt_recall(representation_lane):
-    lane = representation_lane
-    original = materialize(lane)
-    assert hasattr(pg_backfill, "project_pg_representation"), "verified representation writer is missing"
-    result = publish(lane)
-    assert result["status"] == "projected"
-    mapping = receipt(lane)
-    row = lane["sql"].get_chunk(result["ref"])
-    assert mapping["receipt_version"] == 2
-    assert mapping["representation_kind"] == "qdrant_public_safe_mask.v1"
-    assert mapping["embedding_profile"] == DEFAULT_EMBEDDING_PROFILE_ID
-    assert mapping["active_content_hash"] == original.content_hash
-    assert mapping["projected_source_hash"] == original.source_hash
-    assert mapping["representation_content_hash"] == row.content_hash == dm.sha256_hash(row.content_markdown)
-    assert row.content_hash != original.content_hash
-    assert row.content_markdown == public_safe_mask_body(original.body)
-    assert original.body == materialize(lane).body
-    assert [(h["memory_id"], h["summary"], h["content_hash"]) for h in lane["query"]()] == [(row.chunk_id, row.content_markdown, row.content_hash)]

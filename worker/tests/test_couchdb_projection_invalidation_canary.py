@@ -506,8 +506,7 @@ def test_execute_rejects_resolved_writable_target_drift_before_live_call(
     primary_env = {
         "COUCHDB_URL": "https://primary-couchdb.invalid",
         "COUCHDB_DB": "primary_source",
-        "QDRANT_URL": "https://primary-qdrant.invalid",
-        "QDRANT_COLLECTION": "primary_collection",
+        "NEURON_LBRAIN_PGVECTOR_DSN": "postgresql://primary.invalid/db",
         "LLM_BRAIN_NEO4J_URI": "bolt://primary-graph.invalid:7687",
     }
     with patch.dict(os.environ, primary_env, clear=False), patch(
@@ -520,13 +519,13 @@ def test_execute_rejects_resolved_writable_target_drift_before_live_call(
         "graph_store",
         "ingress_state_db",
         "projection_ledger",
-        "qdrant_collection",
+        "postgres_pgvector",
         "runtime_workspace",
     }
     assert all(value.startswith("sha256:") for value in plan["target_fingerprints"].values())
     serialized_plan = json.dumps(plan, sort_keys=True)
     assert "primary-couchdb" not in serialized_plan
-    assert "primary-qdrant" not in serialized_plan
+    assert "primary.invalid" not in serialized_plan
     assert "primary-graph" not in serialized_plan
 
     approval_path = tmp_path / "approval.json"
@@ -557,7 +556,7 @@ def test_execute_rejects_resolved_writable_target_drift_before_live_call(
     with (
         patch.dict(
             os.environ,
-            {**primary_env, "QDRANT_COLLECTION": "drifted_collection"},
+            {**primary_env, "NEURON_LBRAIN_PGVECTOR_DSN": "postgresql://drifted.invalid/db"},
             clear=False,
         ),
         patch(
@@ -573,7 +572,7 @@ def test_execute_rejects_resolved_writable_target_drift_before_live_call(
     execute_live.assert_not_called()
 
     mismatched_target_fingerprints = dict(plan["target_fingerprints"])
-    mismatched_target_fingerprints["qdrant_collection"] = "sha256:" + ("b" * 64)
+    mismatched_target_fingerprints["postgres_pgvector"] = "sha256:" + ("b" * 64)
     approval_path.write_text(
         json.dumps(
             {
@@ -638,8 +637,8 @@ def test_execute_live_uses_private_resolved_password_snapshot_without_repr_leak(
         args,
         {
             "CANARY_TEST_PASSWORD": password_marker,
-            "SESSION_MEMORY_PROJECTION_BACKEND": "qdrant",
-            "QDRANT_URL": "https://private-qdrant.invalid",
+            "SESSION_MEMORY_PROJECTION_BACKEND": "postgres_pgvector",
+            "NEURON_LBRAIN_PGVECTOR_DSN": "postgresql://private.invalid/db",
         },
     )
     rendered = repr(targets)
@@ -675,7 +674,7 @@ def test_execute_live_uses_private_resolved_password_snapshot_without_repr_leak(
             "agent_knowledge.llm_brain_core.couchdb_projection_cli._build_source_store",
             return_value=source_store,
         ) as build_source_store,
-        patch.object(canary_module, "_build_qdrant_projector", return_value=projector),
+        patch.object(canary_module, "_build_pg_projector", return_value=projector),
         patch.object(canary_module, "build_graph_adapter_from_env", return_value=graph_adapter),
         patch.object(
             canary_module,

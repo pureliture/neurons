@@ -629,18 +629,22 @@ def test_brain_query_v2_session_context_semantic_ranker_controls_results_lane():
     assert result["audit"]["semantic_ranker_used"] is True
 
 
+
+
+
+
 def test_brain_query_v2_promotes_only_high_confidence_semantic_hits_to_results_lane():
     def index_search(_query, _brain_id):
         return [
             {
-                "result_type": "qdrant_semantic",
+                "result_type": "postgres_pgvector_semantic",
                 "memory_id": "semantic_high",
                 "summary": "Paraphrased temporal currentness evidence",
                 "score": 0.91,
                 "currentness": "searchable_reference",
             },
             {
-                "result_type": "qdrant_semantic",
+                "result_type": "postgres_pgvector_semantic",
                 "memory_id": "semantic_low",
                 "summary": "Weak unrelated nearest neighbor",
                 "score": 0.4,
@@ -666,7 +670,7 @@ def test_brain_query_v2_rejects_non_finite_semantic_scores(score):
     def index_search(_query, _brain_id):
         return [
             {
-                "result_type": "qdrant_semantic",
+                "result_type": "postgres_pgvector_semantic",
                 "memory_id": "semantic_non_finite",
                 "summary": "Untrusted non-finite semantic result",
                 "score": score,

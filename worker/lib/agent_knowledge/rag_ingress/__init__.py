@@ -13,7 +13,7 @@ Design boundary (see
   dataset id. ``targetProfile`` is a *logical* profile, not a physical dataset.
 - The adapter contract lives in :mod:`agent_knowledge.rag_ingress.index_adapter`;
   every backend-specific upload/parse/status semantic lives inside a concrete
-  adapter (``couchdb_index_adapter.py``, ``qdrant_docling_mirror.py``).
+  adapter (``couchdb_index_adapter.py`` and backend-specific adapters).
 - This is a RAG-ready document ingress bus, NOT a Kafka-like general event bus.
 """
 

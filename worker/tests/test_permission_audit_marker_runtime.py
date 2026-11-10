@@ -1,18 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 
 import pytest
 
 from agent_knowledge.permission_audit import IndependentProductMutationMarkerReader
 from agent_knowledge.postgres_exact_mutation_marker import (
     build_source_owned_postgres_exact_marker_contract,
-)
-from agent_knowledge.qdrant_write_gateway import (
-    GatewayCoverageManifest,
-    QdrantMutationRoute,
-    WriterCoverage,
-    build_gateway_coverage_manifest,
 )
 
 
@@ -24,18 +17,19 @@ def _raw_sha(character: str) -> str:
     return character * 64
 
 
-def _record(plane: str, *, call_count: int = 1) -> dict[str, object]:
-    status = (
-        "clear"
-        if plane in {"authority_ledger", "index"}
-        else "atomic_commit_boundary"
-    )
+def _record(
+    plane: str,
+    *,
+    call_count: int = 1,
+    in_flight_count: int = 0,
+) -> dict[str, object]:
+    status = "clear" if plane == "authority_ledger" else "atomic_commit_boundary"
     return {
         "plane": plane,
         "generation_hash": _sha("1"),
         "event_position_hash": _sha("2"),
         "marker_hash": _sha("3"),
-        "in_flight_count": 0,
+        "in_flight_count": in_flight_count,
         "in_flight_status": status,
         "coverage_hash": _sha("4"),
         "coverage_status": "validated",
@@ -46,13 +40,14 @@ def _record(plane: str, *, call_count: int = 1) -> dict[str, object]:
 
 
 class _NativeProvider:
-    def __init__(self, plane: str) -> None:
+    def __init__(self, plane: str, *, in_flight_count: int = 0) -> None:
         self.plane = plane
         self.calls = 0
+        self.in_flight_count = in_flight_count
 
     def __call__(self) -> dict[str, object]:
         self.calls += 1
-        return _record(self.plane)
+        return _record(self.plane, in_flight_count=self.in_flight_count)
 
 
 class _Connection:
@@ -97,40 +92,8 @@ class _PostgresReader:
         return fence
 
 
-@dataclass
-class _QdrantMetadataReader:
-    positions: list[int]
-
-    def __post_init__(self) -> None:
-        self.calls = 0
-
-    def __call__(self) -> dict[str, object]:
-        position = self.positions[self.calls]
-        self.calls += 1
-        return {
-            "generation": 7,
-            "event_position": position,
-            "marker_hash": _raw_sha("5"),
-            "in_flight_count": 0,
-            "coverage_hash": self.coverage_hash,
-            "coverage_status": "complete",
-            "count_status": "exact",
-            "reset_count": 0,
-            "bypass_count": 0,
-        }
-
-    coverage_hash: str = ""
 
 
-def _coverage() -> GatewayCoverageManifest:
-    writers = tuple(
-        WriterCoverage(
-            writer_ref_hash=_raw_sha(format(index + 6, "x")),
-            routes=(route,),
-        )
-        for index, route in enumerate(QdrantMutationRoute)
-    )
-    return build_gateway_coverage_manifest(generation=7, writers=writers)
 
 
 def _postgres_contract():
@@ -151,9 +114,6 @@ def _build_reader(monkeypatch: pytest.MonkeyPatch, **overrides: object):
     _PostgresReader.instances.clear()
     monkeypatch.setattr(runtime, "PostgresExactMutationMarkerReader", _PostgresReader)
     connection = _Connection()
-    coverage = _coverage()
-    metadata_reader = _QdrantMetadataReader([10, 10])
-    metadata_reader.coverage_hash = coverage.coverage_hash
     corpus = _NativeProvider("corpus")
     queue = _NativeProvider("queue")
     product_db = _NativeProvider("product_db")
@@ -163,15 +123,10 @@ def _build_reader(monkeypatch: pytest.MonkeyPatch, **overrides: object):
         "couchdb_provider": corpus,
         "nats_provider": queue,
         "sqlite_provider": product_db,
-        "qdrant_metadata_reader": metadata_reader,
-        "qdrant_coverage_reader": lambda: coverage,
-        "qdrant_expected_coverage": coverage,
     }
     arguments.update(overrides)
     return runtime.build_permission_audit_marker_reader(**arguments), {
         "connection": connection,
-        "coverage": coverage,
-        "metadata_reader": metadata_reader,
         "native": (corpus, queue, product_db),
     }
 
@@ -193,76 +148,24 @@ def test_builder_returns_one_source_owned_reader_and_reuses_provider_instances(
         "authority_ledger",
         "corpus",
         "queue",
-        "index",
         "product_db",
     ]
     assert [item["plane"] for item in after["markers"]] == [
         "authority_ledger",
         "corpus",
         "queue",
-        "index",
         "product_db",
     ]
     assert all(
         set(item) == set(_record(str(item["plane"])))
         for item in before["markers"]
     )
-    assert state["metadata_reader"].calls == 2
     assert [provider.calls for provider in state["native"]] == [2, 2, 2]
     pg_reader = _PostgresReader.instances[0]
     assert pg_reader.acquired_connections == [state["connection"]]
     assert pg_reader.fences[0].reads == 2
     assert pg_reader.fences[0].releases == 1
     assert state["connection"].closed is True
-
-
-@pytest.mark.parametrize("failure", ["raw_field", "unresolved", "coverage_mismatch"])
-def test_qdrant_metadata_or_coverage_failure_is_closed_before_store_action(
-    monkeypatch: pytest.MonkeyPatch,
-    failure: str,
-) -> None:
-    coverage = _coverage()
-    metadata_reader = _QdrantMetadataReader([10])
-    metadata_reader.coverage_hash = coverage.coverage_hash
-    coverage_reader = lambda: coverage
-
-    if failure == "raw_field":
-        original_reader = metadata_reader
-
-        def read_with_raw_field():
-            return {**original_reader(), "point_id": "must-not-cross"}
-
-        configured_metadata_reader = read_with_raw_field
-    elif failure == "unresolved":
-        original_reader = metadata_reader
-
-        def read_unresolved():
-            return {**original_reader(), "in_flight_count": 1}
-
-        configured_metadata_reader = read_unresolved
-    else:
-        mismatched = _coverage()
-        mismatched = GatewayCoverageManifest(
-            generation=8,
-            writers=mismatched.writers,
-            coverage_hash=mismatched.coverage_hash,
-        )
-        configured_metadata_reader = metadata_reader
-        coverage_reader = lambda: mismatched
-
-    reader, _ = _build_reader(
-        monkeypatch,
-        qdrant_metadata_reader=configured_metadata_reader,
-        qdrant_coverage_reader=coverage_reader,
-        qdrant_expected_coverage=coverage,
-    )
-    actions: list[str] = []
-
-    with pytest.raises(Exception) as error:
-        reader.run_audit_window(lambda: actions.append("stored"))
-
-    assert actions == []
-    assert "must-not-cross" not in str(error.value)
 
 
 @pytest.mark.parametrize("failure", ["missing", "alias", "malformed"])
@@ -277,7 +180,7 @@ def test_builder_rejects_missing_aliased_or_malformed_sources(
     elif failure == "alias":
         overrides = {"couchdb_provider": corpus, "nats_provider": corpus}
     else:
-        overrides = {"qdrant_expected_coverage": object()}
+        overrides = {"postgres_connection_factory": None}
 
     with pytest.raises((TypeError, ValueError)):
         _build_reader(monkeypatch, **overrides)
@@ -331,24 +234,16 @@ def test_postgres_fence_and_connection_failures_close_before_store_action(
 
     monkeypatch.setattr(runtime, "PostgresExactMutationMarkerReader", PostgresReader)
     connection = Connection()
-    coverage = _coverage()
-    metadata_reader = _QdrantMetadataReader([10])
-    metadata_reader.coverage_hash = coverage.coverage_hash
-    if failure in {"release", "close"}:
-        original_reader = metadata_reader
-
-        def metadata_reader():  # type: ignore[no-redef]
-            return {**original_reader(), "in_flight_count": 1}
 
     reader = runtime.build_permission_audit_marker_reader(
         postgres_contract=_postgres_contract(),
         postgres_connection_factory=lambda: connection,
         couchdb_provider=_NativeProvider("corpus"),
         nats_provider=_NativeProvider("queue"),
-        sqlite_provider=_NativeProvider("product_db"),
-        qdrant_metadata_reader=metadata_reader,
-        qdrant_coverage_reader=lambda: coverage,
-        qdrant_expected_coverage=coverage,
+        sqlite_provider=_NativeProvider(
+            "product_db",
+            in_flight_count=int(failure in {"release", "close"}),
+        ),
     )
     actions: list[str] = []
 

@@ -152,7 +152,7 @@ Palantir Ontology를 그대로 복제하지 않는다. LBrain에 필요한 수�
 - Palantir Ontology를 그대로 복제하거나 enterprise-wide ontology product를 만들지 않는다.
 - raw Palantir corpus, raw private transcript, secret, private runtime evidence를 public repo에 넣지 않는다.
 - raw document text를 곧바로 accepted/current memory로 승격하지 않는다.
-- graph/Qdrant/search mirror를 canonical authority로 만들지 않는다.
+- graph/PG search projection을 canonical authority로 만들지 않는다.
 - UI를 이번 요구사항의 필수 조건으로 두지 않는다. CLI/worker/MCP ingest가 우선 가능해야 한다.
 - live mutation, proposal write, ledger write, deployment/GitOps mutation은 승인된 design과 별도 실행 gate 전에는 수행하지 않는다.
 

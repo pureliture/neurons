@@ -336,7 +336,7 @@ def _install_diversity_search(
         lambda **_kwargs: store,
     )
     monkeypatch.setattr(
-        "agent_knowledge.rag_ingress.qdrant_embedding.build_openai_embedding_provider",
+        "agent_knowledge.rag_ingress.embedding_provider.build_openai_embedding_provider",
         lambda **_kwargs: Embedder(),
     )
     monkeypatch.setattr(

@@ -1,6 +1,6 @@
 """Hermes mixed project scope must be judged identically by both build lanes.
 
-The graph projection lane (``llm_brain_core.runtime``) and the PG/Qdrant
+The graph projection lane (``llm_brain_core.runtime``) and the PostgreSQL
 session-memory lane (``couchdb_source.session_memory_materializer``) read the
 same CouchDB source documents. A Hermes session whose documents disagree on
 ``project`` must not be admitted by one lane and refused by the other.

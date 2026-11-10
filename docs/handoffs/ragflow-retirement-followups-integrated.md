@@ -45,7 +45,7 @@
 >   `scripts/live-index-verify.py` 삭제, `rag_ingress/retired_index_bridge.py` → `index_adapter.py`
 >   등 backend-neutral 명칭으로 중립화, `worker/lib/agent_knowledge/index_client.py` →
 >   `legacy/index_client.py`로 격리, `couchdb_source/index_projector.py`·`index_fallback.py` 제거,
->   `SESSION_MEMORY_PROJECTION_BACKEND`의 코드 default를 `qdrant`로 변경.
+>   `SESSION_MEMORY_PROJECTION_BACKEND`의 코드 default를 `retired-vector-index`로 변경.
 > - 라이브 실측(앞선 세션): 라이브 secret 3개 키 전수 검사 결과 `RAGFLOW*`·`RETIRED_INDEX_BRIDGE*` 0건.
 >   neurons-ops overlay 저장소 grep에서도 옛 이름 잔존 0건. 라이브 `INGRESS_DELIVERY_BACKEND=couchdb`,
 >   `SESSION_MEMORY_PROJECTION_BACKEND=postgres_pgvector`, `SHADOW_DELIVER=1`.
@@ -69,7 +69,7 @@
 > 2. 각 도구를 분류한다: (a) RAGFlow 접속이 필수라 지금 동작 불가 / (b) 접속이 선택이라 다른 백엔드로
 >    대체 가능 / (c) 이미 vestigial이라 정리 가능.
 > 3. `native_memory_*` 경로의 현재 제품 상태를 확인한다. 이게 외부 브리지에 직접 쓰는 기능이면,
->    RAGFlow F/O 이후 대체 백엔드(CouchDB / Postgres+pgvector / Qdrant) 중 어디로 갔는지, 아니면
+>    RAGFlow F/O 이후 대체 백엔드(CouchDB / Postgres+pgvector / retired-vector-index) 중 어디로 갔는지, 아니면
 >    아직 안 갔는지. 안 갔으면 그게 남은 제품 결정이다.
 > 4. 정리한다: 지울 것 / 대체 백엔드로 옮길 것 / 유지할 것. 각 항목에 근거와 영향 범위(어떤 CLI·도구가
 >    영향받는지)를 붙인다.

@@ -181,7 +181,7 @@ def test_paid_embedding_fallback_blocked_across_connectors_and_adapters(
         )
 
     # 3) PG/MCP recall provider: local model + paid base url is rejected at construction
-    from agent_knowledge.rag_ingress.qdrant_embedding import build_openai_embedding_provider
+    from agent_knowledge.rag_ingress.embedding_provider import build_openai_embedding_provider
 
     with pytest.raises(Exception) as excinfo:
         build_openai_embedding_provider(

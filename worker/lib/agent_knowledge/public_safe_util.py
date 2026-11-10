@@ -3,9 +3,8 @@
 These were originally housed in ``llm_brain_core._util``, but importing them from
 there triggers the heavy ``llm_brain_core`` package ``__init__`` (graphiti, neo4j,
 ontology, ...), which is NOT present in the ingress/delivery worker's vendored lib
-subset. The searchable-mirror adapter (``rag_ingress.qdrant_docling_mirror``) needs
-these helpers in that delivery subset, so they live here at the top level where the
-only dependencies are ``agent_knowledge.redaction`` and
+subset. Shared delivery and projection helpers live here at the top level where
+the only dependencies are ``agent_knowledge.redaction`` and
 ``agent_knowledge.session_memory.transcript_model`` (both already vendored in the
 worker; ``session_memory`` uses lazy exports so importing ``transcript_model`` does
 not drag heavy brain modules).
@@ -120,3 +119,27 @@ def ensure_public_safe(value: Any, field: str = "value") -> None:
 def public_dict(value: dict[str, Any], *, field: str = "value") -> dict[str, Any]:
     ensure_public_safe(value, field)
     return value
+
+
+_MASKED_PRIVATE_TOKEN = "[mirror-redacted]"
+_MASK_PATH_TOKEN_RE = re.compile(
+    r"\S*(?:/Users/|~/|/private/|/Volumes/|[A-Za-z]:\\|\\\\[A-Za-z0-9_.-]+|raw[_ -]?transcript)\S*",
+    re.IGNORECASE,
+)
+_MASK_BEARER_TOKEN_RE = re.compile(r"Bearer\s+\S+", re.IGNORECASE)
+_MASK_SECRET_ASSIGNMENT_RE = re.compile(
+    r"\b[A-Z0-9_]*(?:TOKEN|SECRET|API_KEY|PASSWORD|PASSWD)\b\s*[:=]\s*\S*",
+    re.IGNORECASE,
+)
+
+
+def public_safe_mask_body(body: str) -> str:
+    """Mask residual private, path, and secret tokens in a projection body."""
+    from .rag_ingress.server_runtime import _leak_patterns
+
+    text = redact_public_ingress_text(str(body or ""))
+    for _name, regex in _leak_patterns():
+        text = regex.sub(_MASKED_PRIVATE_TOKEN, text)
+    text = _MASK_SECRET_ASSIGNMENT_RE.sub(_MASKED_PRIVATE_TOKEN, text)
+    text = _MASK_BEARER_TOKEN_RE.sub(_MASKED_PRIVATE_TOKEN, text)
+    return _MASK_PATH_TOKEN_RE.sub(_MASKED_PRIVATE_TOKEN, text)

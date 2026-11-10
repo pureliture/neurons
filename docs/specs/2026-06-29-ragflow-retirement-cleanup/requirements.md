@@ -78,7 +78,7 @@ active schema, model, table, column, variable 이름에는 backend/vendor 이름
 
 ### Q: migration 성공/실패 기준과 rollback 조건은 어떻게 둘까?
 
-보존 migration은 사전 백업 또는 되돌릴 수 있는 snapshot을 전제로 한다. 성공 기준은 기존 행 수와 핵심 참조값이 backend-neutral schema로 보존되고, 옛 `index_*` schema 이름이 active DB/schema/model에 남지 않으며, 관련 read/write path가 Qdrant/graph runtime 기준으로 통과하는 것이다. 데이터 누락, row count mismatch, old schema 잔존, runtime regression이 발견되면 migration을 중단하고 백업/snapshot 또는 이전 배포 상태로 rollback한다.
+보존 migration은 사전 백업 또는 되돌릴 수 있는 snapshot을 전제로 한다. 성공 기준은 기존 행 수와 핵심 참조값이 backend-neutral schema로 보존되고, 옛 `index_*` schema 이름이 active DB/schema/model에 남지 않으며, 관련 read/write path가 PostgreSQL/pgvector 및 graph runtime 기준으로 통과하는 것이다. 데이터 누락, row count mismatch, old schema 잔존, runtime regression이 발견되면 migration을 중단하고 백업/snapshot 또는 이전 배포 상태로 rollback한다.
 
 ### Q: local MCP 설정 수정 대상과 stale 프로세스 식별 기준은 어떻게 둘까?
 
@@ -110,7 +110,7 @@ local cleanup 대상은 Mac local process/config surface로 제한한다. `neuro
 | Source of truth | `requirements.md` |
 | Approval gate | `requirements.md` 승인 전 `design.md` 작성 금지 |
 | Execution gate | `design.md` 승인 전 kill/edit/delete/migration 실행 금지 |
-| Runtime 기준 | Qdrant/graph 기반 `neurons` live runtime |
+| Runtime 기준 | PostgreSQL/pgvector 및 graph 기반 `neurons` live runtime |
 | 보존 예외 | 퇴역 기록 문서 1개 |
 | 검색 기준 | 퇴역 기록 문서 외 RAGFlow 관련 검색 결과 없음 |
 | 퇴역 기록 경로 | `docs/retired/index-retirement.md` |
@@ -128,7 +128,7 @@ local cleanup 대상은 Mac local process/config surface로 제한한다. `neuro
 
 - 운영자가 `neurons` repo에서 RAGFlow 관련 문자열을 검색했을 때, 현재 runtime 선택지로 오해할 수 있는 결과가 나오지 않는다.
 - 운영자가 local MCP 프로세스를 확인했을 때, stale RAGFlow direct recall 인자가 남아 있지 않다.
-- 개발자가 CLI help, README, AGENTS류 문서를 읽었을 때, `neurons`가 Qdrant/graph 기반 live runtime이라는 점을 바로 이해한다.
+- 개발자가 CLI help, README, AGENTS류 문서를 읽었을 때, `neurons`가 PostgreSQL/pgvector 및 graph 기반 live runtime이라는 점을 바로 이해한다.
 - 데이터 migration 후 기존 state 내용은 backend-neutral 이름으로 계속 조회 가능하다.
 
 ## 미결정 항목

@@ -39,7 +39,7 @@ Neurons 프로젝트에는 파일, 문서, 세션, 카드, 런타임 사실이 �
 
 대표 사례:
 
-- "Qdrant가 아직 쓰이나?"라는 질문에 LBrain이 **폐기 이전 준비 카드**를 current로 반환하고, 삭제된 파일을 대상으로 한 task를 `in_progress`로 반환한다.
+- "이전 vector index가 아직 쓰이나?"라는 질문에 LBrain이 **폐기 이전 준비 카드**를 current로 반환하고, 삭제된 파일을 대상으로 한 task를 `in_progress`로 반환한다.
 - 반면 실제 상태는 "런타임 폐기 완료, 코드 표면 일부 비활성 잔존"이다. 이 차이를 LBrain 응답만으로 판정할 수 없다.
 
 ### 2.3 왜 나이만으로는 부족한가
@@ -70,7 +70,7 @@ Neurons 프로젝트에는 파일, 문서, 세션, 카드, 런타임 사실이 �
 - 보존 기간(retention)과 삭제 정책
 - 임베딩 모델·본문 압축·검색 품질 변경
 - 시계열 대시보드나 통계 제품
-- Qdrant 제거 (테스트 표본으로 유지)
+- 이전 vector index는 제거하고, 관련 역사 자료만 currentness 테스트 fixture로 유지
 
 ---
 
@@ -140,7 +140,7 @@ LBrain은 "이 정보는 오래되었으니 틀렸다"고 말하지 않는다. �
 
 **S1. 폐기 여부 확인**
 
-> "Qdrant 아직 쓰고 있어?"
+> "이전 vector index 아직 쓰고 있어?"
 
 기대: 폐기 결정 카드가 반환된다. 카드에는 `observed_at`(결정 시점), `valid_from`, `valid_to`(있는 경우), `currentness=superseded|retired`, `superseded_by`, `age`가 포함된다. 폐기 이전 준비 카드는 current로 반환되지 않고, historical로 명시된다.
 
@@ -452,10 +452,10 @@ temporal:
 **When** 조회한다.
 **Then** `freshness.state=unchecked`이고 `gaps`에 `no_recent_freshness_check`가 있어야 한다. "검증됨"으로 표시되면 실패다.
 
-### AC-AGE-011 — Qdrant 사례
+### AC-AGE-011 — 이전 index 사례
 
-**Given** Qdrant 런타임 폐기 결정과, 폐기 이전 "Qdrant readiness" 카드가 함께 존재한다.
-**When** "Qdrant 아직 쓰이나?"를 조회한다.
+**Given** 이전 index runtime의 폐기 결정과 폐기 전 readiness 카드가 함께 존재한다.
+**When** "이전 index가 아직 쓰이나?"를 조회한다.
 **Then** 폐기 결정이 current/historical 관계와 함께 반환되고, readiness 카드는 current로 반환되지 않아야 한다. 응답만 보고 "런타임 폐기, 코드 표면 일부 잔존"을 판단할 수 있어야 한다.
 
 ### AC-AGE-012 — task 상태
@@ -509,7 +509,7 @@ temporal:
 - 기존 `current` 카드도 `valid_to`가 없으면 "계속 유효"로 취급하되, `freshness`는 `unchecked`로 표시한다.
 - 시간 메타데이터가 수정되면 다음 조회에서 반영되어야 하며, 이전 값으로 캐시된 나이를 반환해서는 안 된다.
 - 과거 조회(`as_of`)는 이행 후에도 계속 가능해야 한다.
-- Qdrant는 제거하지 않고, "런타임 폐기 + 코드 잔존" 표본으로 회귀 검증에 사용한다.
+- 이전 index runtime과 코드는 제거하고, 폐기 결정과 readiness 문서만 과거 자료로 두어 currentness 동작을 검증한다.
 
 ---
 
@@ -535,7 +535,6 @@ temporal:
 - 조회 결과를 실제 분석 결과로 교정하는 authority/correction 루프
 - `brain_correct`류의 쓰기 도구와 권한 모델
 - Neo4j/Graphiti 투영 구현과 스키마
-- Qdrant 제거
 - 임베딩 모델/차원/본문 압축 변경
 - 자동 사실 검증(LLM judge 등) 정책
 - 보존/삭제 정책
@@ -566,4 +565,3 @@ temporal:
 - `docs/specs/2026-07-05-lbrain-knowledge-object-substrate/design.md` — KnowledgeObject envelope, `observed_at`/`valid_from`/`valid_to`, freshness, temporal_work_recall
 - `docs/contracts/brain-steward-mcp.md` — 승인 시 `valid_from`, stale/supersede 시 `valid_to` 종료 규칙
 - `milestones.md` — M5b(entity/relation/temporal/provenance), M5c(temporal correctness gate), M7(PG authority → graph projection)
-- `docs/specs/2026-06-24-qdrant-mirror-cutover/milestones.md` — currentness reconcile 이력

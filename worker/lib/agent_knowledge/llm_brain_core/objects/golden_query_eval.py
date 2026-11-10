@@ -107,7 +107,7 @@ def build_phase_golden_query_coverage_report() -> dict[str, Any]:
             result="PASS_WITH_GAPS",
             evaluator="extraction evaluator suite preview",
             gaps=[
-                "live_graph_qdrant_projection_join_unproven",
+                "live_graph_projection_join_unproven",
             ],
         ),
         _phase_coverage(
@@ -2631,7 +2631,7 @@ def _apply_product_evidence_to_phase_progress(
         if isinstance(item, Mapping)
     }
     removable_gaps_by_phase = {
-        "P3": {"live_graph_qdrant_projection_join_unproven"},
+        "P3": {"live_graph_projection_join_unproven"},
         "P4": {
             "production_authority_pilot_not_executed",
             "production_authority_write_evidence_missing",

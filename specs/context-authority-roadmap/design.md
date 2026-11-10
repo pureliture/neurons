@@ -23,16 +23,16 @@ authority graph를 검토한다.
   - `specs/llm-brain-core-v1/implementation-matrix.md`
   - `specs/llm-brain-bulk-semantic-lane/requirements.md`
   - `specs/llm-brain-bulk-semantic-lane/design.md`
-  - `docs/specs/2026-06-21-qdrant-docling-searchable-mirror/requirements.md`
-  - `docs/specs/2026-06-24-qdrant-mirror-cutover/requirements.md`
+  - `docs/specs/2026-06-21-retired-vector-index-docling-searchable-mirror/requirements.md`
+  - `docs/specs/2026-06-24-retired-vector-index-mirror-cutover/requirements.md`
 - Core approved requirements:
   - `neurons` owns authority synthesis and agent-facing brain APIs.
-  - Agent consumers call `brain_context_resolve`, not Neo4j/Qdrant/Graphiti
+  - Agent consumers call `brain_context_resolve`, not Neo4j/retired-vector-index/Graphiti
     directly as the default path.
   - Neo4j is promoted from derived graph index to Authority Graph Workbench
     substrate, but not to raw source of truth.
   - Graphiti remains semantic extraction/projection path.
-  - Qdrant/Docling remains searchable document mirror, not canonical memory.
+  - retired-vector-index/Docling remains searchable document mirror, not canonical memory.
   - Ledger/current state adapter owns lifecycle/currentness seam; PG/SQLite are
     storage adapters hidden behind authority stores.
   - Dendrite captures local evidence and source locators; it does not decide
@@ -70,7 +70,7 @@ Pros:
 Cons:
 - Requires projection consistency checks between Context Pack output and Neo4j.
 - Requires explicit graph schema discipline so Browser/Bloom views stay useful.
-- Requires clear degraded behavior when Neo4j, Graphiti, or Qdrant is stale or
+- Requires clear degraded behavior when Neo4j, Graphiti, or retired-vector-index is stale or
   unavailable.
 
 ### Alternative A: Neo4j-Centered Product Surface
@@ -110,7 +110,7 @@ flowchart LR
   Graphiti["Graphiti\nsemantic projection"]
   Neo4j["Neo4j\nderived authority graph"]
   Workbench["Neo4j Browser/Bloom/Workspace\nAuthority Graph Workbench"]
-  Qdrant["Qdrant / Docling\nsearchable document mirror"]
+  retired-vector-index["retired-vector-index / Docling\nsearchable document mirror"]
   Bundle["OKF / Markdown authority bundle"]
 
   Codex --> BrainAPI
@@ -123,7 +123,7 @@ flowchart LR
   Docs --> Authority
   Live --> Authority
   Dendrite --> Authority
-  Qdrant -. candidate search .-> Authority
+  retired-vector-index -. candidate search .-> Authority
   Graphiti -. relation projection .-> Neo4j
   Authority --> Neo4j
   Neo4j --> Workbench
@@ -138,7 +138,7 @@ flowchart LR
   the default coding-agent context resolver.
 - Graphiti writes/reads semantic graph projections but does not decide product
   authority.
-- Qdrant returns recall/search candidates that must be joined with document and
+- retired-vector-index returns recall/search candidates that must be joined with document and
   lifecycle authority before product use.
 - Ledger/current state adapter stores accepted/current lifecycle state behind an
   interface; callers do not couple to PG/SQLite.
@@ -241,7 +241,7 @@ Dependencies:
 - raw session store;
 - ledger/current state adapter;
 - document inventory;
-- Qdrant/search adapter;
+- retired-vector-index/search adapter;
 - Neo4j projection status;
 - live evidence probes when available.
 
@@ -320,7 +320,7 @@ Rules:
 - unavailable/stale Graphiti status degrades relation recall, not canonical
   authority.
 
-### Qdrant / Docling Mirror
+### retired-vector-index / Docling Mirror
 
 Purpose:
 - searchable mirror for PDF/doc/document fuzzy recall.
@@ -382,7 +382,7 @@ degraded, but agent-start authority can still function.
 Graphiti lag degrades semantic relation richness. It does not block document,
 workflow, or preference authority cards if card evidence exists.
 
-### Qdrant Mirror Unavailable
+### retired-vector-index Mirror Unavailable
 
 Document fuzzy recall degrades. Existing document authority cards remain usable.
 Responses that would have depended on fuzzy document recall include a search
@@ -400,7 +400,7 @@ cleanup is triggered by this roadmap.
 
 ### Boundary Violation
 
-If a code path lets agent consumers bypass `neurons` and call Neo4j/Qdrant/
+If a code path lets agent consumers bypass `neurons` and call Neo4j/retired-vector-index/
 Graphiti as the default context source, tests should fail. Operator/debug paths
 must be clearly named and separate.
 
@@ -432,13 +432,13 @@ must be clearly named and separate.
 
 ### Search and Mirror Tests
 
-- Qdrant hits require document authority join before product use.
-- Qdrant unavailable produces degraded search status.
+- retired-vector-index hits require document authority join before product use.
+- retired-vector-index unavailable produces degraded search status.
 - Graphiti unavailable/stale produces degraded graph status.
 
 ### Boundary Regression Tests
 
-- Agent-facing API does not require direct Neo4j/Qdrant/Graphiti calls.
+- Agent-facing API does not require direct Neo4j/retired-vector-index/Graphiti calls.
 - RetiredIndexBridge is not introduced as a core Context Authority dependency.
 - Dendrite capture does not assign authority statuses.
 - Raw PC file bodies and graph DB files are not synced for federation.

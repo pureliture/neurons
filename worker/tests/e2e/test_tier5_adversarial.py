@@ -5,8 +5,7 @@ Extends E2E verification with extreme adversarial scenarios:
 2. Progressive truncation under extreme memory/payload stress.
 3. High-concurrency CAS race conditions across 10 mutating threads & 5 workers.
 4. Deep cyclic & diamond DAG provenance security under temporal filtering.
-5. High-scale Qdrant to PostgreSQL migration with dual-read shadow verification.
-6. Absolute candidate proposal isolation against context leakage.
+5. Absolute candidate proposal isolation against context leakage.
 """
 
 from __future__ import annotations
@@ -20,7 +19,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import uuid
 import pytest
-from qdrant_client import QdrantClient, models
 from support.perf_budget import perf_budget_enforced
 
 from agent_knowledge.ledger import Ledger
@@ -50,12 +48,6 @@ from agent_knowledge.postgres_store.pgvector_store import (
 from agent_knowledge.postgres_store.outbox_worker import (
     OutboxWorker,
     generate_deterministic_embedding,
-)
-from agent_knowledge.postgres_store.migration_qdrant_to_postgres import (
-    QdrantToPostgresMigrator,
-)
-from agent_knowledge.postgres_store.dual_read_shadow import (
-    DualReadShadowHarness,
 )
 
 PG_DSN = os.environ.get("LBRAIN_TEST_PG_DSN", "")
@@ -456,84 +448,3 @@ def test_tier5_adversarial_deep_cyclic_provenance_dag(isolated_pg_store):
 # ==============================================================================
 # 5. Full End-to-End Migration & Dual-Read Cutover Verification
 # ==============================================================================
-
-@live_pg
-def test_tier5_adversarial_full_backfill_and_dual_read_cutover(isolated_pg_store):
-    """Simulates full zero-downtime cutover: migrate 100 items and verify Recall@5 >= 0.95."""
-    project = f"t5_cutover_{uuid.uuid4().hex[:8]}"
-
-    source_qdrant = QdrantClient(":memory:")
-    from agent_knowledge.postgres_store.migration_qdrant_to_postgres import DEFAULT_SESSION_COLLECTION
-    source_qdrant.create_collection(
-        DEFAULT_SESSION_COLLECTION,
-        vectors_config=models.VectorParams(size=3072, distance=models.Distance.COSINE),
-    )
-    source_qdrant.create_collection(
-        "memory_cards",
-        vectors_config=models.VectorParams(size=3072, distance=models.Distance.COSINE),
-    )
-
-    points = []
-    for i in range(100):
-        vec = make_dummy_vector(i * 7)
-        card_id = f"{project}_card_{i}"
-        payload = {
-            "memory_id": card_id,
-            "project": project,
-            "card_type": "decision" if i % 2 == 0 else "preference",
-            "title": f"Migrated Knowledge {i}",
-            "summary": f"Summary for knowledge point {i}",
-            "typed_payload": {"idx": i},
-            "content_hash": f"sha256:{hashlib.sha256(card_id.encode()).hexdigest()}",
-            "lifecycle_state": "human_accepted",
-            "authorization_status": "active",
-            "currentness": "current",
-            "confidence": 0.95,
-            "valid_from": "2026-01-01T00:00:00Z",
-            "valid_to": None,
-            "source_ref": [f"ref_{i}"],
-            "embedding_model": "gemini-embedding-2",
-        }
-        points.append(models.PointStruct(id=i + 1, vector=vec, payload=payload))
-    source_qdrant.upsert("memory_cards", points)
-
-    pg_target = isolated_pg_store
-
-    # Step 1: Run Backfill Migration
-    migrator = QdrantToPostgresMigrator(
-        qdrant_client=source_qdrant,
-        target_store=pg_target,
-        batch_size=25,
-    )
-    summary = migrator.run_full_migration(project=project)
-    assert summary.total_migrated == 100
-    migrated_cards = pg_target.list_authorized_cards(project=project)
-    assert len(migrated_cards) == 100
-
-    # Step 2: Run Dual-Read Shadow Benchmark
-    harness = DualReadShadowHarness(
-        qdrant_client=source_qdrant,
-        pg_store=pg_target,
-        default_limit=5,
-        recall_gate_threshold=0.95,
-        p95_latency_gate_ms=20.0,
-        evidence_class="test_harness",
-    )
-    benchmark_queries = [make_dummy_vector(q * 11) for q in range(50)]
-    bench_res = harness.run_benchmark(benchmark_queries, project=project)
-
-    assert bench_res.mean_recall_at_k >= 0.95
-    assert bench_res.recall_gate_passed is True
-    if perf_budget_enforced():
-        assert bench_res.p95_pgvector_latency_ms <= 20.0
-    assert bench_res.overall_gate_passed is False
-    assert "test_harness_not_cutover_evidence" in bench_res.cutover_blockers
-
-    # Step 3: Verify Cutover Search on Target Store
-    resolved = pg_target.hybrid_search(
-        project=project,
-        query_vector=make_dummy_vector(0),
-        limit=5,
-    )
-    assert len(resolved) == 5
-    assert resolved[0]["similarity_score"] >= 0.99
