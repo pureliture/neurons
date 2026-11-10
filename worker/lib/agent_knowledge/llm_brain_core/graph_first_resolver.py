@@ -157,10 +157,12 @@ class GraphFirstResolver:
         store: Any,
         graph_adapter: Any | None = None,
         embed_query: Callable[[str], list[float]] | None = None,
+        session_memory_search: Callable[[str, str], list[dict[str, Any]]] | None = None,
     ) -> None:
         self._store = store
         self._graph_adapter = graph_adapter
         self._embed_query = embed_query
+        self._session_memory_search = session_memory_search
         self._query_vectors: dict[str, list[float]] = {}
 
     def resolve(
@@ -728,6 +730,59 @@ class GraphFirstResolver:
             or not callable(getattr(self._store, "search_session_chunks", None))
         ):
             return []
+        if callable(self._session_memory_search):
+            try:
+                authorized_hits = self._session_memory_search(
+                    request.query,
+                    request.project,
+                )
+            except Exception:
+                return []
+            cards: list[dict[str, Any]] = []
+            for hit in authorized_hits or ():
+                if not isinstance(hit, Mapping):
+                    continue
+                text = str(hit.get("summary") or "").strip()
+                chunk_id = str(hit.get("memory_id") or "")
+                if not text or not chunk_id:
+                    continue
+                summary = _safe(_session_chunk_body(text), 65536)
+                if not summary:
+                    continue
+                title_line = next(
+                    (line.strip("#* -") for line in summary.splitlines() if line.strip("#* -")),
+                    "",
+                )
+                segment_range = hit.get("segment_turn_range")
+                if segment_range is not None:
+                    typed_payload = {"segment_turn_range": segment_range}
+                else:
+                    typed_payload = {
+                        "status": summary,
+                        "status_value": summary,
+                    }
+                card = {
+                    "memory_id": f"chunk:{chunk_id[:56]}",
+                    "project": request.project,
+                    "card_type": "status",
+                    "title": _safe(title_line or f"{request.project} session context", 1000),
+                    "summary": summary,
+                    "typed_payload": typed_payload,
+                    "currentness": str(hit.get("currentness") or "current"),
+                    "content_hash": str(hit.get("content_hash") or ""),
+                    "source": SOURCE_SESSION_MEMORY,
+                    "semantic_score": hit.get("score"),
+                }
+                if segment_range is not None:
+                    card["segment_turn_range"] = segment_range
+                if hit.get("observed_at") is not None:
+                    card["observed_at"] = hit.get("observed_at")
+                if hit.get("recorded_at") is not None:
+                    card["created_at"] = hit.get("recorded_at")
+                cards.append(card)
+                if len(cards) >= request.limit + 1:
+                    break
+            return cards
         if vector is None:
             vector = self._query_vector(request)
             if vector is None:
@@ -936,7 +991,20 @@ class GraphFirstResolver:
         for card in cards:
             context_mode = request.mode == "context"
             item = _context_item(card) if context_mode else _item(card)
-            section_identity = {"id": item["id"]} if context_mode else {k: v for k, v in item.items() if k != "typed_payload"}
+            if context_mode:
+                section_identity = {"id": item["id"]}
+            else:
+                excluded_fields = {"typed_payload"}
+                if (
+                    card.get("source") == SOURCE_SESSION_MEMORY
+                    and isinstance(card.get("segment_turn_range"), Mapping)
+                ):
+                    excluded_fields.add("summary")
+                section_identity = {
+                    key: value
+                    for key, value in item.items()
+                    if key not in excluded_fields
+                }
             # Temporal envelope (FR-AGE): only on the non-context (slim) item,
             # so the compact context lane stays minimal.
             if not context_mode:
@@ -991,11 +1059,21 @@ class GraphFirstResolver:
                         task_entry["blocker"] = blocker
                 tasks.append(task_entry)
             elif card_type == "status":
-                subject = _safe(_status_subject(card, typed), 65536)
+                if (
+                    card.get("source") == SOURCE_SESSION_MEMORY
+                    and isinstance(card.get("segment_turn_range"), Mapping)
+                ):
+                    subject = _safe(card.get("title") or "session memory", 65536)
+                else:
+                    subject = _safe(_status_subject(card, typed), 65536)
                 status_entry = {
                     **section_identity,
                     "status": subject,
                 }
+                if isinstance(card.get("segment_turn_range"), Mapping):
+                    status_entry["segment_turn_range"] = _safe_typed_value(
+                        card["segment_turn_range"]
+                    )
                 state = _safe(typed.get("status_value") or typed.get("status"), 256)
                 if state and state != subject and state.strip().lower() in _STATUS_STATE_TOKENS:
                     status_entry["status_state"] = state
@@ -1343,6 +1421,8 @@ def _item(card: Mapping[str, Any], *, include_created_at: bool = True) -> dict[s
         item["authority_source"] = _safe(card.get("authority_source"), 64)
     if card.get("source"):
         item["source"] = _safe(card.get("source"), 32)
+    if isinstance(card.get("segment_turn_range"), Mapping):
+        item["segment_turn_range"] = _safe_typed_value(card["segment_turn_range"])
     if card.get("temporal_conflict"):
         item["temporal_conflict"] = True
     created_at = card.get("created_at") or card.get("observed_at")
@@ -1538,6 +1618,8 @@ def _context_item(card: Mapping[str, Any]) -> dict[str, Any]:
         item["authority_source"] = _safe(card.get("authority_source"), 64)
     if card.get("source"):
         item["source"] = _safe(card.get("source"), 32)
+    if isinstance(card.get("segment_turn_range"), Mapping):
+        item["segment_turn_range"] = _safe_typed_value(card["segment_turn_range"])
     if card.get("temporal_conflict"):
         item["temporal_conflict"] = True
     return item
@@ -1620,17 +1702,24 @@ def _session_chunk_body(text: str) -> str:
     전부 동일해진다. `## Transcript` 이후를 본문으로 보고, marker가 없으면 front
     matter와 헤더 라인만 건너뛴다. 본문이 비면 원문을 그대로 반환한다.
     """
+    lines = text.splitlines()
+    is_segment = bool(
+        lines
+        and lines[0].lstrip().startswith("# session-memory")
+        and any(line.startswith("segment:") for line in lines[1:4])
+    )
     marker = text.find(_CHUNK_TRANSCRIPT_MARKER)
-    if marker >= 0:
+    if marker >= 0 and not is_segment:
         body = text[marker + len(_CHUNK_TRANSCRIPT_MARKER):]
     else:
-        lines = text.splitlines()
         index = 0
         if lines and lines[0].lstrip().startswith("# session-memory"):
             index = 1
             while index < len(lines) and (
                 not lines[index].strip()
-                or lines[index].startswith(("session_id_hash:", "## conversation"))
+                or lines[index].startswith(
+                    ("session_id_hash:", "segment:", "## conversation")
+                )
             ):
                 index += 1
         if index < len(lines) and lines[index].strip() == "---":

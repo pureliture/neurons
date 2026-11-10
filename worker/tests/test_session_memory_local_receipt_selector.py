@@ -11,6 +11,7 @@ import pytest
 
 import agent_knowledge.couchdb_source.build_cli as build_cli
 from agent_knowledge.couchdb_source import document_model as dm
+from agent_knowledge.couchdb_source.document_model import sha256_hash
 from agent_knowledge.couchdb_source.build_cli import (
     _evaluate_session_change,
     _select_sessions_needing_projection,
@@ -22,6 +23,9 @@ from agent_knowledge.couchdb_source.session_memory_materializer import (
 from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
 from agent_knowledge.model_connectors import LOCAL_EMBEDDING_PROFILE_ID
 from agent_knowledge.rag_ingress.pg_embedding_privacy import EGRESS_POLICY_ERROR
+from agent_knowledge.rag_ingress.pg_representation import (
+    build_local_segment_receipt_v4,
+)
 from test_couchdb_build_cli import (
     _build_synthetic_session,
     _mark_projected,
@@ -132,6 +136,38 @@ def _project_locally(
         projector=active_projector,
         backend="postgres_pgvector",
     )
+
+
+def _set_segment_receipt(store: InMemoryCouchDBSourceStore, session_id_hash: str) -> None:
+    materialized = materialize_session_memory(
+        session_id_hash=session_id_hash, store=store
+    )
+    segment_ids = ["seg_" + "a" * 60]
+    receipt = build_local_segment_receipt_v4(
+        project=materialized.project,
+        provider=materialized.provider,
+        session_id_hash=materialized.session_id_hash,
+        active_content_hash=materialized.content_hash,
+        projected_source_hash=materialized.source_hash,
+        representation_content_hash=materialized.content_hash,
+        session_memory_knowledge_id=segment_ids[0],
+        embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
+        segment_ids=segment_ids,
+        segment_content_hashes=[sha256_hash("segment body")],
+        segment_set_digest=sha256_hash(
+            json.dumps(segment_ids, ensure_ascii=False, separators=(",", ":"))
+        ),
+    )
+    receipt.update(
+        projection_status=dm.ProjectionStatus.PROJECTED,
+        materialized_at="2026-01-01T00:00:00+00:00",
+        failure_reason="",
+    )
+    state = store.get(dm.projection_state_doc_id(session_id_hash))
+    state["backend_receipts"]["postgres_pgvector_local"][
+        LOCAL_EMBEDDING_PROFILE_ID
+    ] = receipt
+    store.put(state)
 
 
 def _local_receipt(
@@ -291,6 +327,89 @@ def test_incremental_evaluator_empty_profile_keeps_the_legacy_pg_receipt_lane() 
     assert needs_projection is True
     assert selected is not None
     assert selected["session_id_hash"] == session_id_hash
+
+
+@pytest.mark.parametrize(
+    ("stored_representation", "target_representation", "expected"),
+    [
+        ("session_v1", "segment_v1", True),
+        ("segment_v1", "session_v1", True),
+        ("session_v1", "session_v1", False),
+        ("segment_v1", "segment_v1", False),
+    ],
+)
+def test_representation_change_selects_in_full_incremental_and_pending_paths(
+    stored_representation: str,
+    target_representation: str,
+    expected: bool,
+) -> None:
+    store = InMemoryCouchDBSourceStore()
+    session_id_hash = _build_session(store, f"representation-{stored_representation}-{target_representation}")
+    _project_locally(store, session_id_hash)
+    if stored_representation == "segment_v1":
+        _set_segment_receipt(store, session_id_hash)
+
+    full = _select_sessions_needing_projection(
+        store,
+        10,
+        project="neurons",
+        provider="claude",
+        embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
+        representation=target_representation,
+    )
+    needs, _ = _evaluate_session_change(
+        store,
+        session_id_hash,
+        project="neurons",
+        provider="claude",
+        embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
+        representation=target_representation,
+    )
+    incremental, _, _ = build_cli._select_sessions_incremental(
+        store,
+        checkpoint={"last_seq": "0"},
+        limit=10,
+        project="neurons",
+        provider="claude",
+        embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
+        representation=target_representation,
+    )
+    pending = build_cli._resolve_pending_sessions(
+        store,
+        [session_id_hash],
+        project="neurons",
+        provider="claude",
+        embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
+        representation=target_representation,
+    )
+
+    assert bool(full) is expected
+    assert needs is expected
+    assert bool(incremental) is expected
+    assert bool(pending) is expected
+
+
+def test_representation_change_bypasses_terminal_failure_block() -> None:
+    store = InMemoryCouchDBSourceStore()
+    session_id_hash = _build_session(store, "terminal-representation-change")
+    _project_locally(
+        store,
+        session_id_hash,
+        projector=_TerminalFailureLocalProjector(
+            embedding_profile=LOCAL_EMBEDDING_PROFILE_ID
+        ),
+    )
+
+    selected = _select_sessions_needing_projection(
+        store,
+        10,
+        project="neurons",
+        provider="claude",
+        embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
+        representation="segment_v1",
+    )
+
+    assert [row["session_id_hash"] for row in selected] == [session_id_hash]
 
 
 def test_local_receipts_in_production_backend_do_not_starve_new_sessions() -> None:
@@ -560,3 +679,108 @@ def test_checkpoint_profile_change_forces_full_walk(
     assert incremental_calls == []
     assert "[selection] mode=full" in output.err
     assert saved_checkpoint["embedding_profile"] == LOCAL_EMBEDDING_PROFILE_ID
+    assert saved_checkpoint["representation"] == "session_v1"
+
+
+@pytest.mark.parametrize(
+    ("stored_representation", "target_representation"),
+    [("session_v1", "segment_v1"), ("segment_v1", "session_v1")],
+)
+def test_checkpoint_representation_change_forces_full_walk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    stored_representation: str,
+    target_representation: str,
+) -> None:
+    store = InMemoryCouchDBSourceStore()
+    session_id_hash = _build_session(
+        store, f"checkpoint-representation-{stored_representation}"
+    )
+    _project_locally(store, session_id_hash)
+    if stored_representation == "segment_v1":
+        _set_segment_receipt(store, session_id_hash)
+    checkpoint = tmp_path / "selection-checkpoint.json"
+    checkpoint.write_text(
+        json.dumps(
+            {
+                "schema_version": "session_memory_selection_checkpoint.v1",
+                "pg_input_policy_version": build_cli.PG_INPUT_POLICY_VERSION,
+                "embedding_profile": LOCAL_EMBEDDING_PROFILE_ID,
+                "representation": stored_representation,
+                "last_seq": "stored-sequence",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SESSION_MEMORY_SELECTION_CHECKPOINT", str(checkpoint))
+    incremental_calls: list[dict] = []
+    monkeypatch.setattr(
+        build_cli,
+        "_select_sessions_incremental",
+        lambda *args, **kwargs: incremental_calls.append(kwargs) or ([], {}, 0),
+    )
+
+    selected = build_cli._select_sessions_for_cycle(
+        store,
+        limit=0,
+        project="neurons",
+        provider="claude",
+        backend="postgres_pgvector",
+        mode="auto",
+        embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
+        representation=target_representation,
+    )
+    output = capsys.readouterr()
+    saved_checkpoint = build_cli._read_selection_checkpoint(str(checkpoint))
+
+    assert [row["session_id_hash"] for row in selected] == [session_id_hash]
+    assert incremental_calls == []
+    assert "[selection] mode=full" in output.err
+    assert saved_checkpoint["representation"] == target_representation
+
+
+def test_checkpoint_without_representation_remains_session_v1_compatible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    store = InMemoryCouchDBSourceStore()
+    _build_session(store, "legacy-checkpoint-representation")
+    checkpoint = tmp_path / "selection-checkpoint.json"
+    checkpoint.write_text(
+        json.dumps(
+            {
+                "schema_version": "session_memory_selection_checkpoint.v1",
+                "pg_input_policy_version": build_cli.PG_INPUT_POLICY_VERSION,
+                "embedding_profile": LOCAL_EMBEDDING_PROFILE_ID,
+                "last_seq": "stored-sequence",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SESSION_MEMORY_SELECTION_CHECKPOINT", str(checkpoint))
+    incremental_calls: list[dict] = []
+    monkeypatch.setattr(
+        build_cli,
+        "_select_sessions_incremental",
+        lambda *args, **kwargs: incremental_calls.append(kwargs) or ([], {}, 0),
+    )
+
+    selected = build_cli._select_sessions_for_cycle(
+        store,
+        limit=0,
+        project="",
+        provider="",
+        backend="postgres_pgvector",
+        mode="auto",
+        embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
+        representation="session_v1",
+    )
+    output = capsys.readouterr()
+    saved_checkpoint = build_cli._read_selection_checkpoint(str(checkpoint))
+
+    assert selected == []
+    assert len(incremental_calls) == 1
+    assert "[selection] mode=incremental" in output.err
+    assert saved_checkpoint["representation"] == "session_v1"

@@ -59,6 +59,7 @@ class CouchDBProjectionStateAuthorityResolver:
         if state is None:
             return None
         representation_hash = None
+        representation_metadata: dict[str, Any] = {}
         if self._backend == "postgres_pgvector_local":
             from ..model_connectors import LOCAL_EMBEDDING_PROFILE_ID
             from ..couchdb_source.session_memory_materializer import materialize_session_memory
@@ -75,18 +76,30 @@ class CouchDBProjectionStateAuthorityResolver:
             if not isinstance(local_map, dict):
                 return None
             state = local_map.get(profile_key, {})
-            if not isinstance(state, dict) or state.get("receipt_version") != 3:
+            if not isinstance(state, dict) or state.get("receipt_version") not in (3, 4):
                 return None
             current = materialize_session_memory(session_id_hash=session_id_hash, store=self._store)
             if not valid_local_pg_receipt_metadata(
                 state,
                 store=self._pg_store,
                 current_materialized=current,
+                require_ready_vector=state.get("receipt_version") == 4,
             ):
                 return None
             if state["session_id_hash"] != session_id_hash:
                 return None
-            if state.get("representation_kind") == REPRESENTATION_KIND:
+            if state.get("receipt_version") == 4:
+                if state.get("representation") != "segment_v1":
+                    return None
+                if current.content_hash != state["representation_content_hash"]:
+                    return None
+                representation_metadata = {
+                    "representation": "segment_v1",
+                    "segment_ids": list(state["segment_ids"]),
+                    "segment_content_hashes": list(state["segment_content_hashes"]),
+                    "segment_set_digest": state["segment_set_digest"],
+                }
+            elif state.get("representation_kind") == REPRESENTATION_KIND:
                 from ..couchdb_source.document_model import sha256_hash
                 from .qdrant_backfill import public_safe_mask_body
 
@@ -96,7 +109,14 @@ class CouchDBProjectionStateAuthorityResolver:
                 if current.content_hash != state["representation_content_hash"]:
                     return None
             representation_hash = state["representation_content_hash"]
-            if str(state.get("session_memory_knowledge_id") or "") != str(hit.get("memory_id") or ""):
+            hit_id = str(hit.get("memory_id") or "")
+            if state.get("receipt_version") == 4:
+                try:
+                    hit_index = state["segment_ids"].index(hit_id)
+                except ValueError:
+                    return None
+                representation_hash = state["segment_content_hashes"][hit_index]
+            elif str(state.get("session_memory_knowledge_id") or "") != hit_id:
                 return None
             if any(str(state.get(key) or "") != str(hit.get(key) or "") for key in ("provider", "project")):
                 return None
@@ -153,6 +173,7 @@ class CouchDBProjectionStateAuthorityResolver:
             "provider": str(state.get("provider") or ""),
             "project": str(state.get("project") or ""),
             "content_hash": content_hash,
+            **representation_metadata,
         }
 
 

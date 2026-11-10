@@ -184,7 +184,16 @@ def valid_local_pg_receipt_metadata(
     if not isinstance(receipt, dict):
         return False
     version = receipt.get("receipt_version")
-    if type(version) is not int or version != LOCAL_REPRESENTATION_RECEIPT_VERSION:
+    if type(version) is not int:
+        return False
+    if version == 4:
+        return valid_local_segment_receipt_v4(
+            receipt,
+            store=store,
+            current_materialized=current_materialized,
+            require_ready_vector=require_ready_vector,
+        )
+    if version != LOCAL_REPRESENTATION_RECEIPT_VERSION:
         return False
     if any(not isinstance(receipt[key], str) for key in _BASE_FIELDS if key in receipt):
         return False
@@ -197,6 +206,197 @@ def valid_local_pg_receipt_metadata(
         current_materialized=current_materialized,
         require_ready_vector=require_ready_vector,
     )
+
+
+def _segment_receipt_digest(receipt: dict) -> str:
+    fields = (
+        "receipt_version",
+        "representation",
+        "project",
+        "provider",
+        "session_id_hash",
+        "active_content_hash",
+        "projected_source_hash",
+        "representation_content_hash",
+        "session_memory_knowledge_id",
+        "embedding_profile",
+        "segment_ids",
+        "segment_content_hashes",
+        "segment_set_digest",
+    )
+    return sha256_hash(
+        json.dumps(
+            {key: receipt[key] for key in fields},
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+    )
+
+
+def build_local_segment_receipt_v4(
+    *,
+    project: str,
+    provider: str,
+    session_id_hash: str,
+    active_content_hash: str,
+    projected_source_hash: str,
+    representation_content_hash: str,
+    session_memory_knowledge_id: str,
+    embedding_profile: str,
+    segment_ids: list[str],
+    segment_content_hashes: list[str],
+    segment_set_digest: str,
+) -> dict[str, Any]:
+    receipt: dict[str, Any] = {
+        "receipt_version": 4,
+        "representation": "segment_v1",
+        "project": project,
+        "provider": provider,
+        "session_id_hash": session_id_hash,
+        "active_content_hash": active_content_hash,
+        "projected_source_hash": projected_source_hash,
+        "representation_content_hash": representation_content_hash,
+        "session_memory_knowledge_id": session_memory_knowledge_id,
+        "embedding_profile": embedding_profile,
+        "segment_ids": list(segment_ids),
+        "segment_content_hashes": list(segment_content_hashes),
+        "segment_set_digest": segment_set_digest,
+    }
+    receipt["provenance_digest"] = _segment_receipt_digest(receipt)
+    if not valid_local_segment_receipt_v4(receipt):
+        raise ValueError("constructed local segment receipt v4 failed validation")
+    return receipt
+
+
+def valid_local_segment_receipt_v4(
+    receipt: dict,
+    *,
+    store: Any | None = None,
+    current_materialized: Any | None = None,
+    require_ready_vector: bool = False,
+) -> bool:
+    if not isinstance(receipt, dict):
+        return False
+    required = {
+        "receipt_version",
+        "representation",
+        "project",
+        "provider",
+        "session_id_hash",
+        "active_content_hash",
+        "projected_source_hash",
+        "representation_content_hash",
+        "session_memory_knowledge_id",
+        "embedding_profile",
+        "segment_ids",
+        "segment_content_hashes",
+        "segment_set_digest",
+        "provenance_digest",
+    }
+    if set(receipt) - (_BASE_FIELDS | required) or not required.issubset(receipt):
+        return False
+    if (
+        type(receipt.get("receipt_version")) is not int
+        or receipt["receipt_version"] != 4
+        or receipt.get("representation") != "segment_v1"
+        or receipt.get("embedding_profile") != LOCAL_EMBEDDING_PROFILE_ID
+    ):
+        return False
+    for key in (
+        "project",
+        "provider",
+        "session_id_hash",
+        "active_content_hash",
+        "projected_source_hash",
+        "representation_content_hash",
+        "session_memory_knowledge_id",
+    ):
+        if not isinstance(receipt.get(key), str) or not receipt[key]:
+            return False
+    segment_ids = receipt.get("segment_ids")
+    segment_content_hashes = receipt.get("segment_content_hashes")
+    if (
+        not isinstance(segment_ids, list)
+        or not segment_ids
+        or any(not isinstance(value, str) or not value or len(value) > 64 for value in segment_ids)
+        or len(set(segment_ids)) != len(segment_ids)
+        or receipt["session_memory_knowledge_id"] != segment_ids[0]
+        or not isinstance(segment_content_hashes, list)
+        or len(segment_content_hashes) != len(segment_ids)
+        or any(
+            not isinstance(value, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None
+            for value in segment_content_hashes
+        )
+    ):
+        return False
+    if not all(
+        isinstance(receipt.get(key), str)
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", receipt[key])
+        for key in (
+            "session_id_hash",
+            "active_content_hash",
+            "projected_source_hash",
+            "representation_content_hash",
+            "segment_set_digest",
+            "provenance_digest",
+        )
+    ):
+        return False
+    expected_set_digest = sha256_hash(
+        json.dumps(segment_ids, ensure_ascii=False, separators=(",", ":"))
+    )
+    if (
+        receipt["segment_set_digest"] != expected_set_digest
+        or receipt["provenance_digest"] != _segment_receipt_digest(receipt)
+    ):
+        return False
+    if current_materialized is not None and (
+        not current_materialized.fully_materialized
+        or current_materialized.session_id_hash != receipt["session_id_hash"]
+        or current_materialized.project != receipt["project"]
+        or current_materialized.provider != receipt["provider"]
+        or current_materialized.content_hash != receipt["active_content_hash"]
+        or current_materialized.source_hash != receipt["projected_source_hash"]
+        or current_materialized.content_hash != receipt["representation_content_hash"]
+    ):
+        return False
+    if store is not None:
+        from ..local_embedding.canonical import compute_input_hash
+        from ..model_connectors import LOCAL_EMBEDDING_DIM
+
+        for segment_id in segment_ids:
+            row = store.get_chunk(segment_id)
+            if (
+                row is None
+                or row.session_id_hash != receipt["session_id_hash"]
+                or row.project != receipt["project"]
+                or row.provider != receipt["provider"]
+                or not row.content_markdown
+                or sha256_hash(row.content_markdown) != row.content_hash
+            ):
+                return False
+            local = store.get_local_embedding_row(
+                target_type="session_chunk",
+                target_id=segment_id,
+                embedding_profile=receipt["embedding_profile"],
+            )
+            if local is None:
+                if require_ready_vector:
+                    return False
+                continue
+            if (
+                local.get("source_content_hash") != row.content_hash
+                or local.get("input_hash") != compute_input_hash(row.content_markdown)
+                or (require_ready_vector and (
+                    local.get("state") != "ready"
+                    or local.get("vector") is None
+                    or len(local["vector"]) != LOCAL_EMBEDDING_DIM
+                ))
+            ):
+                return False
+    return True
 
 
 def valid_local_representation_receipt_v3(

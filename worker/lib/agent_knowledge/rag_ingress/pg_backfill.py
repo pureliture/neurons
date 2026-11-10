@@ -254,16 +254,27 @@ class PgSessionMemoryProjector:
         *,
         chunk_embedder=None,
         allow_deferred_on_model_unavailable: bool = True,
+        representation: str = "session_v1",
+        segment_max_bytes: int = 4096,
     ) -> None:
+        if representation not in {"session_v1", "segment_v1"}:
+            raise ValueError("unsupported session-memory representation")
+        if isinstance(segment_max_bytes, bool) or int(segment_max_bytes) <= 0:
+            raise ValueError("segment_max_bytes must be positive")
         self._profile = validated_pg_embedding_profile(embed_provider)
         self._store = store
         self._embed = embed_provider
         self._chunk_embedder = chunk_embedder
         self._allow_deferred = bool(allow_deferred_on_model_unavailable)
+        self._representation = representation
+        self._segment_max_bytes = int(segment_max_bytes)
         self.last_local_representation_receipt: dict[str, Any] | None = None
         self.last_local_identity_scheme: str | None = None
         self.last_local_identity_bypassed_rows: int = 0
         self.last_local_identity_resolution: str = ""
+        self.last_segments_total = 0
+        self.last_segments_reused = 0
+        self.last_segments_embedded = 0
 
     @property
     def embedding_profile(self) -> str:
@@ -272,6 +283,10 @@ class PgSessionMemoryProjector:
     def project(self, *, target_profile: str, document: dict[str, Any]) -> str:
         self.last_local_identity_bypassed_rows = 0
         self.last_local_identity_resolution = ""
+        self.last_local_representation_receipt = None
+        self.last_segments_total = 0
+        self.last_segments_reused = 0
+        self.last_segments_embedded = 0
         assert_index_target_allowed(target_profile)
 
         body = str(document.get("body") or "")
@@ -291,7 +306,19 @@ class PgSessionMemoryProjector:
         )
         observed_at = _as_optional_datetime(observed_raw)
         assert_pg_text_safe(body, session_id_hash, project, provider, source_hash, content_hash)
+        if self._representation == "segment_v1" and self._profile != LOCAL_EMBEDDING_PROFILE_ID:
+            raise ValueError("segment_v1 requires the local embedding profile")
         if self._profile == LOCAL_EMBEDDING_PROFILE_ID:
+            if self._representation == "segment_v1":
+                return self._project_local_segments(
+                    document=document,
+                    session_id_hash=session_id_hash,
+                    project=project,
+                    provider=provider,
+                    source_hash=source_hash,
+                    content_hash=content_hash,
+                    observed_at=observed_at,
+                )
             return self._project_local_profile(
                 body=body,
                 content_hash=content_hash,
@@ -423,6 +450,149 @@ class PgSessionMemoryProjector:
         if stored.embedding is None or len(stored.embedding) != embedding_size:
             raise ValueError("PG ready chunk vector mismatch")
         return chunk_id
+
+    def _project_local_segments(
+        self,
+        *,
+        document: dict[str, Any],
+        session_id_hash: str,
+        project: str,
+        provider: str,
+        source_hash: str,
+        content_hash: str,
+        observed_at: Any,
+    ) -> str:
+        import json
+        from types import SimpleNamespace
+
+        from ..local_embedding.canonical import compute_input_hash
+        from ..model_connectors import LOCAL_EMBEDDING_DIM, LOCAL_EMBEDDING_MODEL
+        from ..postgres_store.outbox_worker import LocalEmbeddingOutboxWorker
+        from ..postgres_store.pgvector_store import SessionChunk
+        from ..session_memory.segments import build_segments
+        from ..couchdb_source.document_model import sha256_hash
+        from .pg_embedding_chunks import EmbeddingChunksPending
+        from .pg_representation import build_local_segment_receipt_v4
+
+        if getattr(self._embed, "size", 0) != LOCAL_EMBEDDING_DIM:
+            raise ValueError("local embedding provider has invalid size")
+        materialized = SimpleNamespace(
+            session_id_hash=session_id_hash,
+            project=project,
+            provider=provider,
+            conversation_views=tuple(document.get("conversation_views") or ()),
+            tool_evidence_bodies=tuple(document.get("tool_evidence_bodies") or ()),
+        )
+        segments = build_segments(materialized, max_bytes=self._segment_max_bytes)
+        self.last_segments_total = len(segments)
+        segment_ids: list[str] = []
+        pending_ids: list[str] = []
+        for segment in segments:
+            assert_pg_text_safe(segment.text, session_id_hash, project, provider, source_hash)
+            assert_pg_embedding_egress_safe(segment.text)
+            row = self._store.get_chunk(segment.segment_id)
+            if row is not None and (
+                row.session_id_hash != session_id_hash
+                or row.project != project
+                or row.provider != provider
+                or row.content_markdown != segment.text
+                or row.content_hash != segment.content_hash
+            ):
+                raise ValueError("PG segment identity conflict: row scope or body mismatch")
+            local_row = (
+                self._store.get_local_embedding_row(
+                    target_type="session_chunk",
+                    target_id=segment.segment_id,
+                    embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
+                )
+                if row is not None
+                else None
+            )
+            expected_input_hash = compute_input_hash(segment.text)
+            ready = bool(
+                row is not None
+                and local_row is not None
+                and local_row.get("state") == "ready"
+                and local_row.get("source_content_hash") == segment.content_hash
+                and local_row.get("input_hash") == expected_input_hash
+                and local_row.get("vector") is not None
+                and len(local_row["vector"]) == LOCAL_EMBEDDING_DIM
+            )
+            if ready:
+                self.last_segments_reused += 1
+            else:
+                chunk = SessionChunk(
+                    chunk_id=segment.segment_id,
+                    session_id_hash=session_id_hash,
+                    project=project,
+                    provider=provider,
+                    chunk_index=segment.segment_index,
+                    content_markdown=segment.text,
+                    content_hash=segment.content_hash,
+                    embedding_model=LOCAL_EMBEDDING_MODEL,
+                    embedding_state="pending",
+                    embedding_revision=1,
+                    observed_at=observed_at,
+                )
+                self._store.insert_chunk_with_local_outbox(
+                    chunk,
+                    profile_id=LOCAL_EMBEDDING_PROFILE_ID,
+                    insert_only=row is None,
+                )
+                pending_ids.append(segment.segment_id)
+            segment_ids.append(segment.segment_id)
+
+        for _ in pending_ids:
+            worker = LocalEmbeddingOutboxWorker(
+                store=self._store,
+                embedding_fn=self._embed.embed,
+                batch_size=1,
+                lease_seconds=60,
+                embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
+            )
+            worker.run_once()
+            if worker.last_batch_failed and not self._allow_deferred:
+                raise RuntimeError("local embedding model call failed during projection")
+
+        for segment in segments:
+            stored = self._store.get_chunk(segment.segment_id)
+            local_row = self._store.get_local_embedding_row(
+                target_type="session_chunk",
+                target_id=segment.segment_id,
+                embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
+            )
+            if (
+                stored is None
+                or stored.session_id_hash != session_id_hash
+                or stored.project != project
+                or stored.provider != provider
+                or stored.content_markdown != segment.text
+                or stored.content_hash != segment.content_hash
+                or local_row is None
+                or local_row.get("state") != "ready"
+                or local_row.get("source_content_hash") != segment.content_hash
+                or local_row.get("input_hash") != compute_input_hash(segment.text)
+                or local_row.get("vector") is None
+                or len(local_row["vector"]) != LOCAL_EMBEDDING_DIM
+            ):
+                raise EmbeddingChunksPending()
+
+        self.last_segments_embedded = len(pending_ids)
+        digest = sha256_hash(json.dumps(segment_ids, ensure_ascii=False, separators=(",", ":")))
+        self.last_local_representation_receipt = build_local_segment_receipt_v4(
+            project=project,
+            provider=provider,
+            session_id_hash=session_id_hash,
+            active_content_hash=content_hash,
+            projected_source_hash=source_hash,
+            representation_content_hash=content_hash,
+            session_memory_knowledge_id=segment_ids[0],
+            embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
+            segment_ids=segment_ids,
+            segment_content_hashes=[segment.content_hash for segment in segments],
+            segment_set_digest=digest,
+        )
+        return segment_ids[0]
 
     def _project_local_profile(
         self,

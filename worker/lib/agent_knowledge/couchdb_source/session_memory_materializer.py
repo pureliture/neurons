@@ -61,6 +61,8 @@ class MaterializedSessionMemory:
     observed_at_end: str = ""
     materialized_at: str = ""
     notes: tuple[str, ...] = field(default_factory=tuple)
+    conversation_views: tuple[ChunkView, ...] = field(default_factory=tuple)
+    tool_evidence_bodies: tuple[str, ...] = field(default_factory=tuple)
 
     def to_projection_document(self) -> dict:
         return {
@@ -76,6 +78,8 @@ class MaterializedSessionMemory:
             "observed_at_start": self.observed_at_start,
             "observed_at_end": self.observed_at_end,
             "materialized_at": self.materialized_at,
+            "conversation_views": self.conversation_views,
+            "tool_evidence_bodies": self.tool_evidence_bodies,
         }
 
 
@@ -396,6 +400,9 @@ def materialize_session_memory(*, session_id_hash: str, store: CouchDBSourceStor
     # store a longer chunk that subsumes an earlier shorter one. Counts/coverage below
     # stay on the STORED `chunks`, so the coverage gate is unaffected.
     body_views, overlap_report = canonicalize_chunk_views([_chunk_to_view(chunk) for chunk in chunks])
+    tool_evidence_bodies = tuple(
+        str(bundle.get("body", "")).rstrip() for bundle in bundles
+    )
 
     lines = [
         f"# session-memory {provider} {project}",
@@ -408,10 +415,10 @@ def materialize_session_memory(*, session_id_hash: str, store: CouchDBSourceStor
         lines.append(view.text.rstrip())
     lines.append("")
     lines.append("## tool_evidence_summary")
-    for bundle in bundles:
+    for evidence_body in tool_evidence_bodies:
         # Full materialization: embed the bundle body so recall needs no CouchDB ref.
         lines.append("")
-        lines.append(str(bundle.get("body", "")).rstrip())
+        lines.append(evidence_body)
     body = "\n".join(lines).rstrip() + "\n"
 
     notes: list[str] = []
@@ -476,6 +483,8 @@ def materialize_session_memory(*, session_id_hash: str, store: CouchDBSourceStor
         observed_at_end=observed_at_end,
         materialized_at=datetime.datetime.now(tz=datetime.timezone.utc).isoformat(),
         notes=tuple(notes),
+        conversation_views=tuple(body_views),
+        tool_evidence_bodies=tool_evidence_bodies,
     )
 
 
@@ -715,7 +724,8 @@ def _commit_projection_state_if_source_current(
             if (
                 projection_status != ProjectionStatus.PROJECTED
                 or not valid_local_pg_receipt_metadata(representation_receipt)
-                or representation_receipt.get("receipt_version") != 3
+                or representation_receipt.get("receipt_version")
+                != (4 if representation_receipt.get("representation") == "segment_v1" else 3)
                 or representation_receipt.get("embedding_profile") != profile_key
                 or any(
                     representation_receipt.get(key) != value
@@ -729,7 +739,7 @@ def _commit_projection_state_if_source_current(
                     }.items()
                 )
             ):
-                raise ValueError("PG local representation receipt v3 mismatch")
+                raise ValueError("PG local representation receipt mismatch")
         else:
             from ..rag_ingress.pg_representation import valid_pg_receipt_metadata
 

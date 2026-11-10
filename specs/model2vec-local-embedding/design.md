@@ -89,6 +89,12 @@
 - 성능 gate 후보: isolated synthetic 동일 길이와 실제 길이 분포, 30분 mixed sustained(초기 microbenchmark의 30초보다 길게), inflow >= 관찰된 실제 peak ×2 의 부하에서 backlog 증가 없이 오류 0, cold/warm p50/p95, CPU/peak+steady RSS, loopback와 private 네트워크의 차이, Mac 다른 앱과 경합. 요청속도·허용 p95·RAM hard cap은 live baseline/사용자 조건 측정 뒤 운영 승인에서 확정; 숫자를 임의로 PASS라 하지 않는다.
 - 제품/운영 수용: 공개 `brain.resolve(mode=query)` 에서 `retrieval_path`, graph_status, authority_join_status, fallback_used가 실제 경로와 부합, 대상 재색인 coverage·failures, worker + queue 안정, restart/sleep recovery, 해당 모든 임베딩 경로에서 외부 유료 endpoint 호출 0 관측. 관찰 기간/비용 청구 지연과 다른 서비스/프로젝트 범위 명시. 사용자 승인, source SHA/image digest, readback과 실제 측정 없이는 운영 PASS 금지.
 
+## P3-1 session-memory segment_v1
+
+기본 `SESSION_MEMORY_REPRESENTATION=session_v1`의 본문·hash·projection은 그대로 둔다. `segment_v1`은 local profile에서만 사용하며, materializer의 턴 순서 view를 `SESSION_MEMORY_SEGMENT_MAX_BYTES`(기본 4096) 경계로 묶고 tool evidence는 마지막 segment에 붙인다. segment ID는 project/provider/session hash/member hash/max bytes로 결정해 source revision과 무관하게 append prefix를 재사용한다.
+
+segment 하나를 기존 `session_memory_chunks` row 하나와 local outbox job 하나로 저장한다. scope/body 및 ready vector가 검증된 row는 재사용하고 schema 변경·stale 표시·GC는 하지 않는다. profile-scoped receipt v4는 ordered `segment_ids`와 digest를 권위로 기록하며, 호환용 knowledge ID는 첫 segment ID다. 현재성 CAS와 source revision fence는 유지한다. 검색은 receipt가 허가한 segment만 세션별 한 card로 묶고 점수에서 `SESSION_MEMORY_SEGMENT_LENGTH_PENALTY`(기본 0.01) × `ln(segment 수)`를 뺀다. 본문은 최고 hit과 같은 세션의 앞뒤 segment만 포함한다.
+
 ## D7 이 문서의 판정 경계
 
 이것은 상세 설계 정본이며 M1–M3 격리 환경 구현의 기준이다. 제시된 수치 중 개발 기본값 및 품질 기준은 제안치이며, 운영 배포·운영 DB/Neo4j 변경·실데이터 재색인(M4–M5)은 별도 승인 대상이다.

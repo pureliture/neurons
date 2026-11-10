@@ -8,6 +8,8 @@ ready, integrity-valid PostgreSQL rows directly. No path falls back to Qdrant.
 from __future__ import annotations
 
 import base64
+import math
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -82,6 +84,7 @@ _RECALL_LIMIT = 5
 # one SQL sentinel. If that window cannot produce the requested result count,
 # fail explicitly rather than treating truncation as an empty successful recall.
 _RECALL_CANDIDATE_LIMIT = 100
+_SEGMENT_TURN_RANGE = re.compile(r"^segment: \d+ turns (\d+)-(\d+)$", re.MULTILINE)
 
 BrainQuerySearch = Callable[[str, str], list[dict[str, Any]]]
 
@@ -108,6 +111,17 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
     if not dsn:
         return None
     direct_migrated = _direct_migrated_reader_enabled(environ)
+    representation = str(environ.get("SESSION_MEMORY_REPRESENTATION") or "session_v1")
+    if representation not in {"session_v1", "segment_v1"}:
+        raise RuntimeError("unsupported session-memory representation")
+    try:
+        segment_length_penalty = float(
+            environ.get("SESSION_MEMORY_SEGMENT_LENGTH_PENALTY", "0.01")
+        )
+    except (TypeError, ValueError):
+        raise RuntimeError("invalid session-memory segment length penalty") from None
+    if not math.isfinite(segment_length_penalty) or segment_length_penalty < 0:
+        raise RuntimeError("invalid session-memory segment length penalty")
     couch_store = None
     embed_provider = None
     try:
@@ -139,6 +153,10 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
         active_profile = validated_pg_embedding_profile(embed_provider)
         from ..model_connectors import LOCAL_EMBEDDING_PROFILE_ID
 
+        if representation == "segment_v1" and (
+            active_profile != LOCAL_EMBEDDING_PROFILE_ID or direct_migrated
+        ):
+            raise RuntimeError("segment_v1 recall requires authority-backed local PG")
         if active_profile == LOCAL_EMBEDDING_PROFILE_ID and hasattr(pg_store, "embedding_profile"):
             pg_store.embedding_profile = LOCAL_EMBEDDING_PROFILE_ID
     except Exception:
@@ -203,9 +221,14 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
                     else None
                 )
                 try:
-                    expected_input_hash = canonical_input_hash_v1(
-                        canonical_session_input_v1(row.content_markdown)
-                    )
+                    if representation == "segment_v1":
+                        from ..local_embedding.canonical import compute_input_hash
+
+                        expected_input_hash = compute_input_hash(row.content_markdown)
+                    else:
+                        expected_input_hash = canonical_input_hash_v1(
+                            canonical_session_input_v1(row.content_markdown)
+                        )
                 except ValueError:
                     continue
                 if local_emb is not None:
@@ -294,11 +317,30 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
                 "memory_id": str(hit["memory_id"]),
                 "card_type": "",
                 "summary": str(hit["summary"]),
+                "provider": str(hit.get("provider") or ""),
+                "project": str(hit.get("project") or ""),
                 "currentness": curr,
                 "score": hit["score"],
                 "content_hash": str(hit["content_hash"]),
                 "temporal": temporal_block,
             })
+            if hit.get("representation") == "segment_v1":
+                all_hits[-1].update(
+                    session_id_hash=str(hit.get("session_id_hash") or ""),
+                    representation="segment_v1",
+                    segment_ids=list(hit.get("segment_ids") or ()),
+                    segment_content_hashes=list(
+                        hit.get("segment_content_hashes") or ()
+                    ),
+                )
+
+        if representation == "segment_v1" and not direct_migrated:
+            all_hits = _group_segment_recall_hits(
+                all_hits,
+                pg_store=pg_store,
+                authority_resolver=resolver,
+                length_penalty=segment_length_penalty,
+            )
 
         current_hits: list[dict[str, Any]] = []
         past_hits: list[dict[str, Any]] = []
@@ -326,6 +368,114 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
         if len(results) < _RECALL_LIMIT and len(raw_chunks) > _RECALL_CANDIDATE_LIMIT:
             # brain.query maps this to projection_state=unavailable, not fresh [].
             raise RuntimeError("PG recall candidate limit exhausted")
+        if representation == "segment_v1":
+            results.sort(key=lambda hit: float(hit.get("score") or 0.0), reverse=True)
         return results[:_RECALL_LIMIT]
 
+    if representation == "segment_v1" and active_profile == LOCAL_EMBEDDING_PROFILE_ID:
+        def _search_session_memory_segments(query: str, project: str) -> list[dict[str, Any]]:
+            return _search(query, f"/project/{project}")
+
+        setattr(_search, "search_session_memory_segments", _search_session_memory_segments)
     return _search
+
+
+def _segment_turn_range(text: str) -> tuple[int, int] | None:
+    match = _SEGMENT_TURN_RANGE.search(text)
+    return (int(match.group(1)), int(match.group(2))) if match else None
+
+
+def _group_segment_recall_hits(
+    hits: list[dict[str, Any]],
+    *,
+    pg_store: PgVectorStore,
+    authority_resolver: Any,
+    length_penalty: float,
+) -> list[dict[str, Any]]:
+    segment_hits: dict[str, list[dict[str, Any]]] = {}
+    session_hits: list[dict[str, Any]] = []
+    for hit in hits:
+        if hit.get("representation") == "segment_v1" and hit.get("session_id_hash"):
+            segment_hits.setdefault(str(hit["session_id_hash"]), []).append(hit)
+        else:
+            session_hits.append(hit)
+
+    grouped: list[dict[str, Any]] = []
+    for session_id_hash, candidates in segment_hits.items():
+        best = max(candidates, key=lambda hit: float(hit.get("score") or 0.0))
+        authorized = authority_resolver.resolve(
+            {
+                "session_id_hash": session_id_hash,
+                "content_hash": best.get("content_hash"),
+                "memory_id": best.get("memory_id"),
+                "provider": best.get("provider"),
+                "project": best.get("project"),
+            }
+        )
+        if authorized is None or authorized.get("representation") != "segment_v1":
+            continue
+        segment_ids = list(authorized.get("segment_ids") or ())
+        segment_content_hashes = list(
+            authorized.get("segment_content_hashes") or ()
+        )
+        if len(segment_content_hashes) != len(segment_ids):
+            continue
+        try:
+            best_index = segment_ids.index(str(best["memory_id"]))
+        except (ValueError, KeyError):
+            continue
+        if segment_content_hashes[best_index] != best.get("content_hash"):
+            continue
+        neighbors: list[tuple[int, dict[str, Any]]] = [
+            (best_index, best),
+        ]
+        for index in (best_index - 1, best_index + 1):
+            if index < 0 or index >= len(segment_ids):
+                continue
+            row = pg_store.get_chunk(segment_ids[index])
+            if (
+                row is None
+                or row.session_id_hash != session_id_hash
+                or row.provider != authorized.get("provider")
+                or row.project != authorized.get("project")
+                or sha256_hash(row.content_markdown) != row.content_hash
+                or row.content_hash != segment_content_hashes[index]
+            ):
+                continue
+            if row.chunk_id != segment_ids[index]:
+                continue
+            neighbors.append(
+                (
+                    index,
+                    {
+                        "summary": row.content_markdown,
+                        "content_hash": row.content_hash,
+                    },
+                )
+            )
+        neighbors.sort(key=lambda item: item[0])
+        ranges = [
+            parsed
+            for _, neighbor in neighbors
+            if (parsed := _segment_turn_range(str(neighbor.get("summary") or ""))) is not None
+        ]
+        result = dict(best)
+        result["segment_ids"] = segment_ids
+        result["segment_content_hashes"] = segment_content_hashes
+        result["summary"] = "\n\n".join(
+            str(neighbor.get("summary") or "") for _, neighbor in neighbors
+        )
+        result["score"] = float(best.get("score") or 0.0) - (
+            length_penalty * math.log(len(segment_ids))
+        )
+        if ranges:
+            result["segment_turn_range"] = {
+                "start": min(turns[0] for turns in ranges),
+                "end": max(turns[1] for turns in ranges),
+            }
+        grouped.append(result)
+    return sorted(
+        [*session_hits, *grouped],
+        key=lambda hit: float(hit.get("score") or 0.0),
+        reverse=True,
+    )
