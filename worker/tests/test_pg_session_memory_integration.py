@@ -31,7 +31,7 @@ def lane(monkeypatch, tmp_path, capsys):
     couch = InMemoryCouchDBSourceStore()
     project = "pg-e2e-" + uuid.uuid4().hex
     sid = _build_synthetic_session(couch, provider="codex", project=project, raw_id=project)
-    _mark_projected(couch, sid, "codex", project)
+    _mark_projected(couch, sid, "codex", project, include_pg_receipt=False)
     legacy = couch.get(dm.projection_state_doc_id(sid))
     embeds = []
 

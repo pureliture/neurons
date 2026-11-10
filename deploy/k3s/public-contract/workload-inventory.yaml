@@ -46,8 +46,6 @@ workloads:
     k3sContract: documented retired compose surface, not a k3s workload target
     scaleCategory: not-a-target
     replicaPolicy: singleton
-    scaleCategory: singleton-stateful
-    replicaPolicy: singleton
   - id: couchdb-source-store
     composeServices:
       - llm-brain-couchdb

@@ -150,7 +150,14 @@ def _build_current_only_active_session(
     return sid
 
 
-def _mark_projected(store: InMemoryCouchDBSourceStore, sid: str, provider: str, project: str) -> None:
+def _mark_projected(
+    store: InMemoryCouchDBSourceStore,
+    sid: str,
+    provider: str,
+    project: str,
+    *,
+    include_pg_receipt: bool = True,
+) -> None:
     """Mark a session as already projected (PROJECTED status)."""
     source_hash = session_source_revision_from_couchdb_source(
         session_id_hash=sid,
@@ -166,14 +173,15 @@ def _mark_projected(store: InMemoryCouchDBSourceStore, sid: str, provider: str, 
     )
     state["source_hash"] = source_hash
     state["projected_source_hash"] = source_hash
-    state["backend_receipts"] = {
-        "postgres_pgvector": {
-            "projection_status": dm.ProjectionStatus.PROJECTED,
-            "projected_source_hash": source_hash,
-            "session_memory_knowledge_id": "pg-ref-fake",
-            "active_content_hash": "sha256:" + "a" * 64,
+    if include_pg_receipt:
+        state["backend_receipts"] = {
+            "postgres_pgvector": {
+                "projection_status": dm.ProjectionStatus.PROJECTED,
+                "projected_source_hash": source_hash,
+                "session_memory_knowledge_id": "pg-ref-fake",
+                "active_content_hash": "sha256:" + "a" * 64,
+            }
         }
-    }
     store.put(state)
 
 
