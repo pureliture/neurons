@@ -258,6 +258,7 @@ def test_neuron_knowledge_help_lists_server_owned_commands(capsys):
         "neuron-session-memory-build",
         "native-memory-sync",
         "session-memory-gc",
+        "session-memory-stale-plan",
         "transcript-backfill",
         "session-entry-recall",
         "transcript-resources",

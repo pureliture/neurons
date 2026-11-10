@@ -175,6 +175,19 @@ class SessionChunk:
     observed_at: datetime | None = None
 
 
+@dataclass(frozen=True)
+class SessionChunkMeta:
+    chunk_id: str
+    session_id_hash: str
+    project: str
+    provider: str
+    content_hash: str
+    content_bytes: int
+    created_at: datetime | None
+    updated_at: datetime | None
+    observed_at: datetime | None
+
+
 @dataclass
 class OutboxJob:
     outbox_id: int
@@ -1118,6 +1131,99 @@ class PgVectorStore:
                 )
                 row = cur.fetchone()
         return _chunk_from_row(row) if row is not None else None
+
+    def iter_session_chunk_meta_batches(
+        self,
+        *,
+        batch_size: int = 100,
+        limit_sessions: int = 20_000,
+    ) -> Iterator[tuple[str, tuple[SessionChunkMeta, ...]]]:
+        """본문과 벡터 없이 세션 경계를 유지하며 메타데이터를 읽는다."""
+
+        if isinstance(batch_size, bool) or batch_size < 1:
+            raise ValueError("batch_size must be positive")
+        if isinstance(limit_sessions, bool) or limit_sessions < 1:
+            raise ValueError("limit_sessions must be positive")
+        last_session_id: str | None = None
+        sessions_yielded = 0
+        with self._scope() as db:
+            with db.cursor() as cur:
+                cur.execute("SET TRANSACTION READ ONLY")
+            while sessions_yielded < limit_sessions:
+                current_batch_size = min(
+                    batch_size,
+                    limit_sessions - sessions_yielded,
+                )
+                with db.cursor() as cur:
+                    if last_session_id is None:
+                        cur.execute(
+                            """
+                            SELECT DISTINCT session_id_hash
+                              FROM session_memory_chunks
+                             ORDER BY session_id_hash
+                             LIMIT %s
+                            """,
+                            (current_batch_size,),
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            SELECT DISTINCT session_id_hash
+                              FROM session_memory_chunks
+                             WHERE session_id_hash > %s
+                             ORDER BY session_id_hash
+                             LIMIT %s
+                            """,
+                            (last_session_id, current_batch_size),
+                        )
+                    session_rows = cur.fetchall()
+                session_ids = [
+                    str(_row_value(row, "session_id_hash", 0) or "")
+                    for row in session_rows
+                ]
+                if not session_ids:
+                    break
+                chunks_by_session: dict[str, list[SessionChunkMeta]] = {
+                    session_id: [] for session_id in session_ids
+                }
+                with db.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT chunk_id, session_id_hash, project, provider, content_hash,
+                               octet_length(content_markdown) AS content_bytes,
+                               created_at, updated_at, observed_at
+                          FROM session_memory_chunks
+                         WHERE session_id_hash = ANY(%s)
+                         ORDER BY session_id_hash, chunk_id
+                        """,
+                        (session_ids,),
+                    )
+                    rows = cur.fetchall()
+                for row in rows:
+                    chunk = SessionChunkMeta(
+                        chunk_id=str(_row_value(row, "chunk_id", 0) or ""),
+                        session_id_hash=str(
+                            _row_value(row, "session_id_hash", 1) or ""
+                        ),
+                        project=str(_row_value(row, "project", 2) or ""),
+                        provider=str(_row_value(row, "provider", 3) or ""),
+                        content_hash=str(_row_value(row, "content_hash", 4) or ""),
+                        content_bytes=int(_row_value(row, "content_bytes", 5) or 0),
+                        created_at=_as_optional_datetime(
+                            _row_value(row, "created_at", 6)
+                        ),
+                        updated_at=_as_optional_datetime(
+                            _row_value(row, "updated_at", 7)
+                        ),
+                        observed_at=_as_optional_datetime(
+                            _row_value(row, "observed_at", 8)
+                        ),
+                    )
+                    chunks_by_session.setdefault(chunk.session_id_hash, []).append(chunk)
+                for session_id in session_ids:
+                    yield session_id, tuple(chunks_by_session[session_id])
+                sessions_yielded += len(session_ids)
+                last_session_id = session_ids[-1]
 
     def find_ready_chunk_by_identity(
         self,
@@ -4680,6 +4786,7 @@ __all__ = [
     "MemoryCard",
     "MemoryEdge",
     "SessionChunk",
+    "SessionChunkMeta",
     "OutboxJob",
     "LocalOutboxJob",
     "PgVectorStore",
