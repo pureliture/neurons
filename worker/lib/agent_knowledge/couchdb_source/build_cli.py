@@ -22,6 +22,7 @@ import base64
 import json
 import os
 import sys
+from types import SimpleNamespace
 
 from agent_knowledge.qdrant_write_gateway_runtime import (
     QdrantMutationSource,
@@ -53,7 +54,32 @@ def _build_auth_header(user: str, password: str) -> str:
     return basic_auth_header(user=user, password=password)
 
 
-def _blocked_source_hash_from_state(state: dict, backend: str) -> str:
+def _pg_receipt_lane(embedding_profile: str) -> str:
+    from ..model_connectors import LOCAL_EMBEDDING_PROFILE_ID
+
+    return (
+        "postgres_pgvector_local"
+        if embedding_profile == LOCAL_EMBEDDING_PROFILE_ID
+        else "postgres_pgvector"
+    )
+
+
+def _pg_receipt(state: dict, *, embedding_profile: str) -> dict:
+    receipts = state.get("backend_receipts") or {}
+    if not isinstance(receipts, dict):
+        return {}
+    lane = _pg_receipt_lane(embedding_profile)
+    lane_receipts = receipts.get(lane) or {}
+    if lane == "postgres_pgvector_local":
+        receipt = lane_receipts.get(embedding_profile) if isinstance(lane_receipts, dict) else None
+    else:
+        receipt = lane_receipts
+    return receipt if isinstance(receipt, dict) else {}
+
+
+def _blocked_source_hash_from_state(
+    state: dict, backend: str, *, embedding_profile: str = ""
+) -> str:
     """Return the terminal-failure source hash for a top-level state document.
 
     This must be called on the raw projection_state, before ``backend_receipts``
@@ -65,7 +91,8 @@ def _blocked_source_hash_from_state(state: dict, backend: str) -> str:
         return ""
     from .document_model import ProjectionStatus
 
-    attempt = (state.get("projection_attempt") or {}).get(backend) or {}
+    lane = _pg_receipt_lane(embedding_profile)
+    attempt = (state.get("projection_attempt") or {}).get(lane) or {}
     if (
         attempt.get("policy_version") == PG_INPUT_POLICY_VERSION
         and str(attempt.get("status") or "") == ProjectionStatus.FAILED
@@ -73,18 +100,25 @@ def _blocked_source_hash_from_state(state: dict, backend: str) -> str:
         and str(attempt.get("source_hash") or "")
     ):
         return str(attempt["source_hash"])
-    # Backward compatibility for states written before projection_attempt existed.
-    if (
-        str(state.get("projection_status") or "") == ProjectionStatus.FAILED
-        and str(state.get("failure_reason") or "") in TERMINAL_INPUT_REASONS
-        and str(state.get("failure_source_hash") or "")
-    ):
-        return str(state["failure_source_hash"])
+    if lane != "postgres_pgvector_local":
+        # Backward compatibility for states written before projection_attempt existed.
+        if (
+            str(state.get("projection_status") or "") == ProjectionStatus.FAILED
+            and str(state.get("failure_reason") or "") in TERMINAL_INPUT_REASONS
+            and str(state.get("failure_source_hash") or "")
+        ):
+            return str(state["failure_source_hash"])
     return ""
 
 
 def _select_sessions_needing_projection(
-    store, limit: int, *, project: str = "", provider: str = "", backend: str = "postgres_pgvector"
+    store,
+    limit: int,
+    *,
+    project: str = "",
+    provider: str = "",
+    backend: str = "postgres_pgvector",
+    embedding_profile: str = "",
 ) -> list[dict]:
     """Return sessions whose projected revision is not the current source revision.
 
@@ -130,11 +164,13 @@ def _select_sessions_needing_projection(
                 session_id_hash
                 and str(state.get("_id") or "") == projection_state_doc_id(session_id_hash)
             ):
-                blocked = _blocked_source_hash_from_state(state, backend)
+                blocked = _blocked_source_hash_from_state(
+                    state, backend, embedding_profile=embedding_profile
+                )
                 if blocked:
                     blocked_source_hashes[session_id_hash] = blocked
         states = [
-            {**state, **(state.get("backend_receipts") or {}).get(backend, {})}
+            {**state, **_pg_receipt(state, embedding_profile=embedding_profile)}
             for state in raw_states
         ]
     else:
@@ -285,6 +321,7 @@ def _write_selection_checkpoint(
     path: str,
     last_seq: str,
     *,
+    embedding_profile: str = "",
     pending_session_ids: list[str] | tuple[str, ...] = (),
     full_walk_in_progress: bool = False,
     pending_attempts: dict[str, int] | None = None,
@@ -297,6 +334,7 @@ def _write_selection_checkpoint(
     payload: dict = {
         "schema_version": _SELECTION_CHECKPOINT_SCHEMA,
         "pg_input_policy_version": PG_INPUT_POLICY_VERSION,
+        "embedding_profile": str(embedding_profile or ""),
         "last_seq": str(last_seq or ""),
         "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
@@ -322,7 +360,12 @@ def _write_selection_checkpoint(
 
 
 def _evaluate_session_change(
-    store, session_id_hash: str, *, project: str, provider: str
+    store,
+    session_id_hash: str,
+    *,
+    project: str,
+    provider: str,
+    embedding_profile: str = "",
 ) -> tuple[bool, dict | None]:
     """Single-session mirror of ``_select_sessions_needing_projection`` (pg backend).
 
@@ -349,11 +392,11 @@ def _evaluate_session_change(
     blocked_source_hash = ""
     if isinstance(state, dict) and str(state.get("_id") or "") == state_id:
         blocked_source_hash = _blocked_source_hash_from_state(
-            state, "postgres_pgvector"
+            state, "postgres_pgvector", embedding_profile=embedding_profile
         )
         merged = {
             **state,
-            **((state.get("backend_receipts") or {}).get("postgres_pgvector") or {}),
+            **_pg_receipt(state, embedding_profile=embedding_profile),
         }
     projected_source_hash = ""
     if str(merged.get("projection_status") or "") == ProjectionStatus.PROJECTED:
@@ -422,6 +465,7 @@ def _select_sessions_incremental(
     project: str = "",
     provider: str = "",
     backend: str = "postgres_pgvector",
+    embedding_profile: str = "",
 ) -> tuple[list[dict], dict, int]:
     """Change-feed driven selection.
 
@@ -472,7 +516,11 @@ def _select_sessions_incremental(
             raise ValueError("change document session mismatch")
         examined.add(session_id_hash)
         needs, session = _evaluate_session_change(
-            store, session_id_hash, project=project, provider=provider
+            store,
+            session_id_hash,
+            project=project,
+            provider=provider,
+            embedding_profile=embedding_profile,
         )
         if needs and session is not None:
             selected.append(session)
@@ -530,7 +578,12 @@ def _apply_pending_attempt_cap(
 
 
 def _resolve_pending_sessions(
-    store, pending_ids: list[str], *, project: str, provider: str
+    store,
+    pending_ids: list[str],
+    *,
+    project: str,
+    provider: str,
+    embedding_profile: str = "",
 ) -> list[dict]:
     """Re-select previously chosen sessions whose projection is still unfinished.
 
@@ -546,7 +599,11 @@ def _resolve_pending_sessions(
     for session_id_hash in pending_ids:
         try:
             needs_projection, session = _evaluate_session_change(
-                store, session_id_hash, project=project, provider=provider
+                store,
+                session_id_hash,
+                project=project,
+                provider=provider,
+                embedding_profile=embedding_profile,
             )
         except Exception:  # noqa: BLE001 - a read failure must not discard pending work
             still_pending.append({"session_id_hash": session_id_hash})
@@ -564,6 +621,7 @@ def _select_sessions_for_cycle(
     provider: str,
     backend: str,
     mode: str,
+    embedding_profile: str = "",
     persist: bool = True,
 ) -> list[dict]:
     """Checkpoint-aware selection: incremental when possible, full walk otherwise.
@@ -585,6 +643,8 @@ def _select_sessions_for_cycle(
     checkpoint = _read_selection_checkpoint(path)
     last_seq = str(checkpoint.get("last_seq") or "")
     full_walk_pending = bool(checkpoint.get("full_walk_in_progress"))
+    if str(checkpoint.get("embedding_profile") or "") != str(embedding_profile or ""):
+        full_walk_pending = True
     pending_ids = _pending_session_ids(checkpoint)
     if backend == "postgres_pgvector" and checkpoint.get("pg_input_policy_version") != PG_INPUT_POLICY_VERSION:
         from .document_model import SourceDocType, projection_state_doc_id
@@ -619,7 +679,11 @@ def _select_sessions_for_cycle(
             *_valid_projection_ids(failures),
         ]))
     pending_sessions = _resolve_pending_sessions(
-        store, pending_ids, project=project, provider=provider
+        store,
+        pending_ids,
+        project=project,
+        provider=provider,
+        embedding_profile=embedding_profile,
     )
     pending_attempts = dict(checkpoint.get("pending_session_attempts") or {})
     pending_sessions, pending_attempts, dropped_pending = _apply_pending_attempt_cap(
@@ -651,6 +715,7 @@ def _select_sessions_for_cycle(
                 project=project,
                 provider=provider,
                 backend=backend,
+                embedding_profile=embedding_profile,
             )
         except Exception as exc:  # noqa: BLE001 - fail-safe fallback to the full walk
             print(
@@ -684,7 +749,12 @@ def _select_sessions_for_cycle(
             sequence_before = ""
         walk_limit = 0 if fresh_limit is None else fresh_limit
         fresh = _select_sessions_needing_projection(
-            store, limit=walk_limit, project=project, provider=provider, backend=backend
+            store,
+            limit=walk_limit,
+            project=project,
+            provider=provider,
+            backend=backend,
+            embedding_profile=embedding_profile,
         )
         sessions = _dedupe_sessions(processed_pending + fresh)
         capped = fresh_limit is not None and fresh_limit > 0 and len(fresh) >= fresh_limit
@@ -706,6 +776,7 @@ def _select_sessions_for_cycle(
                 next_seq,
                 pending_session_ids=durable_pending,
                 full_walk_in_progress=next_full_walk_pending,
+                embedding_profile=embedding_profile,
                 pending_attempts={
                     key: value
                     for key, value in pending_attempts.items()
@@ -837,6 +908,18 @@ def main(argv: list[str] | None = None) -> int:
 
     # --- Backend Resolution -------------------------------------------------
     backend = os.environ.get("SESSION_MEMORY_PROJECTION_BACKEND", "postgres_pgvector").strip().lower()
+    embedding_profile = ""
+    if backend == "postgres_pgvector":
+        try:
+            from ..rag_ingress.pg_backfill import validated_pg_embedding_profile
+            from ..rag_ingress.qdrant_embedding import resolve_embedding_config
+
+            cfg = resolve_embedding_config(os.environ)
+            embedding_profile = validated_pg_embedding_profile(
+                SimpleNamespace(model=cfg["model"], size=cfg["dim"])
+            )
+        except Exception:
+            embedding_profile = ""
 
     # --- Session selection --------------------------------------------------
     explicit_session_ids = _explicit_session_ids(args.session_id_hashes)
@@ -871,6 +954,7 @@ def main(argv: list[str] | None = None) -> int:
             provider=str(args.provider or ""),
             backend=backend,
             mode=os.environ.get("SESSION_MEMORY_SELECTION_MODE", "auto"),
+            embedding_profile=embedding_profile,
             persist=not args.dry_run,
         )
     selected_count = len(sessions)
@@ -957,6 +1041,25 @@ def main(argv: list[str] | None = None) -> int:
                         "schema_version": BUILD_CLI_SCHEMA_VERSION,
                         "error": "env_missing",
                         "reason": "PGVECTOR_DSN is required for the postgres_pgvector projection backend",
+                        "dry_run": False,
+                        "selected": selected_count,
+                        "projected": 0,
+                        "failed": 0,
+                        "skipped": 0,
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 2
+        projector_profile = str(getattr(projector, "embedding_profile", "") or "")
+        if projector_profile and projector_profile != embedding_profile:
+            _close_if_supported(projector)
+            print(
+                json.dumps(
+                    {
+                        "schema_version": BUILD_CLI_SCHEMA_VERSION,
+                        "error": "embedding_profile_mismatch",
+                        "reason": "PG projector embedding profile does not match the resolved active profile",
                         "dry_run": False,
                         "selected": selected_count,
                         "projected": 0,
