@@ -79,6 +79,9 @@ def join_mirror_hits_to_authority(
             value = record.get(record_key)
             if value not in (None, ""):
                 joined[hit_key] = str(value)
+        for key in ("representation", "segment_ids", "segment_set_digest"):
+            if key in record:
+                joined[key] = record[key]
         out.append(joined)
     return out
 
