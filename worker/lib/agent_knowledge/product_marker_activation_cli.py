@@ -1,4 +1,4 @@
-"""Operator-only PostgreSQL and Qdrant exact-marker activation CLI."""
+"""Operator-only PostgreSQL exact-marker activation CLI."""
 
 from __future__ import annotations
 
@@ -21,22 +21,6 @@ from .postgres_exact_mutation_marker import (
     PostgresExactMutationMarkerContract,
     build_source_owned_postgres_exact_marker_contract,
 )
-from .qdrant_write_gateway import QdrantGatewayContractError, QdrantMutationRoute
-from .qdrant_write_gateway_runtime import (
-    QDRANT_EXACT_MARKER_METADATA_KEYS,
-    QDRANT_MARKER_REQUIRED_PAYLOAD_INDEX_FIELDS,
-    AuthenticatedQdrantSubject,
-    ExactRouteAuthorizer,
-    QdrantCollectionPolicy,
-    QdrantMarkerMetadataPhase,
-    QdrantMutationSource,
-    RenderedQdrantWriter,
-    activate_qdrant_marker_collection,
-    build_qdrant_coverage_activation_anchor,
-    build_qdrant_coverage_manifest_from_activation_anchor,
-    build_qdrant_pending_cutover_anchor,
-    reconcile_qdrant_marker_metadata,
-)
 
 
 _RESULT_SCHEMA = "product_marker_activation_result.v1"
@@ -45,10 +29,6 @@ _CONFIG_SCHEMA = "product_marker_activation_config.v1"
 _CONFIG_NAME = "product-marker-activation.json"
 _POSTGRES_PHASE = "postgres_schema_activation"
 _POSTGRES_SCOPE = "postgres_exact_marker_activation"
-_QDRANT_PENDING_PHASE = "qdrant_marker_generation_initialization"
-_QDRANT_PENDING_SCOPE = "qdrant_marker_generation_initialization"
-_QDRANT_FINALIZE_PHASE = "qdrant_marker_coverage_finalization"
-_QDRANT_FINALIZE_SCOPE = "qdrant_marker_coverage_finalization"
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _RAW_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _COLLECTION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
@@ -61,10 +41,6 @@ _APPROVAL_SCHEMA = "product_marker_activation_approval.v1"
 _POSTGRES_SECRET_SCHEMA = "product_marker_activation_postgres_secret.v1"
 _POSTGRES_SECRET_CONTRACT_SCHEMA = (
     "product_marker_activation_postgres_secret_contract.v1"
-)
-_QDRANT_SECRET_SCHEMA = "product_marker_activation_qdrant_secret.v1"
-_QDRANT_SECRET_CONTRACT_SCHEMA = (
-    "product_marker_activation_qdrant_secret_contract.v1"
 )
 
 
@@ -91,7 +67,6 @@ class ActivationDependencies:
     """Lazy connection factories; validation paths never call them."""
 
     postgres_connection_factory: Callable[[str], object]
-    qdrant_client_factory: Callable[[str, str], object]
 
 
 class _SafeArgumentParser(argparse.ArgumentParser):
@@ -106,26 +81,9 @@ def _default_postgres_connection_factory(dsn: str) -> object:
     return psycopg.connect(dsn, autocommit=True)
 
 
-def _default_qdrant_client_factory(url: str, api_key: str) -> object:
-    from qdrant_client import QdrantClient
-
-    return QdrantClient(
-        url=url,
-        port=6333,
-        https=True,
-        api_key=api_key,
-        prefer_grpc=False,
-        timeout=5,
-        check_compatibility=False,
-        trust_env=False,
-        follow_redirects=False,
-    )
-
-
 def _default_dependencies() -> ActivationDependencies:
     return ActivationDependencies(
         postgres_connection_factory=_default_postgres_connection_factory,
-        qdrant_client_factory=_default_qdrant_client_factory,
     )
 
 
@@ -339,22 +297,9 @@ def _validate_public_config(config: Mapping[str, object]) -> None:
         raise ProductMarkerActivationCliError("config_invalid")
     _validate_hash(config.get("approval_token_hash"))
     phase = config.get("phase")
-    if phase == _POSTGRES_PHASE:
-        if config.get("operator_scope") != _POSTGRES_SCOPE:
-            raise ProductMarkerActivationCliError("config_invalid")
-        _validate_postgres_public_contract(config.get("contract"))
-        return
-    if phase == _QDRANT_PENDING_PHASE:
-        if config.get("operator_scope") != _QDRANT_PENDING_SCOPE:
-            raise ProductMarkerActivationCliError("config_invalid")
-        _validate_qdrant_pending_public_contract(config.get("contract"))
-        return
-    if phase == _QDRANT_FINALIZE_PHASE:
-        if config.get("operator_scope") != _QDRANT_FINALIZE_SCOPE:
-            raise ProductMarkerActivationCliError("config_invalid")
-        _validate_qdrant_finalize_public_contract(config.get("contract"))
-        return
-    raise ProductMarkerActivationCliError("config_invalid")
+    if phase != _POSTGRES_PHASE or config.get("operator_scope") != _POSTGRES_SCOPE:
+        raise ProductMarkerActivationCliError("config_invalid")
+    _validate_postgres_public_contract(config.get("contract"))
 
 
 def _validate_postgres_public_contract(contract: object) -> None:
@@ -384,101 +329,8 @@ def _validate_postgres_public_contract(contract: object) -> None:
         raise ProductMarkerActivationCliError("config_invalid")
 
 
-def _validate_qdrant_pending_public_contract(contract: object) -> None:
-    if not isinstance(contract, Mapping) or set(contract) != {
-        "activation_hash",
-        "coverage_hash",
-        "credential_inventory_anchor_hash",
-        "generation",
-        "previous_generation_hash",
-        "secret_contract_hash",
-    }:
-        raise ProductMarkerActivationCliError("config_invalid")
-    for key in ("activation_hash", "coverage_hash", "previous_generation_hash"):
-        _validate_raw_hash(contract.get(key))
-    for key in ("credential_inventory_anchor_hash", "secret_contract_hash"):
-        _validate_hash(contract.get(key))
-    generation = contract.get("generation")
-    if (
-        isinstance(generation, bool)
-        or not isinstance(generation, int)
-        or not 0 < generation < 2**63
-    ):
-        raise ProductMarkerActivationCliError("config_invalid")
 
 
-def _validate_qdrant_finalize_public_contract(contract: object) -> None:
-    if not isinstance(contract, Mapping) or set(contract) != {
-        "activation_hash",
-        "auth_boundary_status",
-        "coverage_hash",
-        "credential_inventory_anchor_hash",
-        "direct_write_credentials_zero",
-        "generation",
-        "network_policy_status",
-        "previous_generation_hash",
-        "read_endpoint_write_denied_status",
-        "rendered_inventory",
-        "secret_contract_hash",
-    }:
-        raise ProductMarkerActivationCliError("config_invalid")
-    for key in ("activation_hash", "coverage_hash", "previous_generation_hash"):
-        _validate_raw_hash(contract.get(key))
-    for key in ("credential_inventory_anchor_hash", "secret_contract_hash"):
-        _validate_hash(contract.get(key))
-    generation = contract.get("generation")
-    if (
-        isinstance(generation, bool)
-        or not isinstance(generation, int)
-        or not 0 < generation < 2**63
-        or contract.get("auth_boundary_status") != "validated"
-        or contract.get("network_policy_status") != "validated"
-        or contract.get("read_endpoint_write_denied_status") != "validated"
-        or contract.get("direct_write_credentials_zero") is not True
-    ):
-        raise ProductMarkerActivationCliError("config_invalid")
-    inventory = contract.get("rendered_inventory")
-    if not isinstance(inventory, list) or not inventory:
-        raise ProductMarkerActivationCliError("config_invalid")
-    expected_keys = {
-        "active_caller",
-        "image_ref_hash",
-        "network_policy_ref_hash",
-        "route",
-        "route_set_hash",
-        "source",
-        "workload_ref_hash",
-        "writer_ref_hash",
-    }
-    observed_sources: set[str] = set()
-    for item in inventory:
-        if not isinstance(item, Mapping) or set(item) != expected_keys:
-            raise ProductMarkerActivationCliError("config_invalid")
-        source = item.get("source")
-        route = item.get("route")
-        active_caller = item.get("active_caller")
-        if (
-            not isinstance(source, str)
-            or source not in {value.value for value in QdrantMutationSource}
-            or source in observed_sources
-            or not isinstance(route, str)
-            or route not in {value.value for value in QdrantMutationRoute}
-            or type(active_caller) is not bool
-        ):
-            raise ProductMarkerActivationCliError("config_invalid")
-        observed_sources.add(source)
-        _validate_raw_hash(item.get("writer_ref_hash"))
-        identity_fields = (
-            "image_ref_hash",
-            "network_policy_ref_hash",
-            "route_set_hash",
-            "workload_ref_hash",
-        )
-        if active_caller:
-            for key in identity_fields:
-                _validate_raw_hash(item.get(key))
-        elif any(item.get(key) is not None for key in identity_fields):
-            raise ProductMarkerActivationCliError("config_invalid")
 
 
 def _read_secret_json(fd: int, *, maximum: int, error_code: str) -> dict[str, Any]:
@@ -710,533 +562,20 @@ def _activate_postgres(
     return operation_count, 1, True
 
 
-def _qdrant_secret_contract_hash(secret: Mapping[str, object]) -> str:
-    product_collections = secret.get("product_collections")
-    marker_collection = secret.get("marker_collection")
-    metadata_point_id = secret.get("metadata_point_id")
-    operator_subject_ref_hash = secret.get("operator_subject_ref_hash")
-    url = secret.get("url")
-    anchor = secret.get("credential_inventory_anchor_hash")
-    if (
-        not isinstance(product_collections, list)
-        or not product_collections
-        or len(product_collections) != len(set(product_collections))
-        or any(
-            not isinstance(name, str) or not _COLLECTION_NAME.fullmatch(name)
-            for name in product_collections
-        )
-        or not isinstance(marker_collection, str)
-        or not _COLLECTION_NAME.fullmatch(marker_collection)
-        or marker_collection in product_collections
-        or not isinstance(metadata_point_id, str)
-        or not isinstance(operator_subject_ref_hash, str)
-        or not _RAW_SHA256.fullmatch(operator_subject_ref_hash)
-        or not isinstance(url, str)
-        or not isinstance(anchor, str)
-        or not _SHA256.fullmatch(anchor)
-    ):
-        raise ProductMarkerActivationCliError("credential_invalid")
-    try:
-        parsed_point_id = uuid.UUID(metadata_point_id)
-    except (ValueError, AttributeError):
-        raise ProductMarkerActivationCliError("credential_invalid") from None
-    if str(parsed_point_id) != metadata_point_id:
-        raise ProductMarkerActivationCliError("credential_invalid")
-    _validate_canonical_qdrant_operator_url(url)
-    projection = {
-        "credential_inventory_anchor_hash": anchor,
-        "endpoint_identity_hash": _sha256_text(url),
-        "marker_collection_hash": _sha256_text(marker_collection),
-        "metadata_point_id_hash": _sha256_text(metadata_point_id),
-        "operator_subject_ref_hash": operator_subject_ref_hash,
-        "product_collection_hashes": sorted(
-            _sha256_text(name) for name in product_collections
-        ),
-        "schema_version": _QDRANT_SECRET_CONTRACT_SCHEMA,
-    }
-    encoded = json.dumps(
-        projection,
-        ensure_ascii=True,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
-def _validate_canonical_qdrant_operator_url(url: str) -> None:
-    if (
-        not 1 <= len(url) <= 2048
-        or any(character < " " or character == "\x7f" for character in url)
-        or "\\" in url
-        or "%" in url
-    ):
-        raise ProductMarkerActivationCliError("credential_invalid")
-    try:
-        parsed = urllib.parse.urlsplit(url)
-        hostname = parsed.hostname
-        port = parsed.port
-    except (TypeError, ValueError):
-        raise ProductMarkerActivationCliError("credential_invalid") from None
-    if (
-        parsed.scheme != "https"
-        or not hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.path
-        or parsed.query
-        or parsed.fragment
-        or port != 6333
-        or parsed.netloc != f"{hostname}:6333"
-        or hostname == "localhost"
-        or hostname.startswith("0x")
-    ):
-        raise ProductMarkerActivationCliError("credential_invalid")
-    if set(hostname) <= set("0123456789."):
-        try:
-            address = ipaddress.IPv4Address(hostname)
-        except ipaddress.AddressValueError:
-            raise ProductMarkerActivationCliError("credential_invalid") from None
-        if str(address) != hostname:
-            raise ProductMarkerActivationCliError("credential_invalid")
-        return
-    labels = hostname.split(".")
-    if (
-        len(hostname) > 253
-        or any(not label or not _DNS_LABEL.fullmatch(label) for label in labels)
-    ):
-        raise ProductMarkerActivationCliError("credential_invalid")
 
 
-def _validate_qdrant_secret(secret: Mapping[str, object]) -> tuple[str, str]:
-    if set(secret) != {
-        "api_key",
-        "credential_inventory_anchor_hash",
-        "marker_collection",
-        "metadata_point_id",
-        "operator_subject_ref_hash",
-        "product_collections",
-        "schema_version",
-        "url",
-    } or secret.get("schema_version") != _QDRANT_SECRET_SCHEMA:
-        raise ProductMarkerActivationCliError("credential_invalid")
-    api_key = secret.get("api_key")
-    if (
-        not isinstance(api_key, str)
-        or not 16 <= len(api_key) <= 4096
-        or any(character < " " or character == "\x7f" for character in api_key)
-    ):
-        raise ProductMarkerActivationCliError("credential_invalid")
-    return api_key, _qdrant_secret_contract_hash(secret)
 
 
-def _build_qdrant_pending_inputs(
-    *,
-    config: Mapping[str, object],
-    secret: Mapping[str, object],
-) -> tuple[
-    object,
-    QdrantCollectionPolicy,
-    AuthenticatedQdrantSubject,
-    ExactRouteAuthorizer,
-    str,
-    str,
-    str,
-]:
-    api_key, secret_contract_hash = _validate_qdrant_secret(secret)
-    contract_config = config.get("contract")
-    if not isinstance(contract_config, Mapping):
-        raise ProductMarkerActivationCliError("config_invalid")
-    if not hmac.compare_digest(
-        str(contract_config.get("secret_contract_hash") or ""),
-        secret_contract_hash,
-    ) or not hmac.compare_digest(
-        str(contract_config.get("credential_inventory_anchor_hash") or ""),
-        str(secret.get("credential_inventory_anchor_hash") or ""),
-    ):
-        raise ProductMarkerActivationCliError("credential_anchor_mismatch")
-    marker_collection = str(secret["marker_collection"])
-    try:
-        anchor = build_qdrant_pending_cutover_anchor(
-            generation=contract_config["generation"],  # type: ignore[arg-type]
-            marker_collection=marker_collection,
-            previous_generation_hash=str(
-                contract_config["previous_generation_hash"]
-            ),
-            coverage_hash=str(contract_config["coverage_hash"]),
-            activation_hash=str(contract_config["activation_hash"]),
-        )
-        policy = QdrantCollectionPolicy(
-            product_collections=tuple(secret["product_collections"]),  # type: ignore[arg-type]
-            marker_collection=marker_collection,
-        )
-        subject = AuthenticatedQdrantSubject(
-            subject_ref_hash=str(secret["operator_subject_ref_hash"])
-        )
-        authorizer = ExactRouteAuthorizer(
-            bindings=(
-                (
-                    subject.subject_ref_hash,
-                    QdrantMutationSource.OPERATOR_MAINTENANCE,
-                    marker_collection,
-                ),
-            )
-        )
-    except (KeyError, TypeError, ValueError, QdrantGatewayContractError):
-        raise ProductMarkerActivationCliError("qdrant_anchor_invalid") from None
-    return (
-        anchor,
-        policy,
-        subject,
-        authorizer,
-        str(secret["metadata_point_id"]),
-        str(secret["url"]),
-        api_key,
-    )
 
 
-def _build_qdrant_finalize_inputs(
-    *,
-    config: Mapping[str, object],
-    secret: Mapping[str, object],
-) -> tuple[
-    object,
-    QdrantCollectionPolicy,
-    AuthenticatedQdrantSubject,
-    ExactRouteAuthorizer,
-    str,
-    str,
-    str,
-]:
-    api_key, secret_contract_hash = _validate_qdrant_secret(secret)
-    contract_config = config.get("contract")
-    if not isinstance(contract_config, Mapping):
-        raise ProductMarkerActivationCliError("config_invalid")
-    if not hmac.compare_digest(
-        str(contract_config.get("secret_contract_hash") or ""),
-        secret_contract_hash,
-    ) or not hmac.compare_digest(
-        str(contract_config.get("credential_inventory_anchor_hash") or ""),
-        str(secret.get("credential_inventory_anchor_hash") or ""),
-    ):
-        raise ProductMarkerActivationCliError("credential_anchor_mismatch")
-    inventory_config = contract_config.get("rendered_inventory")
-    if not isinstance(inventory_config, list):
-        raise ProductMarkerActivationCliError("config_invalid")
-    marker_collection = str(secret["marker_collection"])
-    try:
-        rendered_inventory = tuple(
-            RenderedQdrantWriter(
-                source=QdrantMutationSource(str(item["source"])),
-                route=QdrantMutationRoute(str(item["route"])),
-                writer_ref_hash=str(item["writer_ref_hash"]),
-                active_caller=item["active_caller"],  # type: ignore[arg-type]
-                workload_ref_hash=item["workload_ref_hash"],  # type: ignore[arg-type]
-                image_ref_hash=item["image_ref_hash"],  # type: ignore[arg-type]
-                network_policy_ref_hash=item["network_policy_ref_hash"],  # type: ignore[arg-type]
-                route_set_hash=item["route_set_hash"],  # type: ignore[arg-type]
-            )
-            for item in inventory_config
-        )
-        anchor = build_qdrant_coverage_activation_anchor(
-            generation=contract_config["generation"],  # type: ignore[arg-type]
-            marker_collection=marker_collection,
-            rendered_inventory=rendered_inventory,
-            previous_generation_hash=str(
-                contract_config["previous_generation_hash"]
-            ),
-            auth_boundary_status=str(contract_config["auth_boundary_status"]),
-            network_policy_status=str(contract_config["network_policy_status"]),
-            direct_write_credentials_zero=contract_config[
-                "direct_write_credentials_zero"
-            ],  # type: ignore[arg-type]
-            read_endpoint_write_denied_status=str(
-                contract_config["read_endpoint_write_denied_status"]
-            ),
-            activation_hash=str(contract_config["activation_hash"]),
-        )
-        coverage = build_qdrant_coverage_manifest_from_activation_anchor(anchor)
-        if not hmac.compare_digest(
-            coverage.coverage_hash,
-            str(contract_config["coverage_hash"]),
-        ):
-            raise QdrantGatewayContractError("coverage_hash_mismatch")
-        policy = QdrantCollectionPolicy(
-            product_collections=tuple(secret["product_collections"]),  # type: ignore[arg-type]
-            marker_collection=marker_collection,
-        )
-        subject = AuthenticatedQdrantSubject(
-            subject_ref_hash=str(secret["operator_subject_ref_hash"])
-        )
-        authorizer = ExactRouteAuthorizer(
-            bindings=(
-                (
-                    subject.subject_ref_hash,
-                    QdrantMutationSource.OPERATOR_MAINTENANCE,
-                    marker_collection,
-                ),
-            )
-        )
-    except (KeyError, TypeError, ValueError, QdrantGatewayContractError):
-        raise ProductMarkerActivationCliError("qdrant_anchor_invalid") from None
-    return (
-        anchor,
-        policy,
-        subject,
-        authorizer,
-        str(secret["metadata_point_id"]),
-        str(secret["url"]),
-        api_key,
-    )
 
 
-class _QdrantActivationClientGuard:
-    """Expose only marker activation operations to the typed Qdrant APIs."""
-
-    def __init__(
-        self,
-        client: object,
-        *,
-        marker_collection: str,
-        metadata_point_id: str,
-        phase: QdrantMarkerMetadataPhase,
-    ) -> None:
-        self._client = client
-        self._marker_collection = marker_collection
-        self._metadata_point_id = metadata_point_id
-        self._phase = phase
-        self.mutation_count = 0
-
-    def _method(self, name: str) -> Callable[..., object]:
-        method = getattr(self._client, name, None)
-        if not callable(method):
-            raise QdrantGatewayContractError("qdrant_client_operation_unavailable")
-        return method
-
-    def _require_marker_collection(self, collection_name: object) -> None:
-        if collection_name != self._marker_collection:
-            raise QdrantGatewayContractError("qdrant_activation_scope_invalid")
-
-    def collection_exists(self, collection_name: str) -> object:
-        self._require_marker_collection(collection_name)
-        return self._method("collection_exists")(collection_name)
-
-    def create_collection(self, **kwargs: object) -> object:
-        self._require_marker_collection(kwargs.get("collection_name"))
-        if self._phase is not QdrantMarkerMetadataPhase.PENDING_CUTOVER:
-            raise QdrantGatewayContractError("qdrant_activation_phase_invalid")
-        self.mutation_count += 1
-        return self._method("create_collection")(**kwargs)
-
-    def get_collection(self, collection_name: str) -> object:
-        self._require_marker_collection(collection_name)
-        return self._method("get_collection")(collection_name)
-
-    def create_payload_index(self, **kwargs: object) -> object:
-        self._require_marker_collection(kwargs.get("collection_name"))
-        if (
-            self._phase is not QdrantMarkerMetadataPhase.PENDING_CUTOVER
-            or kwargs.get("field_name")
-            not in QDRANT_MARKER_REQUIRED_PAYLOAD_INDEX_FIELDS
-        ):
-            raise QdrantGatewayContractError("qdrant_activation_phase_invalid")
-        self.mutation_count += 1
-        return self._method("create_payload_index")(**kwargs)
-
-    def retrieve(
-        self,
-        *,
-        collection_name: str,
-        ids: list[str],
-        **kwargs: object,
-    ) -> object:
-        self._require_marker_collection(collection_name)
-        if ids != [self._metadata_point_id]:
-            raise QdrantGatewayContractError("qdrant_activation_point_invalid")
-        return self._method("retrieve")(
-            collection_name=collection_name,
-            ids=ids,
-            **kwargs,
-        )
-
-    def count(self, **kwargs: object) -> object:
-        self._require_marker_collection(kwargs.get("collection_name"))
-        if (
-            self._phase is not QdrantMarkerMetadataPhase.PENDING_CUTOVER
-            or kwargs.get("count_filter") is not None
-            or kwargs.get("exact") is not True
-        ):
-            raise QdrantGatewayContractError("qdrant_activation_count_invalid")
-        return self._method("count")(**kwargs)
-
-    def upsert(self, **kwargs: object) -> object:
-        self._require_marker_collection(kwargs.get("collection_name"))
-        points = kwargs.get("points")
-        if not isinstance(points, list) or len(points) != 1:
-            raise QdrantGatewayContractError("qdrant_activation_point_invalid")
-        point = points[0]
-        point_id = getattr(point, "id", None)
-        payload = getattr(point, "payload", None)
-        mode = str(kwargs.get("update_mode") or "").lower()
-        expected_mode = (
-            "insert_only"
-            if self._phase is QdrantMarkerMetadataPhase.PENDING_CUTOVER
-            else "update_only"
-        )
-        if (
-            str(point_id) != self._metadata_point_id
-            or not isinstance(payload, Mapping)
-            or set(payload) != QDRANT_EXACT_MARKER_METADATA_KEYS
-            or not mode.endswith(expected_mode)
-            or (
-                self._phase is QdrantMarkerMetadataPhase.PENDING_CUTOVER
-                and kwargs.get("update_filter") is not None
-            )
-            or (
-                self._phase is QdrantMarkerMetadataPhase.POST_RECONCILE
-                and kwargs.get("update_filter") is None
-            )
-        ):
-            raise QdrantGatewayContractError("qdrant_activation_point_invalid")
-        self.mutation_count += 1
-        return self._method("upsert")(**kwargs)
 
 
-def _activate_qdrant_pending(
-    *,
-    config: Mapping[str, object],
-    secret: Mapping[str, object],
-    dependencies: ActivationDependencies,
-) -> tuple[int, int, bool]:
-    (
-        anchor,
-        policy,
-        subject,
-        authorizer,
-        metadata_point_id,
-        url,
-        api_key,
-    ) = _build_qdrant_pending_inputs(config=config, secret=secret)
-    try:
-        client = dependencies.qdrant_client_factory(url, api_key)
-    except Exception:
-        raise ProductMarkerActivationCliError("qdrant_connection_failed") from None
-    close = getattr(client, "close", None)
-    if not callable(close):
-        raise ProductMarkerActivationCliError("qdrant_client_invalid")
-    guarded_client = _QdrantActivationClientGuard(
-        client,
-        marker_collection=policy.marker_collection,
-        metadata_point_id=metadata_point_id,
-        phase=QdrantMarkerMetadataPhase.PENDING_CUTOVER,
-    )
-    operation_count = 0
-    try:
-        operation_count = 1
-        activate_qdrant_marker_collection(
-            client=guarded_client,
-            source=QdrantMutationSource.OPERATOR_MAINTENANCE,
-            subject=subject,
-            authorizer=authorizer,
-            policy=policy,
-        )
-        operation_count = 2
-        reconcile_qdrant_marker_metadata(
-            client=guarded_client,
-            metadata_point_id=metadata_point_id,
-            activation_anchor=anchor,  # type: ignore[arg-type]
-            phase=QdrantMarkerMetadataPhase.PENDING_CUTOVER,
-            source=QdrantMutationSource.OPERATOR_MAINTENANCE,
-            subject=subject,
-            authorizer=authorizer,
-            policy=policy,
-        )
-    except Exception:
-        raise ProductMarkerActivationCliError(
-            "qdrant_initialization_failed",
-            operation_count=operation_count,
-            mutation_count=guarded_client.mutation_count,
-            mutation_performed=guarded_client.mutation_count > 0,
-        ) from None
-    finally:
-        try:
-            close()
-        except Exception:
-            raise ProductMarkerActivationCliError(
-                "qdrant_close_failed",
-                operation_count=operation_count,
-                mutation_count=guarded_client.mutation_count,
-                mutation_performed=guarded_client.mutation_count > 0,
-            ) from None
-    return (
-        operation_count,
-        guarded_client.mutation_count,
-        guarded_client.mutation_count > 0,
-    )
 
 
-def _finalize_qdrant_coverage(
-    *,
-    config: Mapping[str, object],
-    secret: Mapping[str, object],
-    dependencies: ActivationDependencies,
-) -> tuple[int, int, bool]:
-    (
-        anchor,
-        policy,
-        subject,
-        authorizer,
-        metadata_point_id,
-        url,
-        api_key,
-    ) = _build_qdrant_finalize_inputs(config=config, secret=secret)
-    try:
-        client = dependencies.qdrant_client_factory(url, api_key)
-    except Exception:
-        raise ProductMarkerActivationCliError("qdrant_connection_failed") from None
-    close = getattr(client, "close", None)
-    if not callable(close):
-        raise ProductMarkerActivationCliError("qdrant_client_invalid")
-    guarded_client = _QdrantActivationClientGuard(
-        client,
-        marker_collection=policy.marker_collection,
-        metadata_point_id=metadata_point_id,
-        phase=QdrantMarkerMetadataPhase.POST_RECONCILE,
-    )
-    operation_count = 0
-    try:
-        operation_count = 1
-        reconcile_qdrant_marker_metadata(
-            client=guarded_client,
-            metadata_point_id=metadata_point_id,
-            activation_anchor=anchor,  # type: ignore[arg-type]
-            phase=QdrantMarkerMetadataPhase.POST_RECONCILE,
-            source=QdrantMutationSource.OPERATOR_MAINTENANCE,
-            subject=subject,
-            authorizer=authorizer,
-            policy=policy,
-        )
-    except Exception:
-        raise ProductMarkerActivationCliError(
-            "qdrant_finalization_failed",
-            operation_count=operation_count,
-            mutation_count=guarded_client.mutation_count,
-            mutation_performed=guarded_client.mutation_count > 0,
-        ) from None
-    finally:
-        try:
-            close()
-        except Exception:
-            raise ProductMarkerActivationCliError(
-                "qdrant_close_failed",
-                operation_count=operation_count,
-                mutation_count=guarded_client.mutation_count,
-                mutation_performed=guarded_client.mutation_count > 0,
-            ) from None
-    return (
-        operation_count,
-        guarded_client.mutation_count,
-        guarded_client.mutation_count > 0,
-    )
 
 
 def _build_parser() -> _SafeArgumentParser:
@@ -1250,16 +589,6 @@ def _build_parser() -> _SafeArgumentParser:
     postgres.add_argument("--config-name", required=True)
     postgres.add_argument("--approval-fd", required=True, type=int)
     postgres.add_argument("--credential-fd", required=True, type=int)
-    qdrant_pending = subparsers.add_parser("activate-qdrant-pending")
-    qdrant_pending.add_argument("--config-root", required=True)
-    qdrant_pending.add_argument("--config-name", required=True)
-    qdrant_pending.add_argument("--approval-fd", required=True, type=int)
-    qdrant_pending.add_argument("--credential-fd", required=True, type=int)
-    qdrant_finalize = subparsers.add_parser("finalize-qdrant-coverage")
-    qdrant_finalize.add_argument("--config-root", required=True)
-    qdrant_finalize.add_argument("--config-name", required=True)
-    qdrant_finalize.add_argument("--approval-fd", required=True, type=int)
-    qdrant_finalize.add_argument("--credential-fd", required=True, type=int)
     return parser
 
 
@@ -1317,94 +646,6 @@ def main(
                 )
                 operation_count, mutation_count, mutation_performed = (
                     _activate_postgres(
-                        config=config,
-                        secret=secret,
-                        dependencies=selected_dependencies,
-                    )
-                )
-            finally:
-                _close_owned_fds(parsed.approval_fd, parsed.credential_fd)
-            _emit_result(
-                phase=phase,
-                status="PASS",
-                config_hash=config_hash,
-                operation_count=operation_count,
-                mutation_count=mutation_count,
-                mutation_performed=mutation_performed,
-            )
-            return 0
-        if parsed.command == "activate-qdrant-pending":
-            phase = _QDRANT_PENDING_PHASE
-            try:
-                if parsed.approval_fd == parsed.credential_fd:
-                    raise ProductMarkerActivationCliError("invalid_arguments")
-                config, config_hash = _read_rooted_config(
-                    parsed.config_root,
-                    parsed.config_name,
-                )
-                if config.get("phase") != phase:
-                    raise ProductMarkerActivationCliError("config_invalid")
-                approval = _read_secret_json(
-                    parsed.approval_fd,
-                    maximum=_MAX_APPROVAL_BYTES,
-                    error_code="approval_invalid",
-                )
-                _validate_approval(
-                    approval,
-                    config=config,
-                    config_hash=config_hash,
-                )
-                secret = _read_secret_json(
-                    parsed.credential_fd,
-                    maximum=_MAX_CREDENTIAL_BYTES,
-                    error_code="credential_invalid",
-                )
-                operation_count, mutation_count, mutation_performed = (
-                    _activate_qdrant_pending(
-                        config=config,
-                        secret=secret,
-                        dependencies=selected_dependencies,
-                    )
-                )
-            finally:
-                _close_owned_fds(parsed.approval_fd, parsed.credential_fd)
-            _emit_result(
-                phase=phase,
-                status="PASS",
-                config_hash=config_hash,
-                operation_count=operation_count,
-                mutation_count=mutation_count,
-                mutation_performed=mutation_performed,
-            )
-            return 0
-        if parsed.command == "finalize-qdrant-coverage":
-            phase = _QDRANT_FINALIZE_PHASE
-            try:
-                if parsed.approval_fd == parsed.credential_fd:
-                    raise ProductMarkerActivationCliError("invalid_arguments")
-                config, config_hash = _read_rooted_config(
-                    parsed.config_root,
-                    parsed.config_name,
-                )
-                if config.get("phase") != phase:
-                    raise ProductMarkerActivationCliError("config_invalid")
-                approval = _read_secret_json(
-                    parsed.approval_fd,
-                    maximum=_MAX_APPROVAL_BYTES,
-                    error_code="approval_invalid",
-                )
-                _validate_approval(
-                    approval,
-                    config=config,
-                    config_hash=config_hash,
-                )
-                secret = _read_secret_json(
-                    parsed.credential_fd,
-                    maximum=_MAX_CREDENTIAL_BYTES,
-                    error_code="credential_invalid",
-                )
-                operation_count, mutation_count, mutation_performed = (
-                    _finalize_qdrant_coverage(
                         config=config,
                         secret=secret,
                         dependencies=selected_dependencies,

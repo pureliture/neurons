@@ -13,15 +13,6 @@ import pytest
 from agent_knowledge.postgres_exact_mutation_marker import (
     build_source_owned_postgres_exact_marker_contract,
 )
-from agent_knowledge.qdrant_write_gateway_runtime import (
-    QDRANT_MARKER_REQUIRED_PAYLOAD_INDEX_FIELDS,
-    QDRANT_SOURCE_REGISTRY,
-    QdrantMutationSource,
-    RenderedQdrantWriter,
-    build_qdrant_coverage_activation_anchor,
-    build_qdrant_coverage_manifest_from_activation_anchor,
-    build_qdrant_pending_cutover_anchor,
-)
 
 
 def _sha(value: bytes | str) -> str:
@@ -147,301 +138,16 @@ def _postgres_activation_inputs(
     return name, config_hash, approval_fd, credential_fd, secret["dsn"]
 
 
-def _qdrant_secret_contract_hash(secret: dict[str, object]) -> str:
-    projection = {
-        "credential_inventory_anchor_hash": secret[
-            "credential_inventory_anchor_hash"
-        ],
-        "endpoint_identity_hash": _sha(secret["url"]),
-        "marker_collection_hash": _sha(secret["marker_collection"]),
-        "metadata_point_id_hash": _sha(secret["metadata_point_id"]),
-        "operator_subject_ref_hash": secret["operator_subject_ref_hash"],
-        "product_collection_hashes": sorted(
-            _sha(name) for name in secret["product_collections"]
-        ),
-        "schema_version": "product_marker_activation_qdrant_secret_contract.v1",
-    }
-    return _sha(
-        json.dumps(
-            projection,
-            ensure_ascii=True,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-    )
 
 
-def _qdrant_pending_inputs(
-    root: Path,
-    *,
-    secret_mutation: Callable[[dict[str, object]], None] | None = None,
-    config_mutation: Callable[[dict[str, object]], None] | None = None,
-) -> tuple[str, str, int, int, dict[str, object]]:
-    token = "approved-qdrant-pending-initialization-token-000001"
-    secret: dict[str, object] = {
-        "api_key": "private-qdrant-api-key-material",
-        "credential_inventory_anchor_hash": _sha("qdrant-credential-inventory"),
-        "marker_collection": "private_mutation_marker",
-        "metadata_point_id": "00000000-0000-4000-8000-000000000001",
-        "operator_subject_ref_hash": _raw_sha("operator-subject"),
-        "product_collections": ["private_product_index"],
-        "schema_version": "product_marker_activation_qdrant_secret.v1",
-        "url": "https://private-qdrant.invalid:6333",
-    }
-    if secret_mutation is not None:
-        secret_mutation(secret)
-    anchor = build_qdrant_pending_cutover_anchor(
-        generation=7,
-        marker_collection=secret["marker_collection"],
-        previous_generation_hash=_raw_sha("qdrant-generation-6"),
-    )
-    config = {
-        "approval_token_hash": _sha(token),
-        "contract": {
-            "activation_hash": anchor.activation_hash,
-            "coverage_hash": anchor.coverage_hash,
-            "credential_inventory_anchor_hash": secret[
-                "credential_inventory_anchor_hash"
-            ],
-            "generation": anchor.generation,
-            "previous_generation_hash": anchor.previous_generation_hash,
-            "secret_contract_hash": _qdrant_secret_contract_hash(secret),
-        },
-        "operator_scope": "qdrant_marker_generation_initialization",
-        "phase": "qdrant_marker_generation_initialization",
-        "schema_version": "product_marker_activation_config.v1",
-    }
-    if config_mutation is not None:
-        config_mutation(config)
-    name, config_hash = _write_config(root, config)
-    approval = {
-        "config_hash": config_hash,
-        "operator_scope": config["operator_scope"],
-        "phase": config["phase"],
-        "schema_version": "product_marker_activation_approval.v1",
-        "token": token,
-    }
-    approval_path = root / "approval.json"
-    credential_path = root / "qdrant-secret.json"
-    approval_path.write_bytes(_canonical_bytes(approval))
-    credential_path.write_bytes(_canonical_bytes(secret))
-    return (
-        name,
-        config_hash,
-        os.open(approval_path, os.O_RDONLY),
-        os.open(credential_path, os.O_RDONLY),
-        secret,
-    )
 
 
-def _rendered_qdrant_inventory() -> tuple[RenderedQdrantWriter, ...]:
-    return tuple(
-        RenderedQdrantWriter(
-            source=source,
-            route=binding.route,
-            writer_ref_hash=binding.writer_ref_hash,
-            active_caller=binding.active_caller,
-            workload_ref_hash=(
-                _raw_sha(f"workload:{source.value}")
-                if binding.active_caller
-                else None
-            ),
-            image_ref_hash=(
-                _raw_sha(f"image:{source.value}")
-                if binding.active_caller
-                else None
-            ),
-            network_policy_ref_hash=(
-                _raw_sha(f"network:{source.value}")
-                if binding.active_caller
-                else None
-            ),
-            route_set_hash=(
-                _raw_sha(f"routes:{source.value}")
-                if binding.active_caller
-                else None
-            ),
-        )
-        for source, binding in QDRANT_SOURCE_REGISTRY.items()
-    )
 
 
-def _qdrant_finalize_inputs(
-    root: Path,
-    *,
-    secret: dict[str, object],
-    config_mutation: Callable[[dict[str, object]], None] | None = None,
-) -> tuple[str, str, int, int]:
-    token = "approved-qdrant-coverage-finalization-token-000001"
-    inventory = _rendered_qdrant_inventory()
-    anchor = build_qdrant_coverage_activation_anchor(
-        generation=7,
-        marker_collection=secret["marker_collection"],
-        rendered_inventory=inventory,
-        previous_generation_hash=_raw_sha("qdrant-generation-6"),
-        auth_boundary_status="validated",
-        network_policy_status="validated",
-        direct_write_credentials_zero=True,
-        read_endpoint_write_denied_status="validated",
-    )
-    coverage = build_qdrant_coverage_manifest_from_activation_anchor(anchor)
-    config = {
-        "approval_token_hash": _sha(token),
-        "contract": {
-            "activation_hash": anchor.activation_hash,
-            "auth_boundary_status": anchor.auth_boundary_status,
-            "coverage_hash": coverage.coverage_hash,
-            "credential_inventory_anchor_hash": secret[
-                "credential_inventory_anchor_hash"
-            ],
-            "direct_write_credentials_zero": anchor.direct_write_credentials_zero,
-            "generation": anchor.generation,
-            "network_policy_status": anchor.network_policy_status,
-            "previous_generation_hash": anchor.previous_generation_hash,
-            "read_endpoint_write_denied_status": (
-                anchor.read_endpoint_write_denied_status
-            ),
-            "rendered_inventory": [
-                {
-                    "active_caller": item.active_caller,
-                    "image_ref_hash": item.image_ref_hash,
-                    "network_policy_ref_hash": item.network_policy_ref_hash,
-                    "route": item.route.value,
-                    "route_set_hash": item.route_set_hash,
-                    "source": item.source.value,
-                    "workload_ref_hash": item.workload_ref_hash,
-                    "writer_ref_hash": item.writer_ref_hash,
-                }
-                for item in inventory
-            ],
-            "secret_contract_hash": _qdrant_secret_contract_hash(secret),
-        },
-        "operator_scope": "qdrant_marker_coverage_finalization",
-        "phase": "qdrant_marker_coverage_finalization",
-        "schema_version": "product_marker_activation_config.v1",
-    }
-    if config_mutation is not None:
-        config_mutation(config)
-    name, config_hash = _write_config(root, config)
-    approval = {
-        "config_hash": config_hash,
-        "operator_scope": config["operator_scope"],
-        "phase": config["phase"],
-        "schema_version": "product_marker_activation_approval.v1",
-        "token": token,
-    }
-    approval_path = root / "approval.json"
-    credential_path = root / "qdrant-secret.json"
-    approval_path.write_bytes(_canonical_bytes(approval))
-    credential_path.write_bytes(_canonical_bytes(secret))
-    return (
-        name,
-        config_hash,
-        os.open(approval_path, os.O_RDONLY),
-        os.open(credential_path, os.O_RDONLY),
-    )
 
 
-class _QdrantActivationClient:
-    def __init__(self) -> None:
-        self.exists = False
-        self.indexes: dict[str, object] = {}
-        self.points: dict[str, object] = {}
-        self.calls: list[tuple[str, dict[str, object]]] = []
-        self.operation_id = 0
-        self.close_count = 0
-
-    def collection_exists(self, collection_name: str) -> bool:
-        self.calls.append(("collection_exists", {"collection_name": collection_name}))
-        return self.exists
-
-    def create_collection(self, **kwargs: object) -> None:
-        self.calls.append(("create_collection", dict(kwargs)))
-        self.exists = True
-
-    def get_collection(self, collection_name: str) -> dict[str, object]:
-        self.calls.append(("get_collection", {"collection_name": collection_name}))
-        return {
-            "config": {
-                "params": {
-                    "replication_factor": 1,
-                    "shard_number": 1,
-                    "vectors": {"distance": "cosine", "size": 1},
-                    "write_consistency_factor": 1,
-                }
-            },
-            "payload_schema": {
-                field: {"data_type": field_schema}
-                for field, field_schema in self.indexes.items()
-            },
-        }
-
-    def create_payload_index(self, **kwargs: object) -> None:
-        self.calls.append(("create_payload_index", dict(kwargs)))
-        self.indexes[str(kwargs["field_name"])] = kwargs["field_schema"]
-
-    def retrieve(
-        self,
-        *,
-        collection_name: str,
-        ids: list[str],
-        **kwargs: object,
-    ) -> list[object]:
-        self.calls.append(
-            (
-                "retrieve",
-                {"collection_name": collection_name, "ids": ids, **kwargs},
-            )
-        )
-        return [self.points[point_id] for point_id in ids if point_id in self.points]
-
-    def count(self, **kwargs: object) -> object:
-        self.calls.append(("count", dict(kwargs)))
-        return SimpleNamespace(count=len(self.points))
-
-    def upsert(self, **kwargs: object) -> object:
-        self.calls.append(("upsert", dict(kwargs)))
-        self.operation_id += 1
-        for point in kwargs["points"]:
-            self.points[str(point.id)] = point
-        return SimpleNamespace(status="completed", operation_id=self.operation_id)
-
-    def close(self) -> None:
-        self.close_count += 1
 
 
-def test_default_qdrant_factory_disables_proxy_redirect_and_grpc(monkeypatch):
-    activation_cli = importlib.import_module(
-        "agent_knowledge.product_marker_activation_cli"
-    )
-    observed: dict[str, object] = {}
-    sentinel = object()
-
-    def fake_client(**kwargs: object) -> object:
-        observed.update(kwargs)
-        return sentinel
-
-    qdrant_client_module = importlib.import_module("qdrant_client")
-    monkeypatch.setattr(qdrant_client_module, "QdrantClient", fake_client)
-
-    assert (
-        activation_cli._default_qdrant_client_factory(
-            "https://private-qdrant.invalid:6333",
-            "private-api-key-material",
-        )
-        is sentinel
-    )
-    assert observed == {
-        "api_key": "private-api-key-material",
-        "check_compatibility": False,
-        "follow_redirects": False,
-        "https": True,
-        "port": 6333,
-        "prefer_grpc": False,
-        "timeout": 5,
-        "trust_env": False,
-        "url": "https://private-qdrant.invalid:6333",
-    }
 
 
 def test_default_mode_is_a_public_safe_noop(capsys):
@@ -474,19 +180,15 @@ def test_precheck_reads_canonical_rooted_config_without_calling_connectors(
         "agent_knowledge.product_marker_activation_cli"
     )
     name, config_hash = _write_config(tmp_path, _postgres_config())
-    calls = {"postgres": 0, "qdrant": 0}
+    calls = {"postgres": 0}
 
     def postgres_factory(_dsn: str):
         calls["postgres"] += 1
         raise AssertionError("precheck must not open PostgreSQL")
 
-    def qdrant_factory(_url: str, _api_key: str):
-        calls["qdrant"] += 1
-        raise AssertionError("precheck must not open Qdrant")
 
     dependencies = activation_cli.ActivationDependencies(
         postgres_connection_factory=postgres_factory,
-        qdrant_client_factory=qdrant_factory,
     )
 
     assert (
@@ -511,7 +213,7 @@ def test_precheck_reads_canonical_rooted_config_without_calling_connectors(
     assert result["mutation_count"] == 0
     assert result["mutation_performed"] is False
     assert result["live_proof"] is False
-    assert calls == {"postgres": 0, "qdrant": 0}
+    assert calls == {"postgres": 0}
 
 
 def test_postgres_activation_executes_the_source_contract_once(
@@ -549,9 +251,6 @@ def test_postgres_activation_executes_the_source_contract_once(
 
     dependencies = activation_cli.ActivationDependencies(
         postgres_connection_factory=postgres_factory,
-        qdrant_client_factory=lambda _url, _api_key: (_ for _ in ()).throw(
-            AssertionError("PostgreSQL phase must not open Qdrant")
-        ),
     )
 
     assert (
@@ -622,9 +321,6 @@ def test_postgres_failure_rolls_back_without_partial_ddl_or_secret_output(
     connection = FailingConnection()
     dependencies = activation_cli.ActivationDependencies(
         postgres_connection_factory=lambda _dsn: connection,
-        qdrant_client_factory=lambda _url, _api_key: (_ for _ in ()).throw(
-            AssertionError("PostgreSQL phase must not open Qdrant")
-        ),
     )
 
     assert (
@@ -705,9 +401,6 @@ def test_postgres_commit_response_loss_is_unknown_and_never_auto_retried(
 
     dependencies = activation_cli.ActivationDependencies(
         postgres_connection_factory=postgres_factory,
-        qdrant_client_factory=lambda _url, _api_key: (_ for _ in ()).throw(
-            AssertionError("PostgreSQL phase must not open Qdrant")
-        ),
     )
 
     assert (
@@ -752,7 +445,7 @@ def test_postgres_commit_response_loss_is_unknown_and_never_auto_retried(
     ("field", "invalid_value"),
     (
         ("schema_version", "product_marker_activation_config.v999"),
-        ("phase", "qdrant_marker_coverage_finalization"),
+        ("phase", "unsupported_phase"),
         ("operator_scope", "self_approved_scope"),
     ),
 )
@@ -774,9 +467,6 @@ def test_postgres_activation_rejects_self_consistent_wrong_config_identity_befor
     calls = []
     dependencies = activation_cli.ActivationDependencies(
         postgres_connection_factory=lambda dsn: calls.append(dsn),
-        qdrant_client_factory=lambda _url, _api_key: (_ for _ in ()).throw(
-            AssertionError("invalid PostgreSQL config must not open Qdrant")
-        ),
     )
 
     assert (
@@ -825,9 +515,6 @@ def test_bad_approval_closes_both_fds_and_calls_no_connector_without_leaking_val
     calls = []
     dependencies = activation_cli.ActivationDependencies(
         postgres_connection_factory=lambda dsn: calls.append(dsn),
-        qdrant_client_factory=lambda _url, _api_key: (_ for _ in ()).throw(
-            AssertionError("invalid approval must not open Qdrant")
-        ),
     )
 
     assert (
@@ -886,7 +573,6 @@ def test_deep_json_is_a_fixed_public_safe_failure_without_connector(
     calls: list[tuple[object, ...]] = []
     dependencies = activation_cli.ActivationDependencies(
         postgres_connection_factory=lambda dsn: calls.append(("postgres", dsn)),
-        qdrant_client_factory=lambda url, key: calls.append(("qdrant", url, key)),
     )
 
     if boundary == "config":
@@ -975,7 +661,6 @@ def test_config_root_rejects_relative_parent_and_intermediate_symlink_before_con
     calls = []
     dependencies = activation_cli.ActivationDependencies(
         postgres_connection_factory=lambda dsn: calls.append(("postgres", dsn)),
-        qdrant_client_factory=lambda url, key: calls.append(("qdrant", url, key)),
     )
 
     for rejected_root in rejected_roots:
@@ -1027,7 +712,6 @@ def test_precheck_rejects_noncanonical_or_aliased_config_file(
     calls: list[tuple[object, ...]] = []
     dependencies = activation_cli.ActivationDependencies(
         postgres_connection_factory=lambda dsn: calls.append(("postgres", dsn)),
-        qdrant_client_factory=lambda url, key: calls.append(("qdrant", url, key)),
     )
 
     assert (
@@ -1098,551 +782,3 @@ def test_bounded_one_open_read_rejects_same_inode_same_size_rewrite(
     assert before.st_ino == after.st_ino
     assert before.st_size == after.st_size
     assert path.read_bytes() == replacement_payload
-
-
-def test_qdrant_pending_initialization_uses_only_insert_only_typed_apis(
-    tmp_path: Path,
-    capsys,
-):
-    activation_cli = importlib.import_module(
-        "agent_knowledge.product_marker_activation_cli"
-    )
-    name, config_hash, approval_fd, credential_fd, secret = (
-        _qdrant_pending_inputs(tmp_path)
-    )
-    client = _QdrantActivationClient()
-    factory_calls = []
-
-    def qdrant_factory(url: str, api_key: str) -> _QdrantActivationClient:
-        factory_calls.append((url, api_key))
-        return client
-
-    dependencies = activation_cli.ActivationDependencies(
-        postgres_connection_factory=lambda _dsn: (_ for _ in ()).throw(
-            AssertionError("Qdrant phase must not open PostgreSQL")
-        ),
-        qdrant_client_factory=qdrant_factory,
-    )
-
-    assert (
-        activation_cli.main(
-            [
-                "activate-qdrant-pending",
-                "--config-root",
-                str(tmp_path),
-                "--config-name",
-                name,
-                "--approval-fd",
-                str(approval_fd),
-                "--credential-fd",
-                str(credential_fd),
-            ],
-            dependencies=dependencies,
-        )
-        == 0
-    )
-
-    captured = capsys.readouterr()
-    result = json.loads(captured.out)
-    assert captured.err == ""
-    assert result["phase"] == "qdrant_marker_generation_initialization"
-    assert result["status"] == "PASS"
-    assert result["config_hash"] == config_hash
-    assert result["operation_count"] == 2
-    assert result["mutation_count"] == len(
-        QDRANT_MARKER_REQUIRED_PAYLOAD_INDEX_FIELDS
-    ) + 2
-    assert result["mutation_performed"] is True
-    assert result["live_proof"] is False
-    assert factory_calls == [(secret["url"], secret["api_key"])]
-    assert sum(name == "create_collection" for name, _ in client.calls) == 1
-    assert sum(name == "create_payload_index" for name, _ in client.calls) == len(
-        QDRANT_MARKER_REQUIRED_PAYLOAD_INDEX_FIELDS
-    )
-    upserts = [kwargs for name, kwargs in client.calls if name == "upsert"]
-    assert len(upserts) == 1
-    assert str(upserts[0]["update_mode"]).lower().endswith("insert_only")
-    point = next(iter(client.points.values()))
-    assert point.payload["coverage_status"] == "pending_cutover"
-    assert point.payload["bypass_count"] == 1
-    assert client.close_count == 1
-    protected_values = (
-        secret["url"],
-        secret["api_key"],
-        secret["marker_collection"],
-        secret["metadata_point_id"],
-        str(tmp_path),
-    )
-    assert all(value not in captured.out for value in protected_values)
-    assert all(value not in captured.err for value in protected_values)
-
-
-def test_qdrant_pending_initialization_is_idempotent_without_a_second_write(
-    tmp_path: Path,
-    capsys,
-):
-    activation_cli = importlib.import_module(
-        "agent_knowledge.product_marker_activation_cli"
-    )
-    client = _QdrantActivationClient()
-    dependencies = activation_cli.ActivationDependencies(
-        postgres_connection_factory=lambda _dsn: (_ for _ in ()).throw(
-            AssertionError("Qdrant phase must not open PostgreSQL")
-        ),
-        qdrant_client_factory=lambda _url, _api_key: client,
-    )
-
-    for expected_mutation_count in (
-        len(QDRANT_MARKER_REQUIRED_PAYLOAD_INDEX_FIELDS) + 2,
-        0,
-    ):
-        name, config_hash, approval_fd, credential_fd, _secret = (
-            _qdrant_pending_inputs(tmp_path)
-        )
-        assert (
-            activation_cli.main(
-                [
-                    "activate-qdrant-pending",
-                    "--config-root",
-                    str(tmp_path),
-                    "--config-name",
-                    name,
-                    "--approval-fd",
-                    str(approval_fd),
-                    "--credential-fd",
-                    str(credential_fd),
-                ],
-                dependencies=dependencies,
-            )
-            == 0
-        )
-        result = json.loads(capsys.readouterr().out)
-        assert result["config_hash"] == config_hash
-        assert result["operation_count"] == 2
-        assert result["mutation_count"] == expected_mutation_count
-        assert result["mutation_performed"] is (expected_mutation_count > 0)
-
-    assert sum(name == "create_collection" for name, _ in client.calls) == 1
-    assert sum(name == "create_payload_index" for name, _ in client.calls) == len(
-        QDRANT_MARKER_REQUIRED_PAYLOAD_INDEX_FIELDS
-    )
-    assert sum(name == "upsert" for name, _ in client.calls) == 1
-    assert client.close_count == 2
-
-
-@pytest.mark.parametrize(
-    "malicious_url",
-    (
-        "http://private-qdrant.invalid:6333",
-        "https://operator@private-qdrant.invalid:6333",
-        "https://private-qdrant.invalid",
-        "https://private-qdrant.invalid:6334",
-        "https://private-qdrant.invalid:6333/admin",
-        "https://private-qdrant.invalid:6333?target=other",
-        "https://private-qdrant.invalid:6333#other",
-        "https://PRIVATE-qdrant.invalid:6333",
-        "https://private%2dqdrant.invalid:6333",
-        "https://private-qdrant.invalid\\@other.invalid:6333",
-        "https://127.1:6333",
-        "https://0x7f000001:6333",
-    ),
-)
-def test_qdrant_operator_url_rejects_credential_confusion_before_connect(
-    tmp_path: Path,
-    capsys,
-    malicious_url: str,
-):
-    activation_cli = importlib.import_module(
-        "agent_knowledge.product_marker_activation_cli"
-    )
-    name, _config_hash, approval_fd, credential_fd, secret = (
-        _qdrant_pending_inputs(
-            tmp_path,
-            secret_mutation=lambda value: value.__setitem__("url", malicious_url),
-        )
-    )
-    calls: list[tuple[str, str]] = []
-    dependencies = activation_cli.ActivationDependencies(
-        postgres_connection_factory=lambda _dsn: (_ for _ in ()).throw(
-            AssertionError("Qdrant phase must not open PostgreSQL")
-        ),
-        qdrant_client_factory=lambda url, api_key: calls.append((url, api_key)),
-    )
-
-    assert (
-        activation_cli.main(
-            [
-                "activate-qdrant-pending",
-                "--config-root",
-                str(tmp_path),
-                "--config-name",
-                name,
-                "--approval-fd",
-                str(approval_fd),
-                "--credential-fd",
-                str(credential_fd),
-            ],
-            dependencies=dependencies,
-        )
-        == 2
-    )
-
-    captured = capsys.readouterr()
-    assert json.loads(captured.out)["mutation_count"] == 0
-    assert captured.err == "product_marker_activation_error:credential_invalid\n"
-    assert calls == []
-    assert malicious_url not in captured.out
-    assert malicious_url not in captured.err
-    assert secret["api_key"] not in captured.out
-    assert secret["api_key"] not in captured.err
-
-
-@pytest.mark.parametrize(
-    ("field", "invalid_value"),
-    (
-        ("generation", True),
-        ("generation", 0),
-        ("activation_hash", "sha256:" + "a" * 64),
-        ("coverage_hash", "not-a-hash"),
-        ("previous_generation_hash", "A" * 64),
-        ("credential_inventory_anchor_hash", "0" * 64),
-        ("secret_contract_hash", "sha256:short"),
-    ),
-)
-def test_qdrant_pending_precheck_rejects_malformed_contract_without_connect(
-    tmp_path: Path,
-    capsys,
-    field: str,
-    invalid_value: object,
-):
-    activation_cli = importlib.import_module(
-        "agent_knowledge.product_marker_activation_cli"
-    )
-
-    def mutate(config: dict[str, object]) -> None:
-        contract = config["contract"]
-        assert isinstance(contract, dict)
-        contract[field] = invalid_value
-
-    name, _config_hash, approval_fd, credential_fd, _secret = (
-        _qdrant_pending_inputs(tmp_path, config_mutation=mutate)
-    )
-    os.close(approval_fd)
-    os.close(credential_fd)
-    calls: list[tuple[object, ...]] = []
-    dependencies = activation_cli.ActivationDependencies(
-        postgres_connection_factory=lambda dsn: calls.append(("postgres", dsn)),
-        qdrant_client_factory=lambda url, api_key: calls.append(
-            ("qdrant", url, api_key)
-        ),
-    )
-
-    assert (
-        activation_cli.main(
-            [
-                "precheck",
-                "--config-root",
-                str(tmp_path),
-                "--config-name",
-                name,
-            ],
-            dependencies=dependencies,
-        )
-        == 2
-    )
-    captured = capsys.readouterr()
-    assert json.loads(captured.out)["mutation_count"] == 0
-    assert captured.err == "product_marker_activation_error:config_invalid\n"
-    assert calls == []
-
-
-@pytest.mark.parametrize("field", ("activation_hash", "coverage_hash"))
-def test_qdrant_pending_semantic_hash_mismatch_calls_no_connector(
-    tmp_path: Path,
-    capsys,
-    field: str,
-):
-    activation_cli = importlib.import_module(
-        "agent_knowledge.product_marker_activation_cli"
-    )
-
-    def mutate(config: dict[str, object]) -> None:
-        contract = config["contract"]
-        assert isinstance(contract, dict)
-        contract[field] = _raw_sha(f"wrong-{field}")
-
-    name, _config_hash, approval_fd, credential_fd, secret = (
-        _qdrant_pending_inputs(tmp_path, config_mutation=mutate)
-    )
-    calls: list[tuple[str, str]] = []
-    dependencies = activation_cli.ActivationDependencies(
-        postgres_connection_factory=lambda _dsn: (_ for _ in ()).throw(
-            AssertionError("Qdrant phase must not open PostgreSQL")
-        ),
-        qdrant_client_factory=lambda url, api_key: calls.append((url, api_key)),
-    )
-
-    assert (
-        activation_cli.main(
-            [
-                "activate-qdrant-pending",
-                "--config-root",
-                str(tmp_path),
-                "--config-name",
-                name,
-                "--approval-fd",
-                str(approval_fd),
-                "--credential-fd",
-                str(credential_fd),
-            ],
-            dependencies=dependencies,
-        )
-        == 2
-    )
-    captured = capsys.readouterr()
-    assert json.loads(captured.out)["mutation_count"] == 0
-    assert captured.err == "product_marker_activation_error:qdrant_anchor_invalid\n"
-    assert calls == []
-    assert secret["api_key"] not in captured.out
-    assert secret["url"] not in captured.out
-
-
-def test_qdrant_finalize_only_updates_exact_pending_metadata(
-    tmp_path: Path,
-    capsys,
-):
-    activation_cli = importlib.import_module(
-        "agent_knowledge.product_marker_activation_cli"
-    )
-    pending_name, _pending_hash, pending_approval_fd, pending_credential_fd, secret = (
-        _qdrant_pending_inputs(tmp_path)
-    )
-    client = _QdrantActivationClient()
-    dependencies = activation_cli.ActivationDependencies(
-        postgres_connection_factory=lambda _dsn: (_ for _ in ()).throw(
-            AssertionError("Qdrant phase must not open PostgreSQL")
-        ),
-        qdrant_client_factory=lambda _url, _api_key: client,
-    )
-    assert (
-        activation_cli.main(
-            [
-                "activate-qdrant-pending",
-                "--config-root",
-                str(tmp_path),
-                "--config-name",
-                pending_name,
-                "--approval-fd",
-                str(pending_approval_fd),
-                "--credential-fd",
-                str(pending_credential_fd),
-            ],
-            dependencies=dependencies,
-        )
-        == 0
-    )
-    capsys.readouterr()
-    initial_collection_creates = sum(
-        name == "create_collection" for name, _ in client.calls
-    )
-    initial_index_creates = sum(
-        name == "create_payload_index" for name, _ in client.calls
-    )
-
-    name, config_hash, approval_fd, credential_fd = _qdrant_finalize_inputs(
-        tmp_path,
-        secret=secret,
-    )
-    assert (
-        activation_cli.main(
-            [
-                "finalize-qdrant-coverage",
-                "--config-root",
-                str(tmp_path),
-                "--config-name",
-                name,
-                "--approval-fd",
-                str(approval_fd),
-                "--credential-fd",
-                str(credential_fd),
-            ],
-            dependencies=dependencies,
-        )
-        == 0
-    )
-
-    captured = capsys.readouterr()
-    result = json.loads(captured.out)
-    assert captured.err == ""
-    assert result["phase"] == "qdrant_marker_coverage_finalization"
-    assert result["status"] == "PASS"
-    assert result["config_hash"] == config_hash
-    assert result["operation_count"] == 1
-    assert result["mutation_count"] == 1
-    assert result["mutation_performed"] is True
-    assert result["live_proof"] is False
-    assert sum(name == "create_collection" for name, _ in client.calls) == (
-        initial_collection_creates
-    )
-    assert sum(name == "create_payload_index" for name, _ in client.calls) == (
-        initial_index_creates
-    )
-    upserts = [kwargs for name, kwargs in client.calls if name == "upsert"]
-    assert len(upserts) == 2
-    assert str(upserts[-1]["update_mode"]).lower().endswith("update_only")
-    assert upserts[-1]["update_filter"] is not None
-    assert len(upserts[-1]["update_filter"].must) == 7
-    point = next(iter(client.points.values()))
-    assert point.payload["coverage_status"] == "complete"
-    assert point.payload["bypass_count"] == 0
-    assert client.close_count == 2
-
-
-def test_qdrant_finalize_is_idempotent_without_collection_or_metadata_write(
-    tmp_path: Path,
-    capsys,
-):
-    activation_cli = importlib.import_module(
-        "agent_knowledge.product_marker_activation_cli"
-    )
-    pending_name, _pending_hash, approval_fd, credential_fd, secret = (
-        _qdrant_pending_inputs(tmp_path)
-    )
-    client = _QdrantActivationClient()
-    dependencies = activation_cli.ActivationDependencies(
-        postgres_connection_factory=lambda _dsn: (_ for _ in ()).throw(
-            AssertionError("Qdrant phase must not open PostgreSQL")
-        ),
-        qdrant_client_factory=lambda _url, _api_key: client,
-    )
-    assert (
-        activation_cli.main(
-            [
-                "activate-qdrant-pending",
-                "--config-root",
-                str(tmp_path),
-                "--config-name",
-                pending_name,
-                "--approval-fd",
-                str(approval_fd),
-                "--credential-fd",
-                str(credential_fd),
-            ],
-            dependencies=dependencies,
-        )
-        == 0
-    )
-    capsys.readouterr()
-
-    for expected_mutation_count in (1, 0):
-        name, config_hash, approval_fd, credential_fd = _qdrant_finalize_inputs(
-            tmp_path,
-            secret=secret,
-        )
-        assert (
-            activation_cli.main(
-                [
-                    "finalize-qdrant-coverage",
-                    "--config-root",
-                    str(tmp_path),
-                    "--config-name",
-                    name,
-                    "--approval-fd",
-                    str(approval_fd),
-                    "--credential-fd",
-                    str(credential_fd),
-                ],
-                dependencies=dependencies,
-            )
-            == 0
-        )
-        result = json.loads(capsys.readouterr().out)
-        assert result["config_hash"] == config_hash
-        assert result["operation_count"] == 1
-        assert result["mutation_count"] == expected_mutation_count
-        assert result["mutation_performed"] is (expected_mutation_count > 0)
-
-    assert sum(name == "create_collection" for name, _ in client.calls) == 1
-    assert sum(name == "create_payload_index" for name, _ in client.calls) == len(
-        QDRANT_MARKER_REQUIRED_PAYLOAD_INDEX_FIELDS
-    )
-    assert sum(name == "upsert" for name, _ in client.calls) == 2
-    assert client.close_count == 3
-
-
-@pytest.mark.parametrize(
-    ("case", "expected_code"),
-    (
-        ("activation_hash", "qdrant_anchor_invalid"),
-        ("coverage_hash", "qdrant_anchor_invalid"),
-        ("inventory_route", "qdrant_anchor_invalid"),
-        ("credential_anchor", "credential_anchor_mismatch"),
-    ),
-)
-def test_qdrant_finalize_mismatch_calls_no_connector_or_collection_api(
-    tmp_path: Path,
-    capsys,
-    case: str,
-    expected_code: str,
-):
-    activation_cli = importlib.import_module(
-        "agent_knowledge.product_marker_activation_cli"
-    )
-    _name, _hash, pending_approval_fd, pending_credential_fd, secret = (
-        _qdrant_pending_inputs(tmp_path)
-    )
-    os.close(pending_approval_fd)
-    os.close(pending_credential_fd)
-
-    def mutate(config: dict[str, object]) -> None:
-        contract = config["contract"]
-        assert isinstance(contract, dict)
-        if case in {"activation_hash", "coverage_hash"}:
-            contract[case] = _raw_sha(f"wrong-{case}")
-        elif case == "inventory_route":
-            inventory = contract["rendered_inventory"]
-            assert isinstance(inventory, list)
-            first = inventory[0]
-            assert isinstance(first, dict)
-            first["route"] = "repair"
-        else:
-            contract["credential_inventory_anchor_hash"] = _sha(
-                "wrong-credential-anchor"
-            )
-
-    name, _config_hash, approval_fd, credential_fd = _qdrant_finalize_inputs(
-        tmp_path,
-        secret=secret,
-        config_mutation=mutate,
-    )
-    calls: list[tuple[str, str]] = []
-    dependencies = activation_cli.ActivationDependencies(
-        postgres_connection_factory=lambda _dsn: (_ for _ in ()).throw(
-            AssertionError("Qdrant phase must not open PostgreSQL")
-        ),
-        qdrant_client_factory=lambda url, api_key: calls.append((url, api_key)),
-    )
-
-    assert (
-        activation_cli.main(
-            [
-                "finalize-qdrant-coverage",
-                "--config-root",
-                str(tmp_path),
-                "--config-name",
-                name,
-                "--approval-fd",
-                str(approval_fd),
-                "--credential-fd",
-                str(credential_fd),
-            ],
-            dependencies=dependencies,
-        )
-        == 2
-    )
-    captured = capsys.readouterr()
-    assert json.loads(captured.out)["mutation_count"] == 0
-    assert captured.err == f"product_marker_activation_error:{expected_code}\n"
-    assert calls == []
-    assert secret["api_key"] not in captured.out
-    assert secret["url"] not in captured.out

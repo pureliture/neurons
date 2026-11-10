@@ -214,23 +214,11 @@ def test_couchdb_rejects_wire_payload_that_conservative_redaction_would_change(t
 
 
 def test_process_payload_exact_duplicate_submits_once_and_reuses_canonical_success_proof(tmp_path):
-    class RecordingMirror:
-        def __init__(self) -> None:
-            self.documents = []
-
-        def submit_document(self, document):
-            self.documents.append(document)
-            return SimpleNamespace(document_ref=f"mirror-{len(self.documents)}")
-
     store = IngestStateStore(tmp_path / "ingress.sqlite", canonical_state=True)
     payload = _couchdb_payload(tag="canonical-exact-duplicate")
-    mirror = RecordingMirror()
-    mirror_outcomes = []
     backend = CouchDBDeliveryBackend(
         state_db=store.state_db,
         store=InMemoryCouchDBSourceStore(),
-        mirror=mirror,
-        on_mirror_outcome=mirror_outcomes.append,
     )
     original_submit = backend.submit
     submit_calls = 0
@@ -247,8 +235,6 @@ def test_process_payload_exact_duplicate_submits_once_and_reuses_canonical_succe
 
     assert (first.status, second.status) == ("delivered", "deduplicated")
     assert submit_calls == 1
-    assert len(mirror.documents) == 1
-    assert [outcome.status for outcome in mirror_outcomes] == ["mirrored"]
     assert store.state_db.scalar("SELECT COUNT(*) FROM delivery_jobs") == 1
     assert store.state_db.get_delivery_payload(payload["idempotencyKey"]) == payload
     assert store.get_delivered(payload["idempotencyKey"]) is not None

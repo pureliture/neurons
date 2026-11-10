@@ -109,7 +109,7 @@ def project_pg_representation(*, materialized, source_store, sql_store, embed_pr
     from ..couchdb_source.session_memory_materializer import (
         materialize_session_memory, _commit_projection_state_if_source_current,
     )
-    from .qdrant_backfill import public_safe_mask_body
+    from ..public_safe_util import public_safe_mask_body
     from .pg_representation import REPRESENTATION_KIND, mapping_digest
 
     profile = validated_pg_embedding_profile(embed_provider)

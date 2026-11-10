@@ -1329,9 +1329,9 @@ class IngressStatusMixin:
 
         Identical lifecycle/authority gate as :meth:`authorize_document` (status,
         authorization_status, disabled_at, supersedes, expiry, dataset-enabled,
-        type-specific active-snapshot/coverage checks). The Qdrant searchable
-        mirror resolves every hit through this so the non-authority mirror cannot
-        diverge from canonical authority semantics.
+        type-specific active-snapshot/coverage checks). Derived search results
+        resolve every hit through this so they cannot diverge from canonical
+        authority semantics.
         """
         _ = include_private
         if not content_hash:

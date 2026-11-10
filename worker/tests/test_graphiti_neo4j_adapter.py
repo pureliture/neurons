@@ -2243,7 +2243,3 @@ def test_edge_to_ontology_maps_legacy_memory_card_authority_sources():
     assert len(auth_sources) == 1
     assert auth_sources[0]["authority_memory_id"] == "mem_steward_legacy_123"
     assert auth_sources[0]["content_hash"] == legacy_card_ep.content_hash
-
-
-
-

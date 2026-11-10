@@ -144,7 +144,6 @@ class K3sMigrationContractTest {
         assertThat(backup).contains("CouchDB");
         assertThat(backup).contains("Postgres ledger");
         assertThat(backup).contains("Neo4j");
-        assertThat(backup).contains("Qdrant");
         assertThat(backup).contains("restore rehearsal");
         assertThat(backup).contains("redacted evidence");
 

@@ -15,7 +15,7 @@ from ..couchdb_source.document_model import sha256_hash
 from ..local_embedding.canonical import canonical_input_hash_v1, canonical_session_input_v1
 from ..model_connectors import DEFAULT_EMBEDDING_PROFILE_ID, LOCAL_EMBEDDING_PROFILE_ID
 
-REPRESENTATION_KIND = "qdrant_public_safe_mask.v1"
+REPRESENTATION_KIND = "public_safe_mask.v1"
 LOCAL_SESSION_REPRESENTATION_KIND = "session_memory_v1"
 LOCAL_REPRESENTATION_KINDS = frozenset({REPRESENTATION_KIND, LOCAL_SESSION_REPRESENTATION_KIND})
 LOCAL_REPRESENTATION_RECEIPT_VERSION = 3

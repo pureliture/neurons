@@ -477,7 +477,7 @@ Latest current-session configured MCP read-path recheck was repeated after PR #1
 - The source-to-candidate review-loop readiness gate validates sanitized evidence shape only and did not mutate live production.
 - The bounded production corpus ingest readiness test validates sanitized evidence shape only and did not mutate live production.
 - The bounded production authority execution evidence test used local/fake ledger state only and did not mutate live production.
-- No graph/Qdrant write, GC, accepted/current promotion, corpus ingest/write, object authority write, or raw private evidence access was performed during validation.
+- No graph/retired-vector-index write, GC, accepted/current promotion, corpus ingest/write, object authority write, or raw private evidence access was performed during validation.
 - Production denial gate did not mutate state.
 
 ## Conclusion

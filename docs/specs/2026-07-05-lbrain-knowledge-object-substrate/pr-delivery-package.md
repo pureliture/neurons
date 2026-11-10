@@ -171,7 +171,7 @@ Body preview:
 
 - Adds deterministic local/test extraction previews for reference corpus, repo documents, runtime truth, preference/style, work units, sessions, PR/commit details, and graph/search projection joins.
 - Adds evaluator suite coverage for deterministic fixtures and golden-query slices.
-- Records P3 as PASS_WITH_GAPS because live graph/Qdrant projection join remains unproven.
+- Records P3 as PASS_WITH_GAPS because the live graph/search projection join remains unproven.
 
 ## Why
 

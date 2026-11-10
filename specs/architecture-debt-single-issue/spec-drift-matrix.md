@@ -32,8 +32,8 @@ Status vocabulary:
 | Source | Matrix status | Drift note |
 | --- | --- | --- |
 | `docs/specs/2026-06-17-ci-quality-signal` | done | CI quality signal source is not a current #40 blocker. |
-| `docs/specs/2026-06-21-qdrant-docling-searchable-mirror` | partial | Local/searchable mirror gates are done, but production failover remains `NO-GO`. |
-| `docs/specs/2026-06-24-qdrant-mirror-cutover` | open | Cutover requires evidence and approval; do not infer active runtime migration. |
+| `docs/specs/2026-06-21-retired-vector-index-docling-searchable-mirror` | partial | Local/searchable mirror gates are done, but production failover remains `NO-GO`. |
+| `docs/specs/2026-06-24-retired-vector-index-mirror-cutover` | open | Cutover requires evidence and approval; do not infer active runtime migration. |
 | `docs/specs/2026-06-25-model-connectors-boundary` | partial | Current #40 wording should say residual parsing/logprobs debt. |
 | `docs/specs/2026-06-26-architecture-modernization-campaign` | superseded | #40 now owns the current single-issue architecture debt campaign. |
 | `docs/specs/2026-06-27-neurons-k3s-migration` | partial | Public contract static guards now exist; durable current-runtime proof remains separate. |

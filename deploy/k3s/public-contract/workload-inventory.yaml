@@ -46,14 +46,6 @@ workloads:
     k3sContract: documented retired compose surface, not a k3s workload target
     scaleCategory: not-a-target
     replicaPolicy: singleton
-  - id: searchable-mirror
-    composeServices:
-      - qdrant
-    stateful: true
-    backupRestoreRequired: true
-    activation: profile-gated
-    enabledOnlyWhenSourceProfileEnabled: true
-    k3sContract: profile-gated vector store with restore rehearsal
     scaleCategory: singleton-stateful
     replicaPolicy: singleton
   - id: couchdb-source-store

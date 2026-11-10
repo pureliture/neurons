@@ -8,10 +8,9 @@ The generic ingress bus hands a :class:`RagReadyDocument` to an
 - the backend status vocabulary, which the adapter translates into the
   generic :class:`IndexStatus`.
 
-This module carries no vendor wire protocol. Every transport lives in the
-concrete adapter: the CouchDB adapter is
-``couchdb_index_adapter.py``, the Qdrant adapter is
-``qdrant_docling_mirror.py``.
+This module carries no vendor wire protocol. The CouchDB adapter is
+``couchdb_index_adapter.py``; other projection backends are owned by their
+respective runtime lanes.
 """
 
 from __future__ import annotations

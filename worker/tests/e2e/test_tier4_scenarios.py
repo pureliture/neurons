@@ -1,7 +1,7 @@
 """Tier 4 End-to-End Persona Scenario Coverage Test Suite (Simulation).
 
-Pure simulation suite running against InMemoryPostgresStore, InMemoryQdrantStore,
-and MockMCPServer with isolated legacy 1536-dim simulation profile.
+Pure simulation suite running against InMemoryPostgresStore and MockMCPServer
+with isolated legacy 1536-dim simulation profile.
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ from support.perf_budget import perf_budget_enforced
 
 from .conftest import (
     InMemoryPostgresStore,
-    InMemoryQdrantStore,
     MemoryCard,
     MemoryEdge,
     MockMCPServer,
@@ -102,26 +101,21 @@ def test_tier4_scenario_1_developer_feature_implementation_cycle(
     assert len(active_ids) == 1
 
 
+
+
 def test_tier4_scenario_2_admin_review_and_supersession_workflow(
     mcp_server: MockMCPServer, pg_store: InMemoryPostgresStore
 ):
-    """
-    Scenario 2: Admin Review & Supersession Workflow
-    1. System has an existing active decision card (Old Architecture).
-    2. Agent creates a candidate card proposing New Architecture.
-    3. Operator reviews and approves the candidate via agent_memory_admin.
-    4. Operator commits supersession link, setting Old Architecture to 'superseded'.
-    5. Agent calls brain.resolve(slim); verifies New Architecture is active and Old Architecture is excluded.
-    """
+    """An approved replacement supersedes an older decision in public context."""
     old_card_id = "mem_old_arch"
     pg_store.insert_card(
         MemoryCard(
             memory_id=old_card_id,
             project="neurons",
             card_type="decision",
-            title="Qdrant Vector Cluster",
-            summary="Use dedicated Qdrant cluster for vector search",
-            typed_payload={"decision": "Use Qdrant"},
+            title="Previous vector architecture",
+            summary="Use a dedicated vector cluster for search",
+            typed_payload={"decision": "Use a dedicated vector cluster"},
             lifecycle_state="human_accepted",
             authorization_status="active",
             currentness="current",
@@ -129,7 +123,6 @@ def test_tier4_scenario_2_admin_review_and_supersession_workflow(
         )
     )
 
-    # Step 2: Agent creates candidate
     cand_req = {
         "jsonrpc": "2.0",
         "id": 10,
@@ -148,8 +141,6 @@ def test_tier4_scenario_2_admin_review_and_supersession_workflow(
     }
     cand_res = mcp_server.handle_public_request(cand_req)
     new_card_id = cand_res["result"]["memory_id"]
-
-    # Step 3: Admin approves candidate
     app_req = {
         "jsonrpc": "2.0",
         "id": 20,
@@ -159,7 +150,6 @@ def test_tier4_scenario_2_admin_review_and_supersession_workflow(
     app_res = mcp_server.handle_admin_request(app_req, auth_token="lbrain_admin")
     assert app_res["result"]["status"] == "approved"
 
-    # Step 4: Admin supersedes old card
     sup_req = {
         "jsonrpc": "2.0",
         "id": 30,
@@ -173,7 +163,6 @@ def test_tier4_scenario_2_admin_review_and_supersession_workflow(
     assert sup_res["result"]["status"] == "committed"
     assert pg_store.cards[old_card_id].currentness == "superseded"
 
-    # Step 5: Agent calls brain.resolve(slim)
     resolve_req = {
         "jsonrpc": "2.0",
         "id": 40,
@@ -298,81 +287,3 @@ def test_tier4_scenario_4_provenance_audit_and_temporal_investigation(
     assert len(result["decisions"]) == 1
     assert result["decisions"][0]["id"] == "gen_2"
     assert "sha256:gen2" in result["evidence_hashes"]
-
-
-def test_tier4_scenario_5_zero_downtime_qdrant_to_pgvector_cutover(
-    qdrant_store: InMemoryQdrantStore, pg_store: InMemoryPostgresStore
-):
-    """
-    Scenario 5: Zero-Downtime Qdrant to PostgreSQL Cutover
-    1. Qdrant store contains 20 active session chunks and card vectors.
-    2. Migration script runs in background and backfills data into PostgreSQL pgvector store.
-    3. Dual-read shadow harness executes 20 benchmark queries comparing Qdrant vs pgvector.
-    4. Asserts Recall@5 >= 0.95 and latency P95 <= 20ms.
-    5. Search backend switches to postgres_pgvector with 0 downtime.
-    """
-    # 1. Populate Qdrant
-    for i in range(20):
-        vec = make_dummy_vector(300 + i)
-        qdrant_store.upsert(
-            f"chunk_prod_{i}",
-            vec,
-            {
-                "memory_id": f"chunk_prod_{i}",
-                "project": "neurons",
-                "title": f"Production Chunk {i}",
-                "summary": f"Summary {i}",
-                "content_hash": sha256_str(f"prod_chunk_{i}"),
-                "lifecycle_state": "human_accepted",
-                "authorization_status": "active",
-            },
-        )
-
-    # 2. Backfill into PostgreSQL
-    for pid, (vec, p) in qdrant_store.vectors.items():
-        pg_store.insert_card(
-            MemoryCard(
-                memory_id=pid,
-                project=p["project"],
-                card_type="decision",
-                title=p["title"],
-                summary=p["summary"],
-                typed_payload={},
-                content_hash=p["content_hash"],
-                lifecycle_state=p["lifecycle_state"],
-                authorization_status=p["authorization_status"],
-                embedding=vec,
-                embedding_state="ready",
-            )
-        )
-    assert len(pg_store.cards) == 20
-
-    # 3. Dual-Read Shadow Benchmark execution
-    latencies = []
-    recall_list = []
-    for i in range(20):
-        start_t = time.perf_counter()
-        q_vec = make_dummy_vector(300 + i)
-
-        q_res = [r["id"] for r in qdrant_store.search(q_vec, limit=5)]
-        pg_res = [r["memory_id"] for r in pg_store.hybrid_vector_search(q_vec, project="neurons", limit=5)]
-
-        elapsed_ms = (time.perf_counter() - start_t) * 1000
-        latencies.append(elapsed_ms)
-
-        overlap = len(set(q_res).intersection(set(pg_res)))
-        recall_list.append(overlap / len(q_res))
-
-    # 4. Gate assertions
-    avg_recall = sum(recall_list) / len(recall_list)
-    assert avg_recall >= 0.95, f"Cutover Recall@5 {avg_recall} < 0.95"
-
-    latencies.sort()
-    p95_latency = latencies[int(len(latencies) * 0.95) - 1]
-    assert len(latencies) == 20 and p95_latency >= 0.0
-    if perf_budget_enforced():
-        assert p95_latency <= 20.0, f"P95 latency {p95_latency}ms > 20ms"
-
-    # 5. Switch search backend
-    active_search_backend = "postgres_pgvector"
-    assert active_search_backend == "postgres_pgvector"

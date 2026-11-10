@@ -1,7 +1,7 @@
 """Tier 2 Boundary Condition Coverage Test Suite (Simulation).
 
-Pure simulation suite running against InMemoryPostgresStore, InMemoryQdrantStore,
-and MockMCPServer with isolated legacy 1536-dim simulation profile.
+Pure simulation suite running against InMemoryPostgresStore and MockMCPServer
+with isolated legacy 1536-dim simulation profile.
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ import pytest
 
 from .conftest import (
     InMemoryPostgresStore,
-    InMemoryQdrantStore,
     MemoryCard,
     MemoryEdge,
     MockMCPServer,
@@ -736,54 +735,13 @@ def test_f10_b05_dag_diamond_dependency_convergence(pg_store: InMemoryPostgresSt
 
 
 # ==============================================================================
-# Feature 11 Boundary: Qdrant to PostgreSQL Backfill (5 Boundary Tests)
+# Feature 11 Boundary: retired_vector_index to PostgreSQL Backfill (5 Boundary Tests)
 # ==============================================================================
 
-def test_f11_b01_empty_qdrant_collection(qdrant_store: InMemoryQdrantStore, pg_store: InMemoryPostgresStore):
-    """Migrating empty Qdrant collection succeeds with 0 records copied."""
-    migrated = 0
-    for pid, (vec, p) in qdrant_store.vectors.items():
-        migrated += 1
-    assert migrated == 0
-    assert len(pg_store.chunks) == 0
 
 
-def test_f11_b02_missing_optional_payload_fields(qdrant_store: InMemoryQdrantStore, pg_store: InMemoryPostgresStore):
-    """Payload with missing optional fields defaults cleanly in Postgres."""
-    v = make_dummy_vector(1)
-    qdrant_store.upsert("min_point", v, {"project": "neurons", "session_id_hash": "sha256:s1"})
-
-    for pid, (vec, p) in qdrant_store.vectors.items():
-        chunk = SessionChunk(
-            chunk_id=pid,
-            session_id_hash=p.get("session_id_hash", ""),
-            project=p.get("project", "default"),
-            provider=p.get("provider", "unspecified"),
-            chunk_index=p.get("chunk_index", 0),
-            content_markdown=p.get("content_markdown", ""),
-            embedding_model=p.get("embedding_model", "text-embedding-3-small"),
-            embedding=vec,
-        )
-        pg_store.insert_chunk(chunk)
-
-    assert "min_point" in pg_store.chunks
-    assert pg_store.chunks["min_point"].provider == "unspecified"
 
 
-def test_f11_b03_idempotent_rerun(qdrant_store: InMemoryQdrantStore, pg_store: InMemoryPostgresStore):
-    """Re-running migration on same dataset is idempotent (no duplicate rows)."""
-    v = make_dummy_vector(2)
-    qdrant_store.upsert("idem_point", v, {"project": "neurons", "title": "Idempotent"})
-
-    # Run 1
-    for pid, (vec, p) in qdrant_store.vectors.items():
-        pg_store.insert_card(MemoryCard(pid, "neurons", "decision", p["title"], "S", {}, embedding=vec))
-    assert len(pg_store.cards) == 1
-
-    # Run 2 (upsert replacement)
-    for pid, (vec, p) in qdrant_store.vectors.items():
-        pg_store.insert_card(MemoryCard(pid, "neurons", "decision", p["title"], "S", {}, embedding=vec))
-    assert len(pg_store.cards) == 1
 
 
 def test_f11_b04_corrupted_vector_quarantine(pg_store: InMemoryPostgresStore):
@@ -817,16 +775,6 @@ def test_f11_b05_network_retry_resumption():
 # Feature 12 Boundary: Dual-Read Shadow Benchmark (5 Boundary Tests)
 # ==============================================================================
 
-def test_f12_b01_single_store_timeout_resilience(qdrant_store: InMemoryQdrantStore, pg_store: InMemoryPostgresStore):
-    """Qdrant timeout does not crash dual-read harness (records error)."""
-    qdrant_timeout = True
-    pg_res = pg_store.hybrid_vector_search(make_dummy_vector(1), project="neurons")
-    qdrant_res = None
-    if not qdrant_timeout:
-        qdrant_res = qdrant_store.search(make_dummy_vector(1))
-
-    assert qdrant_res is None
-    assert isinstance(pg_res, list)
 
 
 def test_f12_b02_zero_match_recall():

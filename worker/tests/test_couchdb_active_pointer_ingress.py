@@ -148,6 +148,13 @@ def _mark_projected(store: InMemoryCouchDBSourceStore, *, source_hash: str) -> N
             "projected_source_hash": source_hash,
         }
     )
+    state["backend_receipts"] = {
+        "postgres_pgvector": {
+            "projection_status": dm.ProjectionStatus.PROJECTED,
+            "projected_source_hash": source_hash,
+            "active_content_hash": dm.sha256_hash("materialized-session-memory"),
+        }
+    }
     store.put(state)
 
 
@@ -426,7 +433,7 @@ def test_delivery_backend_rotates_active_pointer_for_distinct_chunk_not_duplicat
     backend.submit(_job(state_db, "delivery-first"))
 
     assert _active_pointer(store) == pointer_before_duplicate
-    assert _select_sessions_needing_projection(store, limit=0, backend="qdrant") == []
+    assert _select_sessions_needing_projection(store, limit=0, backend="postgres_pgvector") == []
     duplicate_projection = store.get(dm.projection_state_doc_id(SESSION_ID_HASH))
     assert duplicate_projection is not None
     assert duplicate_projection["projection_status"] == dm.ProjectionStatus.PROJECTED
@@ -471,7 +478,7 @@ def test_delivery_backend_rotates_active_pointer_for_distinct_chunk_not_duplicat
             dm.conversation_chunk_doc_id(SESSION_ID_HASH, "second-chunk"),
         }
     )
-    assert [row["session_id_hash"] for row in _select_sessions_needing_projection(store, limit=0, backend="qdrant")] == [
+    assert [row["session_id_hash"] for row in _select_sessions_needing_projection(store, limit=0, backend="postgres_pgvector")] == [
         SESSION_ID_HASH
     ]
 
@@ -605,7 +612,7 @@ def test_retired_index_bridge_rotates_active_pointer_for_distinct_chunk_not_dupl
     adapter.submit_document(document_from_ingress_payload(first))
 
     assert _active_pointer(store) == pointer_before_duplicate
-    assert _select_sessions_needing_projection(store, limit=0, backend="qdrant") == []
+    assert _select_sessions_needing_projection(store, limit=0, backend="postgres_pgvector") == []
 
     adapter.submit_document(document_from_ingress_payload(second))
 
@@ -1138,7 +1145,7 @@ def test_delivery_replay_of_corrective_current_chunk_is_idempotent(tmp_path) -> 
         resolved.conversation_chunks[0]["supersedes_source_document_hash"]
         == dm.sha256_hash(dm.conversation_chunk_doc_id(SESSION_ID_HASH, "current-chunk"))
     )
-    assert _select_sessions_needing_projection(store, limit=0, backend="qdrant") == []
+    assert _select_sessions_needing_projection(store, limit=0, backend="postgres_pgvector") == []
 
 
 def test_full_tool_evidence_generation_preserves_corrective_current_identity_for_delivery_replay(
@@ -1259,7 +1266,7 @@ def test_retired_bridge_replay_of_corrective_current_chunk_is_idempotent() -> No
     assert result.status == "submitted"
     assert _active_pointer(store) == pointer_before
     assert resolved.conversation_chunks == (store.get(current_chunk["_id"]),)
-    assert _select_sessions_needing_projection(store, limit=0, backend="qdrant") == []
+    assert _select_sessions_needing_projection(store, limit=0, backend="postgres_pgvector") == []
 
 
 def test_full_tool_evidence_generation_preserves_corrective_current_identity_for_bridge_replay() -> None:

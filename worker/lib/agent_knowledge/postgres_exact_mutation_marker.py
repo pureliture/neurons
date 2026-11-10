@@ -54,7 +54,6 @@ _LEDGER_SCHEMA_TABLES = (
     "public.profile_facts",
     "public.project_memory_active_snapshots",
     "public.provider_source_contracts",
-    "public.qdrant_collections",
     "public.reference_corpus_bundles",
     "public.reference_corpus_document_chunks",
     "public.reference_corpus_document_snapshots",

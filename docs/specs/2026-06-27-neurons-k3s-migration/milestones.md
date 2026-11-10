@@ -22,7 +22,7 @@
 ## M4 Backup/Restore Rehearsal Runbook
 
 - status: done
-- evidence: `backup-restore-rehearsal.md` defines CouchDB, Postgres ledger, Neo4j, Qdrant,
+- evidence: `backup-restore-rehearsal.md` defines CouchDB, Postgres ledger, Neo4j, retired-vector-index,
   restore rehearsal, and redacted evidence gates, verified by `K3sMigrationContractTest`.
 
 ## M5 Canary/Cutover Runbook

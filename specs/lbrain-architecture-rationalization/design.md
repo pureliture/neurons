@@ -11,12 +11,12 @@
 
 ## 0. 설계 결정과 경계
 
-이 설계는 **Graphiti와 Neo4j를 유지하고, 조회는 Graph-first로 바꾸며, Qdrant는 임베딩 이관·섀도우 기간에만 사용하는 것**을 전제로 한다.
+이 설계는 **Graphiti와 Neo4j를 유지하고, 조회는 Graph-first로 바꾸며, retired-vector-index는 임베딩 이관·섀도우 기간에만 사용하는 것**을 전제로 한다.
 
 - PostgreSQL: 승인·권한·currentness·content hash·명시적 lineage의 권위 저장소
 - Graphiti → Neo4j: 엔티티·관계·temporal fact를 저장하고 탐색하는 주 조회 경로
 - PostgreSQL `halfvec(3072)`: graph 미투영 데이터와 graph 장애 시의 명시적 semantic fallback
-- Qdrant: migration/dual-read shadow 전용. 정상 Agent read path에 두지 않음
+- retired-vector-index: migration/dual-read shadow 전용. 정상 Agent read path에 두지 않음
 - AST/Graphify: product runtime에서 제외
 - `pgai`: 첫 cutover의 embedding owner가 아님. Embedding Worker 하나만 임베딩을 생성함
 
@@ -55,7 +55,7 @@ flowchart LR
         Graphiti["Graphiti adapter<br/>extraction + graph search"]
         Neo4j["Neo4j 5.x<br/>derived graph + graph indexes"]
         Join["PostgreSQL authority join"]
-        Qdrant["Qdrant<br/>migration / shadow only"]
+        retired-vector-index["retired-vector-index<br/>migration / shadow only"]
 
         Ingress --> Authority
         Authority --> EmbeddingOutbox --> EmbedWorker --> PGVector
@@ -67,7 +67,7 @@ flowchart LR
         Join --> Authority
         Router -. "unprojected / graph_status=degraded" .-> PGVector
         PGVector --> Join
-        Qdrant -. "preflight + shadow" .-> PGVector
+        retired-vector-index -. "preflight + shadow" .-> PGVector
     end
 
     subgraph MCP ["MCP surface"]
@@ -89,7 +89,7 @@ flowchart LR
 | Graphiti | episode를 읽어 entity/relation/time/provenance로 만들고 Neo4j 검색 API를 조립 | PostgreSQL 승인 상태를 직접 바꾸지 않음 |
 | Neo4j | Graphiti가 만든 노드·엣지·그래프 인덱스와 multi-hop 탐색 | 승인·권한의 독립 SoT가 되지 않음 |
 | pgvector | 3072차원 semantic fallback과 미투영 카드 검색 | Graphiti의 temporal relation을 대체하지 않음 |
-| Qdrant | 기존 데이터 source, 비교용 shadow | 공개 Agent 조회의 정상 경로가 아님 |
+| retired-vector-index | 기존 데이터 source, 비교용 shadow | 공개 Agent 조회의 정상 경로가 아님 |
 
 ---
 
@@ -133,7 +133,7 @@ PG fallback은 Graphiti/Neo4j의 관계 의미를 복원하지 않는다. outage
 }
 ```
 
-허용되는 `retrieval_path`는 `graph_neo4j`, `pgvector_fallback`, `none`이다. `graph_status`는 `available`, `degraded`, `unavailable`, `projection_lag` 중 하나이고, `authority_join_status`는 `verified`, `mismatch`, `unavailable` 중 하나다. 지연 필드는 `projection_lag_ms` 하나만 사용하며, `graph_status="available"`일 때도 측정할 수 없으면 `null`을 반환한다. Qdrant를 정상 경로 이름으로 반환하지 않는다.
+허용되는 `retrieval_path`는 `graph_neo4j`, `pgvector_fallback`, `none`이다. `graph_status`는 `available`, `degraded`, `unavailable`, `projection_lag` 중 하나이고, `authority_join_status`는 `verified`, `mismatch`, `unavailable` 중 하나다. 지연 필드는 `projection_lag_ms` 하나만 사용하며, `graph_status="available"`일 때도 측정할 수 없으면 `null`을 반환한다. retired-vector-index를 정상 경로 이름으로 반환하지 않는다.
 
 ### 2.4. Graph-to-authority canonical join key
 
@@ -313,7 +313,7 @@ CREATE INDEX IF NOT EXISTS idx_graph_projection_outbox_queue
 
 - DSN 또는 caller-owned `psycopg` connection을 반드시 받는다.
 - connection/schema/query 실패는 `ConnectionError` 또는 원래 DB 예외로 전달한다.
-- 실패 시 빈 결과, 임시 memory mode, Qdrant 자동 우회를 반환하지 않는다.
+- 실패 시 빈 결과, 임시 memory mode, retired-vector-index 자동 우회를 반환하지 않는다.
 - 모든 vector 입력은 길이 3072와 finite number를 검사한다.
 - SQL cast는 `%s::halfvec`이고 distance expression은 `embedding <=> %s::halfvec`이다.
 
@@ -396,13 +396,13 @@ SQL statement timeout은 1초를 상한으로 하되 호출자의 기존 제한�
 | owner | Embedding Worker |
 | alternative | Ollama를 명시한 local profile에서만 `nomic-embed-text / 768`; 로컬 Model2Vec 전환 프로필(`lbrain-memory-model2vec-256-v1` / `local-model2vec-256-v1` / `256` / `vector(256)`)은 `specs/model2vec-local-embedding/design.md` 정본 참조 |
 
-Graphiti의 Neo4j vector index를 생성하는 embedder도 동일한 profile을 사용해야 한다. 다른 dimension의 vector를 같은 collection/index에 섞지 않는다. Qdrant에 남은 기존 vector가 profile과 다르면 migration tool이 quarantine하고 re-embed job을 만든다.
+Graphiti의 Neo4j vector index를 생성하는 embedder도 동일한 profile을 사용해야 한다. 다른 dimension의 vector를 같은 collection/index에 섞지 않는다. retired-vector-index에 남은 기존 vector가 profile과 다르면 migration tool이 quarantine하고 re-embed job을 만든다.
 
 `pgai`는 첫 cutover에 자동으로 embedding을 생성하는 숨은 owner가 아니다. 나중에 도입할 경우 worker와의 중복 enqueue, retry, hash/CAS, model revision을 별도 ADR로 결정한다.
 
-### 5.2. Qdrant source preflight
+### 5.2. retired-vector-index source preflight
 
-이관 전 실제 Qdrant에서 다음을 읽어 checkpoint에 남긴다.
+이관 전 실제 retired-vector-index에서 다음을 읽어 checkpoint에 남긴다.
 
 - collection name과 실제 dimension
 - distance metric
@@ -411,7 +411,7 @@ Graphiti의 Neo4j vector index를 생성하는 embedder도 동일한 profile을 
 - payload 필드와 source/content hash coverage
 - scroll pagination의 마지막 offset
 
-문서의 기본값 `3072`만으로 Qdrant 원본 차원을 추정하지 않는다.
+문서의 기본값 `3072`만으로 retired-vector-index 원본 차원을 추정하지 않는다.
 
 ---
 
@@ -500,9 +500,9 @@ M3에서 발견한 두 경계 결함 때문에 구현을 보정했다. 구조화
 
 ### Phase 0 — 측정
 
-- 실제 Qdrant와 PostgreSQL의 connection, dimension, distance, model을 read-only probe한다.
+- 실제 retired-vector-index와 PostgreSQL의 connection, dimension, distance, model을 read-only probe한다.
 - 실제 Neo4j의 node/edge/index 상태와 Graphiti version을 기록한다.
-- 기존 Qdrant의 Recall@5 측정치가 mock/dummy vector 기반이면 cutover 증거로 폐기한다.
+- 기존 retired-vector-index의 Recall@5 측정치가 mock/dummy vector 기반이면 cutover 증거로 폐기한다.
 
 ### Phase 1 — PostgreSQL vector fallback 준비
 
@@ -513,7 +513,7 @@ M3에서 발견한 두 경계 결함 때문에 구현을 보정했다. 구조화
 
 ### Phase 2 — Graphiti/Neo4j replay
 
-- Qdrant point 자체가 아니라 원본 episode 또는 권위 card/reference를 replay한다.
+- retired-vector-index point 자체가 아니라 원본 episode 또는 권위 card/reference를 replay한다.
 - Graph Projection Worker가 Graphiti를 호출하여 Neo4j entity/relation/temporal graph를 재생성한다.
 - projection cursor, source revision, duplicate, failure, lag를 checkpoint에 남긴다.
 - vector-only copy는 relation, temporal validity, provenance를 복원한 것으로 간주하지 않는다.
@@ -524,13 +524,13 @@ M3에서 발견한 두 경계 결함 때문에 구현을 보정했다. 구조화
 
 - Graphiti/Neo4j 후보와 PG authority join 결과
 - PG vector fallback 결과
-- 기존 Qdrant shadow 결과
+- 기존 retired-vector-index shadow 결과
 - Recall@5, relation/temporal correctness
 - authority false-positive/false-negative
 - p50/p95 latency, projection lag, fallback rate
 - slim payload size와 evidence coverage
 
-기본 cutover benchmark는 실제 Qdrant/실제 PostgreSQL만 사용하며, 최소 50개 query fixture와 동일한 10분 관찰 창을 요구한다. 기본 gate는 `mean Recall@5 >= 0.95`, relation/temporal correctness `>= 0.95`, backend error `0건`, PostgreSQL p95 `<= 20ms`다. false-positive와 fallback rate는 측정값 및 승인된 상한을 같이 기록해야 하며, 빈 fixture·mock client·dummy vector·Python dict scan 결과는 gate 통과로 인정하지 않는다. 결과에는 `evidence_class=live_cutover`를 기록해야 하고, 테스트용 harness는 `evidence_class=test_harness`로 별도 실행하며 `cutover evidence`와 섞지 않는다.
+기본 cutover benchmark는 실제 retired-vector-index/실제 PostgreSQL만 사용하며, 최소 50개 query fixture와 동일한 10분 관찰 창을 요구한다. 기본 gate는 `mean Recall@5 >= 0.95`, relation/temporal correctness `>= 0.95`, backend error `0건`, PostgreSQL p95 `<= 20ms`다. false-positive와 fallback rate는 측정값 및 승인된 상한을 같이 기록해야 하며, 빈 fixture·mock client·dummy vector·Python dict scan 결과는 gate 통과로 인정하지 않는다. 결과에는 `evidence_class=live_cutover`를 기록해야 하고, 테스트용 harness는 `evidence_class=test_harness`로 별도 실행하며 `cutover evidence`와 섞지 않는다.
 
 ### Phase 4 — Graph-first cutover
 
@@ -541,9 +541,9 @@ M3에서 발견한 두 경계 결함 때문에 구현을 보정했다. 구조화
 - graph 장애 시 explicit fallback과 metadata 통과
 - Graphiti extraction이 hot path를 막지 않음
 - 실제 Neo4j/Graphiti read latency와 projection lag가 관찰 가능
-- Qdrant public query 호출이 없음
+- retired-vector-index public query 호출이 없음
 
-Qdrant는 rollback window 동안 보존할 수 있지만 정상 조회의 우선순위로 되돌리지 않는다.
+retired-vector-index는 rollback window 동안 보존할 수 있지만 정상 조회의 우선순위로 되돌리지 않는다.
 
 ---
 
@@ -556,7 +556,7 @@ Qdrant는 rollback window 동안 보존할 수 있지만 정상 조회의 우선
 | Graphiti projection 실패 | outbox retry/dead-letter; 기존 graph는 source revision과 함께 유지 |
 | graph projection lag 증가 | `graph_status="projection_lag"`, `projection_lag_ms` 공개, 운영 alert, 필요 시 PG fallback |
 | embedding model/dimension mismatch | write 거부 또는 quarantine; 임의 cast/padding 금지 |
-| Qdrant shadow 실패 | shadow metric만 실패; 권위 write와 graph read를 Qdrant에 종속시키지 않음 |
+| retired-vector-index shadow 실패 | shadow metric만 실패; 권위 write와 graph read를 retired-vector-index에 종속시키지 않음 |
 | Agent가 admin mutation 호출 | auth boundary에서 거부 |
 
 ---
@@ -570,7 +570,7 @@ Qdrant는 rollback window 동안 보존할 수 있지만 정상 조회의 우선
 - memory card/chunk Dual CAS와 outbox lease
 - 실제 Neo4j Graphiti add/search/retrieve와 projection replay
 - graph-first → authority join → PG fallback 순서
-- Qdrant preflight와 vector/episode migration 분리
+- retired-vector-index preflight와 vector/episode migration 분리
 - MCP public 2-tool schema, admin isolation, 3KB serializer cap
 - Graphiti redaction, temporal correctness, idempotency, timeout/dead-letter
 

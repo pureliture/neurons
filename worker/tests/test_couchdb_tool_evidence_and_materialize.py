@@ -262,17 +262,22 @@ def test_distinct_tool_coverage_revision_invalidates_session_and_graph_currentne
     first_coverage = update_coverage_with_tool_evidence(
         session_id_hash=_sid(), store=store
     )
-    store.put(
-        dm.build_projection_state_document(
-            session_id_hash=_sid(),
-            provider="codex",
-            project="neurons",
-            projection_status=dm.ProjectionStatus.PROJECTED,
-            active_content_hash=dm.sha256_hash("first-artifact"),
-            source_hash=first_coverage["source_hash"],
-            projected_source_hash=first_coverage["source_hash"],
-        )
+    projected_state = dm.build_projection_state_document(
+        session_id_hash=_sid(),
+        provider="codex",
+        project="neurons",
+        projection_status=dm.ProjectionStatus.PENDING,
+        active_content_hash=dm.sha256_hash("first-artifact"),
+        source_hash=first_coverage["source_hash"],
     )
+    projected_state["backend_receipts"] = {
+        "postgres_pgvector": {
+            "projection_status": dm.ProjectionStatus.PROJECTED,
+            "active_content_hash": dm.sha256_hash("first-artifact"),
+            "projected_source_hash": first_coverage["source_hash"],
+        }
+    }
+    store.put(projected_state)
 
     revision = store.put(changed)
     current_coverage = update_coverage_with_tool_evidence(
@@ -294,7 +299,7 @@ def test_distinct_tool_coverage_revision_invalidates_session_and_graph_currentne
     ) == current_coverage["source_hash"]
     assert [
         row["session_id_hash"]
-        for row in _select_sessions_needing_projection(store, limit=0, backend="qdrant")
+        for row in _select_sessions_needing_projection(store, limit=0, backend="postgres_pgvector")
     ] == [_sid()]
 
     class _ProjectedFirstRevision:
@@ -360,17 +365,22 @@ def test_tool_evidence_body_revision_invalidates_both_projection_lanes_but_dupli
     first_coverage = update_coverage_with_tool_evidence(
         session_id_hash=_sid(), store=store
     )
-    store.put(
-        dm.build_projection_state_document(
-            session_id_hash=_sid(),
-            provider="codex",
-            project="neurons",
-            projection_status=dm.ProjectionStatus.PROJECTED,
-            active_content_hash=dm.sha256_hash("first-artifact"),
-            source_hash=first_coverage["source_hash"],
-            projected_source_hash=first_coverage["source_hash"],
-        )
+    projected_state = dm.build_projection_state_document(
+        session_id_hash=_sid(),
+        provider="codex",
+        project="neurons",
+        projection_status=dm.ProjectionStatus.PENDING,
+        active_content_hash=dm.sha256_hash("first-artifact"),
+        source_hash=first_coverage["source_hash"],
     )
+    projected_state["backend_receipts"] = {
+        "postgres_pgvector": {
+            "projection_status": dm.ProjectionStatus.PROJECTED,
+            "active_content_hash": dm.sha256_hash("first-artifact"),
+            "projected_source_hash": first_coverage["source_hash"],
+        }
+    }
+    store.put(projected_state)
 
     duplicate = store.put(original)
     duplicate_coverage = update_coverage_with_tool_evidence(
@@ -378,7 +388,7 @@ def test_tool_evidence_body_revision_invalidates_both_projection_lanes_but_dupli
     )
     assert duplicate.outcome == "duplicate"
     assert duplicate_coverage["source_hash"] == first_coverage["source_hash"]
-    assert _select_sessions_needing_projection(store, limit=0, backend="qdrant") == []
+    assert _select_sessions_needing_projection(store, limit=0, backend="postgres_pgvector") == []
 
     class _ProjectedFirstRevision:
         def list_projected_source_hash_sets(self, *args, **kwargs):
@@ -424,7 +434,7 @@ def test_tool_evidence_body_revision_invalidates_both_projection_lanes_but_dupli
     assert current_coverage["source_hash"] != first_coverage["source_hash"]
     assert [
         row["session_id_hash"]
-        for row in _select_sessions_needing_projection(store, limit=0, backend="qdrant")
+        for row in _select_sessions_needing_projection(store, limit=0, backend="postgres_pgvector")
     ] == [_sid()]
     assert [
         row["session_id_hash"]
@@ -556,17 +566,18 @@ def test_projection_goes_to_session_memory_only() -> None:
     _seed_session(store)
     store_tool_evidence_bundles([_record(0)], store=store)
     projector = RecordingSessionMemoryProjector()
-    report = materialize_and_project(session_id_hash=_sid(), store=store, projector=projector, backend="qdrant")
+    report = materialize_and_project(session_id_hash=_sid(), store=store, projector=projector, backend="postgres_pgvector")
     assert report["projection"]["status"] == dm.ProjectionStatus.PROJECTED
     assert len(projector.calls) == 1
     assert projector.calls[0]["target_profile"] == dm.INDEX_RECALL_PROFILE
     # projection_state recorded in the store
     state = store.get(dm.projection_state_doc_id(_sid()))
-    assert state["projection_status"] == dm.ProjectionStatus.PROJECTED
-    assert state["target_profile"] == dm.INDEX_RECALL_PROFILE
+    receipt = state["backend_receipts"]["postgres_pgvector"]
+    assert receipt["projection_status"] == dm.ProjectionStatus.PROJECTED
+    assert receipt["session_memory_knowledge_id"]
     session = store.get(dm.session_doc_id(_sid()))
-    assert session["source_hash"] == state["projected_source_hash"]
-    assert session["materialized_at"] == state["materialized_at"]
+    assert session["source_hash"] == receipt["projected_source_hash"]
+    assert session["materialized_at"] == receipt["materialized_at"]
     assert session["materialized_at"]
 
 
@@ -680,11 +691,11 @@ def test_materialization_loss_blocks_projection() -> None:
     assert mat.fully_materialized is False
     assert "materialization_loss" in mat.notes
     projector = RecordingSessionMemoryProjector()
-    result = project_session_memory(materialized=mat, store=store, projector=projector, backend="qdrant")
+    result = project_session_memory(materialized=mat, store=store, projector=projector, backend="postgres_pgvector")
     assert result["status"] == dm.ProjectionStatus.FAILED
     assert projector.calls == []  # never projected
     state = store.get(dm.projection_state_doc_id(_sid()))
-    assert state["projection_status"] == dm.ProjectionStatus.FAILED
+    assert state["backend_receipts"]["postgres_pgvector"]["projection_status"] == dm.ProjectionStatus.FAILED
 
 
 def test_projector_failure_keeps_source_and_marks_failed() -> None:

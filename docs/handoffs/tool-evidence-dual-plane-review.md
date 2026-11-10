@@ -90,7 +90,7 @@ tool 실행 정보가 이제 두 경로로 나뉩니다.
 | 입력 | chunk prose + `## Tool Evidence` 섹션 | chunk prose(8000자) + evidence addendum(2000자) |
 | evidence 소스 | `list_tool_evidence_summaries` (ledger) | `resolved.tool_evidence_bundles` (CouchDB) |
 | evidence 형식 | `### N cat/outcome`, `- command:`, `- result:` | `### N cat/outcome`, `- tool:`, `- command:`, `- result:` |
-| 소비 | 검색/리콜 (Qdrant 등 검색 미러) | 엔티티·관계 추출 후 Neo4j 그래프 |
+| 소비 | 검색/리콜 (retired-vector-index 등 검색 미러) | 엔티티·관계 추출 후 Neo4j 그래프 |
 
 **질문 1**: 이 이중 구조가 정당한가, 아니면 한쪽이 중복인가?
 - 정당하다고 보면: 두 경로의 질문이 다르다. recall은 "이 세션에서 무슨 일이

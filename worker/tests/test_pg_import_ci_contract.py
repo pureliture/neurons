@@ -10,26 +10,6 @@ import yaml
 WORKFLOW = Path(__file__).parents[2] / ".github/workflows/test.yml"
 
 
-def test_importer_ci_uses_dedicated_postgres_lane_only():
-    workflow = yaml.safe_load(WORKFLOW.read_text())
-    jobs = workflow["jobs"]
-    job = jobs["worker-lbrain-pgvector"]
-    assert job["env"]["ATLAS_QRET_SYNTHETIC_SQL"] == "1"
-    assert job["env"]["LBRAIN_TEST_PG_DSN"]
-    assert job["services"]["postgres"]["image"] == "pgvector/pgvector:pg17"
-    commands = "\n".join(step.get("run", "") for step in job["steps"])
-    for suite in (
-        "test_pg_representation.py", "test_pg_projection_privacy.py",
-        "test_pg_qdrant_import.py", "test_pg_qdrant_import_cli.py",
-        "test_pg_import_underflow.py",
-    ):
-        assert "tests/" + suite in commands.split()
-    assert "ATLAS_QRET_SYNTHETIC_SQL" not in workflow.get("env", {})
-    for name, other in jobs.items():
-        if name != "worker-lbrain-pgvector":
-            assert "ATLAS_QRET_SYNTHETIC_SQL" not in other.get("env", {})
-            assert all("ATLAS_QRET_SYNTHETIC_SQL" not in step.get("env", {})
-                       for step in other["steps"])
 
 
 @pytest.mark.parametrize("dsn", [None, "", "synthetic-configured-dsn"])

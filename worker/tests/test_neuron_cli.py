@@ -1855,40 +1855,6 @@ def test_neuron_knowledge_golden_query_eval_activation_progress_classifies_p7_re
     assert report["production_ready"] is False
 
 
-def test_neuron_knowledge_golden_query_eval_activation_progress_closes_p3_post_deploy_gap(
-    tmp_path, capsys
-):
-    capture_file = tmp_path / "p3-post-deploy-capture.json"
-    capture_file.write_text(
-        json.dumps(_valid_p3_post_deploy_capture(live=True)),
-        encoding="utf-8",
-    )
-
-    assert (
-        main(
-            [
-                "golden-query-eval",
-                "--activation-progress",
-                "--post-deploy-capture-file",
-                str(capture_file),
-            ]
-        )
-        == 0
-    )
-
-    report = json.loads(capsys.readouterr().out)
-    checks = {item["phase"]: item for item in report["product_evidence_checks"]}
-    p3 = next(item for item in report["product_evidence_summary"] if item["phase"] == "P3")
-    phase_progress = {item["phase"]: item for item in report["phase_progress"]}
-
-    assert checks["P3"]["result"] == "PASS"
-    assert p3["projection_join_claim_status"] == "validated"
-    assert p3["projection_join_edge_count"] == 2
-    assert p3["evidence_is_live"] is True
-    assert p3["network_used"] is True
-    assert p3["evidence_collection_network_used"] is True
-    assert "p3_live_graph_qdrant_projection_join_unproven" not in checks["P3"]["gaps"]
-    assert "live_graph_qdrant_projection_join_unproven" not in phase_progress["P3"]["gaps"]
 
 
 def test_neuron_knowledge_golden_query_eval_activation_progress_treats_partial_post_deploy_capture_as_gap(

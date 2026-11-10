@@ -69,7 +69,6 @@ def _sentinel():
         "authority_ledger": {"count": 5, "hash": "sha256:" + "1" * 64},
         "corpus": {"count": 7, "hash": "sha256:" + "2" * 64},
         "queue": {"count": 0, "hash": "sha256:" + "3" * 64},
-        "index": {"count": 9, "hash": "sha256:" + "4" * 64},
         "product_db": {"count": 11, "hash": "sha256:" + "5" * 64},
     }
 
@@ -79,13 +78,12 @@ def _marker_snapshot():
         "clear",
         "atomic_commit_boundary",
         "atomic_commit_boundary",
-        "clear",
         "atomic_commit_boundary",
     )
     markers = []
     for index, (plane, in_flight_status) in enumerate(
         zip(
-            ("authority_ledger", "corpus", "queue", "index", "product_db"),
+            ("authority_ledger", "corpus", "queue", "product_db"),
             in_flight_statuses,
             strict=True,
         ),
@@ -108,7 +106,7 @@ def _marker_snapshot():
         )
     return {
         "schema_version": "product_mutation_marker_snapshot.v1",
-        "marker_count": 5,
+        "marker_count": 4,
         "markers": markers,
         "reset_or_decrease_count": 0,
         "production_mutation_performed": False,
@@ -147,7 +145,7 @@ def _exact_marker_reader(*, events=None):
         authority_fence_factory=acquire_fence,
         providers={
             plane: Provider(plane)
-            for plane in ("corpus", "queue", "index", "product_db")
+            for plane in ("corpus", "queue", "product_db")
         },
     )
 
@@ -219,7 +217,7 @@ def test_independent_exact_marker_reader_holds_postgres_fence_across_one_action(
         authority_fence_factory=acquire_fence,
         providers={
             plane: Provider(plane)
-            for plane in ("corpus", "queue", "index", "product_db")
+            for plane in ("corpus", "queue", "product_db")
         },
     )
 
@@ -235,13 +233,11 @@ def test_independent_exact_marker_reader_holds_postgres_fence_across_one_action(
         "authority_ledger",
         "corpus",
         "queue",
-        "index",
         "product_db",
         "action",
         "authority_ledger",
         "corpus",
         "queue",
-        "index",
         "product_db",
         "release",
     ]
@@ -611,10 +607,10 @@ def test_enabled_probe_returns_one_sanitized_denial_and_validated_readback(tmp_p
     assert result["product_marker_evidence"]["external_build_association_hash"] == (
         BUILD_ASSOCIATION_HASH
     )
-    assert result["product_marker_evidence"]["marker_count"] == 5
+    assert result["product_marker_evidence"]["marker_count"] == 4
     assert [
         marker["plane"] for marker in result["product_marker_evidence"]["markers"]
-    ] == ["authority_ledger", "corpus", "queue", "index", "product_db"]
+    ] == ["authority_ledger", "corpus", "queue", "product_db"]
     assert {
         marker["pre_post_status"]
         for marker in result["product_marker_evidence"]["markers"]

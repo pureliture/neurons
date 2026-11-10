@@ -199,25 +199,6 @@ def _episode(
 # Existing 6 Basic Tests (Retained)
 # ==============================================================================
 
-def test_retired_runtime_card_is_not_current():
-    cards = [
-        _card("qdrant-readiness", currentness="superseded", observed_days_ago=10),
-        _card(
-            "qdrant-retirement",
-            currentness="current",
-            observed_days_ago=5,
-            typed={"decision": "Qdrant runtime retired; pgvector is authority"},
-        ),
-    ]
-    resolver = GraphFirstResolver(_Store(cards), None, None)
-    result = resolver.resolve(project="neurons", mode="list", query="qdrant", limit=5)
-    ids = [it["id"] for it in result["items"]]
-    assert "qdrant-retirement" in ids
-    for it in result["items"]:
-        if it["id"] == "qdrant-retirement":
-            assert it["currentness"] == "current"
-            assert it["temporal"]["observed_at"] is not None
-            assert it["temporal"]["age"]["seconds"] >= 0
 
 
 def test_old_but_current_stays_current():
@@ -603,40 +584,6 @@ def test_ac_age_010_missing_checked_at_yields_unchecked_gap():
     assert "no_recent_freshness_check" in chunk_t["freshness"]["gaps"]
 
 
-def test_ac_age_011_qdrant_retired_runtime_specimen():
-    """AC-AGE-011: Qdrant retirement specimen distinguishes runtime retirement from code presence without ambiguity."""
-    cards = [
-        _card(
-            "qdrant-readiness-prep",
-            card_type="task",
-            currentness="superseded",
-            observed_days_ago=45,
-            superseded_by=["qdrant-runtime-retirement"],
-        ),
-        _card(
-            "qdrant-runtime-retirement",
-            card_type="decision",
-            currentness="current",
-            observed_days_ago=15,
-            summary="Qdrant runtime retired; pgvector is single authority",
-            typed={"decision": "Qdrant runtime retired; pgvector is authority"},
-        ),
-    ]
-    resolver = GraphFirstResolver(_Store(cards), None, lambda _: [0.1])
-    result = resolver.resolve(project="neurons", query="qdrant", mode="query", limit=10)
-
-    returned_ids = [it["id"] for it in result["items"]]
-    assert "qdrant-runtime-retirement" in returned_ids
-
-    ret_item = next(it for it in result["items"] if it["id"] == "qdrant-runtime-retirement")
-    assert ret_item["currentness"] == "current"
-    assert ret_item["temporal"]["age"]["seconds"] is not None
-
-    # Obsolete readiness prep card must not be returned as current
-    if "qdrant-readiness-prep" in returned_ids:
-        prep_item = next(it for it in result["items"] if it["id"] == "qdrant-readiness-prep")
-        assert prep_item["currentness"] == "superseded"
-        assert prep_item["temporal"].get("recommended_action") == "prefer_replacement"
 
 
 def test_ac_age_012_task_items_check_due_no_auto_obsolete():

@@ -19,17 +19,6 @@ from .outbox_worker import (
     LocalEmbeddingOutboxWorker,
     generate_deterministic_embedding,
 )
-from .migration_qdrant_to_postgres import (
-    QdrantToPostgresMigrator,
-    MigrationResult,
-    FullMigrationSummary,
-)
-from .dual_read_shadow import (
-    DualReadShadowHarness,
-    BenchmarkQuery,
-    BenchmarkSummary,
-    DualReadComparisonResult,
-)
 
 __all__ = [
     "MemoryCard",
@@ -47,12 +36,4 @@ __all__ = [
     "session_identity_lock_id",
     "target_advisory_lock_id",
     "generate_deterministic_embedding",
-    "QdrantToPostgresMigrator",
-    "MigrationResult",
-    "FullMigrationSummary",
-    "DualReadShadowHarness",
-    "BenchmarkQuery",
-    "BenchmarkSummary",
-    "DualReadComparisonResult",
 ]
-

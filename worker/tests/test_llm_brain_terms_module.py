@@ -24,4 +24,3 @@ def test_query_terms_keeps_two_char_korean_nouns_and_filters_conversational_fill
     assert terms_mod.query_terms("운영 승격 어떻게 됐어") == ["운영", "승격"]
     assert terms_mod.query_terms("뭐 입지") == ["입지"]
     assert terms_mod.query_terms("너는") == ["너는"]
-

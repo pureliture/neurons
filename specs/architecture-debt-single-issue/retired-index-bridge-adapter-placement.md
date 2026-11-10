@@ -15,7 +15,7 @@ removed as well.
 
 The surviving boundary is the **Python** adapter contract in
 `worker/lib/agent_knowledge/rag_ingress/index_adapter.py`, which is
-backend-neutral and implemented by the CouchDB and Qdrant adapters. Its
+backend-neutral and implemented by the CouchDB and retired-vector-index adapters. Its
 invariants are pinned by
 `worker/tests/test_retired_index_bridge_protocol_guard.py`.
 

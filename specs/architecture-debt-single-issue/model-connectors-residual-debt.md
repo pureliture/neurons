@@ -1,6 +1,6 @@
 # Model Connectors Residual Debt
 
-This audit/implementation note is the M6 slice for GitHub issue #40. It does not perform live Graphiti, Neo4j, Qdrant, RetiredIndexBridge, deploy, Docker, systemd, or firewall mutation.
+This audit/implementation note is the M6 slice for GitHub issue #40. It does not perform live Graphiti, Neo4j, retired-vector-index, RetiredIndexBridge, deploy, Docker, systemd, or firewall mutation.
 
 ## Finding
 

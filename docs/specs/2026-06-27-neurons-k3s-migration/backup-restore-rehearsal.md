@@ -9,7 +9,7 @@ backup/restore rehearsal gate를 정의한다. 실행 명령과 실제 저장 �
 - CouchDB
 - Postgres ledger
 - Neo4j
-- Qdrant
+- retired-vector-index
 - NATS and worker/runtime state where the workload inventory marks `backupRestoreRequired: true`
 
 Profile-gated stores are required only when the corresponding source compose profile is enabled
@@ -43,7 +43,7 @@ For each stateful store:
 | CouchDB | health, database presence, redacted document counts, representative read behavior |
 | Postgres ledger | health, schema readiness, migration/table presence, representative ledger query |
 | Neo4j | health, graph connectivity, index/constraint readiness, representative graph read |
-| Qdrant | if source profile is enabled: health, collection readiness, vector config readiness, representative search/read; otherwise explicit non-migration decision |
+| retired-vector-index | if source profile is enabled: health, collection readiness, vector config readiness, representative search/read; otherwise explicit non-migration decision |
 | NATS/runtime state | durable stream/consumer readiness or explicit non-migration decision |
 
 ## Promotion Rule

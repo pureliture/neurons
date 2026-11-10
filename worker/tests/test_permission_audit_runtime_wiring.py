@@ -53,7 +53,6 @@ def _exact_marker_reader():
         "authority_ledger": "clear",
         "corpus": "atomic_commit_boundary",
         "queue": "atomic_commit_boundary",
-        "index": "clear",
         "product_db": "atomic_commit_boundary",
     }
 
@@ -91,7 +90,7 @@ def _exact_marker_reader():
         authority_fence_factory=Fence,
         providers={
             plane: Provider(plane)
-            for plane in ("corpus", "queue", "index", "product_db")
+            for plane in ("corpus", "queue", "product_db")
         },
     )
 
@@ -376,7 +375,7 @@ def test_independent_product_mutation_sentinel_calls_each_actual_plane_once():
     from agent_knowledge.permission_audit import IndependentProductMutationSentinelReader
 
     calls = []
-    names = ("authority_ledger", "corpus", "queue", "index", "product_db")
+    names = ("authority_ledger", "corpus", "queue", "product_db")
     providers = {
         name: (
             lambda plane=name: (
@@ -398,7 +397,6 @@ def test_independent_product_mutation_sentinel_calls_each_actual_plane_once():
         "authority_ledger",
         "corpus",
         "queue",
-        "index",
         "product_db",
     }
     assert before["schema_version"] == "product_mutation_sentinel.v1"
@@ -409,7 +407,7 @@ def test_independent_product_mutation_sentinel_calls_each_actual_plane_once():
 
     with pytest.raises(ValueError, match="all independent mutation sentinel providers"):
         IndependentProductMutationSentinelReader(
-            {name: provider for name, provider in providers.items() if name != "index"}
+            {name: provider for name, provider in providers.items() if name != "product_db"}
         )
     shared_provider = lambda: {"count": 1, "hash": "sha256:" + "f" * 64}
     with pytest.raises(ValueError, match="distinct mutation sentinel providers"):
@@ -431,9 +429,6 @@ def test_independent_product_mutation_sentinel_rejects_bound_methods_from_same_o
         def queue(self):
             return {"count": 3, "hash": "sha256:" + "3" * 64}
 
-        def index(self):
-            return {"count": 4, "hash": "sha256:" + "4" * 64}
-
         def product_db(self):
             return {"count": 5, "hash": "sha256:" + "5" * 64}
 
@@ -445,7 +440,6 @@ def test_independent_product_mutation_sentinel_rejects_bound_methods_from_same_o
                 "authority_ledger": shared.authority_ledger,
                 "corpus": shared.corpus,
                 "queue": shared.queue,
-                "index": shared.index,
                 "product_db": shared.product_db,
             }
         )
@@ -467,7 +461,6 @@ def test_independent_product_mutation_sentinel_rejects_repeated_bound_method():
                 "authority_ledger": shared.read,
                 "corpus": shared.read,
                 "queue": shared.read,
-                "index": shared.read,
                 "product_db": shared.read,
             }
         )

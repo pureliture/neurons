@@ -3,7 +3,7 @@
 ## Overview
 
 Graphiti adapter 안에 묶인 model/env/client assembly 책임을 낮은 shared layer로
-분리한다. 기존 `GraphitiNeo4jConfig`와 Qdrant builder public surface는 깨지지 않게
+분리한다. 기존 `GraphitiNeo4jConfig`와 retired-vector-index builder public surface는 깨지지 않게
 facade로 유지하고, 구현 검증은 fake/no-network test와 gated synthetic Graphiti
 canary로 닫는다.
 
@@ -15,7 +15,7 @@ canary로 닫는다.
 
 핵심 요구사항:
 
-- model connector는 Graphiti/Qdrant adapter보다 낮은 shared layer가 소유한다.
+- model connector는 Graphiti/retired-vector-index adapter보다 낮은 shared layer가 소유한다.
 - `llm_brain_core`와 `rag_ingress`는 서로 import하지 않는다.
 - `GraphitiNeo4jConfig`는 장기 compatibility facade로 유지한다.
 - live canary는 public-safe synthetic episode 하나만 사용한다.
@@ -27,14 +27,14 @@ canary로 닫는다.
 ### Compatibility-first shared seam
 
 낮은 shared layer에 non-secret model specs, env precedence, capability policy,
-OpenAI-compatible factories를 둔다. 기존 Graphiti/Qdrant public entrypoint는 유지하고
+OpenAI-compatible factories를 둔다. 기존 Graphiti/retired-vector-index public entrypoint는 유지하고
 내부에서 shared layer로 delegate한다.
 
 선택 이유:
 
-- 기존 `GraphitiNeo4jConfig.from_env`와 Qdrant embedding/rerank builder의 caller를
+- 기존 `GraphitiNeo4jConfig.from_env`와 retired-vector-index embedding/rerank builder의 caller를
   깨지 않는다.
-- Qdrant delivery/import guard를 지킬 수 있다.
+- retired-vector-index delivery/import guard를 지킬 수 있다.
 - Graphiti-only 리팩터보다 중복 env 해석을 더 많이 줄인다.
 - policy/observability를 한 곳에 모을 수 있다.
 
@@ -59,8 +59,8 @@ agent_knowledge/
     graphiti_adapter.py
 
   rag_ingress/
-    qdrant_embedding.py
-    qdrant_rerank.py
+    retired-vector-index_embedding.py
+    retired-vector-index_rerank.py
 ```
 
 Dependency direction:
@@ -73,7 +73,7 @@ rag_ingress ────┘
 
 `model_connectors`는 `llm_brain_core`나 `rag_ingress`를 import하지 않는다.
 Graphiti-specific optional imports는 Graphiti component factory 경계 안에서 lazy로만
-발생한다. Qdrant live client imports도 기존처럼 lazy path에 남긴다.
+발생한다. retired-vector-index live client imports도 기존처럼 lazy path에 남긴다.
 
 ## Data Flow
 
@@ -89,7 +89,7 @@ GraphitiNeo4jGraphMemoryAdapter.from_env
   -> GraphitiNeo4jGraphMemoryAdapter(graphiti, fallback_graphiti, ...)
 ```
 
-### Qdrant embedding/rerank construction
+### retired-vector-index embedding/rerank construction
 
 ```text
 build_openai_embedding_provider / build_openai_reranker
@@ -151,7 +151,7 @@ build_openai_embedding_provider / build_openai_reranker
 - Required graph probe failure: fail fast when graph is required; best-effort graph remains
   degraded/unavailable instead of false healthy.
 - Live canary failure: abort implementation verification, report redacted failure class,
-  do not mutate RetiredIndexBridge/Qdrant/native-memory.
+  do not mutate RetiredIndexBridge/retired-vector-index/native-memory.
 
 ## Testing Strategy
 
@@ -161,14 +161,14 @@ build_openai_embedding_provider / build_openai_reranker
 - Graphiti component bundle assembly with fake clients.
 - `GraphitiNeo4jConfig.from_env/from_config` compatibility tests.
 - `runtime_graph` best-effort vs required behavior tests.
-- Qdrant embedding/rerank existing tests updated to shared config path.
-- Fresh interpreter import guard: Qdrant builder imports must not load `llm_brain_core`.
+- retired-vector-index embedding/rerank existing tests updated to shared config path.
+- Fresh interpreter import guard: retired-vector-index builder imports must not load `llm_brain_core`.
 - Gated live canary: single public-safe synthetic episode extraction/upsert/search.
 
 ## Milestones
 
 - M1: Shared specs/env/policy with compatibility tests green.
-- M2: Qdrant embedding/rerank delegates to shared model connector without import guard regression.
+- M2: retired-vector-index embedding/rerank delegates to shared model connector without import guard regression.
 - M3: Graphiti backend builder delegates model assembly outside adapter while preserving facade behavior.
 - M4: Gated synthetic Graphiti canary evidence.
 

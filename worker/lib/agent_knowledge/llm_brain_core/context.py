@@ -102,7 +102,6 @@ class BrainReadService:
         graph_adapter: GraphMemoryAdapter | None = None,
         source_resolver: SourceRefResolver | None = None,
         document_bridge: DocumentBridge | None = None,
-        search_mirror_status: Mapping[str, Any] | None = None,
         reference_corpus_status_reader: Callable[..., dict[str, Any]] | None = None,
     ) -> None:
         self.artifact_store = artifact_store or InMemorySessionMemoryArtifactStore()
@@ -110,7 +109,6 @@ class BrainReadService:
         self.graph_adapter = graph_adapter or NullGraphMemoryAdapter()
         self.source_resolver = source_resolver or SourceRefResolver()
         self.document_bridge = document_bridge or DisabledDocumentBridge()
-        self.search_mirror_status = dict(search_mirror_status or {})
         self.reference_corpus_status_reader = reference_corpus_status_reader
         # The merge/ranking policy (card > artifact > graph) lives in the builder;
         # the service stays the I/O + seam layer.
@@ -167,7 +165,6 @@ class BrainReadService:
             },
             bridge_evidence=bridge_result.evidence,
             consumer=consumer,
-            search_mirror_status=self.search_mirror_status,
         )
 
     def brain_memory_search(

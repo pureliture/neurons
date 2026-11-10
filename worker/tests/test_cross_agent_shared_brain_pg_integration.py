@@ -64,7 +64,7 @@ def lane(monkeypatch, tmp_path, capsys):
         embeds.append(provider)
         return provider
 
-    monkeypatch.setattr("agent_knowledge.rag_ingress.qdrant_embedding.build_openai_embedding_provider", embedding_factory)
+    monkeypatch.setattr("agent_knowledge.rag_ingress.embedding_provider.build_openai_embedding_provider", embedding_factory)
     monkeypatch.setenv("SESSION_MEMORY_PROJECTION_BACKEND", "postgres_pgvector")
     monkeypatch.setenv("NEURON_LBRAIN_PGVECTOR_DSN", PG_DSN)
     monkeypatch.setenv("COUCHDB_URL", COUCHDB_URL)
@@ -98,7 +98,7 @@ def _agent_b_payload(tmp_path, sql, embed, *, project, query="authority 저장�
     service = KnowledgeSearchService(
         ledger=ledger, retired_index_bridge=DisabledRetiredIndexBridgeClient(), dataset_ids=[],
         pgvector_store=sql, semantic_ranker=SimpleNamespace(embed_query=embed.embed),
-        mirror_search=lambda *_args: pytest.fail("Qdrant public read forbidden"),
+        pg_search=lambda *_args: pytest.fail("unexpected PostgreSQL callback"),
     )
     response = handle_jsonrpc_message({
         "jsonrpc": "2.0", "id": 11, "method": "tools/call",

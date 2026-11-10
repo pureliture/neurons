@@ -294,7 +294,7 @@ class TestChunkRecallFallbackInvariants:
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(pg_recall, "PgVectorStore", lambda **kw: mock_store)
-            mp.setattr("agent_knowledge.rag_ingress.qdrant_embedding.build_openai_embedding_provider", lambda **kw: mock_embed)
+            mp.setattr("agent_knowledge.rag_ingress.embedding_provider.build_openai_embedding_provider", lambda **kw: mock_embed)
             mp.setattr(pg_recall, "validated_pg_embedding_profile", lambda *a: None)
             mp.setattr(pg_recall, "assert_pg_embedding_egress_safe", lambda *a: None)
 
@@ -338,7 +338,7 @@ class TestChunkRecallFallbackInvariants:
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(pg_recall, "PgVectorStore", lambda **kw: mock_store)
-            mp.setattr("agent_knowledge.rag_ingress.qdrant_embedding.build_openai_embedding_provider", lambda **kw: mock_embed)
+            mp.setattr("agent_knowledge.rag_ingress.embedding_provider.build_openai_embedding_provider", lambda **kw: mock_embed)
             mp.setattr(pg_recall, "validated_pg_embedding_profile", lambda *a: None)
             mp.setattr(pg_recall, "assert_pg_embedding_egress_safe", lambda *a: None)
 
@@ -386,7 +386,7 @@ class TestChunkRecallFallbackInvariants:
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(pg_recall, "PgVectorStore", lambda **kw: mock_store)
-            mp.setattr("agent_knowledge.rag_ingress.qdrant_embedding.build_openai_embedding_provider", lambda **kw: mock_embed)
+            mp.setattr("agent_knowledge.rag_ingress.embedding_provider.build_openai_embedding_provider", lambda **kw: mock_embed)
             mp.setattr(pg_recall, "validated_pg_embedding_profile", lambda *a: None)
             mp.setattr(pg_recall, "assert_pg_embedding_egress_safe", lambda *a: None)
 
@@ -416,7 +416,7 @@ class TestChunkRecallFallbackInvariants:
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(pg_recall, "PgVectorStore", lambda **kw: mock_store)
-            mp.setattr("agent_knowledge.rag_ingress.qdrant_embedding.build_openai_embedding_provider", lambda **kw: mock_embed)
+            mp.setattr("agent_knowledge.rag_ingress.embedding_provider.build_openai_embedding_provider", lambda **kw: mock_embed)
             mp.setattr(pg_recall, "validated_pg_embedding_profile", lambda *a: None)
             mp.setattr(pg_recall, "assert_pg_embedding_egress_safe", lambda *a: None)
 
@@ -443,7 +443,7 @@ class TestChunkRecallFallbackInvariants:
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(pg_recall, "PgVectorStore", lambda **kw: mock_store)
-            mp.setattr("agent_knowledge.rag_ingress.qdrant_embedding.build_openai_embedding_provider", lambda **kw: mock_embed)
+            mp.setattr("agent_knowledge.rag_ingress.embedding_provider.build_openai_embedding_provider", lambda **kw: mock_embed)
             mp.setattr(pg_recall, "validated_pg_embedding_profile", lambda *a: None)
             mp.setattr(pg_recall, "assert_pg_embedding_egress_safe", lambda *a: None)
 
@@ -459,7 +459,7 @@ class TestChunkRecallFallbackInvariants:
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(pg_recall, "PgVectorStore", lambda **kw: mock_store)
-            mp.setattr("agent_knowledge.rag_ingress.qdrant_embedding.build_openai_embedding_provider", lambda **kw: mock_embed)
+            mp.setattr("agent_knowledge.rag_ingress.embedding_provider.build_openai_embedding_provider", lambda **kw: mock_embed)
             mp.setattr(pg_recall, "validated_pg_embedding_profile", lambda *a: None)
             mp.setattr(pg_recall, "assert_pg_embedding_egress_safe", lambda *a: None)
 

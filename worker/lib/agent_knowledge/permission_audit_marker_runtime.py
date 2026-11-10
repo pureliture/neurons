@@ -1,4 +1,4 @@
-"""Compose the exact five-plane permission-audit marker runtime.
+"""Compose the exact four-plane permission-audit marker runtime.
 
 The composition boundary accepts already configured, narrow read-only sources.  It
 does not know storage endpoints, paths, collection names, product identifiers, or
@@ -14,14 +14,6 @@ from .postgres_exact_mutation_marker import (
     PostgresExactMutationMarkerContract,
     PostgresExactMutationMarkerReader,
 )
-from .qdrant_write_gateway import (
-    GatewayCoverageManifest,
-    build_exact_marker_projection,
-    build_permission_audit_marker_snapshot_record,
-    validate_gateway_coverage,
-)
-
-
 class PermissionAuditMarkerRuntimeError(RuntimeError):
     """Fail-closed runtime composition or resource-lifecycle failure."""
 
@@ -131,47 +123,6 @@ class _PostgresFenceFactory:
             raise lease_error
 
 
-class _QdrantExactMutationMarkerProvider:
-    def __init__(
-        self,
-        *,
-        metadata_reader: Callable[[], Mapping[str, object]],
-        coverage_reader: Callable[[], GatewayCoverageManifest],
-        expected_coverage: GatewayCoverageManifest,
-    ) -> None:
-        if not callable(metadata_reader):
-            raise ValueError("Qdrant marker metadata reader is required")
-        if not callable(coverage_reader):
-            raise ValueError("Qdrant marker coverage reader is required")
-        if not isinstance(expected_coverage, GatewayCoverageManifest):
-            raise TypeError("Qdrant expected coverage manifest is required")
-        self._metadata_reader = metadata_reader
-        self._coverage_reader = coverage_reader
-        self._expected_coverage = expected_coverage
-        self._previous_event_position: int | None = None
-
-    def __call__(self) -> dict[str, object]:
-        snapshot = self._metadata_reader()
-        projection = build_exact_marker_projection(
-            snapshot,
-            previous_event_position=self._previous_event_position,
-            require_clear=True,
-        )
-        coverage = validate_gateway_coverage(
-            self._coverage_reader(),
-            expected=self._expected_coverage,
-        )
-        record = build_permission_audit_marker_snapshot_record(
-            projection=projection,
-            coverage=coverage,
-        )
-        event_position = snapshot["event_position"]
-        if isinstance(event_position, bool) or not isinstance(event_position, int):
-            raise PermissionAuditMarkerRuntimeError(
-                "Qdrant marker event position is malformed"
-            )
-        self._previous_event_position = event_position
-        return record
 
 
 def build_permission_audit_marker_reader(
@@ -181,11 +132,8 @@ def build_permission_audit_marker_reader(
     couchdb_provider: Callable[[], Mapping[str, object]],
     nats_provider: Callable[[], Mapping[str, object]],
     sqlite_provider: Callable[[], Mapping[str, object]],
-    qdrant_metadata_reader: Callable[[], Mapping[str, object]],
-    qdrant_coverage_reader: Callable[[], GatewayCoverageManifest],
-    qdrant_expected_coverage: GatewayCoverageManifest,
 ) -> IndependentProductMutationMarkerReader:
-    """Return one exact, source-owned five-plane marker reader.
+    """Return one exact, source-owned four-plane marker reader.
 
     Production callers must supply the PostgreSQL contract returned by
     ``build_source_owned_postgres_exact_marker_contract`` so every ledger source
@@ -196,17 +144,11 @@ def build_permission_audit_marker_reader(
         contract=postgres_contract,
         connection_factory=postgres_connection_factory,
     )
-    qdrant_provider = _QdrantExactMutationMarkerProvider(
-        metadata_reader=qdrant_metadata_reader,
-        coverage_reader=qdrant_coverage_reader,
-        expected_coverage=qdrant_expected_coverage,
-    )
     return IndependentProductMutationMarkerReader(
         authority_fence_factory=postgres_fence_factory,
         providers={
             "corpus": couchdb_provider,
             "queue": nats_provider,
-            "index": qdrant_provider,
             "product_db": sqlite_provider,
         },
     )

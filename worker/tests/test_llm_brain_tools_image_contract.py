@@ -16,6 +16,8 @@ def test_pyproject_declares_mcp_client_extra_for_operator_capture() -> None:
     assert extras["mcp-http"] == ["mcp>=1.28.0,<2"]
 
 
+
+
 def test_llm_brain_tools_image_installs_mcp_client_extra() -> None:
     dockerfile = Path("Dockerfile.tools").read_text(encoding="utf-8")
 
@@ -25,7 +27,6 @@ def test_llm_brain_tools_image_installs_mcp_client_extra() -> None:
     legacy_symbol = "streamable" + "http_client"
     assert legacy_symbol not in dockerfile
     assert "post_deploy_mcp_capture" in dockerfile
-    assert "qdrant-client>=1.10" in dockerfile
     assert "openai>=1.0" in dockerfile
     assert 'CMD ["sleep", "infinity"]' in dockerfile
 

@@ -320,4 +320,3 @@ def test_journal_hit_neutralizes_chunk_blockers_for_that_row(tmp_path):
     )
     assert "replay_source_text_missing" in without_journal["blockers"]
     assert "replay_key_incomplete" in without_journal["blockers"]
-

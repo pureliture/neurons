@@ -590,7 +590,7 @@ def build_source_to_candidate_runtime_evidence_collection_plan(
             "collect_agent_context_product": "live_agent_context_product_sections_unverified",
             "probe_brain_objects_query_routes": "live_brain_objects_query_route_smokes_unverified",
             "probe_temporal_recall_corrective_checkpoint": "live_temporal_recall_corrective_checkpoint_unverified",
-            "probe_projection_join_runtime": "live_graph_qdrant_projection_join_unproven",
+            "probe_projection_join_runtime": "live_graph_projection_join_unproven",
             "probe_source_to_candidate_review_loop": "live_source_to_candidate_review_loop_unverified",
             "probe_session_project_rollup_runtime": "live_session_project_rollup_unverified",
             "probe_preference_artifact_memory_runtime": "live_preference_artifact_memory_unverified",
@@ -1063,7 +1063,7 @@ def build_source_to_candidate_projection_join_shadow_evidence(
                 "score": 0.86,
             },
             {
-                "hit_id": "projection-hit:qdrant-shadow",
+                "hit_id": "projection-hit:vector-index-shadow",
                 "source": "search",
                 "object_ref": target_object_id,
                 "summary": "Derived search projection hit for the shadow target.",
@@ -2763,7 +2763,7 @@ def _runtime_evidence_collection_steps() -> list[dict[str, Any]]:
                 "mismatch_empty_with_gap_and_zero_confidence",
                 "nonsense_query_empty",
                 "semantic_ranker_bound_and_used",
-                "qdrant_semantic_result_lane_used",
+                "pgvector_semantic_result_lane_used",
                 "projection_hash_current",
                 "entity_aggregate_improved",
             ],
@@ -2780,7 +2780,7 @@ def _runtime_evidence_collection_steps() -> list[dict[str, Any]]:
                 "edge_count>0",
                 "redacted_postcheck",
             ],
-            "safe_target": "sanitized_graph_qdrant_projection_join_read_path",
+            "safe_target": "sanitized_graph_projection_join_read_path",
             "mutation_allowed": False,
             "production_mutation_performed": False,
         },
@@ -3775,8 +3775,8 @@ def _live_temporal_recall_corrective_checkpoint_claim(
         or semantic.get("semantic_ranker_used") is not True
     ):
         failures.append("temporal_corrective_semantic_query_ranker_not_used")
-    if semantic.get("qdrant_semantic_result_lane_used") is not True:
-        failures.append("temporal_corrective_qdrant_semantic_result_lane_not_used")
+    if semantic.get("pgvector_semantic_result_lane_used") is not True:
+        failures.append("temporal_corrective_pgvector_semantic_result_lane_not_used")
     if runtime.get("schema_version") != TEMPORAL_CORRECTNESS_RUNTIME_AGGREGATE_SCHEMA:
         failures.append("temporal_corrective_runtime_aggregate_schema_mismatch")
     if runtime_aggregate_source != "live_mcp_runtime_packet":
@@ -3814,8 +3814,8 @@ def _live_temporal_recall_corrective_checkpoint_claim(
         "semantic_ranker_used": nonsense.get("semantic_ranker_used") is True,
         "semantic_query_ranker_bound": semantic.get("semantic_ranker_bound") is True,
         "semantic_query_ranker_used": semantic.get("semantic_ranker_used") is True,
-        "qdrant_semantic_result_lane_used": (
-            semantic.get("qdrant_semantic_result_lane_used") is True
+        "pgvector_semantic_result_lane_used": (
+            semantic.get("pgvector_semantic_result_lane_used") is True
         ),
         "semantic_result_count": _strict_int_or_none(semantic.get("result_count")),
         "semantic_result_score": (
@@ -4338,7 +4338,7 @@ def _live_source_to_candidate_projection_join_claim(evidence: Mapping[str, Any])
             "schema_version": "",
             "edge_count": 0,
             "production_mutation_performed": False,
-            "gaps": ["live_graph_qdrant_projection_join_unproven"],
+            "gaps": ["live_graph_projection_join_unproven"],
         }
     postcheck = projection.get("postcheck") if isinstance(projection.get("postcheck"), Mapping) else {}
     failures = _projection_join_failures(projection=projection, postcheck=postcheck)

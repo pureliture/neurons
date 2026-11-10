@@ -34,7 +34,7 @@
 **`neurons` compose 전체를 k3s로 이전**으로 확정한다.
 
 - 여기서 "compose 전체"는 `neurons` repo가 소유한 compose surface를 뜻한다.
-- API/MCP, worker/runtime services, CouchDB, Postgres ledger, Neo4j, Qdrant, 관련
+- API/MCP, worker/runtime services, CouchDB, Postgres ledger, Neo4j, 관련
   repo-owned worker compose surface를 이관 후보에 포함한다.
 - 이미 제거된 removed legacy external-memory surface는 이번 k3s migration 대상이 아니다.
 - 남아 있는 legacy external-memory source/env 이름은 migration target이 아니라
@@ -85,7 +85,7 @@
 
 **backup/restore rehearsal 먼저**로 확정한다.
 
-- CouchDB, Postgres ledger, Neo4j, Qdrant는 primary 전환 전에 backup과 restore
+- CouchDB, Postgres ledger, Neo4j는 primary 전환 전에 backup과 restore
   rehearsal을 먼저 통과해야 한다.
 - rehearsal은 k3s primary 전환의 선행 조건이며, 성공 evidence 없이 done 처리하지 않는다.
 - restore 검증은 redacted count, health, schema/index readiness, representative query
@@ -158,7 +158,7 @@
 | Safety | live runtime 변경, secret 변경, k3s apply, compose 중단은 명시 승인 전 금지한다. |
 | Privacy | raw host, private path, token, cookie, bearer string, API key, raw transcript body, raw dataset_id, raw document_id를 출력하지 않는다. |
 | Runtime authority | k3s 이관 전 현재 runtime truth는 Ubuntu compose 기준으로 확인한다. |
-| Stateful caution | Neo4j, CouchDB, Qdrant, Postgres state는 보수적으로 다룬다. |
+| Stateful caution | Neo4j, CouchDB, Postgres state는 보수적으로 다룬다. |
 | Network boundary | Tailscale subnet router는 k3s pod/service route scope와 owner-accepted personal tailnet-wide access evidence를 가져야 하며, public internet 노출은 금지한다. kube-apiserver 접근 주체와 service egress는 별도 gate로 확인한다. |
 | Cutover safety | compose 유지 + k3s canary를 기본 전환 방식으로 삼는다. |
 | WorkQueue safety | k3s canary는 live WorkQueue durable을 compose worker와 공유하지 않는다. |

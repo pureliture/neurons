@@ -21,7 +21,7 @@ sanctioned proposal-only extension이며, SoT는 `specs/brain-steward-hardening/
 
 ## Authority model
 
-- 승인 카드 steward lane의 authority는 PostgreSQL `memory_cards` + `steward_card_decisions`다. Qdrant/graph/RetiredIndexBridge는 canonical authority가 아니다. 세션 ledger와 별도 레거시 카드 lane은 이번 전환 대상이 아니다.
+- 승인 카드 steward lane의 authority는 PostgreSQL `memory_cards` + `steward_card_decisions`다. retired-vector-index/graph/RetiredIndexBridge는 canonical authority가 아니다. 세션 ledger와 별도 레거시 카드 lane은 이번 전환 대상이 아니다.
 - **accepted + current** MemoryCard만 authoritative memory다.
 - candidate/proposal은 recall에서 정답처럼 쓰이지 않는다. authority pack에 포함되지 않는다.
 - stale/superseded memory는 authority pack에서 빠지고, review queue에서 downgraded

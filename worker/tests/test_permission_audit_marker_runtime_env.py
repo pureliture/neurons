@@ -26,46 +26,6 @@ def _config() -> dict[str, object]:
         _nats_consumer_generation_hash,
         _nats_stream_generation_hash,
     )
-    from agent_knowledge.qdrant_write_gateway_runtime import (
-        QDRANT_SOURCE_REGISTRY,
-        RenderedQdrantWriter,
-        build_qdrant_coverage_activation_anchor,
-        build_qdrant_coverage_manifest_from_activation_anchor,
-        build_qdrant_exact_marker_hash,
-    )
-
-    inventory = tuple(
-        RenderedQdrantWriter(
-            source=source,
-            route=binding.route,
-            writer_ref_hash=binding.writer_ref_hash,
-            active_caller=binding.active_caller,
-            workload_ref_hash=(
-                _raw_sha(format(index + 1, "x")) if binding.active_caller else None
-            ),
-            image_ref_hash=(
-                _raw_sha(format(index + 9, "x")) if binding.active_caller else None
-            ),
-            network_policy_ref_hash=(
-                _raw_sha("abcdef"[index]) if binding.active_caller else None
-            ),
-            route_set_hash=(
-                _raw_sha(format(index + 7, "x")) if binding.active_caller else None
-            ),
-        )
-        for index, (source, binding) in enumerate(QDRANT_SOURCE_REGISTRY.items())
-    )
-    activation = build_qdrant_coverage_activation_anchor(
-        generation=7,
-        marker_collection="fixed_markers",
-        rendered_inventory=inventory,
-        previous_generation_hash=_raw_sha("f"),
-        auth_boundary_status="validated",
-        network_policy_status="validated",
-        direct_write_credentials_zero=True,
-        read_endpoint_write_denied_status="validated",
-    )
-    coverage = build_qdrant_coverage_manifest_from_activation_anchor(activation)
 
     native_common = {
         "storage_identity": "fixed-production-scope",
@@ -115,39 +75,6 @@ def _config() -> dict[str, object]:
                     )
                 ],
             },
-            "index": {
-                "credential_scope": "qdrant_marker_metadata_read_only",
-                "url": "https://qdrant.invalid:6333",
-                "marker_collection": "fixed_markers",
-                "metadata_point_id": "00000000-0000-4000-8000-000000000001",
-                "generation": 7,
-                "rendered_inventory": [
-                    {
-                        "source": item.source.value,
-                        "route": item.route.value,
-                        "writer_ref_hash": item.writer_ref_hash,
-                        "active_caller": item.active_caller,
-                        "workload_ref_hash": item.workload_ref_hash,
-                        "image_ref_hash": item.image_ref_hash,
-                        "network_policy_ref_hash": item.network_policy_ref_hash,
-                        "route_set_hash": item.route_set_hash,
-                    }
-                    for item in inventory
-                ],
-                "previous_generation_hash": activation.previous_generation_hash,
-                "activation_hash": activation.activation_hash,
-                "auth_boundary_status": "validated",
-                "network_policy_status": "validated",
-                "direct_write_credentials_zero": True,
-                "read_endpoint_write_denied_status": "validated",
-                "event_position_floor": 24,
-                "marker_hash_at_floor": build_qdrant_exact_marker_hash(
-                    generation=7,
-                    event_position=24,
-                    in_flight_count=0,
-                    coverage_hash=coverage.coverage_hash,
-                ),
-            },
             "product_db": {
                 **native_common,
                 "credential_scope": "sqlite_mode_ro_query_only",
@@ -165,11 +92,10 @@ def _environment() -> dict[str, str]:
         "NEURONS_PERMISSION_AUDIT_PG_DSN": "postgresql://private.invalid/db",
         "NEURONS_PERMISSION_AUDIT_COUCHDB_AUTH_HEADER": "Bearer private-couch",
         "NEURONS_PERMISSION_AUDIT_NATS_TOKEN": "private-nats",
-        "NEURONS_PERMISSION_AUDIT_QDRANT_API_KEY": "private-qdrant",
     }
 
 
-def test_valid_fixed_five_environment_builds_reader_without_storage_calls():
+def test_valid_fixed_four_environment_builds_reader_without_storage_calls():
     from agent_knowledge.permission_audit_marker_runtime_env import (
         build_production_permission_audit_marker_reader,
     )
@@ -196,16 +122,6 @@ def test_runtime_assembles_fixed_adapters_lazily_and_closes_resources(
 
         def close(self):
             calls.append(("close", "nats"))
-
-    class Qdrant:
-        def read_marker_metadata(self):
-            raise AssertionError("delegate fake must not read storage")
-
-        def read_coverage_manifest(self):
-            raise AssertionError("delegate fake must not read storage")
-
-        def close(self):
-            calls.append(("close", "qdrant"))
 
     class SQLiteConnector:
         def open(self, *_args, **_kwargs):
@@ -242,9 +158,6 @@ def test_runtime_assembles_fixed_adapters_lazily_and_closes_resources(
         nats_adapter=lambda scope, credential, generation_hash: (
             calls.append(("nats", credential)) or Nats()
         ),
-        qdrant_adapter=lambda scope, credential, expected: (
-            calls.append(("qdrant", credential)) or Qdrant()
-        ),
         sqlite_connector=lambda: SQLiteConnector(),
         sqlite_file_inspector=lambda: SQLiteInspector(),
     )
@@ -261,10 +174,8 @@ def test_runtime_assembles_fixed_adapters_lazily_and_closes_resources(
     assert [name for name, _ in calls] == [
         "couchdb",
         "nats",
-        "qdrant",
         "reader",
         "delegate",
-        "close",
         "close",
         "close",
     ]
@@ -291,10 +202,9 @@ def test_partial_runtime_assembly_failure_closes_already_created_resources():
         postgres_connection=lambda *_args, **_kwargs: object(),
         couchdb_adapter=lambda *_args: Couch(),
         nats_adapter=lambda *_args: Nats(),
-        qdrant_adapter=lambda *_args: (_ for _ in ()).throw(
+        sqlite_connector=lambda: (_ for _ in ()).throw(
             RuntimeError("protected-fixture-value")
         ),
-        sqlite_connector=lambda: object(),
         sqlite_file_inspector=lambda: object(),
     )
     reader = runtime_env.build_production_permission_audit_marker_reader(
@@ -918,481 +828,6 @@ def test_postgres_connection_requires_external_credential_inventory_before_netwo
         )
 
     assert calls == []
-
-
-def test_qdrant_adapter_uses_exact_counts_and_one_fixed_metadata_read_only():
-    from agent_knowledge.permission_audit_marker_runtime_env import (
-        _QdrantMarkerMetadataAdapter,
-        _qdrant_coverage,
-        _qdrant_marker_hash,
-    )
-
-    scope = _config()["scopes"]["index"]
-    expected = _qdrant_coverage(scope)
-    calls = []
-    snapshots = ((24, 0), (25, 1), (26, 0))
-
-    class CountResult:
-        def __init__(self, count):
-            self.count = count
-
-    class Point:
-        id = scope["metadata_point_id"]
-        payload = {
-            "schema_version": "qdrant_exact_marker_metadata.v2",
-            "generation": 7,
-            "coverage_hash": expected.coverage_hash,
-            "coverage_status": "complete",
-            "bypass_count": 0,
-            "activation_hash": scope["activation_hash"],
-            "previous_generation_hash": scope["previous_generation_hash"],
-        }
-
-    class Client:
-        snapshot_index = 0
-
-        def get_collection(self, **kwargs):
-            calls.append(("get_collection", kwargs))
-            return {
-                "config": {
-                    "params": {
-                        "shard_number": 1,
-                        "replication_factor": 1,
-                        "write_consistency_factor": 1,
-                    }
-                },
-                "payload_schema": {
-                    "record_kind": {"data_type": "keyword"},
-                    "phase": {"data_type": "keyword"},
-                    "unresolved": {"data_type": "bool"},
-                    "generation": {"data_type": "integer"},
-                    "route": {"data_type": "keyword"},
-                    "writer_ref_hash": {"data_type": "keyword"},
-                    "pod_ref_hash": {"data_type": "keyword"},
-                    "workload_ref_hash": {"data_type": "keyword"},
-                    "route_set_hash": {"data_type": "keyword"},
-                    "bypass": {"data_type": "bool"},
-                }
-            }
-
-        def count(self, **kwargs):
-            calls.append(("count", kwargs))
-            event_count, unresolved_count = snapshots[self.snapshot_index]
-            filter_value = kwargs["count_filter"]
-            if filter_value is None:
-                return CountResult(event_count + 1)
-            values = {
-                condition.key: condition.match.value
-                for condition in filter_value.must
-            }
-            if "route" in values:
-                routes = ("normal_ingest", "projection", "backfill", "repair")
-                route_index = routes.index(values["route"])
-                quotient, remainder = divmod(event_count, len(routes))
-                return CountResult(quotient + (route_index < remainder))
-            if values.get("phase") == "start" and values.get("unresolved") is True:
-                return CountResult(unresolved_count)
-            start_count = (event_count + 1) // 2
-            if values.get("phase") == "start":
-                return CountResult(start_count)
-            if values.get("phase") == "terminal":
-                return CountResult(event_count - start_count)
-            return CountResult(event_count)
-
-        def retrieve(self, **kwargs):
-            calls.append(("retrieve", kwargs))
-            self.snapshot_index += 1
-            return [Point()]
-
-        def close(self):
-            calls.append(("close", {}))
-
-    adapter = _QdrantMarkerMetadataAdapter(
-        scope,
-        "fixture-api-key",
-        expected,
-        client=Client(),
-    )
-
-    observed_snapshots = [adapter.read_marker_metadata() for _ in range(3)]
-    snapshot = observed_snapshots[0]
-
-    assert snapshot == {
-        "generation": 7,
-        "event_position": 24,
-        "marker_hash": _qdrant_marker_hash(
-            generation=7,
-            event_count=24,
-            unresolved_count=0,
-            coverage_hash=expected.coverage_hash,
-        ),
-        "in_flight_count": 0,
-        "coverage_hash": expected.coverage_hash,
-        "coverage_status": "complete",
-        "count_status": "exact",
-        "reset_count": 0,
-        "bypass_count": 0,
-    }
-    assert adapter.read_coverage_manifest() == expected
-    assert [item["event_position"] for item in observed_snapshots] == [24, 25, 26]
-    assert [item["in_flight_count"] for item in observed_snapshots] == [0, 1, 0]
-    assert len({item["marker_hash"] for item in observed_snapshots}) == 3
-    assert [name for name, _ in calls].count("get_collection") == 3
-    assert [name for name, _ in calls].count("count") == 36
-    assert [name for name, _ in calls].count("retrieve") == 3
-    assert all(call["exact"] is True for name, call in calls if name == "count")
-    assert calls[-1][1]["ids"] == [scope["metadata_point_id"]]
-    assert calls[-1][1]["with_payload"] is True
-    assert calls[-1][1]["with_vectors"] is False
-    assert str(calls[-1][1]["consistency"]).casefold().endswith("all")
-    assert all(
-        kwargs["ids"] == [scope["metadata_point_id"]]
-        for name, kwargs in calls
-        if name == "retrieve"
-    )
-    route_filters = [
-        {
-            condition.key: condition.match.value
-            for condition in kwargs["count_filter"].must
-        }
-        for name, kwargs in calls
-        if name == "count"
-        and kwargs["count_filter"] is not None
-        and any(
-            condition.key == "route" for condition in kwargs["count_filter"].must
-        )
-    ]
-    assert len(route_filters) == 12
-    assert all(
-        {
-            "record_kind",
-            "generation",
-            "route",
-            "writer_ref_hash",
-            "workload_ref_hash",
-            "route_set_hash",
-            "bypass",
-        }.issubset(values)
-        for values in route_filters
-    )
-    pod_presence_filters = [
-        kwargs["count_filter"]
-        for name, kwargs in calls
-        if name == "count"
-        and kwargs["count_filter"] is not None
-        and getattr(kwargs["count_filter"], "must_not", None)
-    ]
-    assert len(pod_presence_filters) == 3
-    assert all(
-        filter_value.must_not[0].is_empty.key == "pod_ref_hash"
-        for filter_value in pod_presence_filters
-    )
-    adapter.close()
-    assert calls[-1] == ("close", {})
-
-
-def test_qdrant_client_disables_proxy_environment_and_redirects(monkeypatch):
-    import qdrant_client
-    from agent_knowledge.permission_audit_marker_runtime_env import (
-        _QdrantMarkerMetadataAdapter,
-        _qdrant_coverage,
-    )
-
-    scope = _config()["scopes"]["index"]
-    captured = {}
-
-    class Client:
-        def get_collection(self, **_kwargs):
-            return None
-
-        def count(self, **_kwargs):
-            return None
-
-        def retrieve(self, **_kwargs):
-            return None
-
-    def client_factory(**kwargs):
-        captured.update(kwargs)
-        return Client()
-
-    monkeypatch.setattr(qdrant_client, "QdrantClient", client_factory)
-
-    _QdrantMarkerMetadataAdapter(
-        scope,
-        "fixture-api-key",
-        _qdrant_coverage(scope),
-    )
-
-    assert captured["trust_env"] is False
-    assert captured["follow_redirects"] is False
-    assert captured["prefer_grpc"] is False
-    assert captured["url"] == "https://qdrant.invalid:6333"
-    assert captured["port"] == 6333
-    assert captured["https"] is True
-
-
-@pytest.mark.parametrize(
-    "failure",
-    ("approximate_count", "duplicate_metadata", "missing_index", "wrong_point"),
-)
-def test_qdrant_malformed_or_non_exact_metadata_fails_closed(failure):
-    from agent_knowledge.permission_audit_marker_runtime_env import (
-        PermissionAuditMarkerEnvironmentError,
-        _QdrantMarkerMetadataAdapter,
-        _qdrant_coverage,
-    )
-
-    scope = _config()["scopes"]["index"]
-    expected = _qdrant_coverage(scope)
-
-    class CountResult:
-        count = 1.5 if failure == "approximate_count" else 2
-
-    class Point:
-        id = (
-            "00000000-0000-4000-8000-000000000099"
-            if failure == "wrong_point"
-            else scope["metadata_point_id"]
-        )
-        payload = {
-            "schema_version": "qdrant_exact_marker_metadata.v2",
-            "generation": 7,
-            "coverage_hash": expected.coverage_hash,
-            "coverage_status": "complete",
-            "bypass_count": 0,
-            "activation_hash": scope["activation_hash"],
-            "previous_generation_hash": scope["previous_generation_hash"],
-        }
-
-    class Client:
-        def get_collection(self, **_kwargs):
-            fields = {
-                "record_kind": {"data_type": "keyword"},
-                "phase": {"data_type": "keyword"},
-                "unresolved": {"data_type": "bool"},
-                "generation": {"data_type": "integer"},
-                "route": {"data_type": "keyword"},
-                "writer_ref_hash": {"data_type": "keyword"},
-                "pod_ref_hash": {"data_type": "keyword"},
-                "workload_ref_hash": {"data_type": "keyword"},
-                "route_set_hash": {"data_type": "keyword"},
-                "bypass": {"data_type": "bool"},
-            }
-            if failure == "missing_index":
-                fields.pop("unresolved")
-            return {
-                "config": {
-                    "params": {
-                        "shard_number": 1,
-                        "replication_factor": 1,
-                        "write_consistency_factor": 1,
-                    }
-                },
-                "payload_schema": fields,
-            }
-
-        def count(self, **_kwargs):
-            return CountResult()
-
-        def retrieve(self, **_kwargs):
-            return [Point(), Point()] if failure == "duplicate_metadata" else [Point()]
-
-    adapter = _QdrantMarkerMetadataAdapter(
-        scope,
-        "fixture-api-key",
-        expected,
-        client=Client(),
-    )
-
-    with pytest.raises(PermissionAuditMarkerEnvironmentError) as error:
-        adapter.read_marker_metadata()
-
-    assert str(error.value) == "Qdrant exact marker metadata read failed"
-
-
-@pytest.mark.parametrize(
-    "failure",
-    (
-        "unknown_record_kind",
-        "stale_generation",
-        "malformed_phase",
-        "unknown_route",
-        "unknown_writer",
-        "missing_pod",
-        "bypass_true",
-    ),
-)
-def test_qdrant_exact_counts_reject_uncovered_event_dimensions(failure):
-    from agent_knowledge.permission_audit_marker_runtime_env import (
-        PermissionAuditMarkerEnvironmentError,
-        _QdrantMarkerMetadataAdapter,
-        _qdrant_coverage,
-    )
-
-    scope = _config()["scopes"]["index"]
-    expected = _qdrant_coverage(scope)
-
-    class CountResult:
-        def __init__(self, count):
-            self.count = count
-
-    class Point:
-        id = scope["metadata_point_id"]
-        payload = {
-            "schema_version": "qdrant_exact_marker_metadata.v2",
-            "generation": 7,
-            "coverage_hash": expected.coverage_hash,
-            "coverage_status": "complete",
-            "bypass_count": 0,
-            "activation_hash": scope["activation_hash"],
-            "previous_generation_hash": scope["previous_generation_hash"],
-        }
-
-    class Client:
-        def get_collection(self, **_kwargs):
-            return {
-                "config": {
-                    "params": {
-                        "shard_number": 1,
-                        "replication_factor": 1,
-                        "write_consistency_factor": 1,
-                    }
-                },
-                "payload_schema": {
-                    "record_kind": {"data_type": "keyword"},
-                    "phase": {"data_type": "keyword"},
-                    "unresolved": {"data_type": "bool"},
-                    "generation": {"data_type": "integer"},
-                    "route": {"data_type": "keyword"},
-                    "writer_ref_hash": {"data_type": "keyword"},
-                    "pod_ref_hash": {"data_type": "keyword"},
-                    "workload_ref_hash": {"data_type": "keyword"},
-                    "route_set_hash": {"data_type": "keyword"},
-                    "bypass": {"data_type": "bool"},
-                },
-            }
-
-        def count(self, **kwargs):
-            filter_value = kwargs["count_filter"]
-            if filter_value is None:
-                return CountResult(26 if failure == "unknown_record_kind" else 25)
-            values = {
-                condition.key: condition.match.value
-                for condition in filter_value.must
-            }
-            keys = set(values)
-            if failure == "missing_pod" and getattr(filter_value, "must_not", None):
-                return CountResult(23)
-            if failure == "stale_generation" and keys == {"record_kind", "generation"}:
-                return CountResult(23)
-            if failure == "malformed_phase" and values.get("phase") == "terminal":
-                return CountResult(11)
-            if "route" in values:
-                routes = ("normal_ingest", "projection", "backfill", "repair")
-                index = routes.index(values["route"])
-                count = 6
-                if failure in {"unknown_route", "unknown_writer"} and index == 0:
-                    count -= 1
-                return CountResult(count)
-            if failure == "bypass_true" and keys == {"record_kind", "bypass"}:
-                return CountResult(23)
-            if values.get("phase") == "start" and values.get("unresolved") is True:
-                return CountResult(0)
-            if values.get("phase") in {"start", "terminal"}:
-                return CountResult(12)
-            return CountResult(24)
-
-        def retrieve(self, **_kwargs):
-            return [Point()]
-
-    adapter = _QdrantMarkerMetadataAdapter(
-        scope,
-        "fixture-api-key",
-        expected,
-        client=Client(),
-    )
-
-    with pytest.raises(PermissionAuditMarkerEnvironmentError):
-        adapter.read_marker_metadata()
-
-
-def test_qdrant_external_continuity_anchor_rejects_cross_audit_reset():
-    from agent_knowledge.permission_audit_marker_runtime_env import (
-        PermissionAuditMarkerEnvironmentError,
-        _QdrantMarkerMetadataAdapter,
-        _qdrant_coverage,
-    )
-
-    scope = _config()["scopes"]["index"]
-    expected = _qdrant_coverage(scope)
-
-    class CountResult:
-        def __init__(self, count):
-            self.count = count
-
-    class Client:
-        def get_collection(self, **_kwargs):
-            return {
-                "config": {
-                    "params": {
-                        "shard_number": 1,
-                        "replication_factor": 1,
-                        "write_consistency_factor": 1,
-                    }
-                },
-                "payload_schema": {
-                    field: {"data_type": "integer" if field == "generation" else "bool" if field in {"unresolved", "bypass"} else "keyword"}
-                    for field in (
-                        "record_kind", "phase", "unresolved", "generation", "route",
-                        "writer_ref_hash", "pod_ref_hash", "workload_ref_hash", "route_set_hash", "bypass",
-                    )
-                },
-            }
-
-        def count(self, **kwargs):
-            filter_value = kwargs["count_filter"]
-            if filter_value is None:
-                return CountResult(24)
-            values = {
-                condition.key: condition.match.value
-                for condition in filter_value.must
-            }
-            if "route" in values:
-                return CountResult(23 // 4 + (values["route"] == "normal_ingest"))
-            if values.get("phase") == "start" and values.get("unresolved") is True:
-                return CountResult(0)
-            if values.get("phase") == "start":
-                return CountResult(12)
-            if values.get("phase") == "terminal":
-                return CountResult(11)
-            return CountResult(23)
-
-        def retrieve(self, **_kwargs):
-            class Point:
-                id = scope["metadata_point_id"]
-                payload = {
-                    "schema_version": "qdrant_exact_marker_metadata.v2",
-                    "generation": 7,
-                    "coverage_hash": expected.coverage_hash,
-                    "coverage_status": "complete",
-                    "bypass_count": 0,
-                    "activation_hash": scope["activation_hash"],
-                    "previous_generation_hash": scope["previous_generation_hash"],
-                }
-
-            return [Point()]
-
-    adapter = _QdrantMarkerMetadataAdapter(
-        scope,
-        "fixture-api-key",
-        expected,
-        client=Client(),
-    )
-
-    with pytest.raises(PermissionAuditMarkerEnvironmentError):
-        adapter.read_marker_metadata()
-
-
 def test_nats_adapter_reads_fixed_stream_and_durable_metadata_without_discovery():
     from agent_knowledge.permission_audit_marker_runtime_env import (
         _NatsStreamMetadataAdapter,
@@ -1629,7 +1064,6 @@ def test_nats_durable_recreation_fails_even_when_counters_are_unchanged():
         "missing_couch_continuity_anchor",
         "missing_nats_publisher_anchor",
         "credential_in_endpoint",
-        "missing_storage_credential",
     ),
 )
 def test_environment_configuration_failures_are_public_safe_and_closed(mutation):
@@ -1662,9 +1096,6 @@ def test_environment_configuration_failures_are_public_safe_and_closed(mutation)
             f"https://user:{protected_value}@couchdb.invalid"
         )
         environment["NEURONS_PERMISSION_AUDIT_MARKER_CONFIG"] = json.dumps(config)
-    else:
-        environment.pop("NEURONS_PERMISSION_AUDIT_QDRANT_API_KEY")
-
     with pytest.raises(PermissionAuditMarkerEnvironmentError) as error:
         build_production_permission_audit_marker_reader(environment)
 
@@ -1715,41 +1146,3 @@ def test_environment_rejects_duplicate_keys_at_every_object_depth(duplicate_dept
 
     assert str(error.value) == "permission audit exact marker configuration invalid"
     assert protected_value not in str(error.value)
-
-
-@pytest.mark.parametrize(
-    "malicious_url",
-    (
-        "http://qdrant.invalid:6333",
-        "https://operator@qdrant.invalid:6333",
-        "https://qdrant.invalid",
-        "https://qdrant.invalid:6334",
-        "https://qdrant.invalid:6333/",
-        "https://qdrant.invalid:6333/admin",
-        "https://qdrant.invalid:6333?target=other",
-        "https://qdrant.invalid:6333#other",
-        "https://QDRANT.invalid:6333",
-        "https://qdrant%2einvalid:6333",
-        "https://qdrant.invalid\\@other.invalid:6333",
-        "https://127.1:6333",
-        "https://0x7f000001:6333",
-    ),
-)
-def test_environment_rejects_noncanonical_qdrant_authority_before_runtime(
-    malicious_url,
-):
-    from agent_knowledge.permission_audit_marker_runtime_env import (
-        PermissionAuditMarkerEnvironmentError,
-        build_production_permission_audit_marker_reader,
-    )
-
-    environment = _environment()
-    config = _config()
-    config["scopes"]["index"]["url"] = malicious_url
-    environment["NEURONS_PERMISSION_AUDIT_MARKER_CONFIG"] = json.dumps(config)
-
-    with pytest.raises(PermissionAuditMarkerEnvironmentError) as error:
-        build_production_permission_audit_marker_reader(environment)
-
-    assert str(error.value) == "permission audit exact marker configuration invalid"
-    assert malicious_url not in str(error.value)

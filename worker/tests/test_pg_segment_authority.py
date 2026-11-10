@@ -10,7 +10,7 @@ from agent_knowledge.model_connectors import LOCAL_EMBEDDING_PROFILE_ID
 from agent_knowledge.rag_ingress.pg_representation import (
     build_local_segment_receipt_v4,
 )
-from agent_knowledge.rag_ingress.qdrant_couchdb_authority import (
+from agent_knowledge.rag_ingress.couchdb_authority import (
     CouchDBProjectionStateAuthorityResolver,
 )
 from test_couchdb_build_cli import _build_synthetic_session

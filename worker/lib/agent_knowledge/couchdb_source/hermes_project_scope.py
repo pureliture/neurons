@@ -7,7 +7,7 @@ document in a session to agree, so these sessions would otherwise fail with
 ``session source docs have inconsistent project``.
 
 This module is the single policy seam. Both the graph projection lane
-(``llm_brain_core.runtime``) and the PG/Qdrant session-memory lane
+(``llm_brain_core.runtime``) and the PostgreSQL session-memory lane
 (``couchdb_source.session_memory_materializer``) call
 :func:`decide_hermes_project_scope` so one session is never admitted by one
 lane and refused by the other. CouchDB documents are immutable revisions and

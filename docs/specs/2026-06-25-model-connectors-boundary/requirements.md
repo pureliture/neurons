@@ -5,15 +5,15 @@
 - Source of truth: `requirements.md`
 - Preview companion: `requirements.html`
 - 현재 단계: Phase 1 Requirements Discovery
-- 승인 전 제한: `design.md` 작성, 구현 코드 변경, live Graphiti/Neo4j/Qdrant/RetiredIndexBridge mutation은 하지 않는다.
+- 승인 전 제한: `design.md` 작성, 구현 코드 변경, live Graphiti/Neo4j/retired-vector-index/RetiredIndexBridge mutation은 하지 않는다.
 
 ## 배경
 
 - `GraphitiNeo4jGraphMemoryAdapter` 생성자는 이미 Graphiti instance를 받을 수 있지만,
   `from_env` / `from_config` / `_build_graphiti()` 경로가 env 해석, 모델 endpoint 선택,
   Graphiti client 조립, fallback Graphiti 조립을 같은 adapter 파일에 묶고 있다.
-- Qdrant searchable mirror 문서와 구현은 기존 OpenAI-compatible embedding/rerank
-  endpoint를 재사용한다. 현재 `qdrant_embedding.py`와 `qdrant_rerank.py`에도
+- retired-vector-index searchable mirror 문서와 구현은 기존 OpenAI-compatible embedding/rerank
+  endpoint를 재사용한다. 현재 `retired-vector-index_embedding.py`와 `retired-vector-index_rerank.py`에도
   유사한 env 해석과 lazy live wiring이 있다.
 - repo의 import guard는 `rag_ingress` 경로가 heavy `llm_brain_core` package를
   끌어오지 않는 것을 중요하게 본다.
@@ -32,7 +32,7 @@
   exact argv, bounded timeout, redaction, postcheck, rollback/abort 기준을 제시한
   operator gate를 통과해야 한다.
 - 이 선택은 Graphiti/Neo4j data-plane을 검증 대상으로 포함하지만, RetiredIndexBridge
-  disable/delete, Qdrant cutover, native-memory authority 이전은 여전히 범위 밖이다.
+  disable/delete, retired-vector-index cutover, native-memory authority 이전은 여전히 범위 밖이다.
 
 ### Q2: Graphiti schema extraction canary는 어느 깊이까지 확인할까?
 
@@ -50,7 +50,7 @@
 
 **낮은 shared layer**로 확정한다.
 
-- model connector는 Graphiti/Qdrant adapter보다 낮은 shared layer가 소유한다.
+- model connector는 Graphiti/retired-vector-index adapter보다 낮은 shared layer가 소유한다.
 - `llm_brain_core`와 `rag_ingress`는 그 계층을 소비하되 서로를 import하지 않는다.
 - 이 결정은 구현 package 이름을 확정하지 않는다. 실제 위치와 public import path는
   Phase 2 design에서 import guard와 compatibility를 검증하며 정한다.
@@ -84,7 +84,7 @@
   제공되어야 하며, 두 상위 영역이 서로를 import하지 않게 해야 한다.
 - 이번 scope에서는 기존 `agent_knowledge` root import path를 바꾸지 않는다.
 - 기존 `GraphitiNeo4jConfig.from_env`, `GraphitiNeo4jGraphMemoryAdapter.from_env`,
-  Qdrant embedding/rerank builder의 public compatibility는 유지한다.
+  retired-vector-index embedding/rerank builder의 public compatibility는 유지한다.
 - `GraphitiNeo4jConfig`는 장기 compatibility facade로 유지하고 기존 caller가
   새 connector 세부 구조를 알 필요 없게 한다.
 - canonical `LLM_BRAIN_*` env precedence와 legacy fallback 계약을 보존한다.
@@ -93,7 +93,7 @@
   best-effort vs required graph activation behavior는 무회귀여야 한다.
 - 구현 검증은 fake/no-network test에 더해 public-safe synthetic episode 기반의
   isolated live Graphiti schema extraction canary를 포함한다.
-- Qdrant import guard를 보존한다. `rag_ingress` 경로가 heavy `llm_brain_core` package를
+- retired-vector-index import guard를 보존한다. `rag_ingress` 경로가 heavy `llm_brain_core` package를
   import하지 않아야 한다.
 - 정책 판정은 provider 이름만이 아니라 role/capability 단위로 한다.
 
@@ -101,10 +101,10 @@
 
 | 항목 | 요구값 |
 | --- | --- |
-| Safety | code-only 변경을 우선하며 live Graphiti/Neo4j/Qdrant/RetiredIndexBridge mutation은 별도 승인 전 금지한다. |
+| Safety | code-only 변경을 우선하며 live Graphiti/Neo4j/retired-vector-index/RetiredIndexBridge mutation은 별도 승인 전 금지한다. |
 | Compatibility | 기존 public import path, env precedence, test fixture behavior, `GraphitiNeo4jConfig` facade를 유지한다. |
 | Privacy | raw host, private path, token, API key, raw transcript, dataset_id, document_id를 출력하지 않는다. |
-| Import locality | shared connector는 Graphiti/Qdrant adapter보다 낮은 layer에 있어야 하며 `llm_brain_core`와 `rag_ingress` 사이 circular import를 만들지 않는다. |
+| Import locality | shared connector는 Graphiti/retired-vector-index adapter보다 낮은 layer에 있어야 하며 `llm_brain_core`와 `rag_ingress` 사이 circular import를 만들지 않는다. |
 | Observability | policy block, fallback use, timeout, vector dim mismatch, required graph probe failure는 redacted signal로 구분 가능해야 한다. |
 | Testability | 기본 test는 fake/no-network로 통과하고 live endpoint wiring은 lazy path로 유지한다. |
 | Live gate | Graphiti schema extraction canary는 구현 단계의 별도 operator gate 이후에만 실행한다. |
@@ -115,7 +115,7 @@
 
 - 개발자는 기존 Graphiti graph path를 그대로 쓰면서 모델 연결 계층만 정리하고, 기존 env로
   동일하게 동작하는지 unit/integration fake test와 synthetic episode live canary로 확인한다.
-- 개발자는 Qdrant mirror의 embedding/rerank 경로가 Graphiti와 같은 model connector
+- 개발자는 retired-vector-index mirror의 embedding/rerank 경로가 Graphiti와 같은 model connector
   규칙을 따르는지 확인하되, delivery worker import guard를 깨지 않는다.
 - 운영자는 graph required path가 실패할 때 backend 연결 실패, policy block, fallback 실패,
   timeout을 구분해 볼 수 있다.

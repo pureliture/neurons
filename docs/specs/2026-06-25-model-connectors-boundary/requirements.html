@@ -96,7 +96,7 @@
     <h2>배경</h2>
     <ul>
       <li><code>GraphitiNeo4jGraphMemoryAdapter</code> 생성자는 이미 Graphiti instance를 받을 수 있지만, env 해석과 모델 조립이 adapter 파일에 묶여 있다.</li>
-      <li>Qdrant searchable mirror도 기존 OpenAI-compatible embedding/rerank endpoint 재사용을 전제로 한다.</li>
+      <li>retired-vector-index searchable mirror도 기존 OpenAI-compatible embedding/rerank endpoint 재사용을 전제로 한다.</li>
       <li><code>rag_ingress</code> 경로가 heavy <code>llm_brain_core</code> package를 끌어오지 않는 import guard가 중요하다.</li>
     </ul>
 
@@ -106,7 +106,7 @@
     <ul>
       <li>Phase 1/2 중에는 live 실행하지 않는다.</li>
       <li>구현 단계에서 current evidence, exact argv, bounded timeout, redaction, postcheck, rollback/abort 기준을 제시한다.</li>
-      <li>RetiredIndexBridge disable/delete, Qdrant cutover, native-memory authority 이전은 범위 밖이다.</li>
+      <li>RetiredIndexBridge disable/delete, retired-vector-index cutover, native-memory authority 이전은 범위 밖이다.</li>
     </ul>
     <h3>Q2: Graphiti schema extraction canary는 어느 깊이까지 확인할까?</h3>
     <div class="notice"><strong>단일 synthetic episode</strong>로 확정. public-safe synthetic episode 하나로 Graphiti extraction, upsert, search를 확인한다.</div>
@@ -117,7 +117,7 @@
       <li>성공 기준은 연결, 모델 기반 schema extraction, episode upsert, bounded search/readback 통과다.</li>
     </ul>
     <h3>Q3: 공용 model connector 책임은 어디가 소유할까?</h3>
-    <div class="notice"><strong>낮은 shared layer</strong>로 확정. Graphiti/Qdrant adapter보다 낮은 계층이 소유하고, <code>llm_brain_core</code>와 <code>rag_ingress</code>는 서로를 import하지 않는다.</div>
+    <div class="notice"><strong>낮은 shared layer</strong>로 확정. Graphiti/retired-vector-index adapter보다 낮은 계층이 소유하고, <code>llm_brain_core</code>와 <code>rag_ingress</code>는 서로를 import하지 않는다.</div>
     <ul>
       <li>구현 package 이름은 아직 확정하지 않는다.</li>
       <li>실제 위치와 public import path는 Phase 2 design에서 import guard와 compatibility를 검증하며 정한다.</li>
@@ -147,7 +147,7 @@
       <li>secret-like 값은 repr, log, error, preview artifact에 노출하지 않는다.</li>
       <li>Graphiti fallback, timeout, structured extraction normalization, graph activation behavior는 무회귀여야 한다.</li>
       <li>구현 검증은 fake/no-network test에 더해 public-safe synthetic episode 기반의 isolated live Graphiti schema extraction canary를 포함한다.</li>
-      <li>Qdrant import guard를 보존한다.</li>
+      <li>retired-vector-index import guard를 보존한다.</li>
       <li>정책 판정은 role/capability 단위로 한다.</li>
     </ul>
 
@@ -158,7 +158,7 @@
         <tr><td>Safety</td><td>code-only 변경 우선. live mutation은 별도 승인 전 금지.</td></tr>
         <tr><td>Compatibility</td><td>기존 public import path, env precedence, test behavior, <code>GraphitiNeo4jConfig</code> facade 유지.</td></tr>
         <tr><td>Privacy</td><td>raw host, private path, token, API key, raw transcript, dataset_id, document_id 출력 금지.</td></tr>
-        <tr><td>Import locality</td><td>shared connector는 Graphiti/Qdrant adapter보다 낮은 layer에 위치하고 두 상위 영역 사이 circular import를 만들지 않는다.</td></tr>
+        <tr><td>Import locality</td><td>shared connector는 Graphiti/retired-vector-index adapter보다 낮은 layer에 위치하고 두 상위 영역 사이 circular import를 만들지 않는다.</td></tr>
         <tr><td>Observability</td><td>policy block, fallback, timeout, vector dim mismatch, probe failure를 redacted signal로 구분.</td></tr>
         <tr><td>Testability</td><td>기본 test는 fake/no-network, live endpoint wiring은 lazy path.</td></tr>
         <tr><td>Live gate</td><td>Graphiti schema extraction canary는 구현 단계의 별도 operator gate 이후에만 실행한다.</td></tr>

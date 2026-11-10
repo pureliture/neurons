@@ -20,7 +20,6 @@ NON_CURRENT_AUTHORITY = frozenset({"stale", "superseded", "archive_candidate", "
 
 TERMINAL_TASK_STATUSES = {"completed", "done", "resolved", "closed", "cancelled"}
 CONTEXT_AUTHORITY_CONSUMERS = {"unspecified", "codex", "claude-code", "gemini", "hermes"}
-SEARCH_MIRROR_STATUSES = {"unverified", "configured_unverified", "available", "degraded", "unavailable"}
 AGENT_CONTEXT_SURFACE_POLICIES = {
     "unspecified": {
         "allowed_actions": ["request_missing_evidence"],
@@ -104,7 +103,6 @@ class ContextPackBuilder:
         bridge_status: dict[str, Any],
         bridge_evidence: tuple[dict[str, Any], ...],
         consumer: str = "unspecified",
-        search_mirror_status: Mapping[str, Any] | None = None,
     ) -> ContextPack:
         safe_consumer = normalize_context_consumer(consumer)
         project = project_from_brain_id(brain_id)
@@ -169,7 +167,6 @@ class ContextPackBuilder:
             current_request=current_request,
             consumer=safe_consumer,
             project=project,
-            search_mirror_status=search_mirror_status,
         )
 
         pack = ContextPack(
@@ -216,7 +213,6 @@ def authority_block(
     current_request: str = "",
     consumer: str = "unspecified",
     project: str = "",
-    search_mirror_status: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     safe_consumer = normalize_context_consumer(consumer)
     scoped_cards = project_scoped_cards(cards, project)
@@ -235,7 +231,6 @@ def authority_block(
             "agents_use_brain_context_resolve",
             "neo4j_is_derived_authority_workbench",
             "graphiti_is_projection_path",
-            "qdrant_is_document_mirror",
             "dendrite_is_evidence_sensor",
             "retired_document_bridge_not_context_authority_dependency",
         ],
@@ -252,9 +247,6 @@ def authority_block(
                 "default_agent_api": "brain_context_resolve",
                 "details": list(graph_result.details),
             }
-        },
-        "search_mirror": {
-            "qdrant_docling": search_mirror_status_block(search_mirror_status)
         },
     }
     block["object_packs"] = build_agent_context_object_packs(
@@ -625,27 +617,6 @@ def object_native_review_tool_hints(missing_evidence: list[str]) -> list[dict[st
     ]
 
 
-def search_mirror_status_block(status: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    provided = status if isinstance(status, Mapping) else {}
-    raw_status = str(provided.get("status") or "unverified").lower()
-    safe_status = raw_status if raw_status in SEARCH_MIRROR_STATUSES else "unverified"
-    raw_details = provided.get("details")
-    details = raw_details if isinstance(raw_details, (list, tuple)) else ()
-    block = {
-        "status": safe_status,
-        "authority": "searchable_document_mirror",
-        "canonical_memory": False,
-        "product_use": "candidate_only_requires_document_authority_join",
-        "requires_document_authority_join": True,
-        "degraded_if_unavailable": True,
-        "last_verified_at": public_safe_text(str(provided.get("last_verified_at") or ""), max_chars=80),
-        "evidence_ref": public_safe_text(str(provided.get("evidence_ref") or ""), max_chars=160),
-        "details": [public_safe_text(str(item or ""), max_chars=160) for item in details if str(item or "")],
-    }
-    ensure_public_safe(block, "search_mirror_status")
-    return block
-
-
 def normalize_context_consumer(consumer: str) -> str:
     safe = public_safe_text(str(consumer or "unspecified"), max_chars=80).lower()
     if safe not in CONTEXT_AUTHORITY_CONSUMERS:
@@ -716,7 +687,6 @@ def needs_runtime_evidence(current_request: str, current_files: list[str]) -> bo
         "health",
         "graphiti",
         "neo4j",
-        "qdrant",
         "rag" + "flow",
         "live",
     )

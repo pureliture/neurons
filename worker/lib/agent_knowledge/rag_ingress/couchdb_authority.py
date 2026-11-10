@@ -1,4 +1,4 @@
-"""CouchDB-native authority resolver for Qdrant searchable-mirror hits.
+"""CouchDB-native authority resolver for derived session-memory hits.
 
 The go-forward recall authority is the CouchDB source plane, not the (retiring)
 ledger ``knowledge_items``. A derived session-memory is *current* iff its
@@ -8,19 +8,19 @@ the CouchDB side). The ``active_content_hash`` field on that doc pins which body
 the currently-projected one.
 
 :class:`CouchDBProjectionStateAuthorityResolver` implements the
-:class:`MirrorAuthorityResolver` Protocol (``qdrant_authority_join``). A mirror hit
+:class:`MirrorAuthorityResolver` protocol (``authority_join``). A derived hit
 resolves to authority only when:
 
   1. a ``projection_state`` doc exists for the hit's ``session_id_hash``, AND
   2. its ``projection_status`` is ``projected``, AND
   3. its ``active_content_hash`` equals the hit's ``content_hash`` (so a stale
-     mirror point for a re-projected session is dropped).
+     stale result for a re-projected session is dropped).
 
 On success it returns the reconciled scope ``{provider, project, content_hash}``.
 It deliberately returns NO ``privacy_level`` key: privacy is not part of the
 CouchDB source plane (the whole corpus is private session transcripts, uniformly
-labeled ``"private"`` at mirror-build time), so the authority-join privacy check
-(``qdrant_authority_join.py:56-58``) is skipped (its guard requires BOTH a record
+labeled ``"private"`` at projection time), so the authority-join privacy check
+(``authority_join.py``) is skipped (its guard requires BOTH a record
 privacy and a hit privacy to be non-empty before comparing). Negative cases drop.
 """
 
@@ -33,14 +33,14 @@ from ..llm_brain_core.runtime import session_source_revision_from_couchdb_source
 
 
 class CouchDBProjectionStateAuthorityResolver:
-    """Resolve a mirror hit to CouchDB projection authority by session + content_hash."""
+    """Resolve a derived hit to CouchDB projection authority by session + content_hash."""
 
     def __init__(
         self,
         store: Any,
         *,
         filters: dict[str, str] | None = None,
-        backend: str = "qdrant",
+        backend: str = "postgres_pgvector",
         embedding_profile: str = "",
         pg_store: Any | None = None,
     ) -> None:
@@ -122,7 +122,7 @@ class CouchDBProjectionStateAuthorityResolver:
                 if not require_segment_hit:
                     return None
                 from ..couchdb_source.document_model import sha256_hash
-                from .qdrant_backfill import public_safe_mask_body
+                from ..public_safe_util import public_safe_mask_body
 
                 if sha256_hash(public_safe_mask_body(current.body)) != state["representation_content_hash"]:
                     return None
@@ -163,7 +163,7 @@ class CouchDBProjectionStateAuthorityResolver:
                     return None
                 from ..couchdb_source.session_memory_materializer import materialize_session_memory
                 from ..couchdb_source.document_model import sha256_hash
-                from .qdrant_backfill import public_safe_mask_body
+                from ..public_safe_util import public_safe_mask_body
 
                 current = materialize_session_memory(session_id_hash=session_id_hash, store=self._store)
                 if (not current.fully_materialized

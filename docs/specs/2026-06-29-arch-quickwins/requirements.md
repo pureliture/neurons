@@ -41,8 +41,8 @@ A: `ComposeConfigTest`는 `Files.readString()` + `contains()` raw-string 검사�
 
 ### Q: #7에서 root .env.example에 넣을 것과 뺄 것은?
 A: 필수(`${VAR:?}`) 누락 2개(MCP_HTTP_HOST, LLM_BRAIN_ENV_FILE)와 dataset parity 갭
-(RETIRED_INDEX_BRIDGE_TASK_SUMMARY_DATASET_ID)을 추가. 주요 optional 그룹(MCP_HTTP_PORT, Qdrant
-mirror, RAG_INGRESS_* live-lane)은 주석 섹션으로 문서화. session-memory 전용
+(RETIRED_INDEX_BRIDGE_TASK_SUMMARY_DATASET_ID)을 추가. 주요 optional 그룹(MCP_HTTP_PORT,
+RAG_INGRESS_* live-lane)은 주석 섹션으로 문서화. session-memory 전용
 (RUN_MODE/SM_STATE_DIR)은 별도 compose project라 root에 넣지 않음(defer).
 
 ## 기능 요구사항
@@ -80,7 +80,7 @@ mirror, RAG_INGRESS_* live-lane)은 주석 섹션으로 문서화. session-memor
 
 ## 미결정 / 후속
 
-- OQ1: #7 optional var(Qdrant/RAG_INGRESS_*) 주석 vs placeholder 표기 — 주석 채택.
+- OQ1: #7 optional var(RAG_INGRESS_*) 주석 vs placeholder 표기 — 주석 채택.
 - OQ2: session-memory 전용 .env.example 신설 여부 — 이번 defer.
 - OQ3: compose anchor YAML 유효성 CI 검사(docker compose config) 도입 — 이번엔 실행 중
   smoke로만, CI 도입은 follow-up.

@@ -1,9 +1,7 @@
-"""Qdrant searchable mirror용 OpenAI-compatible ``EmbeddingProvider``.
+"""OpenAI-compatible ``EmbeddingProvider``와 연결 설정.
 
-Mirror는 worker가 만든 vector가 필요하고, RetiredIndexBridge는 server-side embedding을
-쓴다. 새 model을 고르지 않고 Graphiti adapter와 같은
-``LLM_BRAIN_EMBEDDING_*`` env, ``OPENAI_*`` fallback, 기본 dim 3072를
-재사용한다. 새 secret은 만들지 않는다.
+Graph adapter, PostgreSQL projection 및 recall이 같은
+``LLM_BRAIN_EMBEDDING_*`` 환경 설정을 재사용한다.
 
 Test에서는 ``embed_fn``을 주입해 network와 optional ``openai`` dependency 없이
 검증한다. 실제 endpoint는 :func:`build_openai_embedding_provider`의 live path에서만
@@ -21,17 +19,18 @@ from agent_knowledge.model_connectors import (
     resolve_embedding_spec,
 )
 
-from .qdrant_docling_mirror import SearchableMirrorUnavailable
-
 EmbedFn = Callable[[str], list[float]]
+
+
+class EmbeddingProviderUnavailable(RuntimeError):
+    """Embedding provider configuration or connection is unavailable."""
 
 
 class OpenAICompatibleEmbeddingProvider:
     """주입된 OpenAI-compatible embed function 기반 ``EmbeddingProvider``.
 
-    :class:`QdrantDoclingMirrorAdapter`가 소비하는 ``EmbeddingProvider`` protocol
-    (``size`` + ``embed``)을 만족한다. 반환 vector 길이는 선언된 ``size``와
-    맞춰 검증해서 잘못 설정된 endpoint는 fail closed 처리한다.
+    반환 vector 길이는 선언된 ``size``와 맞춰 검증해서 설정 오류를
+    fail closed 처리한다.
     """
 
     def __init__(self, *, embed_fn: EmbedFn, size: int, model: str = "") -> None:
@@ -64,7 +63,7 @@ class OpenAICompatibleEmbeddingProvider:
 def resolve_embedding_config(environ: Mapping[str, str] | None = None) -> dict[str, object]:
     """Env에서 embedding 연결 config를 해석한다.
 
-    ``GraphitiNeo4jConfig.from_env``와 같은 우선순위를 써서 mirror와 graph adapter가
+    ``GraphitiNeo4jConfig.from_env``와 같은 우선순위를 써서 embedding consumer가
     같은 endpoint를 보게 한다. api_key는 의도적으로 반환하지 않는다. base_url은
     host를 식별할 수 있으므로 production path에서 redaction 없이 log하지 않는다.
     """
@@ -83,7 +82,7 @@ def build_openai_embedding_provider(
     environ: Mapping[str, str] | None = None,
     embed_fn: EmbedFn | None = None,
 ) -> OpenAICompatibleEmbeddingProvider:
-    """Env에서 mirror embedding provider를 만든다.
+    """환경 설정에서 embedding provider를 만든다.
 
     ``embed_fn``은 test/local 주입용이다. 생략하면 실제 OpenAI-compatible embeddings
     endpoint를 lazily 연결한다.
@@ -95,7 +94,7 @@ def build_openai_embedding_provider(
     try:
         ModelPolicy().validate(resolve_embedding_spec(env), capability="embedding")
     except PolicyViolation as exc:
-        raise SearchableMirrorUnavailable(str(exc)) from exc
+        raise EmbeddingProviderUnavailable(str(exc)) from exc
     config = resolve_embedding_config(env)
     model = str(config["model"])
     size = int(config["dim"])
@@ -112,7 +111,7 @@ def _openai_embed_fn(*, model: str, base_url: str, api_key: str, environ: Mappin
     env = environ if environ is not None else os.environ
 
     if not model:
-        raise SearchableMirrorUnavailable(
+        raise EmbeddingProviderUnavailable(
             "embedding model not configured (set LLM_BRAIN_EMBEDDING_MODEL)"
         )
     normalized_model = model.strip().lower()
@@ -126,7 +125,7 @@ def _openai_embed_fn(*, model: str, base_url: str, api_key: str, environ: Mappin
         or profile_raw == "lbrain-memory-model2vec-256-v1"
     ):
         if not str(base_url or "").strip():
-            raise SearchableMirrorUnavailable(
+            raise EmbeddingProviderUnavailable(
                 "local embedding base_url not configured (set LLM_BRAIN_EMBEDDING_BASE_URL)"
             )
         from agent_knowledge.local_embedding.client import CanonicalLocalEmbeddingClient
@@ -142,7 +141,7 @@ def _openai_embed_fn(*, model: str, base_url: str, api_key: str, environ: Mappin
                 dimension=256,
             )
         except PolicyViolation as exc:
-            raise SearchableMirrorUnavailable(str(exc)) from exc
+            raise EmbeddingProviderUnavailable(str(exc)) from exc
 
         try:
             timeout_seconds = float(env.get("LLM_BRAIN_EMBEDDING_TIMEOUT_SECONDS", "30"))
@@ -165,8 +164,8 @@ def _openai_embed_fn(*, model: str, base_url: str, api_key: str, environ: Mappin
     try:
         from openai import OpenAI
     except ImportError as exc:  # pragma: no cover - exercised only on the live path
-        raise SearchableMirrorUnavailable(
-            "openai client is not installed; install the searchable mirror dependencies"
+        raise EmbeddingProviderUnavailable(
+            "openai client is not installed; install the embedding provider dependency"
         ) from exc
     try:
         timeout_seconds = float(env.get("LLM_BRAIN_EMBEDDING_TIMEOUT_SECONDS", "30"))

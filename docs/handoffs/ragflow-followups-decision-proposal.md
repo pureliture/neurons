@@ -60,7 +60,7 @@ report = run_native_memory_sync(..., retired_index_bridge=None, dry_run=True)
 - dry-run조차 bridge를 `None`으로 넘김 → 외부 memory API 호출은 **구조적으로 불가능**
 - 실제 데이터는 로컬 ledger `native_memory_mirror` 테이블에만 저장
 - `knowledge_search_service`의 native-memory semantic recall은 disabled client라 **항상 no-hit**
-- 실사용 recall은 PG/Qdrant + ledger
+- 실사용 recall은 PG/retired-vector-index + ledger
 
 **⇒ native_memory(외부 브리지에 직접 쓰는 기능)는 RAGFlow F/O 후 대체 백엔드로 **옮겨지지 않았다**. 이 자체가 미결 제품 결정이다.**
 
@@ -115,7 +115,7 @@ report = run_native_memory_sync(..., retired_index_bridge=None, dry_run=True)
 - 실측: `native_memory_write_runner.py:203` — live 실행은 `failed_error_class: "live_native_memory_sync_not_vendored"`로 **명시적 차단**, dry-run조차 `retired_index_bridge=None`
 - 실사용 데이터는 로컬 ledger `native_memory_mirror` 테이블에만 저장
 - `knowledge_search_service`의 native-memory semantic recall은 disabled client라 **항상 no-hit**
-- 실사용 recall은 PG/Qdrant + ledger
+- 실사용 recall은 PG/retired-vector-index + ledger
 
 **⇒ native_memory(외부 서버에 직접 쓰는 memory 기능)는 RAGFlow F/O 후 대체 백엔드로 옮겨지지
 않았습니다.** 이건 미결 제품 결정입니다.
@@ -156,7 +156,7 @@ report = run_native_memory_sync(..., retired_index_bridge=None, dry_run=True)
 
 ### C-2: native_memory를 **대체 백엔드로 이전**
 
-`Postgres+pgvector` / `CouchDB` / `Qdrant` 중 하나를 골라 "외부 서버에 직접 쓰는 memory"를
+`Postgres+pgvector` / `CouchDB` / `retired-vector-index` 중 하나를 골라 "외부 서버에 직접 쓰는 memory"를
 그쪽으로 옮깁니다. native memory의 의미(에이전트 대化的 요약/메모리를 벡터 저장소에 직접 기록)를
 그대로 옮기는 작업이라, C-1보다 큽니다.
 
@@ -172,7 +172,7 @@ report = run_native_memory_sync(..., retired_index_bridge=None, dry_run=True)
    B는 가장 나쁜 상태**(죽은 코드가 두 형태로 남음)입니다.
 2. native_memory의 실사용 데이터는 이미 로컬 `native_memory_mirror`에 있고, semantic recall은
    이미 no-hit입니다. 즉 **사용자가 체감하는 기능 손실이 없습니다.**
-3. C-2(대체 백엔드)는 PG/Qdrant recall이 이미 그 역할을 수행 중입니다. 같은 일을 하는 경로를
+3. C-2(대체 백엔드)는 PG/retired-vector-index recall이 이미 그 역할을 수행 중입니다. 같은 일을 하는 경로를
    두 개 유지할 이유가 없습니다.
 4. `memory_gc_audit` 프로덕션 리더가 없어 GC 감사 기록도 실용 가치가 없습니다.
 
@@ -192,7 +192,7 @@ report = run_native_memory_sync(..., retired_index_bridge=None, dry_run=True)
 | chunk prose 소스 | ledger `transcript_chunks` — **`ki.status = 'indexed'` 만** (`ledger_ingress_mixin.py:1147`) | CouchDB `conversation_chunks` — **활성 source revision 만** |
 | evidence 소스 | ledger `tool_evidence_summaries` — **status 필터 없음, 전부** (`ledger_native_memory_mixin.py:761-768`) | CouchDB `tool_evidence_bundles` — 활성 revision 만 |
 | 렌더링 | `### N cat/outcome`, `- command:`, `- result:` | 동일 + `- tool:` 줄 |
-| 소비 | 검색/리콜 (Qdrant 등 검색 미러) | 엔티티·관계 추출 후 Neo4j 그래프 |
+| 소비 | 검색/리콜 (retired-vector-index 등 검색 미러) | 엔티티·관계 추출 후 Neo4j 그래프 |
 
 **양쪽 evidence의 원본은 동일하다.** `ToolEvidenceSummaryRecord` 하나에서 파생되며, `transcript_parsers/evidence.py:293`이 유일한 생성 지점이다. 생성 후 ledger(`tool_evidence_summaries` 테이블)와 CouchDB(`tool_evidence_bundles` doc)로 각각 저장된다.
 
@@ -297,7 +297,7 @@ status로 걸러지 않으며, 호출자는 session 단위 범위(=같은 `sessi
 `session-memory-worker`의 entrypoint(`worker/deploy/session-memory/entrypoint.sh`) 주석:
 > "retired external index bridge lane(gc/backfill)은 삭제됐다 … live GC는 operator 승인 절차로만 수행한다."
 
-그리고 `build-once.sh`는 `SESSION_MEMORY_PROJECTION_BACKEND="${SESSION_MEMORY_PROJECTION_BACKEND:-qdrant}"` — **기본값이 qdrant**이고, 라이브는 env로 `postgres_pgvector`를 명시합니다. 라이브 pod env 실측 확인함.
+그리고 `build-once.sh`는 `SESSION_MEMORY_PROJECTION_BACKEND="${SESSION_MEMORY_PROJECTION_BACKEND:-retired-vector-index}"` — **기본값이 retired-vector-index**이고, 라이브는 env로 `postgres_pgvector`를 명시합니다. 라이브 pod env 실측 확인함.
 
 **⇒ 라이브 동작 변화 없음.** 새 이미지의 session-memory-worker도 `postgres_pgvector`로 동작합니다.
 

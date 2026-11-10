@@ -650,4 +650,3 @@ class TestChallengerRound2AdvancedAdversarial:
             assert isinstance(payload["source_refs"], list)
             for h in payload["evidence_hashes"]:
                 assert h.strip() != ""
-

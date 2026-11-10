@@ -90,7 +90,7 @@
 
 ## M6.3 Search mirror status in Context Authority Pack
 - status: done
-- evidence: RED ContextPack authority block did not expose the Qdrant/Docling searchable mirror role required by the design; GREEN `authority.search_mirror.qdrant_docling` reports searchable mirror status as candidate-only, not canonical memory, and requiring document authority join before product use. Status is no longer hardcoded as unavailable: unset mirror status is `unverified`, configured-without-live-probe is `configured_unverified`, and future probe paths can supply `available`, `degraded`, or `unavailable`; focused ContextPack/bundle/projection/MCP tests cover the contract.
+- evidence: RED ContextPack authority block did not expose the retired-vector-index/Docling searchable mirror role required by the design; GREEN `authority.search_mirror.retired-vector-index_docling` reports searchable mirror status as candidate-only, not canonical memory, and requiring document authority join before product use. Status is no longer hardcoded as unavailable: unset mirror status is `unverified`, configured-without-live-probe is `configured_unverified`, and future probe paths can supply `available`, `degraded`, or `unavailable`; focused ContextPack/bundle/projection/MCP tests cover the contract.
 
 ## M6.4 Consumer read-only contract
 - status: done
@@ -98,7 +98,7 @@
 
 ## M6 Context Pack API Hardening
 - status: done
-- evidence: Codex/Claude/Hermes MCP smokes pass, compact/full/degraded response contracts are tested through model/CLI/MCP paths, authority projection consistency remains covered by focused projection tests, Qdrant/Docling mirror status is explicit as candidate-only/non-canonical and unverified unless a status seam supplies evidence, consumer contracts remain read-only, and backend boundary guardrails pass in the full worker suite.
+- evidence: Codex/Claude/Hermes MCP smokes pass, compact/full/degraded response contracts are tested through model/CLI/MCP paths, authority projection consistency remains covered by focused projection tests, retired-vector-index/Docling mirror status is explicit as candidate-only/non-canonical and unverified unless a status seam supplies evidence, consumer contracts remain read-only, and backend boundary guardrails pass in the full worker suite.
 
 ## M7.1 Dendrite local evidence edge input contract
 - status: done
@@ -166,7 +166,7 @@
 
 ## Infra-B.5 live k3s canary and rollback proof
 - status: done
-- evidence: recorded operator claim, not a durable current-runtime proof artifact. The claimed run says Ubuntu `ops-host` k3s had one Ready control-plane node before the PoC, a temporary `neurons-canary` namespace ran a stateless `llm-brain-mcp` canary first with a public stateless image and then with `neurons-mcp-neuron-knowledge-mcp:latest` via a temporary local registry, `neuron-knowledge --help` and local HTTP postcheck succeeded, rollback scaled the Deployment to 0, compose stayed healthy, and the namespace plus temporary registry were removed. `current_runtime_verified=false` until a redacted execution evidence artifact records timestamp, approval, image digest, namespace cleanup, compose postcheck, and rollback proof. No DB, Neo4j, Qdrant, CouchDB, or production k3s migration was performed.
+- evidence: recorded operator claim, not a durable current-runtime proof artifact. The claimed run says Ubuntu `ops-host` k3s had one Ready control-plane node before the PoC, a temporary `neurons-canary` namespace ran a stateless `llm-brain-mcp` canary first with a public stateless image and then with `neurons-mcp-neuron-knowledge-mcp:latest` via a temporary local registry, `neuron-knowledge --help` and local HTTP postcheck succeeded, rollback scaled the Deployment to 0, compose stayed healthy, and the namespace plus temporary registry were removed. `current_runtime_verified=false` until a redacted execution evidence artifact records timestamp, approval, image digest, namespace cleanup, compose postcheck, and rollback proof. No DB, Neo4j, retired-vector-index, CouchDB, or production k3s migration was performed.
 
 ## Infra-B k3s PoC
 - status: done

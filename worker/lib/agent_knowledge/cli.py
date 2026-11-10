@@ -122,7 +122,6 @@ def run_stdio_server(service) -> None:
 
 
 COMMAND_HANDLERS: dict[str, CommandHandler] = {
-    "pg-qdrant-import": _lazy_handler(".rag_ingress.pg_qdrant_import_cli"),
     "rag-ingress-state": state_cli.main,
     "memory-regeneration": memory_regeneration_cli.main,
     "cleanup-readiness": cleanup_readiness.main,
@@ -179,7 +178,6 @@ COMMAND_HANDLERS: dict[str, CommandHandler] = {
     "couchdb-temporal-revision-rebuild": _lazy_handler(".rag_ingress.temporal_revision_rebuild"),
     "couchdb-temporal-evidence-inventory": temporal_evidence_inventory.main,
     "transcript-migration": migration_cli.main,
-    "qdrant-pg-migrate-cards": _lazy_handler(".postgres_store.migration_qdrant_to_postgres_cli"),
     "pg-graph-project": _lazy_handler(".postgres_store.graph_projection_cli"),
     "pg-embedding-outbox": _lazy_handler(".postgres_store.embedding_outbox_cli"),
     "pg-schema-apply": _lazy_handler(".postgres_store.schema_apply_cli"),
@@ -312,8 +310,7 @@ def _build_recall_service(
     except Exception as exc:
         raise _ServiceWiringError(1, f"graph adapter unavailable: {type(exc).__name__}") from exc
     # A configured PG lane owns session archive recall. Construction failures
-    # must be visible; neither Qdrant nor the retired bridge is a fallback.
-    from .rag_ingress.qdrant_recall import build_qdrant_brain_query_search_from_env
+    # must be visible; the retired bridge is not a fallback.
     from .rag_ingress.pg_recall import build_pg_brain_query_search_from_env
 
     pgvector_store = None
@@ -322,14 +319,12 @@ def _build_recall_service(
         or os.environ.get("LLM_BRAIN_PGVECTOR_DSN", "")
         or os.environ.get("NEURON_LEDGER_PG_DSN", "")
     )
-    # PG authority 구성 시 Qdrant는 shadow/migration 전용이다.
+    pg_search = None
     if pgvector_dsn:
         try:
-            mirror_search = build_pg_brain_query_search_from_env(os.environ)
+            pg_search = build_pg_brain_query_search_from_env(os.environ)
         except Exception:
             raise _ServiceWiringError(2, "PG recall wiring failed") from None
-    else:
-        mirror_search = build_qdrant_brain_query_search_from_env(os.environ)
     if pgvector_dsn:
         try:
             from .postgres_store.pgvector_store import PgVectorStore
@@ -402,7 +397,7 @@ def _build_recall_service(
         allow_private_results=bool(args.allow_private_results),
         native_memory_id=args.native_memory_id,
         graph_adapter=graph_adapter,
-        mirror_search=mirror_search,
+        pg_search=pg_search,
         semantic_ranker=semantic_ranker,
         pgvector_store=pgvector_store,
         allow_restricted_steward=bool(getattr(args, "allow_steward_review_commit", False)),

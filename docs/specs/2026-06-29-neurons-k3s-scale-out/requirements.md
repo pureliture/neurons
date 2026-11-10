@@ -27,7 +27,7 @@ origin/main 기준 현재 k3s 작업은 **단일 노드 lift-and-shift PoC**다.
 ### Q1: scale-out의 현실적 범위는? 전체(stateful 클러스터링 포함)인가, 일부인가?
 
 stateless 워크로드 수평확장 + worker lane competing-consumer 경로 + manifest/계약/분류/테스트에
-capability 도입까지를 in-scope로 한다. stateful 스토어(CouchDB/Postgres/Neo4j/Qdrant/NATS)의
+capability 도입까지를 in-scope로 한다. stateful 스토어(CouchDB/Postgres/Neo4j/NATS)의
 실제 클러스터링·복제는 별도 이니셔티브로 분리(non-goal)한다. 근거: stateful 클러스터링은 각
 스토어마다 별도 토폴로지·백업·복원 리허설이 필요한 대형 작업이고, YAGNI상 capability 도입과
 분리해야 한다.
@@ -45,8 +45,7 @@ capability 도입까지를 in-scope로 한다. stateful 스토어(CouchDB/Postgr
   graph-trigger, bulk-semantic-trigger, session-memory-worker**. graph/bulk/session은 `fcntl.flock`
   또는 파일 기반 직렬화, ingress-worker는 WorkQueue 단일 consumer 계약(Q3)으로 단일 고정.
 - `singleton-stateful` (StatefulSet single-writer, scale-out 비대상, `replicaPolicy: singleton`):
-  **ingress-queue(nats), couchdb-source-store, ledger-postgres, neo4j-graph-store,
-  searchable-mirror(qdrant)**.
+  **ingress-queue(nats), couchdb-source-store, ledger-postgres, neo4j-graph-store**.
 - `not-a-target` (`replicaPolicy: singleton`): **llm-brain-tools**(operator exec 전용 `sleep infinity`),
   **retired-java-ingress-worker**(은퇴 profile, k3s 비대상).
 
@@ -173,7 +172,7 @@ code-changing work(`infra_baseline.py`, contract test, 단위 test)는 red→gre
 
 ## Non-Goals
 
-- stateful 스토어(CouchDB/Postgres/Neo4j/Qdrant/NATS-JetStream) 실제 클러스터링/복제 구현.
+- stateful 스토어(CouchDB/Postgres/Neo4j/NATS-JetStream) 실제 클러스터링/복제 구현.
 - ingress-worker 다중 replica 활성화 및 그 선행조건 구현 — WorkQueue retention/consumer fan-out 모델
   전환, SQLite→Postgres state store 마이그레이션, ack 튜닝(전부 별도 후속 작업).
 - multi-node 클러스터 실제 가동, HA control plane(3-server etcd), 실제 CNI 교체.

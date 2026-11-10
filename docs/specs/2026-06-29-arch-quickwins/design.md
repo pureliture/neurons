@@ -50,8 +50,7 @@ worker pytest       ComposeConfigTest green    gradle test
   - 필수 추가: `MCP_HTTP_HOST`(주석: tailnet IP, 절대 0.0.0.0 금지), `LLM_BRAIN_ENV_FILE`
     (주석: deploy-time 서버측 경로, repo .env 아님).
   - parity 갭: `RETIRED_INDEX_BRIDGE_TASK_SUMMARY_DATASET_ID`(7번째 dataset id) 추가.
-  - optional 주석 섹션: MCP_HTTP_PORT, Qdrant mirror(MIRROR_DUAL_WRITE/QDRANT_*),
-    RAG_INGRESS_* live-lane. profile 섹션으로 구획.
+  - optional 주석 섹션: MCP_HTTP_PORT, RAG_INGRESS_* live-lane. profile 섹션으로 구획.
   - `ComposeConfigTest`에 `@Test envExampleCoversAllRequiredComposeVars()`:
     compose.yaml에서 `${VAR:?}` var 추출 → .env.example `^KEY=` 키와 비교 →
     required ⊆ documented assert.

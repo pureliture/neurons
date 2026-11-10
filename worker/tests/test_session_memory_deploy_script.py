@@ -2,15 +2,15 @@ import subprocess
 from pathlib import Path
 
 
+
+
 def test_build_once_uses_couchdb_native_builder_with_pgvector_default() -> None:
     script = Path("deploy/session-memory/build-once.sh").read_text(encoding="utf-8")
 
     assert "couchdb-session-memory-build" in script
     assert "agent_knowledge.session_memory.neuron_session_memory" not in script
     assert 'SESSION_MEMORY_PROJECTION_BACKEND="${SESSION_MEMORY_PROJECTION_BACKEND:-postgres_pgvector}"' in script
-    assert "SESSION_MEMORY_PROJECTION_BACKEND:-qdrant" not in script
-    assert "QDRANT_URL" in script
-    assert "neurons_mirror_gemini_3072_v1" in script
+    assert "SESSION_MEMORY_PROJECTION_BACKEND:-postgres_pgvector" in script
     assert "RETIRED_INDEX_BRIDGE_API_KEY" not in script
 
 
@@ -30,11 +30,6 @@ def test_build_once_enforces_process_timeout() -> None:
     assert "timeout \"${SESSION_MEMORY_BUILD_TIMEOUT_SECONDS:-300}\"" in script
 
 
-def test_session_memory_image_installs_qdrant_projection_dependencies() -> None:
-    dockerfile = Path("Dockerfile.session-memory").read_text(encoding="utf-8")
-
-    assert "qdrant-client>=1.10" in dockerfile
-    assert "openai>=1.0" in dockerfile
 
 
 def test_entrypoint_build_interval_is_env_configurable() -> None:

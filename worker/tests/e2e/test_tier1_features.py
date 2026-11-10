@@ -1,7 +1,7 @@
 """Tier 1 Feature Coverage Test Suite (Simulation).
 
-Pure simulation suite running against InMemoryPostgresStore, InMemoryQdrantStore,
-and MockMCPServer with isolated legacy 1536-dim simulation profile.
+Pure simulation suite running against InMemoryPostgresStore and MockMCPServer
+with isolated legacy 1536-dim simulation profile.
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ import pytest
 
 from .conftest import (
     InMemoryPostgresStore,
-    InMemoryQdrantStore,
     MemoryCard,
     MemoryEdge,
     MockMCPServer,
@@ -287,6 +286,8 @@ def test_f2_02_create_preference(mcp_server: MockMCPServer, pg_store: InMemoryPo
     assert res["result"]["memory_id"].startswith("mem_cand_")
 
 
+
+
 def test_f2_03_create_task(mcp_server: MockMCPServer, pg_store: InMemoryPostgresStore):
     """Creates task candidate with content_hash validation and disabled authorization."""
     req = {
@@ -298,9 +299,9 @@ def test_f2_03_create_task(mcp_server: MockMCPServer, pg_store: InMemoryPostgres
             "arguments": {
                 "card_type": "task",
                 "project": "neurons",
-                "title": "Migrate vectors from Qdrant",
-                "summary": "Execute one-shot migration script",
-                "typed_payload": {"task_name": "Backfill Qdrant", "status": "planned"},
+                "title": "Consolidate vector storage",
+                "summary": "Use PostgreSQL pgvector as the vector search store",
+                "typed_payload": {"task_name": "Consolidate vector storage", "status": "planned"},
                 "content_hash": "sha256:task12345",
             },
         },
@@ -1090,103 +1091,15 @@ def test_f10_05_dag_cte_relation_types_classification(pg_store: InMemoryPostgres
 
 
 # ==============================================================================
-# Feature 11: Qdrant to PostgreSQL Backfill (5 Test Cases)
+# Feature 11: PostgreSQL Embedding Outbox
 # ==============================================================================
 
-def test_f11_01_backfill_read_qdrant_collection(qdrant_store: InMemoryQdrantStore):
-    """Migration script reads vectors and payloads from source Qdrant collection."""
-    v = make_dummy_vector(1)
-    qdrant_store.upsert("chunk_1", v, {"project": "neurons", "text": "chunk text 1"})
-    assert len(qdrant_store.vectors) == 1
-    assert "chunk_1" in qdrant_store.vectors
 
 
-def test_f11_02_backfill_map_session_chunks(qdrant_store: InMemoryQdrantStore, pg_store: InMemoryPostgresStore):
-    """Maps Qdrant session chunks into session_memory_chunks table preserving IDs and vectors."""
-    v = make_dummy_vector(2)
-    qdrant_store.upsert(
-        "sess_chunk_10",
-        v,
-        {
-            "project": "neurons",
-            "session_id_hash": "sha256:sess_10",
-            "provider": "codex",
-            "chunk_index": 1,
-            "content_markdown": "Session content",
-            "embedding_model": "text-embedding-3-small",
-        },
-    )
-
-    # Simulate migration mapper
-    for pid, (vec, payload) in qdrant_store.vectors.items():
-        chunk = SessionChunk(
-            chunk_id=pid,
-            session_id_hash=payload["session_id_hash"],
-            project=payload["project"],
-            provider=payload["provider"],
-            chunk_index=payload["chunk_index"],
-            content_markdown=payload["content_markdown"],
-            embedding_model=payload["embedding_model"],
-            embedding=vec,
-        )
-        pg_store.insert_chunk(chunk)
-
-    assert "sess_chunk_10" in pg_store.chunks
-    assert len(pg_store.chunks["sess_chunk_10"].embedding) == 1536
 
 
-def test_f11_03_backfill_map_memory_cards(qdrant_store: InMemoryQdrantStore, pg_store: InMemoryPostgresStore):
-    """Maps cards into memory_cards table preserving content hashes and metadata."""
-    v = make_dummy_vector(3)
-    qdrant_store.upsert(
-        "card_point_1",
-        v,
-        {
-            "memory_id": "mem_card_migrated",
-            "project": "neurons",
-            "card_type": "decision",
-            "title": "Migrated Card",
-            "summary": "Migrated from Qdrant",
-            "typed_payload": {"decision": "Migrate"},
-            "content_hash": "sha256:migrated1",
-            "lifecycle_state": "human_accepted",
-            "authorization_status": "active",
-        },
-    )
-
-    # Mapper
-    for _, (vec, p) in qdrant_store.vectors.items():
-        card = MemoryCard(
-            memory_id=p["memory_id"],
-            project=p["project"],
-            card_type=p["card_type"],
-            title=p["title"],
-            summary=p["summary"],
-            typed_payload=p["typed_payload"],
-            content_hash=p["content_hash"],
-            lifecycle_state=p["lifecycle_state"],
-            authorization_status=p["authorization_status"],
-            embedding=vec,
-            embedding_state="ready",
-        )
-        pg_store.insert_card(card)
-
-    assert "mem_card_migrated" in pg_store.cards
-    assert pg_store.cards["mem_card_migrated"].content_hash == "sha256:migrated1"
 
 
-def test_f11_04_backfill_dry_run_mode(qdrant_store: InMemoryQdrantStore, pg_store: InMemoryPostgresStore):
-    """Dry-run mode outputs count and sample records without writing to Postgres."""
-    qdrant_store.upsert("p1", make_dummy_vector(1), {"project": "neurons", "title": "Dry"})
-    dry_run = True
-    migrated_count = 0
-    if not dry_run:
-        pg_store.insert_card(MemoryCard("p1", "neurons", "decision", "Dry", "S", {}))
-    else:
-        migrated_count = len(qdrant_store.vectors)
-
-    assert len(pg_store.cards) == 0  # Dry-run wrote nothing
-    assert migrated_count == 1
 
 
 def test_f11_05_backfill_outbox_enqueue_unvectorized(pg_store: InMemoryPostgresStore):
@@ -1210,107 +1123,3 @@ def test_f11_05_backfill_outbox_enqueue_unvectorized(pg_store: InMemoryPostgresS
 
     assert len(pg_store.outbox) == 1
     assert pg_store.outbox[job_id].target_id == "mem_unvec"
-
-
-# ==============================================================================
-# Feature 12: Dual-Read Shadow Benchmark (5 Test Cases)
-# ==============================================================================
-
-def test_f12_01_dual_read_execute_both_stores(qdrant_store: InMemoryQdrantStore, pg_store: InMemoryPostgresStore):
-    """Dual-read harness executes search against both Qdrant and pgvector stores."""
-    vec = make_dummy_vector(7)
-    qdrant_store.upsert("doc_1", vec, {"project": "neurons", "title": "Doc 1"})
-    pg_store.insert_card(
-        MemoryCard(
-            memory_id="doc_1",
-            project="neurons",
-            card_type="decision",
-            title="Doc 1",
-            summary="S",
-            typed_payload={},
-            embedding=vec,
-            embedding_state="ready",
-            authorization_status="active",
-        )
-    )
-
-    qdrant_res = qdrant_store.search(vec, limit=5)
-    pg_res = pg_store.hybrid_vector_search(vec, project="neurons", limit=5)
-
-    assert len(qdrant_res) == 1
-    assert len(pg_res) == 1
-    assert qdrant_res[0]["id"] == pg_res[0]["memory_id"]
-
-
-def test_f12_02_dual_read_top5_overlap_calculation():
-    """Calculates top-5 rank overlap and Recall@5 metric between stores."""
-    qdrant_top5 = ["id_1", "id_2", "id_3", "id_4", "id_5"]
-    pgvector_top5 = ["id_1", "id_2", "id_3", "id_4", "id_6"]
-
-    intersection = set(qdrant_top5).intersection(set(pgvector_top5))
-    recall_at_5 = len(intersection) / len(qdrant_top5)
-    assert recall_at_5 == 0.8  # 4 / 5
-
-
-def test_f12_03_dual_read_recall_at_5_threshold(qdrant_store: InMemoryQdrantStore, pg_store: InMemoryPostgresStore):
-    """Asserts Recall@5 >= 0.95 across authority query fixtures corpus."""
-    # Seed 10 identical items in both stores
-    for i in range(10):
-        vec = make_dummy_vector(100 + i)
-        qdrant_store.upsert(f"mem_{i}", vec, {"project": "neurons", "title": f"Doc {i}"})
-        pg_store.insert_card(
-            MemoryCard(
-                memory_id=f"mem_{i}",
-                project="neurons",
-                card_type="decision",
-                title=f"Doc {i}",
-                summary="S",
-                typed_payload={},
-                embedding=vec,
-                embedding_state="ready",
-                authorization_status="active",
-            )
-        )
-
-    # Run 10 benchmark queries
-    recall_scores = []
-    for i in range(10):
-        q_vec = make_dummy_vector(100 + i)
-        qdrant_top = [r["id"] for r in qdrant_store.search(q_vec, limit=5)]
-        pg_top = [r["memory_id"] for r in pg_store.hybrid_vector_search(q_vec, project="neurons", limit=5)]
-        overlap = len(set(qdrant_top).intersection(set(pg_top)))
-        recall_scores.append(overlap / len(qdrant_top))
-
-    avg_recall = sum(recall_scores) / len(recall_scores)
-    assert avg_recall >= 0.95, f"Average Recall@5 {avg_recall} < 0.95 threshold"
-
-
-def test_f12_04_dual_read_latency_percentiles():
-    """Measures P50, P95, P99 latency for both backends; asserts P95 <= 20ms."""
-    latencies_ms = [2.1, 3.4, 4.0, 5.2, 8.1, 10.5, 12.0, 14.1, 15.0, 18.2]
-    latencies_ms.sort()
-    p95_idx = int(len(latencies_ms) * 0.95) - 1
-    p95 = latencies_ms[p95_idx]
-    assert p95 <= 20.0, f"P95 latency {p95}ms exceeds 20ms limit"
-
-
-def test_f12_05_dual_read_discrepancy_reporting():
-    """Generates detailed report on rank shifts and score divergences."""
-    discrepancies = []
-    qdrant_ranked = [("id_1", 0.95), ("id_2", 0.88), ("id_3", 0.70)]
-    pg_ranked = [("id_1", 0.95), ("id_3", 0.85), ("id_2", 0.84)]  # Rank shift between id_2 and id_3
-
-    for rank, (qid, qscore) in enumerate(qdrant_ranked):
-        pg_item = next((p for p in pg_ranked if p[0] == qid), None)
-        if pg_item:
-            pg_rank = pg_ranked.index(pg_item)
-            if rank != pg_rank:
-                discrepancies.append({
-                    "id": qid,
-                    "qdrant_rank": rank,
-                    "pg_rank": pg_rank,
-                    "score_diff": abs(qscore - pg_item[1]),
-                })
-
-    assert len(discrepancies) == 2
-    assert discrepancies[0]["id"] == "id_2"

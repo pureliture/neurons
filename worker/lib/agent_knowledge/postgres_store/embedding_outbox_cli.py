@@ -26,7 +26,7 @@ from ..model_connectors import (
 )
 from ..rag_ingress.pg_backfill import validated_pg_embedding_profile
 from ..rag_ingress.pg_embedding_privacy import assert_pg_embedding_egress_safe
-from ..rag_ingress.qdrant_embedding import build_openai_embedding_provider
+from ..rag_ingress.embedding_provider import build_openai_embedding_provider
 from .outbox_worker import LocalEmbeddingOutboxWorker, OutboxWorker
 from .pgvector_store import PgVectorStore
 

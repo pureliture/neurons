@@ -173,7 +173,7 @@ def test_ready_credential_content_reuses_without_external_egress(body, reuse):
 
 def recall_boundary(monkeypatch, *, direct_migrated=False):
     from agent_knowledge.rag_ingress import pg_recall
-    from agent_knowledge.rag_ingress import qdrant_embedding
+    from agent_knowledge.rag_ingress import embedding_provider
     from agent_knowledge.couchdb_source import couchdb_http_store
 
     pg_store = MagicMock(spec=PgVectorStore)
@@ -182,7 +182,7 @@ def recall_boundary(monkeypatch, *, direct_migrated=False):
     _, _, provider, _, _ = projection_boundary("synthetic")
     monkeypatch.setattr(pg_recall, "PgVectorStore", lambda **kw: pg_store)
     monkeypatch.setattr(couchdb_http_store, "CouchDBHttpSourceStore", lambda **kw: source)
-    monkeypatch.setattr(qdrant_embedding, "build_openai_embedding_provider", lambda **kw: provider)
+    monkeypatch.setattr(embedding_provider, "build_openai_embedding_provider", lambda **kw: provider)
     environ = {
         "NEURON_LBRAIN_PGVECTOR_DSN": "synthetic-not-a-dsn",
         "COUCHDB_URL": "https://example.invalid",
@@ -235,8 +235,8 @@ def test_direct_migrated_recall_does_not_construct_couchdb(monkeypatch):
     pg_store = MagicMock(spec=PgVectorStore)
     _, _, provider, _, _ = projection_boundary("synthetic")
     monkeypatch.setattr(pg_recall, "PgVectorStore", lambda **kw: pg_store)
-    from agent_knowledge.rag_ingress import qdrant_embedding
-    monkeypatch.setattr(qdrant_embedding, "build_openai_embedding_provider", lambda **kw: provider)
+    from agent_knowledge.rag_ingress import embedding_provider
+    monkeypatch.setattr(embedding_provider, "build_openai_embedding_provider", lambda **kw: provider)
 
     assert pg_recall.build_pg_brain_query_search_from_env({
         "NEURON_LBRAIN_PGVECTOR_DSN": "synthetic-not-a-dsn",
@@ -403,11 +403,6 @@ def test_direct_migrated_recall_rejects_candidate_outside_requested_project(monk
     assert store.search_session_chunks.call_args.kwargs["project"] == "privacy-test"
 
 
-def test_pg_recall_has_no_qdrant_reader_import():
-    from pathlib import Path
-    source = (Path(__file__).parents[1] / "lib/agent_knowledge/rag_ingress/pg_recall.py").read_text()
-    assert "qdrant_recall" not in source
-    assert "qdrant_recall import" not in source
 
 
 @pytest.mark.parametrize("query", ASSIGNED_CREDENTIALS + AUTH_CREDENTIALS)

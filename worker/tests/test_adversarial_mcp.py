@@ -121,6 +121,8 @@ def test_adversarial_candidate_create_injection_prevention(tmp_path: Path, isola
     assert service.brain_steward().review_queue_list(project="project-omega")["items"][0]["memory_id"] == result["memory_id"]
 
 
+
+
 def test_adversarial_candidate_create_invalid_hash(tmp_path: Path):
     service = _service(tmp_path)
     invalid_hashes = [
@@ -138,7 +140,7 @@ def test_adversarial_candidate_create_invalid_hash(tmp_path: Path):
     valid_payload = {
         "decision": "Use PostgreSQL pgvector",
         "rationale": "Unified storage architecture",
-        "alternatives": ["Qdrant", "SQLite"],
+        "alternatives": ["pgvector", "SQLite"],
         "consequence": "None",
         "authority_ref": "ADR-0007",
     }
@@ -162,7 +164,7 @@ def test_adversarial_candidate_create_invalid_hash(tmp_path: Path):
             },
             service,
         )
-        assert "error" in response, f"Expected error for bad_hash={bad_hash}, got {response}"
+        assert "error" in response
         assert response["error"]["code"] == -32602
 
 

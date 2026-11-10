@@ -136,16 +136,13 @@ from .delivery_executor import (
     DeliveryJobView,
     DeliveryOutcomeUncertain,
 )
-from .qdrant_dual_write import MirrorWriteOutcome
 from .server_runtime import (
     apply_server_redaction,
-    document_from_ingress_payload,
     public_ingress_leak_violations,
 )
 from .state_db import RAGIngressStateDB
 
 
-CouchDBMirrorOutcomeHook = Callable[[MirrorWriteOutcome], None]
 SessionChangedHook = Callable[[Any], None]
 
 _PAYLOAD_PREPARATION_ERRORS = (AttributeError, OverflowError, TypeError, ValueError)
@@ -158,21 +155,6 @@ _CHUNK_IDENTITY_FIELDS = (
     "redaction_version",
     "source_status",
 )
-
-
-def _default_couchdb_mirror_outcome_logger(outcome: MirrorWriteOutcome) -> None:
-    """Emit only redaction-safe best-effort mirror state."""
-    if outcome.status != "mirrored":
-        print(
-            json.dumps(
-                {
-                    "event": "qdrant_mirror_write",
-                    "status": outcome.status,
-                    "error_class": outcome.error_class,
-                }
-            ),
-            flush=True,
-        )
 
 
 def _payload_integrity_evidence(
@@ -385,14 +367,10 @@ class CouchDBDeliveryBackend:
         *,
         state_db: RAGIngressStateDB,
         store: CouchDBSourceStore,
-        mirror: Any | None = None,
-        on_mirror_outcome: CouchDBMirrorOutcomeHook | None = None,
         on_session_changed: SessionChangedHook | None = None,
     ) -> None:
         self._state_db = state_db
         self._store = store
-        self._mirror = mirror
-        self._on_mirror_outcome = on_mirror_outcome
         self._on_session_changed = on_session_changed
 
     # ------------------------------------------------------------------
@@ -852,13 +830,6 @@ class CouchDBDeliveryBackend:
             # state that a concurrent writer or an operator repair can change.
             raise DeliveryOutcomeUncertain(exc.__class__.__name__) from exc
 
-        # The Qdrant mirror is strictly post-authoritative and best-effort. A
-        # partial primary attempt may have stored the chunk but failed before
-        # aggregate reconciliation; its successful retry must still reach the
-        # mirror. Canonical succeeded-job duplicates never call ``submit`` from
-        # DeliveryExecutor, so they still have exactly one mirror side effect.
-        # The mirror sees the full server-redacted, leak-gated payload.
-        self._submit_mirror_after_authoritative_success(payload)
         self._notify_session_changed(
             session_id_hash=session_id_hash,
             provider=provider,
@@ -896,26 +867,6 @@ class CouchDBDeliveryBackend:
             )
         except Exception:
             pass
-
-    def _submit_mirror_after_authoritative_success(self, redacted_payload: dict) -> None:
-        if self._mirror is None:
-            return
-        try:
-            document = document_from_ingress_payload(redacted_payload)
-            result = self._mirror.submit_document(document)
-            outcome = MirrorWriteOutcome(
-                status="mirrored",
-                document_ref=str(getattr(result, "document_ref", "") or ""),
-            )
-        except Exception as exc:  # mirror cannot affect authoritative success
-            outcome = MirrorWriteOutcome(
-                status="mirror_error", error_class=exc.__class__.__name__
-            )
-        if self._on_mirror_outcome is not None:
-            try:
-                self._on_mirror_outcome(outcome)
-            except Exception:
-                pass
 
     def find_by_natural_key(
         self, idempotency_key: str, payload_hash: str
@@ -1051,8 +1002,6 @@ def build_couchdb_delivery_backend(
     couchdb_password: str,
     couchdb_db: str,
     environ: Mapping[str, str] | None = None,
-    mirror_builder: Callable[[Mapping[str, str]], Any | None] | None = None,
-    on_mirror_outcome: CouchDBMirrorOutcomeHook | None = None,
     on_session_changed: SessionChangedHook | None = None,
 ) -> CouchDBDeliveryBackend:
     """Factory used by the env-switch wiring in state_cli to build the backend.
@@ -1064,6 +1013,11 @@ def build_couchdb_delivery_backend(
 
     from ..couchdb_source.couchdb_http_store import CouchDBHttpSourceStore
 
+    if environ is not None:
+        couchdb_url = couchdb_url or environ.get("COUCHDB_URL", "")
+        couchdb_user = couchdb_user or environ.get("COUCHDB_USER", "")
+        couchdb_password = couchdb_password or environ.get("COUCHDB_PASSWORD", "")
+        couchdb_db = couchdb_db or environ.get("COUCHDB_DB", "")
     required_config = {
         "COUCHDB_URL": str(couchdb_url or ""),
         "COUCHDB_USER": str(couchdb_user or ""),
@@ -1081,35 +1035,15 @@ def build_couchdb_delivery_backend(
         db=couchdb_db,
         auth_header=f"Basic {credentials}",
     )
-    effective_environ = environ or {}
-    mirror = None
-    outcome_hook = on_mirror_outcome or _default_couchdb_mirror_outcome_logger
-    if str(effective_environ.get("MIRROR_DUAL_WRITE") or "").strip() == "1":
-        from .qdrant_dual_write import build_qdrant_mirror_from_env
-
-        try:
-            mirror = (mirror_builder or build_qdrant_mirror_from_env)(effective_environ)
-        except Exception as exc:
-            try:
-                outcome_hook(
-                    MirrorWriteOutcome(
-                        status="mirror_build_error", error_class=exc.__class__.__name__
-                    )
-                )
-            except Exception:
-                pass
     return CouchDBDeliveryBackend(
         state_db=state_db,
         store=store,
-        mirror=mirror,
-        on_mirror_outcome=outcome_hook if mirror is not None else None,
         on_session_changed=on_session_changed,
     )
 
 
 __all__ = [
     "CouchDBDeliveryBackend",
-    "CouchDBMirrorOutcomeHook",
     "SessionChangedHook",
     "build_couchdb_delivery_backend",
 ]

@@ -337,5 +337,3 @@ def test_cached_embedder_implements_embedder_client_and_graphiti_clients_contrac
         tracer=_DummyTracer(),
     )
     assert clients.embedder is embedder
-
-

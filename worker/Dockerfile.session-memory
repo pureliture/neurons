@@ -1,6 +1,6 @@
 # session-memory / ledger worker 컨테이너 (Modular Monolith 단일 컨테이너).
 # 호스트 cron + bare python3 배포를 대체. ledger(builder)·3 GC·backfill을 스케줄로
-# 실행. session-memory projection은 CouchDB source에서 Qdrant searchable mirror로 보낸다.
+# 실행. session-memory projection은 CouchDB source에서 PostgreSQL로 보낸다.
 FROM python:3.13-slim
 
 ARG NEURONS_SOURCE_COMMIT
@@ -18,7 +18,7 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY lib ./lib
 RUN pip install --no-cache-dir . \
-    && pip install --no-cache-dir "psycopg[binary]" "qdrant-client>=1.10" "openai>=1.0"
+    && pip install --no-cache-dir "psycopg[binary]" "openai>=1.0"
 
 COPY deploy/session-memory/ ./deploy/
 RUN chmod +x deploy/entrypoint.sh deploy/build-once.sh

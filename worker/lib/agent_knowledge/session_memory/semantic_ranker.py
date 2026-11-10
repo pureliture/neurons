@@ -76,7 +76,7 @@ class EmbeddingSemanticRanker:
 def build_embedding_semantic_ranker(*, environ: Mapping[str, str] | None = None) -> EmbeddingSemanticRanker:
     """Build a live embedding ranker from existing model connector env."""
 
-    from agent_knowledge.rag_ingress.qdrant_embedding import build_openai_embedding_provider
+    from agent_knowledge.rag_ingress.embedding_provider import build_openai_embedding_provider
 
     return EmbeddingSemanticRanker(embedding_provider=build_openai_embedding_provider(environ=environ))
 

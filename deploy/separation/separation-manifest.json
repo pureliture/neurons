@@ -52,7 +52,6 @@
 
     {"match": "worker/deploy/session-memory/compose.yaml", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
     {"match": "worker/deploy/session-memory/build-once.sh", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
-    {"match": "worker/lib/agent_knowledge/rag_ingress/qdrant_backfill_cli.py", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
     {"match": "worker/tests/test_llm_brain_ontology_completion_m2.py", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
     {"match": "worker/tests/test_llm_brain_portable_archive.py", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
     {"match": "worker/eval/golden/neurons.golden.draft.json", "disposition": "sanitize-then-public", "mechanic": "replace-text"},
