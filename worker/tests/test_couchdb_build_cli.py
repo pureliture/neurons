@@ -401,8 +401,7 @@ def _run(argv: list[str], store: InMemoryCouchDBSourceStore, *, projector=None, 
         stack.enter_context(patch.dict(os.environ, env))
         stack.enter_context(patch("sys.stdout", buf))
         if projector is not None:
-            # Patch the retired_vector_index projector factory: it is the only live projection
-            # target now that the retired external index bridge is gone.
+            # Patch the PostgreSQL projector factory, the live projection target.
             stack.enter_context(
                 patch(
                     "agent_knowledge.couchdb_source.build_cli._build_pg_projector",

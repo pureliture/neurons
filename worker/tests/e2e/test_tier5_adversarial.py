@@ -5,8 +5,7 @@ Extends E2E verification with extreme adversarial scenarios:
 2. Progressive truncation under extreme memory/payload stress.
 3. High-concurrency CAS race conditions across 10 mutating threads & 5 workers.
 4. Deep cyclic & diamond DAG provenance security under temporal filtering.
-5. High-scale retired_vector_index to PostgreSQL migration with dual-read shadow verification.
-6. Absolute candidate proposal isolation against context leakage.
+5. Absolute candidate proposal isolation against context leakage.
 """
 
 from __future__ import annotations

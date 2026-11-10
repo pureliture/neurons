@@ -735,16 +735,11 @@ def test_f10_b05_dag_diamond_dependency_convergence(pg_store: InMemoryPostgresSt
 
 
 # ==============================================================================
-# Feature 11 Boundary: retired_vector_index to PostgreSQL Backfill (5 Boundary Tests)
+# PostgreSQL card embedding-dimension validation
 # ==============================================================================
 
 
-
-
-
-
-
-def test_f11_b04_corrupted_vector_quarantine(pg_store: InMemoryPostgresStore):
+def test_pg_card_rejects_wrong_embedding_dimension(pg_store: InMemoryPostgresStore):
     """Corrupted vector (wrong dim) routed to dead letter / unvectorized without failing batch."""
     bad_vectors = [("good_1", [0.1]*1536), ("bad_1", [0.1]*500), ("good_2", [0.1]*1536)]
     migrated_good = 0
@@ -758,18 +753,6 @@ def test_f11_b04_corrupted_vector_quarantine(pg_store: InMemoryPostgresStore):
 
     assert migrated_good == 2
     assert quarantined == 1
-
-
-def test_f11_b05_network_retry_resumption():
-    """Network failure during migration triggers retry and resumes from checkpoint."""
-    total_items = [f"item_{i}" for i in range(10)]
-    checkpoint = 4
-    processed = []
-    for item in total_items[checkpoint:]:
-        processed.append(item)
-    assert len(processed) == 6
-    assert processed[0] == "item_4"
-
 
 # ==============================================================================
 # Feature 12 Boundary: Dual-Read Shadow Benchmark (5 Boundary Tests)

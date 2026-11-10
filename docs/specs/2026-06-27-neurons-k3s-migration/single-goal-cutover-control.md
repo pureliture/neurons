@@ -55,7 +55,6 @@ Required stores:
 - CouchDB
 - Postgres ledger
 - Neo4j
-- retired-vector-index when its source profile is enabled
 - NATS and worker/runtime state where migration is required
 
 Done evidence:

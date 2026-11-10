@@ -1,15 +1,10 @@
-"""Guard: the searchable-mirror adapter must not drag in the heavy llm_brain_core
-package, so it stays importable from the ingress/delivery worker's vendored subset.
+"""Guard the public-safe helper API and its compatibility re-exports.
 
-This is the regression that broke the live dual-write deploy: retired_vector_index_docling_mirror
-imported public-safe helpers from llm_brain_core._util, whose package __init__ pulls
-graphiti/neo4j — absent in the delivery worker.
+The ingress and delivery modules consume these helpers without depending on the
+llm_brain_core implementation.
 """
 
 from __future__ import annotations
-
-import subprocess
-import sys
 
 
 def test_public_safe_util_has_helpers_and_util_reexports():
