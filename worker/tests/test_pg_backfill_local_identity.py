@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 from copy import deepcopy
 
 import pytest
 
-from agent_knowledge.couchdb_source.document_model import sha256_hash
+from agent_knowledge.couchdb_source.document_model import (
+    INDEX_RECALL_PROFILE,
+    sha256_hash,
+)
 from agent_knowledge.local_embedding.canonical import (
     canonical_input_hash_v1,
     canonical_session_input_v1,
+    compute_input_hash,
 )
 from agent_knowledge.model_connectors import (
     DEFAULT_EMBEDDING_PROFILE_ID,
@@ -25,14 +30,25 @@ from agent_knowledge.rag_ingress.pg_backfill import (
 )
 from agent_knowledge.rag_ingress.pg_embedding_chunks import CHUNKED_PROFILE
 from agent_knowledge.rag_ingress.pg_representation import (
+    build_local_segment_receipt_v4,
     derive_local_pg_chunk_id,
     valid_local_pg_receipt_metadata,
 )
+from agent_knowledge.session_memory.chunk_overlap import ChunkView
 
 
 class LocalEmbedProvider:
     size = LOCAL_EMBEDDING_DIM
     model = LOCAL_EMBEDDING_MODEL
+
+
+class SegmentEmbedProvider(LocalEmbedProvider):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def embed(self, text: str) -> list[float]:
+        self.calls += 1
+        return [0.25] * self.size
 
 
 class InMemoryLocalPgStore:
@@ -173,6 +189,134 @@ def _identity_ids(document: dict[str, str]) -> tuple[str, str, str]:
         content_hash=document["content_hash"],
     )
     return legacy_v1, legacy_v2, local_v1
+
+
+def test_segment_projection_reuses_ready_rows_and_only_embeds_changed_tail(monkeypatch):
+    class SegmentStore(InMemoryLocalPgStore):
+        def insert_chunk_with_local_outbox(self, chunk: SessionChunk, **_kwargs):
+            self.rows[chunk.chunk_id] = chunk
+            self.insert_count += 1
+            self.local_embeddings[chunk.chunk_id] = {
+                "state": "pending",
+                "source_content_hash": chunk.content_hash,
+                "input_hash": compute_input_hash(chunk.content_markdown),
+                "vector": None,
+            }
+            return chunk.chunk_id, self.insert_count
+
+    class Worker:
+        def __init__(self, *, store, embedding_fn, **_kwargs):
+            self.store = store
+            self.embedding_fn = embedding_fn
+            self.last_batch_failed = False
+
+        def run_once(self):
+            pending = next(
+                (
+                    chunk_id
+                    for chunk_id, local in self.store.local_embeddings.items()
+                    if local["state"] == "pending"
+                ),
+                None,
+            )
+            if pending is None:
+                return 0
+            text = self.store.rows[pending].content_markdown
+            self.store.local_embeddings[pending].update(
+                state="ready",
+                vector=self.embedding_fn(text),
+            )
+            return 1
+
+    monkeypatch.setattr(
+        "agent_knowledge.postgres_store.outbox_worker.LocalEmbeddingOutboxWorker",
+        Worker,
+    )
+
+    def view(index: int, text: str) -> ChunkView:
+        return ChunkView(
+            content_hash=sha256_hash(f"view-{index}-{text}"),
+            turn_start_index=index,
+            turn_end_index=index,
+            part_index=1,
+            part_count=1,
+            char_start=0,
+            char_end=len(text),
+            redaction_version="test",
+            text=text,
+        )
+
+    views = [view(index, chr(96 + index) * 70) for index in range(1, 4)]
+    body = "synthetic session body with turns one two three"
+    document = {
+        **_document(body),
+        "conversation_views": tuple(views),
+        "tool_evidence_bodies": (),
+    }
+    store = SegmentStore()
+    provider = SegmentEmbedProvider()
+    projector = PgSessionMemoryProjector(
+        store,
+        provider,
+        representation="segment_v1",
+        segment_max_bytes=350,
+    )
+
+    projector.project(target_profile=INDEX_RECALL_PROFILE, document=document)
+    original_rows = deepcopy(store.rows)
+    original_ids = set(store.rows)
+    assert projector.last_segments_total == 2
+    assert projector.last_segments_reused == 0
+    assert projector.last_segments_embedded == 2
+    assert store.insert_count == 2
+    assert provider.calls == 2
+
+    projector.project(target_profile=INDEX_RECALL_PROFILE, document=document)
+    assert projector.last_segments_reused == 2
+    assert projector.last_segments_embedded == 0
+    assert store.insert_count == 2
+    assert provider.calls == 2
+    assert store.rows == original_rows
+
+    appended_document = {
+        **document,
+        "body": body + " and appended fourth turn",
+        "content_hash": sha256_hash(body + " and appended fourth turn"),
+        "source_hash": sha256_hash("synthetic-source-after-append"),
+        "conversation_views": (*views, view(4, "d" * 70)),
+    }
+    projector.project(target_profile=INDEX_RECALL_PROFILE, document=appended_document)
+    assert projector.last_segments_total == 2
+    assert projector.last_segments_reused == 1
+    assert projector.last_segments_embedded == 1
+    assert store.insert_count == 3
+    assert provider.calls == 3
+    assert all(store.rows[chunk_id] == original_rows[chunk_id] for chunk_id in original_ids)
+
+
+def test_segment_receipt_v4_binds_ordered_segment_ids():
+    segment_ids = ["seg_" + "a" * 60, "seg_" + "b" * 60]
+    digest = sha256_hash(
+        json.dumps(segment_ids, ensure_ascii=False, separators=(",", ":"))
+    )
+    receipt = build_local_segment_receipt_v4(
+        project="synthetic-project",
+        provider="synthetic-provider",
+        session_id_hash=sha256_hash("synthetic-session"),
+        active_content_hash=sha256_hash("source-body"),
+        projected_source_hash=sha256_hash("source-revision"),
+        representation_content_hash=sha256_hash("source-body"),
+        session_memory_knowledge_id=segment_ids[0],
+        embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
+        segment_ids=segment_ids,
+        segment_set_digest=digest,
+    )
+
+    assert valid_local_pg_receipt_metadata(receipt)
+    assert receipt["representation"] == "segment_v1"
+    assert receipt["segment_ids"] == segment_ids
+    assert receipt["segment_set_digest"] == digest
+    assert receipt["session_memory_knowledge_id"] == segment_ids[0]
 
 
 @pytest.mark.parametrize(

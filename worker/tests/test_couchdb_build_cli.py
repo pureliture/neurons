@@ -1406,6 +1406,9 @@ class TestLiveRun:
         approval_path.write_text(json.dumps(approval_payload), encoding="utf-8")
 
         projector = RecordingSessionMemoryProjector()
+        projector.last_segments_total = 3
+        projector.last_segments_reused = 1
+        projector.last_segments_embedded = 2
         rc, report = _run(argv, store, projector=projector)
 
         assert rc == 0
@@ -1415,6 +1418,9 @@ class TestLiveRun:
         assert report["projected"] == 2
         assert report["failed"] == 0
         assert len(projector.calls) == 2
+        assert report["segments_total"] == 6
+        assert report["segments_reused"] == 2
+        assert report["segments_embedded"] == 4
 
     def test_live_run_emits_valid_json_report(self, tmp_path) -> None:
         store = InMemoryCouchDBSourceStore()
@@ -1445,9 +1451,11 @@ class TestLiveRun:
             "failed",
             "skipped",
             "identity_conflicts_auto_resolved",
+            "segments_total",
+            "segments_reused",
+            "segments_embedded",
         ):
             assert key in report, f"missing key: {key}"
-
     def test_live_run_records_projection_state_in_store(self, tmp_path) -> None:
         store = InMemoryCouchDBSourceStore()
         sid = _build_synthetic_session(store, provider="claude", project="neurons", raw_id="sess-a")

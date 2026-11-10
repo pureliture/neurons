@@ -1,4 +1,5 @@
 """Local A/B receipt tracer: real isolated SQL, synthetic source/embedding only."""
+import json
 from dataclasses import replace
 
 import pytest
@@ -290,6 +291,68 @@ def test_receipt_commit_rejects_unbound_representation_metadata(representation_l
             projection_status="projected", ref=previous["session_memory_knowledge_id"], backend="postgres_pgvector",
             representation_receipt=malformed)
     assert receipt(lane) == previous
+
+
+def test_segment_receipt_commit_keeps_source_revision_cas_fence(representation_lane):
+    from agent_knowledge.couchdb_source.session_memory_materializer import (
+        _commit_projection_state_if_source_current,
+    )
+    from agent_knowledge.model_connectors import LOCAL_EMBEDDING_PROFILE_ID
+    from agent_knowledge.rag_ingress.pg_representation import build_local_segment_receipt_v4
+
+    lane = representation_lane
+    materialized = materialize(lane)
+    segment_ids = ["seg_" + "a" * 60, "seg_" + "b" * 60]
+    receipt_v4 = build_local_segment_receipt_v4(
+        project=materialized.project,
+        provider=materialized.provider,
+        session_id_hash=materialized.session_id_hash,
+        active_content_hash=materialized.content_hash,
+        projected_source_hash=materialized.source_hash,
+        representation_content_hash=materialized.content_hash,
+        session_memory_knowledge_id=segment_ids[0],
+        embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
+        segment_ids=segment_ids,
+        segment_set_digest=dm.sha256_hash(
+            json.dumps(segment_ids, ensure_ascii=False, separators=(",", ":"))
+        ),
+    )
+
+    current_status, current_state = _commit_projection_state_if_source_current(
+        materialized=materialized,
+        store=lane["couch"],
+        projection_status="projected",
+        ref=segment_ids[0],
+        backend="postgres_pgvector_local",
+        embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
+        representation_receipt=receipt_v4,
+    )
+    assert current_status == "written"
+    stored = current_state["backend_receipts"]["postgres_pgvector_local"][
+        LOCAL_EMBEDDING_PROFILE_ID
+    ]
+    assert stored["representation"] == "segment_v1"
+    assert stored["segment_ids"] == segment_ids
+    assert stored["segment_set_digest"] == receipt_v4["segment_set_digest"]
+
+    chunk = next(
+        row
+        for row in lane["couch"].find_by_session(session_id_hash=lane["sid"])
+        if row["doc_type"] == dm.SourceDocType.CONVERSATION_CHUNK
+    )
+    chunk["body"] += " appended source revision"
+    chunk["content_hash"] = dm.sha256_hash(chunk["body"])
+    lane["couch"].put(chunk)
+    stale_status, _ = _commit_projection_state_if_source_current(
+        materialized=materialized,
+        store=lane["couch"],
+        projection_status="projected",
+        ref=segment_ids[0],
+        backend="postgres_pgvector_local",
+        embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
+        representation_receipt=receipt_v4,
+    )
+    assert stale_status == "source_revision_changed"
 
 
 def test_concurrent_sql_insert_cannot_be_overwritten(representation_lane, monkeypatch):

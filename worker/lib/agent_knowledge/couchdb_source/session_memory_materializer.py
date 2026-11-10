@@ -724,7 +724,8 @@ def _commit_projection_state_if_source_current(
             if (
                 projection_status != ProjectionStatus.PROJECTED
                 or not valid_local_pg_receipt_metadata(representation_receipt)
-                or representation_receipt.get("receipt_version") != 3
+                or representation_receipt.get("receipt_version")
+                != (4 if representation_receipt.get("representation") == "segment_v1" else 3)
                 or representation_receipt.get("embedding_profile") != profile_key
                 or any(
                     representation_receipt.get(key) != value
@@ -738,7 +739,7 @@ def _commit_projection_state_if_source_current(
                     }.items()
                 )
             ):
-                raise ValueError("PG local representation receipt v3 mismatch")
+                raise ValueError("PG local representation receipt mismatch")
         else:
             from ..rag_ingress.pg_representation import valid_pg_receipt_metadata
 

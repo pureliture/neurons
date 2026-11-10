@@ -1076,6 +1076,9 @@ def main(argv: list[str] | None = None) -> int:
     skipped = 0
     skipped_inconsistent = 0
     identity_conflicts_auto_resolved = 0
+    segments_total = 0
+    segments_reused = 0
+    segments_embedded = 0
     session_reports: list[dict] = []
 
     try:
@@ -1125,6 +1128,9 @@ def main(argv: list[str] | None = None) -> int:
                 == "new_local_v1_over_unverifiable_legacy"
             ):
                 identity_conflicts_auto_resolved += 1
+            segments_total += int(getattr(projector, "last_segments_total", 0) or 0)
+            segments_reused += int(getattr(projector, "last_segments_reused", 0) or 0)
+            segments_embedded += int(getattr(projector, "last_segments_embedded", 0) or 0)
     finally:
         _close_if_supported(mirror_sink)
         _close_if_supported(projector)
@@ -1140,6 +1146,9 @@ def main(argv: list[str] | None = None) -> int:
                 "skipped": skipped,
                 "skipped_inconsistent": skipped_inconsistent,
                 "identity_conflicts_auto_resolved": identity_conflicts_auto_resolved,
+                "segments_total": segments_total,
+                "segments_reused": segments_reused,
+                "segments_embedded": segments_embedded,
                 "sessions": session_reports,
             },
             sort_keys=True,
@@ -1266,7 +1275,13 @@ def _build_pg_projector(environ):
             cycle_budget=int(environ.get("PG_EMBEDDING_CHUNKS_PER_CYCLE", "192")),
             session_budget=int(environ.get("PG_EMBEDDING_CHUNKS_PER_SESSION", "64")),
         )
-        return PgSessionMemoryProjector(store=store, embed_provider=provider, chunk_embedder=chunks)
+        return PgSessionMemoryProjector(
+            store=store,
+            embed_provider=provider,
+            chunk_embedder=chunks,
+            representation=str(environ.get("SESSION_MEMORY_REPRESENTATION") or "session_v1"),
+            segment_max_bytes=int(environ.get("SESSION_MEMORY_SEGMENT_MAX_BYTES", "4096")),
+        )
     except Exception:
         _close_if_supported(provider)
         raise
