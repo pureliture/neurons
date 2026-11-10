@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+import sys
 from typing import Any
 
 from ..couchdb_source.document_model import assert_index_target_allowed, sha256_hash
@@ -261,12 +262,16 @@ class PgSessionMemoryProjector:
         self._allow_deferred = bool(allow_deferred_on_model_unavailable)
         self.last_local_representation_receipt: dict[str, Any] | None = None
         self.last_local_identity_scheme: str | None = None
+        self.last_local_identity_bypassed_rows: int = 0
+        self.last_local_identity_resolution: str = ""
 
     @property
     def embedding_profile(self) -> str:
         return self._profile
 
     def project(self, *, target_profile: str, document: dict[str, Any]) -> str:
+        self.last_local_identity_bypassed_rows = 0
+        self.last_local_identity_resolution = ""
         assert_index_target_allowed(target_profile)
 
         body = str(document.get("body") or "")
@@ -514,54 +519,42 @@ class PgSessionMemoryProjector:
                 content_hash=content_hash,
                 conn=conn,
             )
-            for srow in scope_rows:
-                _validate_row_scope_and_body(srow)
-
-            by_id: dict[str, SessionChunk] = {srow.chunk_id: srow for srow in scope_rows}
+            candidate_rows: dict[str, SessionChunk] = {
+                srow.chunk_id: srow for srow in scope_rows
+            }
             for cand_id in (legacy_v1_id, legacy_v2_id, local_v1_id):
-                if cand_id and cand_id not in by_id:
+                if cand_id and cand_id not in candidate_rows:
                     direct_row = self._store.get_chunk(cand_id, conn=conn)
                     if direct_row is not None:
-                        _validate_row_scope_and_body(direct_row)
-                        by_id[cand_id] = direct_row
+                        candidate_rows[cand_id] = direct_row
+
+            valid_rows: dict[str, SessionChunk] = {}
+            for candidate_id, candidate in candidate_rows.items():
+                try:
+                    _validate_row_scope_and_body(candidate)
+                except ValueError:
+                    continue
+                valid_rows[candidate_id] = candidate
 
             exact_legacy_matches = [
-                cid for cid in (legacy_v1_id, legacy_v2_id) if cid and cid in by_id
+                cid for cid in (legacy_v1_id, legacy_v2_id) if cid and cid in valid_rows
             ]
-            if len(exact_legacy_matches) > 1:
-                raise ValueError(
-                    "PG chunk identity conflict: multiple exact legacy candidate rows exist"
-                )
-
-            if local_v1_id and local_v1_id in by_id:
-                if len(by_id) > 1:
-                    raise ValueError(
-                        "PG chunk identity conflict: local_v1 and legacy rows both exist"
-                    )
+            identity_resolution = ""
+            if local_v1_id and local_v1_id in candidate_rows:
                 chosen_id = local_v1_id
                 identity_scheme = "local_v1"
                 existing_parent = True
-            elif exact_legacy_matches:
-                if len(by_id) > 1:
-                    raise ValueError(
-                        "PG chunk identity conflict: exact legacy row and additional natural scope row exist"
-                    )
+                if len(candidate_rows) > 1:
+                    identity_resolution = "local_v1_preferred"
+            elif len(exact_legacy_matches) == 1 and len(valid_rows) == 1:
                 chosen_id = exact_legacy_matches[0]
                 identity_scheme = "legacy_exact"
                 existing_parent = True
-            elif len(by_id) == 1:
-                single_row = next(iter(by_id.values()))
-                if is_over_8k:
-                    raise ValueError(
-                        "PG chunk identity conflict: >8KiB source-independent reuse forbidden"
-                    )
+            elif len(valid_rows) == 1 and not exact_legacy_matches and not is_over_8k:
+                single_row = next(iter(valid_rows.values()))
                 chosen_id = single_row.chunk_id
                 identity_scheme = "legacy_reuse"
                 existing_parent = True
-            elif len(by_id) > 1:
-                raise ValueError(
-                    "PG chunk identity conflict: multiple natural scope rows exist"
-                )
             else:
                 if not source_hash or not local_v1_id:
                     raise ValueError(
@@ -570,6 +563,22 @@ class PgSessionMemoryProjector:
                 chosen_id = local_v1_id
                 identity_scheme = "local_v1"
                 existing_parent = False
+                if candidate_rows:
+                    identity_resolution = "new_local_v1_over_unverifiable_legacy"
+
+            self.last_local_identity_bypassed_rows = len(candidate_rows) - int(
+                existing_parent
+            )
+            if existing_parent:
+                _validate_row_scope_and_body(candidate_rows[chosen_id])
+            self.last_local_identity_resolution = identity_resolution
+            if identity_resolution:
+                print(
+                    "[pg-identity] "
+                    f"resolution={identity_resolution} "
+                    f"bypassed={self.last_local_identity_bypassed_rows}",
+                    file=sys.stderr,
+                )
 
             if existing_parent:
                 outbox_id = self._store._enqueue_local_outbox_on(
