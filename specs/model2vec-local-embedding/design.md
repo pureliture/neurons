@@ -91,9 +91,13 @@
 
 ## P3-1 session-memory segment_v1
 
-기본 `SESSION_MEMORY_REPRESENTATION=session_v1`의 본문·hash·projection은 그대로 둔다. `segment_v1`은 local profile에서만 사용하며, materializer의 턴 순서 view를 `SESSION_MEMORY_SEGMENT_MAX_BYTES`(기본 4096) 경계로 묶고 tool evidence는 마지막 segment에 붙인다. segment ID는 project/provider/session hash/member hash/max bytes로 결정해 source revision과 무관하게 append prefix를 재사용한다.
+기본 `SESSION_MEMORY_REPRESENTATION=session_v1`의 본문·hash·projection은 그대로 둔다. `segment_v1`은 local profile에서만 사용하며, materializer의 턴 순서 view를 `SESSION_MEMORY_SEGMENT_MAX_BYTES`(기본 4096) 경계로 묶고 tool evidence는 마지막 segment에 붙인다. segment ID는 `segment_v1`, project, provider, session hash, segment 본문 hash, max bytes로 결정한다. 본문이 바뀌면 ID도 바뀌며 append 시 본문이 그대로인 prefix segment는 재사용한다.
 
 segment 하나를 기존 `session_memory_chunks` row 하나와 local outbox job 하나로 저장한다. scope/body 및 ready vector가 검증된 row는 재사용하고 schema 변경·stale 표시·GC는 하지 않는다. profile-scoped receipt v4는 ordered `segment_ids`와 digest를 권위로 기록하며, 호환용 knowledge ID는 첫 segment ID다. 현재성 CAS와 source revision fence는 유지한다. 검색은 receipt가 허가한 segment만 세션별 한 card로 묶고 점수에서 `SESSION_MEMORY_SEGMENT_LENGTH_PENALTY`(기본 0.01) × `ln(segment 수)`를 뺀다. 본문은 최고 hit과 같은 세션의 앞뒤 segment만 포함한다.
+
+## P3-2 shadow recall candidate pools
+
+Shadow 지표는 실제 bounded recall 후보 풀을 사용한다. M0는 세션 행을 유사도 순으로 정렬해 상위 `_RECALL_CANDIDATE_LIMIT`개만 평가한다. S4는 최대 `_SEGMENT_DIVERSITY_ROUNDS`라운드 동안 라운드별 상위 `_RECALL_CANDIDATE_LIMIT`개 segment를 가져오고, 이미 후보에 든 세션은 SQL 단계처럼 다음 라운드에서 제외한다. `_SEGMENT_CANDIDATE_SESSIONS`개 세션에 도달하거나 라운드 결과가 비면 멈춘다. 후보 세션의 점수는 leave-one-out을 반영한 전체 segment의 최고 유사도로 계산하고, 페널티는 세션 전체 segment 수를 기준으로 적용한다. 어느 모드든 후보 풀 밖 정답의 rank는 `None`이며 미검색으로 계산한다. limit과 다양성 상수는 `pg_recall`에서 공유한다.
 
 ## D7 이 문서의 판정 경계
 

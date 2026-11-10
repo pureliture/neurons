@@ -1137,6 +1137,7 @@ class PgVectorStore:
         *,
         batch_size: int = 100,
         limit_sessions: int = 20_000,
+        conn: Any | None = None,
     ) -> Iterator[tuple[str, tuple[SessionChunkMeta, ...]]]:
         """본문과 벡터 없이 세션 경계를 유지하며 메타데이터를 읽는다."""
 
@@ -1146,9 +1147,10 @@ class PgVectorStore:
             raise ValueError("limit_sessions must be positive")
         last_session_id: str | None = None
         sessions_yielded = 0
-        with self._scope() as db:
-            with db.cursor() as cur:
-                cur.execute("SET TRANSACTION READ ONLY")
+        with self._scope(conn=conn) as db:
+            if conn is None and self.connection is None:
+                with db.cursor() as cur:
+                    cur.execute("SET TRANSACTION READ ONLY")
             while sessions_yielded < limit_sessions:
                 current_batch_size = min(
                     batch_size,
@@ -3902,6 +3904,7 @@ class PgVectorStore:
         conn: Any | None = None,
         *,
         profile_id: str = LOCAL_EMBEDDING_PROFILE_ID,
+        exclude_session_id_hashes: list[str] | tuple[str, ...] = (),
     ) -> list[dict[str, Any]]:
         """Run vector similarity search over session_local_embeddings joined to session_memory_chunks."""
 
@@ -3909,6 +3912,9 @@ class PgVectorStore:
             raise ValueError(f"unsupported local embedding profile_id: {profile_id}")
         _validate_local_vector(query_vector)
         vector_literal = _local_vector_literal(query_vector)
+        excluded_sessions = sorted(
+            {str(value) for value in exclude_session_id_hashes if str(value)}
+        )
         clauses = [
             "sle.profile_id = %s",
             "sle.state = 'ready'",
@@ -3919,8 +3925,13 @@ class PgVectorStore:
         if project:
             clauses.append("smc.project = %s")
             params.append(project)
+        if excluded_sessions:
+            clauses.append("NOT (smc.session_id_hash = ANY(%s))")
+            params.append(excluded_sessions)
         params.extend([vector_literal, int(limit)])
         with self._scope(conn=conn) as db:
+            if excluded_sessions:
+                self.set_guc_relaxed_order(conn=db)
             with db.cursor() as cur:
                 cur.execute(
                     f"""
@@ -3954,7 +3965,87 @@ class PgVectorStore:
             if str(row.get("local_input_hash") or "") != expected_input_hash:
                 continue
             verified.append(row)
-        return verified
+        return sorted(
+            verified,
+            key=lambda row: (
+                float(row.get("distance") or 0.0),
+                str(row.get("chunk_id") or ""),
+            ),
+        )
+
+    def search_session_chunks_local_by_ids(
+        self,
+        query_vector: list[float],
+        chunk_ids: list[str] | tuple[str, ...],
+        *,
+        limit: int = 1,
+        conn: Any | None = None,
+        profile_id: str = LOCAL_EMBEDDING_PROFILE_ID,
+    ) -> list[dict[str, Any]]:
+        """Search ready local embeddings restricted to receipt-approved chunk IDs."""
+
+        if profile_id != LOCAL_EMBEDDING_PROFILE_ID:
+            raise ValueError(f"unsupported local embedding profile_id: {profile_id}")
+        _validate_local_vector(query_vector)
+        if int(limit) < 1:
+            raise ValueError("limit must be positive")
+        approved_ids = sorted({str(value) for value in chunk_ids if str(value)})
+        if not approved_ids:
+            return []
+        vector_literal = _local_vector_literal(query_vector)
+        params: list[Any] = [
+            vector_literal,
+            approved_ids,
+            profile_id,
+            vector_literal,
+            int(limit),
+        ]
+        with self._scope(conn=conn) as db:
+            self.set_guc_relaxed_order(conn=db)
+            with db.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT smc.chunk_id, smc.session_id_hash, smc.project, smc.provider,
+                           smc.chunk_index, smc.content_markdown, smc.token_count,
+                           smc.content_hash, smc.created_at, smc.observed_at,
+                           sle.input_hash AS local_input_hash,
+                           sle.profile_id AS local_profile_id,
+                           sle.vector <=> %s::vector(256) AS distance
+                      FROM session_memory_chunks AS smc
+                      JOIN session_local_embeddings AS sle
+                        ON sle.chunk_id = smc.chunk_id
+                     WHERE smc.chunk_id = ANY(%s)
+                       AND sle.profile_id = %s
+                       AND sle.state = 'ready'
+                       AND sle.vector IS NOT NULL
+                       AND sle.source_content_hash = smc.content_hash
+                     ORDER BY sle.vector <=> %s::vector(256), smc.chunk_id
+                     LIMIT %s
+                    """,
+                    params,
+                )
+                names = [col.name for col in cur.description]
+                raw_rows = [
+                    dict(row) if isinstance(row, Mapping) else dict(zip(names, row))
+                    for row in cur.fetchall()
+                ]
+        verified: list[dict[str, Any]] = []
+        for row in raw_rows:
+            body_text = str(row.get("content_markdown") or "")
+            try:
+                expected_input_hash = compute_input_hash(body_text)
+            except Exception:
+                continue
+            if str(row.get("local_input_hash") or "") != expected_input_hash:
+                continue
+            verified.append(row)
+        return sorted(
+            verified,
+            key=lambda row: (
+                float(row.get("distance") or 0.0),
+                str(row.get("chunk_id") or ""),
+            ),
+        )
 
     def list_local_outbox_jobs(
         self,

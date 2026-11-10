@@ -51,9 +51,28 @@ class CouchDBProjectionStateAuthorityResolver:
         self._pg_store = pg_store
 
     def resolve(self, hit: dict[str, Any]) -> dict[str, Any] | None:
+        return self._resolve(hit, require_segment_hit=True)
+
+    def resolve_session_segments(self, hit: dict[str, Any]) -> dict[str, Any] | None:
+        """Resolve the current local segment receipt without requiring an ANN row ID."""
+        if self._backend != "postgres_pgvector_local":
+            return None
+        if not all(
+            str(hit.get(key) or "")
+            for key in ("session_id_hash", "provider", "project")
+        ):
+            return None
+        return self._resolve(hit, require_segment_hit=False)
+
+    def _resolve(
+        self,
+        hit: dict[str, Any],
+        *,
+        require_segment_hit: bool,
+    ) -> dict[str, Any] | None:
         session_id_hash = str(hit.get("session_id_hash") or "")
         content_hash = str(hit.get("content_hash") or "")
-        if not session_id_hash or not content_hash:
+        if not session_id_hash or (require_segment_hit and not content_hash):
             return None
         state = self._store.get(projection_state_doc_id(session_id_hash))
         if state is None:
@@ -100,27 +119,37 @@ class CouchDBProjectionStateAuthorityResolver:
                     "segment_set_digest": state["segment_set_digest"],
                 }
             elif state.get("representation_kind") == REPRESENTATION_KIND:
+                if not require_segment_hit:
+                    return None
                 from ..couchdb_source.document_model import sha256_hash
                 from .qdrant_backfill import public_safe_mask_body
 
                 if sha256_hash(public_safe_mask_body(current.body)) != state["representation_content_hash"]:
                     return None
             else:
+                if not require_segment_hit:
+                    return None
                 if current.content_hash != state["representation_content_hash"]:
                     return None
             representation_hash = state["representation_content_hash"]
-            hit_id = str(hit.get("memory_id") or "")
-            if state.get("receipt_version") == 4:
-                try:
-                    hit_index = state["segment_ids"].index(hit_id)
-                except ValueError:
+            if require_segment_hit:
+                hit_id = str(hit.get("memory_id") or "")
+                if state.get("receipt_version") == 4:
+                    try:
+                        hit_index = state["segment_ids"].index(hit_id)
+                    except ValueError:
+                        return None
+                    representation_hash = state["segment_content_hashes"][hit_index]
+                elif str(state.get("session_memory_knowledge_id") or "") != hit_id:
                     return None
-                representation_hash = state["segment_content_hashes"][hit_index]
-            elif str(state.get("session_memory_knowledge_id") or "") != hit_id:
-                return None
-            if any(str(state.get(key) or "") != str(hit.get(key) or "") for key in ("provider", "project")):
+            if any(
+                str(state.get(key) or "") != str(hit.get(key) or "")
+                for key in ("provider", "project")
+            ):
                 return None
         elif self._backend == "postgres_pgvector":
+            if not require_segment_hit:
+                return None
             receipts = state.get("backend_receipts") or {}
             if not isinstance(receipts, dict):
                 return None
@@ -154,7 +183,12 @@ class CouchDBProjectionStateAuthorityResolver:
         # until a rebuild records both active body and projected source revision.
         active = str(state.get("active_content_hash") or "")
         projected_source_hash = str(state.get("projected_source_hash") or "")
-        if not active or (representation_hash or active) != content_hash or not projected_source_hash:
+        expected_content_hash = active if not require_segment_hit else content_hash
+        if (
+            not active
+            or (representation_hash or active) != expected_content_hash
+            or not projected_source_hash
+        ):
             return None
         current_source_hash = session_source_revision_from_couchdb_source(
             session_id_hash=session_id_hash,
@@ -172,7 +206,7 @@ class CouchDBProjectionStateAuthorityResolver:
         return {
             "provider": str(state.get("provider") or ""),
             "project": str(state.get("project") or ""),
-            "content_hash": content_hash,
+            "content_hash": content_hash or active,
             **representation_metadata,
         }
 

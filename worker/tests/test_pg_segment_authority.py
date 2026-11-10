@@ -83,6 +83,13 @@ def test_segment_authority_allows_receipt_ids_and_rejects_out_of_set_ids():
             "project": materialized.project,
         }
     )
+    session_receipt = authority.resolve_session_segments(
+        {
+            "session_id_hash": session_id_hash,
+            "provider": materialized.provider,
+            "project": materialized.project,
+        }
+    )
     old_revision = authority.resolve(
         {
             "session_id_hash": session_id_hash,
@@ -114,6 +121,9 @@ def test_segment_authority_allows_receipt_ids_and_rejects_out_of_set_ids():
     assert allowed is not None
     assert allowed["representation"] == "segment_v1"
     assert allowed["segment_ids"] == segment_ids
+    assert session_receipt is not None
+    assert session_receipt["segment_ids"] == segment_ids
+    assert session_receipt["segment_content_hashes"] == receipt["segment_content_hashes"]
     assert old_revision is None
     assert mismatched_content is None
     assert other_session is None

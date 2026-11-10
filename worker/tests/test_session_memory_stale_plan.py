@@ -510,6 +510,12 @@ class _BatchConnection:
     def cursor(self):
         return _BatchCursor(self)
 
+    def rollback(self):
+        return None
+
+    def close(self):
+        return None
+
 
 def _pg_row(session_id_hash: str, chunk_id: str, index: int) -> dict:
     return {
@@ -547,11 +553,45 @@ def test_pg_chunk_reader_keeps_sessions_whole_and_obeys_session_limit():
         ("session-b", 1),
     ]
     assert connection.queries
-    assert connection.queries[0].strip().upper() == "SET TRANSACTION READ ONLY"
-    select_queries = connection.queries[1:]
+    assert connection.queries[0].lstrip().startswith("SELECT")
+    assert not any(
+        query.strip().upper() == "SET TRANSACTION READ ONLY"
+        for query in connection.queries
+    )
+    select_queries = connection.queries
     assert all(query.lstrip().startswith("SELECT") for query in select_queries)
     row_query = select_queries[1].lower()
     assert "octet_length(content_markdown) as content_bytes" in row_query
     assert "select content_markdown" not in row_query
     assert "embedding" not in row_query
     assert batches[0][1][0].content_bytes == 4
+
+
+def test_pg_chunk_reader_sets_read_only_on_store_owned_connection(monkeypatch):
+    connection = _BatchConnection(
+        {"session-a": [_pg_row("session-a", "a-1", 0)]}
+    )
+    store = PgVectorStore(dsn="synthetic")
+    monkeypatch.setattr(store, "_open_connection", lambda: connection)
+
+    list(store.iter_session_chunk_meta_batches(batch_size=1, limit_sessions=1))
+
+    assert connection.queries[0].strip().upper() == "SET TRANSACTION READ ONLY"
+
+
+def test_pg_chunk_reader_does_not_change_explicit_conn_transaction():
+    connection = _BatchConnection(
+        {"session-a": [_pg_row("session-a", "a-1", 0)]}
+    )
+    store = PgVectorStore(dsn="synthetic")
+
+    list(
+        store.iter_session_chunk_meta_batches(
+            batch_size=1,
+            limit_sessions=1,
+            conn=connection,
+        )
+    )
+
+    assert connection.queries
+    assert all(query.lstrip().startswith("SELECT") for query in connection.queries)

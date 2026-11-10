@@ -84,6 +84,8 @@ _RECALL_LIMIT = 5
 # one SQL sentinel. If that window cannot produce the requested result count,
 # fail explicitly rather than treating truncation as an empty successful recall.
 _RECALL_CANDIDATE_LIMIT = 100
+_SEGMENT_DIVERSITY_ROUNDS = 5
+_SEGMENT_CANDIDATE_SESSIONS = 20
 _SEGMENT_TURN_RANGE = re.compile(r"^segment: \d+ turns (\d+)-(\d+)$", re.MULTILINE)
 
 BrainQuerySearch = Callable[[str, str], list[dict[str, Any]]]
@@ -193,101 +195,103 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
         assert_pg_embedding_egress_safe(query)
         vector = embed_provider.embed(query)
 
-        # One bounded SQL result, already ordered by distance then chunk_id.
-        # A sentinel distinguishes exhausted input from a truncated candidate set.
-        raw_chunks = pg_store.search_session_chunks(
-            query_vector=vector, project=project, limit=_RECALL_CANDIDATE_LIMIT + 1
-        )
-
-        validated_hits: list[dict[str, Any]] = []
         is_local_profile = active_profile == LOCAL_EMBEDDING_PROFILE_ID
-        for candidate in raw_chunks[:_RECALL_CANDIDATE_LIMIT]:
-            row = pg_store.get_chunk(candidate["chunk_id"])
-            if row is None or row.chunk_id != candidate["chunk_id"]:
-                continue
-            if is_local_profile:
-                from ..local_embedding.canonical import (
-                    canonical_input_hash_v1,
-                    canonical_session_input_v1,
-                )
-
-                local_emb = (
-                    pg_store.get_local_embedding_row(
-                        target_type="session_chunk",
-                        target_id=candidate["chunk_id"],
-                        embedding_profile=active_profile,
-                    )
-                    if hasattr(pg_store, "get_local_embedding_row")
-                    else None
-                )
-                try:
-                    if representation == "segment_v1":
-                        from ..local_embedding.canonical import compute_input_hash
-
-                        expected_input_hash = compute_input_hash(row.content_markdown)
-                    else:
-                        expected_input_hash = canonical_input_hash_v1(
-                            canonical_session_input_v1(row.content_markdown)
-                        )
-                except ValueError:
+        def _validate_candidates(
+            candidates: list[dict[str, Any]],
+        ) -> tuple[list[dict[str, Any]], int]:
+            validated: list[dict[str, Any]] = []
+            rejected = 0
+            for candidate in candidates:
+                row = pg_store.get_chunk(candidate["chunk_id"])
+                if row is None or row.chunk_id != candidate["chunk_id"]:
+                    rejected += 1
                     continue
-                if local_emb is not None:
-                    if (
-                        local_emb.get("embedding_state") != "ready"
-                        or local_emb.get("embedding_profile") != active_profile
-                        or local_emb.get("content_hash") != row.content_hash
-                        or local_emb.get("input_hash") != expected_input_hash
-                        or local_emb.get("embedding") is None
-                        or len(local_emb.get("embedding") or ()) != embed_provider.size
-                    ):
+                if is_local_profile:
+                    from ..local_embedding.canonical import (
+                        canonical_input_hash_v1,
+                        canonical_session_input_v1,
+                    )
+
+                    local_emb = (
+                        pg_store.get_local_embedding_row(
+                            target_type="session_chunk",
+                            target_id=candidate["chunk_id"],
+                            embedding_profile=active_profile,
+                        )
+                        if hasattr(pg_store, "get_local_embedding_row")
+                        else None
+                    )
+                    try:
+                        if representation == "segment_v1":
+                            from ..local_embedding.canonical import compute_input_hash
+
+                            expected_input_hash = compute_input_hash(row.content_markdown)
+                        else:
+                            expected_input_hash = canonical_input_hash_v1(
+                                canonical_session_input_v1(row.content_markdown)
+                            )
+                    except ValueError:
+                        rejected += 1
                         continue
-                else:
-                    if (
+                    if local_emb is not None:
+                        if (
+                            local_emb.get("embedding_state") != "ready"
+                            or local_emb.get("embedding_profile") != active_profile
+                            or local_emb.get("content_hash") != row.content_hash
+                            or local_emb.get("input_hash") != expected_input_hash
+                            or local_emb.get("embedding") is None
+                            or len(local_emb.get("embedding") or ()) != embed_provider.size
+                        ):
+                            rejected += 1
+                            continue
+                    elif (
                         candidate.get("embedding_state", row.embedding_state) != "ready"
                         or candidate.get("embedding_model", row.embedding_model) != embed_provider.model
                         or candidate.get("embedding_profile", active_profile) != active_profile
                     ):
+                        rejected += 1
                         continue
-            else:
-                if (
+                elif (
                     row.embedding_state != "ready"
                     or row.embedding_model != embed_provider.model
                     or row.embedding is None
                     or len(row.embedding) != embed_provider.size
                 ):
+                    rejected += 1
                     continue
-            if (
-                row.project != project
-                or sha256_hash(row.content_markdown) != row.content_hash
-                or any(
-                    getattr(row, key) != candidate[key]
-                    for key in (
-                        "session_id_hash",
-                        "content_hash",
-                        "content_markdown",
-                        "provider",
-                        "project",
+                if (
+                    row.project != project
+                    or sha256_hash(row.content_markdown) != row.content_hash
+                    or any(
+                        getattr(row, key) != candidate[key]
+                        for key in (
+                            "session_id_hash",
+                            "content_hash",
+                            "content_markdown",
+                            "provider",
+                            "project",
+                        )
                     )
-                )
-                or _is_synthetic_canary_pg_row(row.provider)
-            ):
-                continue
-            validated_hits.append({
-                "session_id_hash": row.session_id_hash,
-                "content_hash": row.content_hash,
-                "memory_id": row.chunk_id,
-                "summary": row.content_markdown,
-                "provider": row.provider,
-                "project": row.project,
-                "score": 1.0 - float(candidate["distance"]),
-                "observed_at": row.observed_at,
-                "recorded_at": row.created_at,
-                "authority_currentness": getattr(row, "authority_currentness", getattr(row, "currentness", "current")),
-            })
+                    or _is_synthetic_canary_pg_row(row.provider)
+                ):
+                    rejected += 1
+                    continue
+                validated.append({
+                    "session_id_hash": row.session_id_hash,
+                    "content_hash": row.content_hash,
+                    "memory_id": row.chunk_id,
+                    "summary": row.content_markdown,
+                    "provider": row.provider,
+                    "project": row.project,
+                    "score": 1.0 - float(candidate["distance"]),
+                    "observed_at": row.observed_at,
+                    "recorded_at": row.created_at,
+                    "authority_currentness": getattr(row, "authority_currentness", getattr(row, "currentness", "current")),
+                })
+            return validated, rejected
 
-        if direct_migrated:
-            authorized_hits = validated_hits
-        else:
+        resolver = None
+        if representation == "segment_v1" and not direct_migrated:
             resolver = CouchDBProjectionStateAuthorityResolver(
                 couch_store,
                 filters={"project": project},
@@ -295,6 +299,120 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
                 embedding_profile=active_profile if is_local_profile else "",
                 pg_store=pg_store if is_local_profile else None,
             )
+
+        integrity_rejections = 0
+        authority_rejections = 0
+        segment_authority_receipts: dict[str, dict[str, Any]] = {}
+        diversity_rounds = 0
+        last_round_candidate_count = 0
+        if representation == "segment_v1":
+            validated_hits: list[dict[str, Any]] = []
+            raw_chunks: list[dict[str, Any]] = []
+            candidate_session_hints: dict[str, dict[str, str]] = {}
+            for _round_index in range(_SEGMENT_DIVERSITY_ROUNDS):
+                raw_chunks = pg_store.search_session_chunks_local(
+                    query_vector=vector,
+                    project=project,
+                    limit=_RECALL_CANDIDATE_LIMIT,
+                    exclude_session_id_hashes=sorted(candidate_session_hints),
+                    profile_id=active_profile,
+                )
+                raw_chunks.sort(
+                    key=lambda candidate: (
+                        float(candidate.get("distance") or 0.0),
+                        str(candidate.get("chunk_id") or ""),
+                    )
+                )
+                diversity_rounds += 1
+                last_round_candidate_count = len(raw_chunks)
+                for candidate in raw_chunks:
+                    session_id_hash = str(candidate.get("session_id_hash") or "")
+                    if session_id_hash:
+                        candidate_session_hints.setdefault(
+                            session_id_hash,
+                            {
+                                "provider": str(candidate.get("provider") or ""),
+                                "project": str(candidate.get("project") or ""),
+                            },
+                        )
+                if (
+                    len(candidate_session_hints) >= _SEGMENT_CANDIDATE_SESSIONS
+                    or not raw_chunks
+                ):
+                    break
+
+            for session_id_hash, scope in candidate_session_hints.items():
+                authorized = resolver.resolve_session_segments(
+                    {
+                        "session_id_hash": session_id_hash,
+                        "provider": scope["provider"],
+                        "project": scope["project"],
+                    }
+                )
+                if (
+                    authorized is None
+                    or authorized.get("representation") != "segment_v1"
+                    or authorized.get("provider") != scope["provider"]
+                    or authorized.get("project") != scope["project"]
+                ):
+                    authority_rejections += 1
+                    continue
+                segment_ids = list(authorized.get("segment_ids") or ())
+                segment_content_hashes = list(
+                    authorized.get("segment_content_hashes") or ()
+                )
+                if not segment_ids or len(segment_content_hashes) != len(segment_ids):
+                    authority_rejections += 1
+                    continue
+                segment_authority_receipts[session_id_hash] = authorized
+                approved_chunks = pg_store.search_session_chunks_local_by_ids(
+                    query_vector=vector,
+                    chunk_ids=segment_ids,
+                    limit=1,
+                    profile_id=active_profile,
+                )
+                approved_chunks.sort(
+                    key=lambda candidate: (
+                        float(candidate.get("distance") or 0.0),
+                        str(candidate.get("chunk_id") or ""),
+                    )
+                )
+                session_hits, rejected = _validate_candidates(approved_chunks)
+                integrity_rejections += rejected
+                content_hash_by_id = dict(zip(segment_ids, segment_content_hashes))
+                for hit in session_hits:
+                    if content_hash_by_id.get(hit["memory_id"]) != hit["content_hash"]:
+                        integrity_rejections += 1
+                        continue
+                    hit.update(
+                        representation="segment_v1",
+                        segment_ids=segment_ids,
+                        segment_content_hashes=segment_content_hashes,
+                    )
+                    validated_hits.append(hit)
+        else:
+            raw_chunks = pg_store.search_session_chunks(
+                query_vector=vector,
+                project=project,
+                limit=_RECALL_CANDIDATE_LIMIT + 1,
+            )
+            validated_hits, integrity_rejections = _validate_candidates(
+                raw_chunks[:_RECALL_CANDIDATE_LIMIT]
+            )
+            if not direct_migrated:
+                resolver = CouchDBProjectionStateAuthorityResolver(
+                    couch_store,
+                    filters={"project": project},
+                    backend="postgres_pgvector_local" if is_local_profile else "postgres_pgvector",
+                    embedding_profile=active_profile if is_local_profile else "",
+                    pg_store=pg_store if is_local_profile else None,
+                )
+
+        if direct_migrated:
+            authorized_hits = validated_hits
+        elif representation == "segment_v1":
+            authorized_hits = validated_hits
+        else:
             authorized_hits = join_mirror_hits_to_authority(
                 validated_hits, resolver=resolver, drop_unresolved=True
             )
@@ -334,12 +452,15 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
                     ),
                 )
 
+        group_rejections = [0]
         if representation == "segment_v1" and not direct_migrated:
             all_hits = _group_segment_recall_hits(
                 all_hits,
                 pg_store=pg_store,
                 authority_resolver=resolver,
                 length_penalty=segment_length_penalty,
+                rejection_count=group_rejections,
+                authority_receipts=segment_authority_receipts,
             )
 
         current_hits: list[dict[str, Any]] = []
@@ -365,9 +486,16 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
             for hit in results:
                 hit["fallback_reason"] = "no_current_match"
 
-        if len(results) < _RECALL_LIMIT and len(raw_chunks) > _RECALL_CANDIDATE_LIMIT:
-            # brain.query maps this to projection_state=unavailable, not fresh [].
-            raise RuntimeError("PG recall candidate limit exhausted")
+        if len(results) < _RECALL_LIMIT:
+            if representation == "segment_v1":
+                if (
+                    diversity_rounds == _SEGMENT_DIVERSITY_ROUNDS
+                    and last_round_candidate_count == _RECALL_CANDIDATE_LIMIT
+                ):
+                    raise RuntimeError("PG recall candidate limit exhausted")
+            elif len(raw_chunks) > _RECALL_CANDIDATE_LIMIT:
+                # brain.query maps this to projection_state=unavailable, not fresh [].
+                raise RuntimeError("PG recall candidate limit exhausted")
         if representation == "segment_v1":
             results.sort(key=lambda hit: float(hit.get("score") or 0.0), reverse=True)
         return results[:_RECALL_LIMIT]
@@ -391,6 +519,8 @@ def _group_segment_recall_hits(
     pg_store: PgVectorStore,
     authority_resolver: Any,
     length_penalty: float,
+    rejection_count: list[int] | None = None,
+    authority_receipts: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     segment_hits: dict[str, list[dict[str, Any]]] = {}
     session_hits: list[dict[str, Any]] = []
@@ -403,28 +533,38 @@ def _group_segment_recall_hits(
     grouped: list[dict[str, Any]] = []
     for session_id_hash, candidates in segment_hits.items():
         best = max(candidates, key=lambda hit: float(hit.get("score") or 0.0))
-        authorized = authority_resolver.resolve(
-            {
-                "session_id_hash": session_id_hash,
-                "content_hash": best.get("content_hash"),
-                "memory_id": best.get("memory_id"),
-                "provider": best.get("provider"),
-                "project": best.get("project"),
-            }
-        )
+        authorized = (authority_receipts or {}).get(session_id_hash)
+        if authorized is None:
+            authorized = authority_resolver.resolve(
+                {
+                    "session_id_hash": session_id_hash,
+                    "content_hash": best.get("content_hash"),
+                    "memory_id": best.get("memory_id"),
+                    "provider": best.get("provider"),
+                    "project": best.get("project"),
+                }
+            )
         if authorized is None or authorized.get("representation") != "segment_v1":
+            if rejection_count is not None:
+                rejection_count[0] += 1
             continue
         segment_ids = list(authorized.get("segment_ids") or ())
         segment_content_hashes = list(
             authorized.get("segment_content_hashes") or ()
         )
         if len(segment_content_hashes) != len(segment_ids):
+            if rejection_count is not None:
+                rejection_count[0] += 1
             continue
         try:
             best_index = segment_ids.index(str(best["memory_id"]))
         except (ValueError, KeyError):
+            if rejection_count is not None:
+                rejection_count[0] += 1
             continue
         if segment_content_hashes[best_index] != best.get("content_hash"):
+            if rejection_count is not None:
+                rejection_count[0] += 1
             continue
         neighbors: list[tuple[int, dict[str, Any]]] = [
             (best_index, best),
@@ -465,6 +605,16 @@ def _group_segment_recall_hits(
         result["summary"] = "\n\n".join(
             str(neighbor.get("summary") or "") for _, neighbor in neighbors
         )
+        result["best_segment_content_hash"] = str(best.get("content_hash") or "")
+        result["returned_segment_ids"] = [
+            str(neighbor.get("memory_id") or segment_ids[index])
+            for index, neighbor in neighbors
+        ]
+        result["returned_segment_content_hashes"] = [
+            str(neighbor.get("content_hash") or "")
+            for _, neighbor in neighbors
+        ]
+        result["content_hash"] = sha256_hash(result["summary"])
         result["score"] = float(best.get("score") or 0.0) - (
             length_penalty * math.log(len(segment_ids))
         )
