@@ -39,6 +39,10 @@ def test_segment_authority_allows_receipt_ids_and_rejects_out_of_set_ids():
         session_memory_knowledge_id=segment_ids[0],
         embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
         segment_ids=segment_ids,
+        segment_content_hashes=[
+            sha256_hash("synthetic segment body"),
+            sha256_hash("synthetic segment body 2"),
+        ],
         segment_set_digest=sha256_hash(
             json.dumps(segment_ids, ensure_ascii=False, separators=(",", ":"))
         ),
@@ -74,7 +78,7 @@ def test_segment_authority_allows_receipt_ids_and_rejects_out_of_set_ids():
         {
             "session_id_hash": session_id_hash,
             "memory_id": segment_ids[1],
-            "content_hash": sha256_hash("synthetic segment body"),
+            "content_hash": sha256_hash("synthetic segment body 2"),
             "provider": materialized.provider,
             "project": materialized.project,
         }
@@ -84,6 +88,15 @@ def test_segment_authority_allows_receipt_ids_and_rejects_out_of_set_ids():
             "session_id_hash": session_id_hash,
             "memory_id": "seg_" + "c" * 60,
             "content_hash": sha256_hash("old revision"),
+            "provider": materialized.provider,
+            "project": materialized.project,
+        }
+    )
+    mismatched_content = authority.resolve(
+        {
+            "session_id_hash": session_id_hash,
+            "memory_id": segment_ids[1],
+            "content_hash": sha256_hash("different segment body"),
             "provider": materialized.provider,
             "project": materialized.project,
         }
@@ -102,4 +115,5 @@ def test_segment_authority_allows_receipt_ids_and_rejects_out_of_set_ids():
     assert allowed["representation"] == "segment_v1"
     assert allowed["segment_ids"] == segment_ids
     assert old_revision is None
+    assert mismatched_content is None
     assert other_session is None

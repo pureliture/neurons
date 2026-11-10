@@ -313,6 +313,7 @@ def test_segment_receipt_commit_keeps_source_revision_cas_fence(representation_l
         session_memory_knowledge_id=segment_ids[0],
         embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
         segment_ids=segment_ids,
+        segment_content_hashes=[dm.sha256_hash("segment a"), dm.sha256_hash("segment b")],
         segment_set_digest=dm.sha256_hash(
             json.dumps(segment_ids, ensure_ascii=False, separators=(",", ":"))
         ),

@@ -96,6 +96,7 @@ class CouchDBProjectionStateAuthorityResolver:
                 representation_metadata = {
                     "representation": "segment_v1",
                     "segment_ids": list(state["segment_ids"]),
+                    "segment_content_hashes": list(state["segment_content_hashes"]),
                     "segment_set_digest": state["segment_set_digest"],
                 }
             elif state.get("representation_kind") == REPRESENTATION_KIND:
@@ -107,14 +108,14 @@ class CouchDBProjectionStateAuthorityResolver:
             else:
                 if current.content_hash != state["representation_content_hash"]:
                     return None
-            representation_hash = (
-                content_hash if state.get("receipt_version") == 4
-                else state["representation_content_hash"]
-            )
+            representation_hash = state["representation_content_hash"]
             hit_id = str(hit.get("memory_id") or "")
             if state.get("receipt_version") == 4:
-                if hit_id not in state["segment_ids"]:
+                try:
+                    hit_index = state["segment_ids"].index(hit_id)
+                except ValueError:
                     return None
+                representation_hash = state["segment_content_hashes"][hit_index]
             elif str(state.get("session_memory_knowledge_id") or "") != hit_id:
                 return None
             if any(str(state.get(key) or "") != str(hit.get(key) or "") for key in ("provider", "project")):

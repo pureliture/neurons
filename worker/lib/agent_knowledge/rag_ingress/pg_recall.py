@@ -317,6 +317,8 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
                 "memory_id": str(hit["memory_id"]),
                 "card_type": "",
                 "summary": str(hit["summary"]),
+                "provider": str(hit.get("provider") or ""),
+                "project": str(hit.get("project") or ""),
                 "currentness": curr,
                 "score": hit["score"],
                 "content_hash": str(hit["content_hash"]),
@@ -327,6 +329,9 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
                     session_id_hash=str(hit.get("session_id_hash") or ""),
                     representation="segment_v1",
                     segment_ids=list(hit.get("segment_ids") or ()),
+                    segment_content_hashes=list(
+                        hit.get("segment_content_hashes") or ()
+                    ),
                 )
 
         if representation == "segment_v1" and not direct_migrated:
@@ -398,10 +403,28 @@ def _group_segment_recall_hits(
     grouped: list[dict[str, Any]] = []
     for session_id_hash, candidates in segment_hits.items():
         best = max(candidates, key=lambda hit: float(hit.get("score") or 0.0))
-        segment_ids = list(best.get("segment_ids") or ())
+        authorized = authority_resolver.resolve(
+            {
+                "session_id_hash": session_id_hash,
+                "content_hash": best.get("content_hash"),
+                "memory_id": best.get("memory_id"),
+                "provider": best.get("provider"),
+                "project": best.get("project"),
+            }
+        )
+        if authorized is None or authorized.get("representation") != "segment_v1":
+            continue
+        segment_ids = list(authorized.get("segment_ids") or ())
+        segment_content_hashes = list(
+            authorized.get("segment_content_hashes") or ()
+        )
+        if len(segment_content_hashes) != len(segment_ids):
+            continue
         try:
             best_index = segment_ids.index(str(best["memory_id"]))
         except (ValueError, KeyError):
+            continue
+        if segment_content_hashes[best_index] != best.get("content_hash"):
             continue
         neighbors: list[tuple[int, dict[str, Any]]] = [
             (best_index, best),
@@ -413,23 +436,13 @@ def _group_segment_recall_hits(
             if (
                 row is None
                 or row.session_id_hash != session_id_hash
+                or row.provider != authorized.get("provider")
+                or row.project != authorized.get("project")
                 or sha256_hash(row.content_markdown) != row.content_hash
+                or row.content_hash != segment_content_hashes[index]
             ):
                 continue
-            authorized = authority_resolver.resolve(
-                {
-                    "session_id_hash": row.session_id_hash,
-                    "content_hash": row.content_hash,
-                    "memory_id": row.chunk_id,
-                    "provider": row.provider,
-                    "project": row.project,
-                }
-            )
-            if (
-                authorized is None
-                or authorized.get("representation") != "segment_v1"
-                or row.chunk_id not in authorized.get("segment_ids", ())
-            ):
+            if row.chunk_id != segment_ids[index]:
                 continue
             neighbors.append(
                 (
@@ -447,6 +460,8 @@ def _group_segment_recall_hits(
             if (parsed := _segment_turn_range(str(neighbor.get("summary") or ""))) is not None
         ]
         result = dict(best)
+        result["segment_ids"] = segment_ids
+        result["segment_content_hashes"] = segment_content_hashes
         result["summary"] = "\n\n".join(
             str(neighbor.get("summary") or "") for _, neighbor in neighbors
         )

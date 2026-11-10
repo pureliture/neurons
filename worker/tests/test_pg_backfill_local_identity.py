@@ -309,14 +309,40 @@ def test_segment_receipt_v4_binds_ordered_segment_ids():
         session_memory_knowledge_id=segment_ids[0],
         embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
         segment_ids=segment_ids,
+        segment_content_hashes=[
+            sha256_hash("segment a"),
+            sha256_hash("segment b"),
+        ],
         segment_set_digest=digest,
     )
 
     assert valid_local_pg_receipt_metadata(receipt)
     assert receipt["representation"] == "segment_v1"
     assert receipt["segment_ids"] == segment_ids
+    assert receipt["segment_content_hashes"] == [
+        sha256_hash("segment a"),
+        sha256_hash("segment b"),
+    ]
     assert receipt["segment_set_digest"] == digest
     assert receipt["session_memory_knowledge_id"] == segment_ids[0]
+    assert not valid_local_pg_receipt_metadata(
+        {**receipt, "segment_content_hashes": [sha256_hash("segment a")]}
+    )
+    assert not valid_local_pg_receipt_metadata(
+        {
+            **receipt,
+            "segment_content_hashes": [sha256_hash("segment a"), "invalid"],
+        }
+    )
+    assert not valid_local_pg_receipt_metadata(
+        {
+            **receipt,
+            "segment_content_hashes": [
+                sha256_hash("different segment a"),
+                sha256_hash("segment b"),
+            ],
+        }
+    )
 
 
 @pytest.mark.parametrize(

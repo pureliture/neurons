@@ -221,6 +221,7 @@ def _segment_receipt_digest(receipt: dict) -> str:
         "session_memory_knowledge_id",
         "embedding_profile",
         "segment_ids",
+        "segment_content_hashes",
         "segment_set_digest",
     )
     return sha256_hash(
@@ -244,6 +245,7 @@ def build_local_segment_receipt_v4(
     session_memory_knowledge_id: str,
     embedding_profile: str,
     segment_ids: list[str],
+    segment_content_hashes: list[str],
     segment_set_digest: str,
 ) -> dict[str, Any]:
     receipt: dict[str, Any] = {
@@ -258,6 +260,7 @@ def build_local_segment_receipt_v4(
         "session_memory_knowledge_id": session_memory_knowledge_id,
         "embedding_profile": embedding_profile,
         "segment_ids": list(segment_ids),
+        "segment_content_hashes": list(segment_content_hashes),
         "segment_set_digest": segment_set_digest,
     }
     receipt["provenance_digest"] = _segment_receipt_digest(receipt)
@@ -287,6 +290,7 @@ def valid_local_segment_receipt_v4(
         "session_memory_knowledge_id",
         "embedding_profile",
         "segment_ids",
+        "segment_content_hashes",
         "segment_set_digest",
         "provenance_digest",
     }
@@ -311,12 +315,20 @@ def valid_local_segment_receipt_v4(
         if not isinstance(receipt.get(key), str) or not receipt[key]:
             return False
     segment_ids = receipt.get("segment_ids")
+    segment_content_hashes = receipt.get("segment_content_hashes")
     if (
         not isinstance(segment_ids, list)
         or not segment_ids
         or any(not isinstance(value, str) or not value or len(value) > 64 for value in segment_ids)
         or len(set(segment_ids)) != len(segment_ids)
         or receipt["session_memory_knowledge_id"] != segment_ids[0]
+        or not isinstance(segment_content_hashes, list)
+        or len(segment_content_hashes) != len(segment_ids)
+        or any(
+            not isinstance(value, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None
+            for value in segment_content_hashes
+        )
     ):
         return False
     if not all(

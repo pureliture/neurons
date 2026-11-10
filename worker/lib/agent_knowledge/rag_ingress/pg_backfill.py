@@ -589,6 +589,7 @@ class PgSessionMemoryProjector:
             session_memory_knowledge_id=segment_ids[0],
             embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
             segment_ids=segment_ids,
+            segment_content_hashes=[segment.content_hash for segment in segments],
             segment_set_digest=digest,
         )
         return segment_ids[0]

@@ -77,8 +77,17 @@ def _pg_receipt(state: dict, *, embedding_profile: str) -> dict:
     return receipt if isinstance(receipt, dict) else {}
 
 
+def _pg_receipt_representation(state: dict, *, embedding_profile: str) -> str:
+    receipt = _pg_receipt(state, embedding_profile=embedding_profile)
+    return "segment_v1" if receipt.get("receipt_version") == 4 else "session_v1"
+
+
 def _blocked_source_hash_from_state(
-    state: dict, backend: str, *, embedding_profile: str = ""
+    state: dict,
+    backend: str,
+    *,
+    embedding_profile: str = "",
+    representation: str = "session_v1",
 ) -> str:
     """Return the terminal-failure source hash for a top-level state document.
 
@@ -88,6 +97,10 @@ def _blocked_source_hash_from_state(
     top-level failed attempt.
     """
     if backend != "postgres_pgvector":
+        return ""
+    if _pg_receipt_representation(
+        state, embedding_profile=embedding_profile
+    ) != representation:
         return ""
     from .document_model import ProjectionStatus
 
@@ -119,6 +132,7 @@ def _select_sessions_needing_projection(
     provider: str = "",
     backend: str = "postgres_pgvector",
     embedding_profile: str = "",
+    representation: str = "session_v1",
 ) -> list[dict]:
     """Return sessions whose projected revision is not the current source revision.
 
@@ -165,7 +179,10 @@ def _select_sessions_needing_projection(
                 and str(state.get("_id") or "") == projection_state_doc_id(session_id_hash)
             ):
                 blocked = _blocked_source_hash_from_state(
-                    state, backend, embedding_profile=embedding_profile
+                    state,
+                    backend,
+                    embedding_profile=embedding_profile,
+                    representation=representation,
                 )
                 if blocked:
                     blocked_source_hashes[session_id_hash] = blocked
@@ -177,6 +194,15 @@ def _select_sessions_needing_projection(
         states = raw_states
     projected_source_hashes = {
         session_id_hash: str(state.get("projected_source_hash") or "")
+        for state in states
+        if (session_id_hash := str(state.get("session_id_hash") or ""))
+        and str(state.get("_id") or "") == projection_state_doc_id(session_id_hash)
+        and str(state.get("projection_status") or "") == ProjectionStatus.PROJECTED
+    }
+    projected_representations = {
+        session_id_hash: _pg_receipt_representation(
+            state, embedding_profile=embedding_profile
+        )
         for state in states
         if (session_id_hash := str(state.get("session_id_hash") or ""))
         and str(state.get("_id") or "") == projection_state_doc_id(session_id_hash)
@@ -228,6 +254,11 @@ def _select_sessions_needing_projection(
             not projected_source_hash
             or not current_source_hash
             or projected_source_hash != current_source_hash
+            or (
+                backend == "postgres_pgvector"
+                and projected_representations.get(session_id_hash, "session_v1")
+                != representation
+            )
         ):
             if blocked_source_hashes.get(session_id_hash) == current_source_hash:
                 continue
@@ -275,6 +306,11 @@ def _select_sessions_needing_projection(
             not projected_source_hash
             or not resolved.source_hash
             or projected_source_hash != resolved.source_hash
+            or (
+                backend == "postgres_pgvector"
+                and projected_representations.get(session_id_hash, "session_v1")
+                != representation
+            )
         ):
             if blocked_source_hashes.get(session_id_hash) == resolved.source_hash:
                 continue
@@ -322,6 +358,7 @@ def _write_selection_checkpoint(
     last_seq: str,
     *,
     embedding_profile: str = "",
+    representation: str = "session_v1",
     pending_session_ids: list[str] | tuple[str, ...] = (),
     full_walk_in_progress: bool = False,
     pending_attempts: dict[str, int] | None = None,
@@ -335,6 +372,7 @@ def _write_selection_checkpoint(
         "schema_version": _SELECTION_CHECKPOINT_SCHEMA,
         "pg_input_policy_version": PG_INPUT_POLICY_VERSION,
         "embedding_profile": str(embedding_profile or ""),
+        "representation": str(representation or "session_v1"),
         "last_seq": str(last_seq or ""),
         "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
@@ -366,6 +404,7 @@ def _evaluate_session_change(
     project: str,
     provider: str,
     embedding_profile: str = "",
+    representation: str = "session_v1",
 ) -> tuple[bool, dict | None]:
     """Single-session mirror of ``_select_sessions_needing_projection`` (pg backend).
 
@@ -392,7 +431,10 @@ def _evaluate_session_change(
     blocked_source_hash = ""
     if isinstance(state, dict) and str(state.get("_id") or "") == state_id:
         blocked_source_hash = _blocked_source_hash_from_state(
-            state, "postgres_pgvector", embedding_profile=embedding_profile
+            state,
+            "postgres_pgvector",
+            embedding_profile=embedding_profile,
+            representation=representation,
         )
         merged = {
             **state,
@@ -450,6 +492,9 @@ def _evaluate_session_change(
         not projected_source_hash
         or not current_source_hash
         or projected_source_hash != current_source_hash
+        or _pg_receipt_representation(
+            merged, embedding_profile=embedding_profile
+        ) != representation
     ):
         if blocked_source_hash and blocked_source_hash == current_source_hash:
             return False, None
@@ -466,6 +511,7 @@ def _select_sessions_incremental(
     provider: str = "",
     backend: str = "postgres_pgvector",
     embedding_profile: str = "",
+    representation: str = "session_v1",
 ) -> tuple[list[dict], dict, int]:
     """Change-feed driven selection.
 
@@ -521,6 +567,7 @@ def _select_sessions_incremental(
             project=project,
             provider=provider,
             embedding_profile=embedding_profile,
+            representation=representation,
         )
         if needs and session is not None:
             selected.append(session)
@@ -584,6 +631,7 @@ def _resolve_pending_sessions(
     project: str,
     provider: str,
     embedding_profile: str = "",
+    representation: str = "session_v1",
 ) -> list[dict]:
     """Re-select previously chosen sessions whose projection is still unfinished.
 
@@ -604,6 +652,7 @@ def _resolve_pending_sessions(
                 project=project,
                 provider=provider,
                 embedding_profile=embedding_profile,
+                representation=representation,
             )
         except Exception:  # noqa: BLE001 - a read failure must not discard pending work
             still_pending.append({"session_id_hash": session_id_hash})
@@ -622,6 +671,7 @@ def _select_sessions_for_cycle(
     backend: str,
     mode: str,
     embedding_profile: str = "",
+    representation: str = "session_v1",
     persist: bool = True,
 ) -> list[dict]:
     """Checkpoint-aware selection: incremental when possible, full walk otherwise.
@@ -641,9 +691,14 @@ def _select_sessions_for_cycle(
         normalized = "auto"
     path = _selection_checkpoint_path()
     checkpoint = _read_selection_checkpoint(path)
+    if representation not in {"session_v1", "segment_v1"}:
+        raise ValueError("unsupported session-memory representation")
     last_seq = str(checkpoint.get("last_seq") or "")
     full_walk_pending = bool(checkpoint.get("full_walk_in_progress"))
     if str(checkpoint.get("embedding_profile") or "") != str(embedding_profile or ""):
+        full_walk_pending = True
+    checkpoint_representation = str(checkpoint.get("representation") or "session_v1")
+    if checkpoint_representation != representation:
         full_walk_pending = True
     pending_ids = _pending_session_ids(checkpoint)
     if backend == "postgres_pgvector" and checkpoint.get("pg_input_policy_version") != PG_INPUT_POLICY_VERSION:
@@ -684,6 +739,7 @@ def _select_sessions_for_cycle(
         project=project,
         provider=provider,
         embedding_profile=embedding_profile,
+        representation=representation,
     )
     pending_attempts = dict(checkpoint.get("pending_session_attempts") or {})
     pending_sessions, pending_attempts, dropped_pending = _apply_pending_attempt_cap(
@@ -716,6 +772,7 @@ def _select_sessions_for_cycle(
                 provider=provider,
                 backend=backend,
                 embedding_profile=embedding_profile,
+                representation=representation,
             )
         except Exception as exc:  # noqa: BLE001 - fail-safe fallback to the full walk
             print(
@@ -755,6 +812,7 @@ def _select_sessions_for_cycle(
             provider=provider,
             backend=backend,
             embedding_profile=embedding_profile,
+            representation=representation,
         )
         sessions = _dedupe_sessions(processed_pending + fresh)
         capped = fresh_limit is not None and fresh_limit > 0 and len(fresh) >= fresh_limit
@@ -777,6 +835,7 @@ def _select_sessions_for_cycle(
                 pending_session_ids=durable_pending,
                 full_walk_in_progress=next_full_walk_pending,
                 embedding_profile=embedding_profile,
+                representation=representation,
                 pending_attempts={
                     key: value
                     for key, value in pending_attempts.items()
@@ -908,6 +967,10 @@ def main(argv: list[str] | None = None) -> int:
 
     # --- Backend Resolution -------------------------------------------------
     backend = os.environ.get("SESSION_MEMORY_PROJECTION_BACKEND", "postgres_pgvector").strip().lower()
+    representation = (
+        os.environ.get("SESSION_MEMORY_REPRESENTATION", "session_v1").strip().lower()
+        or "session_v1"
+    )
     embedding_profile = ""
     if backend == "postgres_pgvector":
         try:
@@ -955,6 +1018,7 @@ def main(argv: list[str] | None = None) -> int:
             backend=backend,
             mode=os.environ.get("SESSION_MEMORY_SELECTION_MODE", "auto"),
             embedding_profile=embedding_profile,
+            representation=representation,
             persist=not args.dry_run,
         )
     selected_count = len(sessions)

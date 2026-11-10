@@ -23,6 +23,8 @@ def _hit(session: str, chunk_id: str, score: float, ids: list[str], body: str) -
     text = _segment_text(ids.index(chunk_id), 1, 2, body)
     return {
         "session_id_hash": session,
+        "provider": "test",
+        "project": "synthetic",
         "memory_id": chunk_id,
         "content_hash": sha256_hash(text),
         "summary": text,
@@ -54,16 +56,22 @@ class _ResolverStore:
 
 
 class _Authority:
-    def __init__(self, ids_by_session):
+    def __init__(self, ids_by_session, hashes_by_session=None):
         self.ids_by_session = ids_by_session
+        self.hashes_by_session = hashes_by_session or {}
+        self.calls = []
 
     def resolve(self, hit):
         session_id = hit["session_id_hash"]
+        self.calls.append(session_id)
         if hit["memory_id"] not in self.ids_by_session.get(session_id, ()):
             return None
         return {
             "representation": "segment_v1",
             "segment_ids": self.ids_by_session[session_id],
+            "segment_content_hashes": self.hashes_by_session.get(session_id, ()),
+            "provider": hit.get("provider"),
+            "project": hit.get("project"),
         }
 
 
@@ -93,15 +101,31 @@ def test_segment_recall_groups_sessions_applies_penalty_and_keeps_session_v1():
             "summary": "legacy session",
         },
     ]
+    a0_row = _row("a0", "session-a", 0, 1, 2, "A left")
+    b2_row = _row("b2", "session-b", 2, 5, 6, "B left")
+    a1_hash = _hit("session-a", "a1", 0.905, ids_a, "A best")["content_hash"]
+    b3_hash = _hit("session-b", "b3", 0.91, ids_b, "B best")["content_hash"]
     rows = {
-        "a0": _row("a0", "session-a", 0, 1, 2, "A left"),
-        "b2": _row("b2", "session-b", 2, 5, 6, "B left"),
+        "a0": a0_row,
+        "b2": b2_row,
     }
+    authority = _Authority(
+        {"session-a": ids_a, "session-b": ids_b},
+        {
+            "session-a": [a0_row.content_hash, a1_hash],
+            "session-b": [
+                sha256_hash("b0"),
+                sha256_hash("b1"),
+                b2_row.content_hash,
+                b3_hash,
+            ],
+        },
+    )
 
     results = _group_segment_recall_hits(
         hits,
         pg_store=_Store(rows),
-        authority_resolver=_Authority({"session-a": ids_a, "session-b": ids_b}),
+        authority_resolver=authority,
         length_penalty=0.01,
     )
 
@@ -110,17 +134,28 @@ def test_segment_recall_groups_sessions_applies_penalty_and_keeps_session_v1():
     assert "A left" in results[1]["summary"] and "A best" in results[1]["summary"]
     assert abs(results[1]["score"] - (0.905 - 0.01 * math.log(2))) < 1e-9
     assert results[1]["segment_turn_range"] == {"start": 1, "end": 2}
+    assert authority.calls.count("session-a") == 1
+    assert authority.calls.count("session-b") == 1
 
 
 def test_segment_recall_does_not_expand_across_session_boundary():
     ids = ["s0", "s1"]
     hit = _hit("session-a", "s0", 0.9, ids, "current session")
     foreign = _row("s1", "session-b", 1, 3, 4, "foreign session")
+    authority = _Authority(
+        {"session-a": ids},
+        {
+            "session-a": [
+                hit["content_hash"],
+                sha256_hash(_segment_text(1, 1, 2, "expected neighbor")),
+            ]
+        },
+    )
 
     result = _group_segment_recall_hits(
         [hit],
         pg_store=_Store({"s1": foreign}),
-        authority_resolver=_Authority({"session-a": ids, "session-b": ["s1"]}),
+        authority_resolver=authority,
         length_penalty=0.01,
     )
 
@@ -128,6 +163,62 @@ def test_segment_recall_does_not_expand_across_session_boundary():
     assert "current session" in result[0]["summary"]
     assert "foreign session" not in result[0]["summary"]
     assert result[0]["segment_turn_range"] == {"start": 1, "end": 2}
+
+
+def test_segment_recall_resolves_authority_once_for_both_neighbors():
+    ids = ["left", "middle", "right"]
+    left = _row("left", "session-a", 0, 1, 2, "left body")
+    right = _row("right", "session-a", 2, 5, 6, "right body")
+    best = _hit("session-a", "middle", 0.95, ids, "middle body")
+    authority = _Authority(
+        {"session-a": ids},
+        {
+            "session-a": [
+                left.content_hash,
+                best["content_hash"],
+                right.content_hash,
+            ]
+        },
+    )
+
+    results = _group_segment_recall_hits(
+        [best],
+        pg_store=_Store({"left": left, "right": right}),
+        authority_resolver=authority,
+        length_penalty=0.01,
+    )
+
+    assert len(results) == 1
+    assert "left body" in results[0]["summary"]
+    assert "middle body" in results[0]["summary"]
+    assert "right body" in results[0]["summary"]
+    assert authority.calls == ["session-a"]
+
+
+def test_segment_recall_rejects_neighbor_row_with_receipt_id_but_wrong_hash():
+    ids = ["left", "right"]
+    hit = _hit("session-a", "left", 0.9, ids, "left body")
+    row = _row("right", "session-a", 1, 3, 4, "tampered body")
+    authority = _Authority(
+        {"session-a": ids},
+        {
+            "session-a": [
+                hit["content_hash"],
+                sha256_hash(_segment_text(1, 3, 4, "expected body")),
+            ]
+        },
+    )
+
+    results = _group_segment_recall_hits(
+        [hit],
+        pg_store=_Store({"right": row}),
+        authority_resolver=authority,
+        length_penalty=0.01,
+    )
+
+    assert len(results) == 1
+    assert "left body" in results[0]["summary"]
+    assert "tampered body" not in results[0]["summary"]
 
 
 def test_graph_first_resolver_maps_authorized_segment_card_range():
