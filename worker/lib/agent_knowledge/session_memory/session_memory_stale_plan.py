@@ -10,9 +10,6 @@ from typing import Any
 
 from ..couchdb_source.document_model import projection_state_doc_id
 from ..model_connectors import LOCAL_EMBEDDING_PROFILE_ID
-from ..rag_ingress.qdrant_couchdb_authority import (
-    CouchDBProjectionStateAuthorityResolver,
-)
 
 
 COMMAND = "session-memory-stale-plan"
@@ -135,12 +132,29 @@ class SessionMemoryStalePlanner:
         self._authority_resolver = (
             authority_resolver
             if authority_resolver is not None
-            else CouchDBProjectionStateAuthorityResolver(
-                source_store,
-                backend="postgres_pgvector_local",
-                embedding_profile=embedding_profile,
+            else self._build_authority_resolver(
+                source_store=source_store,
                 pg_store=pg_store,
+                embedding_profile=embedding_profile,
             )
+        )
+
+    @staticmethod
+    def _build_authority_resolver(
+        *,
+        source_store: Any,
+        pg_store: Any,
+        embedding_profile: str,
+    ) -> Any:
+        from ..rag_ingress.qdrant_couchdb_authority import (
+            CouchDBProjectionStateAuthorityResolver,
+        )
+
+        return CouchDBProjectionStateAuthorityResolver(
+            source_store,
+            backend="postgres_pgvector_local",
+            embedding_profile=embedding_profile,
+            pg_store=pg_store,
         )
 
     def run(self) -> dict[str, Any]:
