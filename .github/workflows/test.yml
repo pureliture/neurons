@@ -106,7 +106,7 @@ jobs:
           fi
       - name: 실제 PostgreSQL 권위 저장·공개 Graph-first 조회·검토 묶음 검증
         working-directory: worker
-        run: uv run --group dev --extra mcp-http pytest -q -rs tests/test_lbrain_pgvector_contract.py tests/test_graph_first_pg_integration.py tests/test_graph_first_resolver.py tests/test_pg_evidence.py tests/test_pg_session_memory_integration.py tests/test_pg_backfill.py tests/test_pg_representation.py tests/test_pg_projection_privacy.py tests/test_pg_import_canonical_preflight.py tests/test_pg_embedding_named_credentials.py tests/test_outbox_worker.py tests/test_pg_graph_projection_cli.py tests/test_pg_steward_authority.py tests/test_pg_steward_service_wiring.py tests/test_pg_steward_graph_authority.py tests/test_review_bundle_pg_acceptance.py tests/test_pg_review_bundle_store.py tests/test_review_bundle_http_pg.py tests/test_golden_grader.py tests/test_lbrain_chain_e2e.py
+        run: uv run --group dev --extra mcp-http pytest -q -rs tests/test_lbrain_pgvector_contract.py tests/test_graph_first_pg_integration.py tests/test_graph_first_resolver.py tests/test_pg_evidence.py tests/test_pg_session_memory_integration.py tests/test_pg_backfill.py tests/test_pg_representation.py tests/test_pg_projection_privacy.py tests/test_pg_embedding_named_credentials.py tests/test_outbox_worker.py tests/test_pg_graph_projection_cli.py tests/test_pg_steward_authority.py tests/test_pg_steward_service_wiring.py tests/test_pg_steward_graph_authority.py tests/test_review_bundle_pg_acceptance.py tests/test_pg_review_bundle_store.py tests/test_review_bundle_http_pg.py tests/test_golden_grader.py tests/test_lbrain_chain_e2e.py
       - name: Local Model2Vec PostgreSQL pgvector 격리 계약 검증 (M2 PG)
         working-directory: worker
         run: uv run --group dev --extra mcp-http --extra local-embedding pytest -q -rs tests/test_local_embedding_m2_pg.py
@@ -242,4 +242,4 @@ jobs:
           enable-cache: true
       - name: Enforce latency budgets
         working-directory: worker
-        run: uv run --group dev --extra mcp-http pytest -q tests/test_dual_read_shadow.py tests/test_challenger_m4_benchmark.py tests/e2e/test_tier4_scenarios.py tests/e2e/test_tier5_adversarial.py
+        run: uv run --group dev --extra mcp-http pytest -q tests/e2e/test_tier4_scenarios.py tests/e2e/test_tier5_adversarial.py

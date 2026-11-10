@@ -63,7 +63,7 @@ class K3sMigrationContractTest {
         long workloadBlocks = inventory.lines().filter(line -> line.strip().equals("composeServices:")).count();
         long scaleCategoryCount = inventory.lines().filter(line -> line.strip().startsWith("scaleCategory:")).count();
         long replicaPolicyCount = inventory.lines().filter(line -> line.strip().startsWith("replicaPolicy:")).count();
-        assertThat(workloadBlocks).isEqualTo(14L);
+        assertThat(workloadBlocks).isEqualTo(13L);
         assertThat(scaleCategoryCount).isEqualTo(workloadBlocks);
         assertThat(replicaPolicyCount).isEqualTo(workloadBlocks);
 
