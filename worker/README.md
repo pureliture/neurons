@@ -213,7 +213,18 @@ vendored (`lib/agent_knowledge/`):
   live RetiredIndexBridge mutation remains excluded; only dry-run planners and backup store
   are present.
   → `rag_ingress/__init__.py`는 client/Ledger/import-heavy 모듈을 eager import하지
-  않도록 유지한다(패키지 import만으로 Ledger가 끌려오지 않게).
+    않도록 유지한다(패키지 import만으로 Ledger가 끌려오지 않게).
+
+## Phase 3 세션 메모리 운영 도구
+
+- Shadow 평가는 `uv run python -m agent_knowledge.session_memory.shadow_eval --out <path>`
+  로 실행한다. CouchDB의 완전 materialized source만 읽고 PostgreSQL에는 접속하지 않으며,
+  local embedding provider로 M0/S4 recall을 측정한다. 표본 이외의 source 본문이나
+  식별 정보는 보고서에 기록하지 않는다.
+- Stale planner는 `uv run neuron-knowledge session-memory-stale-plan --retention-days 14 --limit-sessions 20000`
+  로 실행한다. PG와 CouchDB를 읽기만 하고
+  활성 local receipt 및 authority 판정에 실패한 행은 `unresolved`로 남긴다. 이 도구는
+  dry-run 전용이며 execute/delete 옵션이 없고, 보고서에는 raw ID나 project 이름을 넣지 않는다.
 
 ## redelivery dedup (under-dedup 갭 수정)
 

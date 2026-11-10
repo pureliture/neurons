@@ -1119,6 +1119,80 @@ class PgVectorStore:
                 row = cur.fetchone()
         return _chunk_from_row(row) if row is not None else None
 
+    def iter_session_chunk_batches(
+        self,
+        *,
+        batch_size: int = 100,
+        limit_sessions: int = 20_000,
+    ) -> Iterator[tuple[str, tuple[SessionChunk, ...]]]:
+        """세션 경계를 유지하며 제한된 batch로 청크 행을 읽는다."""
+
+        if isinstance(batch_size, bool) or batch_size < 1:
+            raise ValueError("batch_size must be positive")
+        if isinstance(limit_sessions, bool) or limit_sessions < 1:
+            raise ValueError("limit_sessions must be positive")
+        last_session_id: str | None = None
+        sessions_yielded = 0
+        with self._scope() as db:
+            while sessions_yielded < limit_sessions:
+                current_batch_size = min(
+                    batch_size,
+                    limit_sessions - sessions_yielded,
+                )
+                with db.cursor() as cur:
+                    if last_session_id is None:
+                        cur.execute(
+                            """
+                            SELECT DISTINCT session_id_hash
+                              FROM session_memory_chunks
+                             ORDER BY session_id_hash
+                             LIMIT %s
+                            """,
+                            (current_batch_size,),
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            SELECT DISTINCT session_id_hash
+                              FROM session_memory_chunks
+                             WHERE session_id_hash > %s
+                             ORDER BY session_id_hash
+                             LIMIT %s
+                            """,
+                            (last_session_id, current_batch_size),
+                        )
+                    session_rows = cur.fetchall()
+                session_ids = [
+                    str(_row_value(row, "session_id_hash", 0) or "")
+                    for row in session_rows
+                ]
+                if not session_ids:
+                    break
+                chunks_by_session: dict[str, list[SessionChunk]] = {
+                    session_id: [] for session_id in session_ids
+                }
+                with db.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT chunk_id, session_id_hash, project, provider, chunk_index,
+                               content_markdown, token_count, content_hash, embedding_model,
+                               embedding_state, embedding_revision, embedding,
+                               created_at, updated_at, observed_at
+                          FROM session_memory_chunks
+                         WHERE session_id_hash = ANY(%s)
+                         ORDER BY session_id_hash, chunk_index, chunk_id
+                        """,
+                        (session_ids,),
+                    )
+                    rows = cur.fetchall()
+                for row in rows:
+                    chunk = _chunk_from_row(row)
+                    chunks_by_session.setdefault(chunk.session_id_hash, []).append(chunk)
+                for session_id in session_ids:
+                    yield session_id, tuple(chunks_by_session[session_id])
+                sessions_yielded += len(session_ids)
+                last_session_id = session_ids[-1]
+
     def find_ready_chunk_by_identity(
         self,
         *,
