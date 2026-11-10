@@ -97,7 +97,7 @@ segment 하나를 기존 `session_memory_chunks` row 하나와 local outbox job 
 
 ## P3-2 shadow recall candidate pools
 
-Shadow 지표는 실제 bounded recall 후보 풀을 사용한다. M0는 세션 행을 유사도 순으로 정렬해 상위 `_RECALL_CANDIDATE_LIMIT`개만 평가한다. S4는 전체 segment를 유사도 순으로 정렬해 100개씩 최대 `_SEGMENT_RECALL_MAX_PAGES`페이지를 가져오고, 풀이 5개 세션을 포함하면 멈춘다. 풀 안에서 세션별 최고 segment 유사도를 집계한 뒤 전체 segment 수로 길이 페널티를 적용한다. 어느 모드든 풀 밖 정답의 rank는 `None`이며 미검색으로 계산한다. paging limit은 `pg_recall`의 상수를 공유한다.
+Shadow 지표는 실제 bounded recall 후보 풀을 사용한다. M0는 세션 행을 유사도 순으로 정렬해 상위 `_RECALL_CANDIDATE_LIMIT`개만 평가한다. S4는 최대 `_SEGMENT_DIVERSITY_ROUNDS`라운드 동안 라운드별 상위 `_RECALL_CANDIDATE_LIMIT`개 segment를 가져오고, 이미 후보에 든 세션은 SQL 단계처럼 다음 라운드에서 제외한다. `_SEGMENT_CANDIDATE_SESSIONS`개 세션에 도달하거나 라운드 결과가 비면 멈춘다. 후보 세션의 점수는 leave-one-out을 반영한 전체 segment의 최고 유사도로 계산하고, 페널티는 세션 전체 segment 수를 기준으로 적용한다. 어느 모드든 후보 풀 밖 정답의 rank는 `None`이며 미검색으로 계산한다. limit과 다양성 상수는 `pg_recall`에서 공유한다.
 
 ## D7 이 문서의 판정 경계
 

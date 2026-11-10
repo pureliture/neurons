@@ -213,78 +213,97 @@ def test_segment_recall_resolves_authority_once_for_both_neighbors():
     assert authority.calls == ["session-a"]
 
 
-@pytest.mark.parametrize(
-    ("rejected_sessions", "expected_count"),
-    [((), 5), (("session-0",), None)],
-)
-def test_segment_recall_pages_past_four_long_sessions_before_candidate_exhaustion(
-    monkeypatch,
-    rejected_sessions,
-    expected_count,
+def _candidate_row(
+    session_id: str,
+    chunk_id: str,
+    index: int,
+    distance: float,
+    body: str,
 ):
-    rows = {}
-    candidates = []
-    receipts = {}
-    now = datetime.now(timezone.utc)
+    row = _row(chunk_id, session_id, index, index + 1, index + 1, body)
+    row.embedding_state = "ready"
+    row.embedding_model = LOCAL_EMBEDDING_MODEL
+    row.embedding = [1.0] * LOCAL_EMBEDDING_DIM
+    row.created_at = datetime.now(timezone.utc)
+    row.observed_at = row.created_at
+    candidate = {
+        "chunk_id": chunk_id,
+        "session_id_hash": session_id,
+        "project": "synthetic",
+        "provider": "test",
+        "content_markdown": row.content_markdown,
+        "content_hash": row.content_hash,
+        "distance": distance,
+        "embedding_state": "ready",
+        "embedding_model": LOCAL_EMBEDDING_MODEL,
+        "embedding_profile": LOCAL_EMBEDDING_PROFILE_ID,
+        "_test_row": row,
+    }
+    return row, candidate
 
-    for session_index in range(5):
-        session_id = f"session-{session_index}"
-        segment_count = 25 if session_index < 4 else 1
-        segment_ids = [f"seg-{session_index}-{index}" for index in range(segment_count)]
-        hashes = []
-        for segment_index, segment_id in enumerate(segment_ids):
-            text = _segment_text(
-                segment_index,
-                segment_index + 1,
-                segment_index + 1,
-                f"session {session_index} segment {segment_index}",
-            )
-            content_hash = sha256_hash(text)
-            hashes.append(content_hash)
-            row = SimpleNamespace(
-                chunk_id=segment_id,
-                session_id_hash=session_id,
-                project="synthetic",
-                provider="test",
-                content_markdown=text,
-                content_hash=content_hash,
-                embedding_state="ready",
-                embedding_model=LOCAL_EMBEDDING_MODEL,
-                created_at=now,
-                observed_at=now,
-            )
-            rows[segment_id] = row
-            candidates.append(
-                {
-                    "chunk_id": segment_id,
-                    "session_id_hash": session_id,
-                    "project": "synthetic",
-                    "provider": "test",
-                    "content_markdown": text,
-                    "content_hash": content_hash,
-                    "distance": float(len(candidates)) / 10_000,
-                    "embedding_state": "ready",
-                    "embedding_model": LOCAL_EMBEDDING_MODEL,
-                    "embedding_profile": LOCAL_EMBEDDING_PROFILE_ID,
-                }
-            )
-        receipts[session_id] = {
-            "representation": "segment_v1",
-            "segment_ids": segment_ids,
-            "segment_content_hashes": hashes,
-            "provider": "test",
-            "project": "synthetic",
+
+def _install_diversity_search(
+    monkeypatch,
+    *,
+    stage1_candidates,
+    approved_candidates,
+    receipts,
+    rejected_sessions=(),
+):
+    rows = {row.chunk_id: row for row, _candidate in stage1_candidates}
+    rows.update(
+        {
+            candidate["chunk_id"]: candidate["_test_row"]
+            for candidate in approved_candidates.values()
         }
+    )
 
     class Store:
         embedding_profile = None
 
         def __init__(self):
-            self.limits = []
+            self.round_calls = []
+            self.approved_id_calls = []
 
-        def search_session_chunks(self, *, limit, **_kwargs):
-            self.limits.append(limit)
-            return candidates[:limit]
+        def search_session_chunks_local(
+            self,
+            *,
+            limit,
+            exclude_session_id_hashes=(),
+            **_kwargs,
+        ):
+            excluded = set(exclude_session_id_hashes)
+            self.round_calls.append((limit, set(excluded)))
+            candidates = [
+                candidate
+                for _row, candidate in stage1_candidates
+                if candidate["session_id_hash"] not in excluded
+            ]
+            return sorted(
+                candidates,
+                key=lambda item: (float(item["distance"]), item["chunk_id"]),
+            )[:limit]
+
+        def search_session_chunks_local_by_ids(
+            self,
+            query_vector,
+            chunk_ids,
+            *,
+            limit=1,
+            conn=None,
+            profile_id=LOCAL_EMBEDDING_PROFILE_ID,
+        ):
+            del query_vector
+            self.approved_id_calls.append((list(chunk_ids), limit, conn, profile_id))
+            candidates = [
+                candidate
+                for chunk_id in chunk_ids
+                if (candidate := approved_candidates.get(chunk_id)) is not None
+            ]
+            return sorted(
+                candidates,
+                key=lambda item: (float(item["distance"]), item["chunk_id"]),
+            )[:limit]
 
         def get_chunk(self, chunk_id):
             return rows.get(chunk_id)
@@ -297,21 +316,21 @@ def test_segment_recall_pages_past_four_long_sessions_before_candidate_exhaustio
             return [1.0] * self.size
 
     class Authority:
-        def resolve(self, hit):
-            receipt = receipts.get(hit["session_id_hash"])
-            if (
-                hit["session_id_hash"] in rejected_sessions
-                or receipt is None
-                or hit["memory_id"] not in receipt["segment_ids"]
-                or receipt["segment_content_hashes"][
-                    receipt["segment_ids"].index(hit["memory_id"])
-                ]
-                != hit["content_hash"]
-            ):
+        def __init__(self):
+            self.session_calls = []
+
+        def resolve_session_segments(self, hit):
+            session_id = hit["session_id_hash"]
+            self.session_calls.append(session_id)
+            if session_id in rejected_sessions:
                 return None
-            return receipt
+            return receipts.get(session_id)
+
+        def resolve(self, _hit):
+            pytest.fail("segment receipt should be resolved only once per candidate session")
 
     store = Store()
+    authority = Authority()
     monkeypatch.setattr(
         "agent_knowledge.rag_ingress.pg_recall.PgVectorStore",
         lambda **_kwargs: store,
@@ -326,9 +345,8 @@ def test_segment_recall_pages_past_four_long_sessions_before_candidate_exhaustio
     )
     monkeypatch.setattr(
         "agent_knowledge.rag_ingress.pg_recall.CouchDBProjectionStateAuthorityResolver",
-        lambda *_args, **_kwargs: Authority(),
+        lambda *_args, **_kwargs: authority,
     )
-
     search = build_pg_brain_query_search_from_env(
         {
             "NEURON_LBRAIN_PGVECTOR_DSN": "synthetic",
@@ -337,16 +355,177 @@ def test_segment_recall_pages_past_four_long_sessions_before_candidate_exhaustio
         }
     )
     assert search is not None
-    if expected_count is None:
-        with pytest.raises(RuntimeError, match="^PG recall candidate limit exhausted$"):
-            search("synthetic query", "/project/synthetic")
-    else:
-        results = search("synthetic query", "/project/synthetic")
-        assert len(results) == expected_count
-        assert store.limits == [101, 201]
-        assert {hit["session_id_hash"] for hit in results} == {
-            f"session-{index}" for index in range(5)
-        }
+    return search, store, authority
+
+
+def _receipt(session_id: str, rows) -> dict:
+    return {
+        "representation": "segment_v1",
+        "segment_ids": [row.chunk_id for row in rows],
+        "segment_content_hashes": [row.content_hash for row in rows],
+        "provider": "test",
+        "project": "synthetic",
+    }
+
+
+def test_segment_recall_uses_session_diversity_rounds_to_find_fifth_session(monkeypatch):
+    stage1_candidates = []
+    approved_candidates = {}
+    receipts = {}
+    for session_index in range(4):
+        session_id = f"session-{session_index}"
+        session_rows = []
+        for segment_index in range(125):
+            distance = session_index * 0.1 + segment_index / 100_000
+            row, candidate = _candidate_row(
+                session_id,
+                f"seg-{session_index}-{segment_index:03d}",
+                segment_index,
+                distance,
+                f"long session {session_index} segment {segment_index}",
+            )
+            session_rows.append(row)
+            stage1_candidates.append((row, candidate))
+            approved_candidates[row.chunk_id] = candidate
+        receipts[session_id] = _receipt(session_id, session_rows)
+
+    target_row, target_candidate = _candidate_row(
+        "session-4",
+        "seg-session-4-current",
+        0,
+        0.9,
+        "fifth related session",
+    )
+    stage1_candidates.append((target_row, target_candidate))
+    approved_candidates[target_row.chunk_id] = target_candidate
+    receipts["session-4"] = _receipt("session-4", [target_row])
+
+    search, store, authority = _install_diversity_search(
+        monkeypatch,
+        stage1_candidates=stage1_candidates,
+        approved_candidates=approved_candidates,
+        receipts=receipts,
+    )
+
+    results = search("synthetic query", "/project/synthetic")
+
+    assert len(results) == 5
+    assert {hit["session_id_hash"] for hit in results} == {
+        f"session-{index}" for index in range(5)
+    }
+    assert len(store.round_calls) == 5
+    assert all(limit == 100 for limit, _ in store.round_calls)
+    assert [len(excluded) for _, excluded in store.round_calls] == [0, 1, 2, 3, 4]
+    assert len(authority.session_calls) == 5
+    assert len(store.approved_id_calls) == 5
+
+
+def test_segment_recall_rescores_stale_best_hit_from_current_receipt_segments(monkeypatch):
+    stale_row, stale_candidate = _candidate_row(
+        "stale-session",
+        "stale-segment",
+        0,
+        0.01,
+        "old revision marker",
+    )
+    current_row, current_candidate = _candidate_row(
+        "stale-session",
+        "current-segment",
+        0,
+        0.8,
+        "current approved body",
+    )
+    receipt = _receipt("stale-session", [current_row])
+    search, _store, authority = _install_diversity_search(
+        monkeypatch,
+        stage1_candidates=[(stale_row, stale_candidate)],
+        approved_candidates={current_row.chunk_id: current_candidate},
+        receipts={"stale-session": receipt},
+    )
+
+    results = search("synthetic query", "/project/synthetic")
+
+    assert len(results) == 1
+    assert results[0]["memory_id"] == "current-segment"
+    assert "current approved body" in results[0]["summary"]
+    assert "old revision marker" not in results[0]["summary"]
+    assert results[0]["best_segment_content_hash"] == current_row.content_hash
+    assert results[0]["returned_segment_ids"] == ["current-segment"]
+    assert results[0]["returned_segment_content_hashes"] == [current_row.content_hash]
+    assert results[0]["content_hash"] == sha256_hash(results[0]["summary"])
+    assert authority.session_calls == ["stale-session"]
+
+
+def test_segment_recall_errors_after_five_full_rounds_with_fewer_than_five_results(
+    monkeypatch,
+):
+    stage1_candidates = []
+    approved_candidates = {}
+    receipts = {}
+    for session_index in range(5):
+        session_id = f"session-{session_index}"
+        session_rows = []
+        for segment_index in range(100):
+            row, candidate = _candidate_row(
+                session_id,
+                f"seg-{session_index}-{segment_index:03d}",
+                segment_index,
+                session_index * 0.1 + segment_index / 100_000,
+                f"session {session_index} segment {segment_index}",
+            )
+            session_rows.append(row)
+            stage1_candidates.append((row, candidate))
+            approved_candidates[row.chunk_id] = candidate
+        receipts[session_id] = _receipt(session_id, session_rows)
+
+    search, store, _authority = _install_diversity_search(
+        monkeypatch,
+        stage1_candidates=stage1_candidates,
+        approved_candidates=approved_candidates,
+        receipts=receipts,
+        rejected_sessions=("session-0",),
+    )
+
+    with pytest.raises(RuntimeError, match="^PG recall candidate limit exhausted$"):
+        search("synthetic query", "/project/synthetic")
+
+    assert len(store.round_calls) == 5
+    assert all(limit == 100 for limit, _ in store.round_calls)
+
+
+def test_segment_recall_returns_small_corpus_without_candidate_exhaustion(monkeypatch):
+    stage1_candidates = []
+    approved_candidates = {}
+    receipts = {}
+    for session_index in range(3):
+        session_id = f"session-{session_index}"
+        row, candidate = _candidate_row(
+            session_id,
+            f"seg-{session_index}",
+            0,
+            session_index / 10,
+            f"small session {session_index}",
+        )
+        stage1_candidates.append((row, candidate))
+        approved_candidates[row.chunk_id] = candidate
+        receipts[session_id] = _receipt(session_id, [row])
+
+    search, store, _authority = _install_diversity_search(
+        monkeypatch,
+        stage1_candidates=stage1_candidates,
+        approved_candidates=approved_candidates,
+        receipts=receipts,
+    )
+
+    results = search("synthetic query", "/project/synthetic")
+
+    assert len(results) == 3
+    assert len(store.round_calls) == 2
+    assert store.round_calls[-1][1] == {
+        "session-0",
+        "session-1",
+        "session-2",
+    }
 
 
 def test_segment_recall_rejects_neighbor_row_with_receipt_id_but_wrong_hash():

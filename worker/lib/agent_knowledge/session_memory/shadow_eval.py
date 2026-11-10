@@ -20,7 +20,8 @@ from ..model_connectors import LOCAL_EMBEDDING_PROFILE_ID
 from ..rag_ingress.pg_recall import (
     _RECALL_CANDIDATE_LIMIT,
     _RECALL_LIMIT,
-    _SEGMENT_RECALL_MAX_PAGES,
+    _SEGMENT_CANDIDATE_SESSIONS,
+    _SEGMENT_DIVERSITY_ROUNDS,
 )
 from ..couchdb_source.session_memory_materializer import (
     MaterializedSessionMemory,
@@ -264,15 +265,20 @@ def _segment_candidate_pool(
     candidates: Sequence[tuple[str, str, float]],
 ) -> list[tuple[str, str, float]]:
     ordered = sorted(candidates, key=lambda item: (-item[2], item[1]))
-    for page in range(1, _SEGMENT_RECALL_MAX_PAGES + 1):
-        pool = ordered[: page * _RECALL_CANDIDATE_LIMIT]
+    pool: list[tuple[str, str, float]] = []
+    seen_sessions: set[str] = set()
+    for _round_index in range(_SEGMENT_DIVERSITY_ROUNDS):
+        round_candidates = [
+            item for item in ordered if item[0] not in seen_sessions
+        ][:_RECALL_CANDIDATE_LIMIT]
+        pool.extend(round_candidates)
+        seen_sessions.update(session_id for session_id, _, _ in round_candidates)
         if (
-            len({session_id for session_id, _, _ in pool}) >= _RECALL_LIMIT
-            or len(pool) == len(ordered)
-            or page == _SEGMENT_RECALL_MAX_PAGES
+            len(seen_sessions) >= _SEGMENT_CANDIDATE_SESSIONS
+            or not round_candidates
         ):
-            return pool
-    return []
+            break
+    return pool
 
 
 def _segment_count_percentile(counts: Sequence[int], percentile: float) -> float:
@@ -491,6 +497,7 @@ def run_shadow_eval(
 
             s4_segment_candidates: list[tuple[str, str, float]] = []
             s4_segment_counts: dict[str, int] = {}
+            s4_all_similarity_by_id: dict[str, float] = {}
             for candidate_id in candidate_ids:
                 vectors, segment_ids = original_s4_vectors[candidate_id]
                 if candidate_id == target_session_id_hash:
@@ -503,6 +510,7 @@ def run_shadow_eval(
                     continue
                 s4_segment_counts[candidate_id] = segment_count
                 similarities = vectors @ query_vector
+                s4_all_similarity_by_id[candidate_id] = float(np.max(similarities))
                 s4_segment_candidates.extend(
                     (
                         candidate_id,
@@ -520,11 +528,9 @@ def run_shadow_eval(
                 start=1,
             ):
                 s4_tie_order.setdefault(candidate_id, pool_rank)
-                if (
-                    candidate_id not in s4_similarity_by_id
-                    or similarity > s4_similarity_by_id[candidate_id]
-                ):
-                    s4_similarity_by_id[candidate_id] = similarity
+                s4_similarity_by_id[candidate_id] = s4_all_similarity_by_id[
+                    candidate_id
+                ]
 
             for alpha in ALPHAS:
                 scores = {

@@ -352,18 +352,35 @@ def test_shadow_candidate_pools_match_recall_limits_and_leave_misses_unranked():
     ]
     crowded_segments.append(("target", "seg-target", 0.1))
     crowded_pool = shadow_eval._segment_candidate_pool(crowded_segments)
-    assert len(crowded_pool) == (
+    assert len(crowded_pool) == shadow_eval._RECALL_CANDIDATE_LIMIT * 4 + 1
+    assert "target" in {session_id for session_id, _, _ in crowded_pool}
+
+    exhausted_segments = [
+        (
+            f"long-{session_index}",
+            f"seg-{session_index}-{index:03d}",
+            0.9 - rank / 10_000,
+        )
+        for rank, (session_index, index) in enumerate(
+            (session_index, index)
+            for session_index in range(shadow_eval._SEGMENT_DIVERSITY_ROUNDS)
+            for index in range(shadow_eval._RECALL_CANDIDATE_LIMIT)
+        )
+    ]
+    exhausted_segments.append(("target", "seg-target", 0.1))
+    exhausted_pool = shadow_eval._segment_candidate_pool(exhausted_segments)
+    assert len(exhausted_pool) == (
         shadow_eval._RECALL_CANDIDATE_LIMIT
-        * shadow_eval._SEGMENT_RECALL_MAX_PAGES
+        * shadow_eval._SEGMENT_DIVERSITY_ROUNDS
     )
-    assert "target" not in {session_id for session_id, _, _ in crowded_pool}
+    assert "target" not in {session_id for session_id, _, _ in exhausted_pool}
     crowded_scores = {
         session_id: max(
             similarity
-            for candidate_session, _, similarity in crowded_pool
+            for candidate_session, _, similarity in exhausted_pool
             if candidate_session == session_id
         )
-        for session_id, _, _ in crowded_pool
+        for session_id, _, _ in exhausted_pool
     }
     assert shadow_eval._rank_for_target(crowded_scores, "target") is None
 

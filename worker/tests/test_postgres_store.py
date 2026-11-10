@@ -28,7 +28,10 @@ from agent_knowledge.postgres_store.pgvector_store import (
     make_dummy_vector,
     _authority_filter,
 )
-from agent_knowledge.model_connectors import DEFAULT_EMBEDDING_MODEL
+from agent_knowledge.model_connectors import (
+    DEFAULT_EMBEDDING_MODEL,
+    LOCAL_EMBEDDING_PROFILE_ID,
+)
 from agent_knowledge.session_memory.memory_miner import build_memory_card_candidate_from_source_span
 
 # Legacy 1536-dim profile is NOT accepted here; the shared profile is 3072-dim.
@@ -229,6 +232,103 @@ def test_guc_allowlist_rejected_before_database():
         store.set_local_guc("search_path", "public")
     with pytest.raises(ValueError, match="unsupported hnsw.iterative_scan value"):
         store.set_local_guc("hnsw.iterative_scan", "sometimes")
+
+
+def test_local_session_search_excludes_seen_sessions_with_relaxed_order():
+    captured = {}
+
+    class Cursor:
+        description = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, query, params):
+            captured["query"] = query
+            captured["params"] = params
+
+        def fetchall(self):
+            return []
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+    store = PgVectorStore(
+        connection=Connection(),
+        embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
+    )
+    relaxed_calls = []
+    store.set_guc_relaxed_order = lambda **kwargs: relaxed_calls.append(kwargs) or True
+
+    assert store.search_session_chunks_local(
+        [0.1] * 256,
+        project="synthetic",
+        limit=100,
+        exclude_session_id_hashes=["session-a", "session-b"],
+        profile_id=LOCAL_EMBEDDING_PROFILE_ID,
+    ) == []
+
+    assert "NOT (smc.session_id_hash = ANY(%s))" in captured["query"]
+    assert "sle.state = 'ready'" in captured["query"]
+    assert "sle.source_content_hash = smc.content_hash" in captured["query"]
+    assert captured["params"][1] == LOCAL_EMBEDDING_PROFILE_ID
+    assert captured["params"][2] == "synthetic"
+    assert captured["params"][3] == ["session-a", "session-b"]
+    assert captured["params"][-1] == 100
+    assert captured["query"].count("%s") == len(captured["params"])
+    assert len(relaxed_calls) == 1
+
+
+def test_local_session_search_by_receipt_ids_uses_ready_profile_hash_guards():
+    captured = {}
+
+    class Cursor:
+        description = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, query, params):
+            captured["query"] = query
+            captured["params"] = params
+
+        def fetchall(self):
+            return []
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+    store = PgVectorStore(
+        connection=Connection(),
+        embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
+    )
+    relaxed_calls = []
+    store.set_guc_relaxed_order = lambda **kwargs: relaxed_calls.append(kwargs) or True
+
+    assert store.search_session_chunks_local_by_ids(
+        [0.1] * 256,
+        ["approved-a", "approved-b"],
+        limit=1,
+        profile_id=LOCAL_EMBEDDING_PROFILE_ID,
+    ) == []
+
+    assert "smc.chunk_id = ANY(%s)" in captured["query"]
+    assert "sle.profile_id = %s" in captured["query"]
+    assert "sle.state = 'ready'" in captured["query"]
+    assert "sle.source_content_hash = smc.content_hash" in captured["query"]
+    assert captured["params"][1] == ["approved-a", "approved-b"]
+    assert captured["params"][2] == LOCAL_EMBEDDING_PROFILE_ID
+    assert captured["params"][-1] == 1
+    assert captured["query"].count("%s") == len(captured["params"])
+    assert len(relaxed_calls) == 1
 
 
 def test_context_selector_filters_and_ranks_before_its_sql_limit():

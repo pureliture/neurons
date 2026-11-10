@@ -84,7 +84,8 @@ _RECALL_LIMIT = 5
 # one SQL sentinel. If that window cannot produce the requested result count,
 # fail explicitly rather than treating truncation as an empty successful recall.
 _RECALL_CANDIDATE_LIMIT = 100
-_SEGMENT_RECALL_MAX_PAGES = 4
+_SEGMENT_DIVERSITY_ROUNDS = 5
+_SEGMENT_CANDIDATE_SESSIONS = 20
 _SEGMENT_TURN_RANGE = re.compile(r"^segment: \d+ turns (\d+)-(\d+)$", re.MULTILINE)
 
 BrainQuerySearch = Callable[[str, str], list[dict[str, Any]]]
@@ -301,54 +302,94 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
 
         integrity_rejections = 0
         authority_rejections = 0
-        candidate_session_ids: set[str] = set()
+        segment_authority_receipts: dict[str, dict[str, Any]] = {}
+        diversity_rounds = 0
+        last_round_candidate_count = 0
         if representation == "segment_v1":
-            validated_hits = []
+            validated_hits: list[dict[str, Any]] = []
             raw_chunks: list[dict[str, Any]] = []
-            start = 0
-            for page in range(1, _SEGMENT_RECALL_MAX_PAGES + 1):
-                page_end = page * _RECALL_CANDIDATE_LIMIT
-                raw_chunks = pg_store.search_session_chunks(
+            candidate_session_hints: dict[str, dict[str, str]] = {}
+            for _round_index in range(_SEGMENT_DIVERSITY_ROUNDS):
+                raw_chunks = pg_store.search_session_chunks_local(
                     query_vector=vector,
                     project=project,
-                    limit=page_end + 1,
+                    limit=_RECALL_CANDIDATE_LIMIT,
+                    exclude_session_id_hashes=sorted(candidate_session_hints),
+                    profile_id=active_profile,
                 )
-                page_candidates = raw_chunks[start:page_end]
-                candidate_session_ids.update(
-                    str(candidate.get("session_id_hash") or "")
-                    for candidate in page_candidates
-                    if candidate.get("session_id_hash")
+                raw_chunks.sort(
+                    key=lambda candidate: (
+                        float(candidate.get("distance") or 0.0),
+                        str(candidate.get("chunk_id") or ""),
+                    )
                 )
-                page_hits, rejected = _validate_candidates(
-                    page_candidates
-                )
-                integrity_rejections += rejected
-                joined_page = join_mirror_hits_to_authority(
-                    page_hits,
-                    resolver=resolver,
-                    drop_unresolved=False,
-                )
-                authority_rejections += sum(
-                    hit.get("authority_join_status") != "resolved"
-                    for hit in joined_page
-                )
-                validated_hits.extend(
-                    hit
-                    for hit in joined_page
-                    if hit.get("authority_join_status") == "resolved"
-                )
-                approved_sessions = {
-                    str(hit.get("session_id_hash") or "")
-                    for hit in validated_hits
-                    if hit.get("session_id_hash")
-                }
+                diversity_rounds += 1
+                last_round_candidate_count = len(raw_chunks)
+                for candidate in raw_chunks:
+                    session_id_hash = str(candidate.get("session_id_hash") or "")
+                    if session_id_hash:
+                        candidate_session_hints.setdefault(
+                            session_id_hash,
+                            {
+                                "provider": str(candidate.get("provider") or ""),
+                                "project": str(candidate.get("project") or ""),
+                            },
+                        )
                 if (
-                    len(approved_sessions) >= _RECALL_LIMIT
-                    or len(raw_chunks) <= page_end
-                    or page == _SEGMENT_RECALL_MAX_PAGES
+                    len(candidate_session_hints) >= _SEGMENT_CANDIDATE_SESSIONS
+                    or not raw_chunks
                 ):
                     break
-                start = page_end
+
+            for session_id_hash, scope in candidate_session_hints.items():
+                authorized = resolver.resolve_session_segments(
+                    {
+                        "session_id_hash": session_id_hash,
+                        "provider": scope["provider"],
+                        "project": scope["project"],
+                    }
+                )
+                if (
+                    authorized is None
+                    or authorized.get("representation") != "segment_v1"
+                    or authorized.get("provider") != scope["provider"]
+                    or authorized.get("project") != scope["project"]
+                ):
+                    authority_rejections += 1
+                    continue
+                segment_ids = list(authorized.get("segment_ids") or ())
+                segment_content_hashes = list(
+                    authorized.get("segment_content_hashes") or ()
+                )
+                if not segment_ids or len(segment_content_hashes) != len(segment_ids):
+                    authority_rejections += 1
+                    continue
+                segment_authority_receipts[session_id_hash] = authorized
+                approved_chunks = pg_store.search_session_chunks_local_by_ids(
+                    query_vector=vector,
+                    chunk_ids=segment_ids,
+                    limit=1,
+                    profile_id=active_profile,
+                )
+                approved_chunks.sort(
+                    key=lambda candidate: (
+                        float(candidate.get("distance") or 0.0),
+                        str(candidate.get("chunk_id") or ""),
+                    )
+                )
+                session_hits, rejected = _validate_candidates(approved_chunks)
+                integrity_rejections += rejected
+                content_hash_by_id = dict(zip(segment_ids, segment_content_hashes))
+                for hit in session_hits:
+                    if content_hash_by_id.get(hit["memory_id"]) != hit["content_hash"]:
+                        integrity_rejections += 1
+                        continue
+                    hit.update(
+                        representation="segment_v1",
+                        segment_ids=segment_ids,
+                        segment_content_hashes=segment_content_hashes,
+                    )
+                    validated_hits.append(hit)
         else:
             raw_chunks = pg_store.search_session_chunks(
                 query_vector=vector,
@@ -419,6 +460,7 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
                 authority_resolver=resolver,
                 length_penalty=segment_length_penalty,
                 rejection_count=group_rejections,
+                authority_receipts=segment_authority_receipts,
             )
 
         current_hits: list[dict[str, Any]] = []
@@ -447,12 +489,8 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
         if len(results) < _RECALL_LIMIT:
             if representation == "segment_v1":
                 if (
-                    len(candidate_session_ids) >= _RECALL_LIMIT
-                    and (
-                        integrity_rejections
-                        or authority_rejections
-                        or group_rejections[0]
-                    )
+                    diversity_rounds == _SEGMENT_DIVERSITY_ROUNDS
+                    and last_round_candidate_count == _RECALL_CANDIDATE_LIMIT
                 ):
                     raise RuntimeError("PG recall candidate limit exhausted")
             elif len(raw_chunks) > _RECALL_CANDIDATE_LIMIT:
@@ -482,6 +520,7 @@ def _group_segment_recall_hits(
     authority_resolver: Any,
     length_penalty: float,
     rejection_count: list[int] | None = None,
+    authority_receipts: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     segment_hits: dict[str, list[dict[str, Any]]] = {}
     session_hits: list[dict[str, Any]] = []
@@ -494,15 +533,17 @@ def _group_segment_recall_hits(
     grouped: list[dict[str, Any]] = []
     for session_id_hash, candidates in segment_hits.items():
         best = max(candidates, key=lambda hit: float(hit.get("score") or 0.0))
-        authorized = authority_resolver.resolve(
-            {
-                "session_id_hash": session_id_hash,
-                "content_hash": best.get("content_hash"),
-                "memory_id": best.get("memory_id"),
-                "provider": best.get("provider"),
-                "project": best.get("project"),
-            }
-        )
+        authorized = (authority_receipts or {}).get(session_id_hash)
+        if authorized is None:
+            authorized = authority_resolver.resolve(
+                {
+                    "session_id_hash": session_id_hash,
+                    "content_hash": best.get("content_hash"),
+                    "memory_id": best.get("memory_id"),
+                    "provider": best.get("provider"),
+                    "project": best.get("project"),
+                }
+            )
         if authorized is None or authorized.get("representation") != "segment_v1":
             if rejection_count is not None:
                 rejection_count[0] += 1
