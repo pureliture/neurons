@@ -57,7 +57,7 @@ def _segment_identity(
     project: str,
     provider: str,
     session_id_hash: str,
-    member_hashes: tuple[str, ...],
+    content_hash: str,
     max_bytes: int,
 ) -> str:
     identity = json.dumps(
@@ -66,7 +66,7 @@ def _segment_identity(
             project,
             provider,
             session_id_hash,
-            member_hashes,
+            content_hash,
             max_bytes,
         ),
         ensure_ascii=False,
@@ -126,6 +126,7 @@ def build_segments(
             tool_evidence_bodies=evidence if is_final_segment else (),
         )
         member_hashes = tuple(view.content_hash for view in members)
+        content_hash = sha256_hash(text)
         segments.append(
             SessionSegment(
                 segment_index=segment_index,
@@ -133,12 +134,12 @@ def build_segments(
                 turn_end=max(view.turn_end_index for view in members),
                 member_hashes=member_hashes,
                 text=text,
-                content_hash=sha256_hash(text),
+                content_hash=content_hash,
                 segment_id=_segment_identity(
                     project=materialized.project,
                     provider=materialized.provider,
                     session_id_hash=materialized.session_id_hash,
-                    member_hashes=member_hashes,
+                    content_hash=content_hash,
                     max_bytes=max_bytes,
                 ),
             )

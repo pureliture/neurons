@@ -1,3 +1,5 @@
+import hashlib
+import json
 from types import SimpleNamespace
 
 from agent_knowledge.couchdb_source.document_model import sha256_hash
@@ -69,21 +71,71 @@ def test_segment_ids_and_content_hashes_are_deterministic_and_bounded():
     assert all(len(segment.segment_id) <= 64 for segment in first)
     assert all(segment.segment_id.startswith("seg_") for segment in first)
     assert all(segment.content_hash == sha256_hash(segment.text) for segment in first)
+    identity = json.dumps(
+        (
+            "segment_v1",
+            materialized.project,
+            materialized.provider,
+            materialized.session_id_hash,
+            first[0].content_hash,
+            2048,
+        ),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    assert first[0].segment_id == "seg_" + hashlib.sha256(
+        identity.encode("utf-8")
+    ).hexdigest()[:60]
 
 
 def test_append_keeps_prefix_segment_identity_and_changes_only_tail_identity():
     initial = (_view(1, "a" * 70), _view(2, "b" * 70), _view(3, "c" * 70))
     appended = (*initial, _view(4, "d" * 70))
 
-    before = build_segments(_materialized(initial), max_bytes=300)
-    after = build_segments(_materialized(appended), max_bytes=300)
+    before = build_segments(
+        _materialized(initial, ("old evidence",)),
+        max_bytes=300,
+    )
+    after = build_segments(
+        _materialized(appended, ("old evidence",)),
+        max_bytes=300,
+    )
 
     assert [segment.member_hashes for segment in before] == [
         (initial[0].content_hash, initial[1].content_hash),
         (initial[2].content_hash,),
     ]
     assert after[0].segment_id == before[0].segment_id
-    assert after[-1].segment_id != before[-1].segment_id
+    assert after[-2].text != before[-1].text
+    assert after[-2].segment_id != before[-1].segment_id
+    assert after[-1].segment_id not in {segment.segment_id for segment in before}
+
+
+def test_evidence_change_changes_only_last_segment_identity():
+    views = (_view(1, "a" * 70), _view(2, "b" * 70), _view(3, "c" * 70))
+
+    before = build_segments(_materialized(views, ("evidence one",)), max_bytes=300)
+    after = build_segments(_materialized(views, ("evidence two",)), max_bytes=300)
+
+    assert len(before) == len(after)
+    assert [segment.segment_id for segment in before[:-1]] == [
+        segment.segment_id for segment in after[:-1]
+    ]
+    assert before[-1].text != after[-1].text
+    assert before[-1].segment_id != after[-1].segment_id
+
+
+def test_segment_index_change_changes_identity_with_body():
+    views = (_view(1, "a" * 10), _view(2, "b" * 100), _view(3, "c" * 100))
+    before = build_segments(_materialized(views), max_bytes=300)
+    edited = (_view(1, "a" * 100), *views[1:])
+    after = build_segments(_materialized(edited), max_bytes=300)
+
+    moved = next(segment for segment in after if segment.member_hashes == (views[2].content_hash,))
+    original = next(segment for segment in before if segment.member_hashes == (views[2].content_hash,))
+    assert moved.segment_index != original.segment_index
+    assert moved.text != original.text
+    assert moved.segment_id != original.segment_id
 
 
 def test_tool_evidence_is_attached_only_to_last_segment():

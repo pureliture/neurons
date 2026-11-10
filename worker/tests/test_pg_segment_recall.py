@@ -1,5 +1,8 @@
 import math
+from datetime import datetime, timezone
 from types import SimpleNamespace
+
+import pytest
 
 from agent_knowledge.couchdb_source.document_model import sha256_hash
 from agent_knowledge.llm_brain_core.graph_first_resolver import (
@@ -8,7 +11,15 @@ from agent_knowledge.llm_brain_core.graph_first_resolver import (
     _item,
     _session_chunk_body,
 )
-from agent_knowledge.rag_ingress.pg_recall import _group_segment_recall_hits
+from agent_knowledge.rag_ingress.pg_recall import (
+    _group_segment_recall_hits,
+    build_pg_brain_query_search_from_env,
+)
+from agent_knowledge.model_connectors import (
+    LOCAL_EMBEDDING_DIM,
+    LOCAL_EMBEDDING_MODEL,
+    LOCAL_EMBEDDING_PROFILE_ID,
+)
 
 
 def _segment_text(index: int, start: int, end: int, body: str) -> str:
@@ -134,6 +145,13 @@ def test_segment_recall_groups_sessions_applies_penalty_and_keeps_session_v1():
     assert "A left" in results[1]["summary"] and "A best" in results[1]["summary"]
     assert abs(results[1]["score"] - (0.905 - 0.01 * math.log(2))) < 1e-9
     assert results[1]["segment_turn_range"] == {"start": 1, "end": 2}
+    assert results[1]["content_hash"] == sha256_hash(results[1]["summary"])
+    assert results[1]["best_segment_content_hash"] == a1_hash
+    assert results[1]["returned_segment_ids"] == ["a0", "a1"]
+    assert results[1]["returned_segment_content_hashes"] == [
+        a0_row.content_hash,
+        a1_hash,
+    ]
     assert authority.calls.count("session-a") == 1
     assert authority.calls.count("session-b") == 1
 
@@ -193,6 +211,142 @@ def test_segment_recall_resolves_authority_once_for_both_neighbors():
     assert "middle body" in results[0]["summary"]
     assert "right body" in results[0]["summary"]
     assert authority.calls == ["session-a"]
+
+
+@pytest.mark.parametrize(
+    ("rejected_sessions", "expected_count"),
+    [((), 5), (("session-0",), None)],
+)
+def test_segment_recall_pages_past_four_long_sessions_before_candidate_exhaustion(
+    monkeypatch,
+    rejected_sessions,
+    expected_count,
+):
+    rows = {}
+    candidates = []
+    receipts = {}
+    now = datetime.now(timezone.utc)
+
+    for session_index in range(5):
+        session_id = f"session-{session_index}"
+        segment_count = 25 if session_index < 4 else 1
+        segment_ids = [f"seg-{session_index}-{index}" for index in range(segment_count)]
+        hashes = []
+        for segment_index, segment_id in enumerate(segment_ids):
+            text = _segment_text(
+                segment_index,
+                segment_index + 1,
+                segment_index + 1,
+                f"session {session_index} segment {segment_index}",
+            )
+            content_hash = sha256_hash(text)
+            hashes.append(content_hash)
+            row = SimpleNamespace(
+                chunk_id=segment_id,
+                session_id_hash=session_id,
+                project="synthetic",
+                provider="test",
+                content_markdown=text,
+                content_hash=content_hash,
+                embedding_state="ready",
+                embedding_model=LOCAL_EMBEDDING_MODEL,
+                created_at=now,
+                observed_at=now,
+            )
+            rows[segment_id] = row
+            candidates.append(
+                {
+                    "chunk_id": segment_id,
+                    "session_id_hash": session_id,
+                    "project": "synthetic",
+                    "provider": "test",
+                    "content_markdown": text,
+                    "content_hash": content_hash,
+                    "distance": float(len(candidates)) / 10_000,
+                    "embedding_state": "ready",
+                    "embedding_model": LOCAL_EMBEDDING_MODEL,
+                    "embedding_profile": LOCAL_EMBEDDING_PROFILE_ID,
+                }
+            )
+        receipts[session_id] = {
+            "representation": "segment_v1",
+            "segment_ids": segment_ids,
+            "segment_content_hashes": hashes,
+            "provider": "test",
+            "project": "synthetic",
+        }
+
+    class Store:
+        embedding_profile = None
+
+        def __init__(self):
+            self.limits = []
+
+        def search_session_chunks(self, *, limit, **_kwargs):
+            self.limits.append(limit)
+            return candidates[:limit]
+
+        def get_chunk(self, chunk_id):
+            return rows.get(chunk_id)
+
+    class Embedder:
+        model = LOCAL_EMBEDDING_MODEL
+        size = LOCAL_EMBEDDING_DIM
+
+        def embed(self, _text):
+            return [1.0] * self.size
+
+    class Authority:
+        def resolve(self, hit):
+            receipt = receipts.get(hit["session_id_hash"])
+            if (
+                hit["session_id_hash"] in rejected_sessions
+                or receipt is None
+                or hit["memory_id"] not in receipt["segment_ids"]
+                or receipt["segment_content_hashes"][
+                    receipt["segment_ids"].index(hit["memory_id"])
+                ]
+                != hit["content_hash"]
+            ):
+                return None
+            return receipt
+
+    store = Store()
+    monkeypatch.setattr(
+        "agent_knowledge.rag_ingress.pg_recall.PgVectorStore",
+        lambda **_kwargs: store,
+    )
+    monkeypatch.setattr(
+        "agent_knowledge.rag_ingress.qdrant_embedding.build_openai_embedding_provider",
+        lambda **_kwargs: Embedder(),
+    )
+    monkeypatch.setattr(
+        "agent_knowledge.couchdb_source.couchdb_http_store.CouchDBHttpSourceStore",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        "agent_knowledge.rag_ingress.pg_recall.CouchDBProjectionStateAuthorityResolver",
+        lambda *_args, **_kwargs: Authority(),
+    )
+
+    search = build_pg_brain_query_search_from_env(
+        {
+            "NEURON_LBRAIN_PGVECTOR_DSN": "synthetic",
+            "COUCHDB_URL": "http://synthetic.invalid",
+            "SESSION_MEMORY_REPRESENTATION": "segment_v1",
+        }
+    )
+    assert search is not None
+    if expected_count is None:
+        with pytest.raises(RuntimeError, match="^PG recall candidate limit exhausted$"):
+            search("synthetic query", "/project/synthetic")
+    else:
+        results = search("synthetic query", "/project/synthetic")
+        assert len(results) == expected_count
+        assert store.limits == [101, 201]
+        assert {hit["session_id_hash"] for hit in results} == {
+            f"session-{index}" for index in range(5)
+        }
 
 
 def test_segment_recall_rejects_neighbor_row_with_receipt_id_but_wrong_hash():

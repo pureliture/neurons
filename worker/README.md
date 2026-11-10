@@ -220,6 +220,8 @@ vendored (`lib/agent_knowledge/`):
 - Shadow 평가는 `uv run python -m agent_knowledge.session_memory.shadow_eval --out <path>`
   로 실행한다. CouchDB의 완전 materialized source만 읽고 PostgreSQL에는 접속하지 않으며,
   CouchDB source를 읽기 전에 local embedding profile이 아니면 실패하고 M0/S4 recall을 측정한다.
+  M0는 상위 100개 세션 행을, S4는 전역 상위 segment를 100개씩 최대 4페이지까지 사용해
+  5개 세션을 채우며, 페널티는 세션 전체 segment 수를 기준으로 한다. 후보 풀 밖 정답은 미검색(rank `None`)이다.
   표본 이외의 source 본문이나 식별 정보는 보고서에 기록하지 않는다.
 - Stale planner는 `uv run neuron-knowledge session-memory-stale-plan --retention-days 14 --limit-sessions 20000`
   로 실행한다. PG와 CouchDB를 읽기만 하고

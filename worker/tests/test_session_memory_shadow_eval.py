@@ -314,6 +314,60 @@ def test_vectorized_similarity_preserves_naive_rank():
         assert abs(naive_scores[candidate_id] - vectorized_scores[candidate_id]) < 1e-12
 
 
+def test_shadow_candidate_pools_match_recall_limits_and_leave_misses_unranked():
+    m0_scores = {
+        f"long-{session_index:03d}": 0.9 - session_index / 10_000
+        for session_index in range(shadow_eval._RECALL_CANDIDATE_LIMIT)
+    }
+    m0_scores["target"] = 0.1
+    assert (
+        shadow_eval._rank_for_target(
+            m0_scores,
+            "target",
+            candidate_limit=shadow_eval._RECALL_CANDIDATE_LIMIT,
+        )
+        is None
+    )
+
+    pageable_segments = [
+        (f"long-{session_index}", f"seg-{session_index}-{index}", 0.9 - rank / 10_000)
+        for rank, (session_index, index) in enumerate(
+            (session_index, index)
+            for session_index in range(4)
+            for index in range(25)
+        )
+    ]
+    pageable_segments.append(("fifth-session", "seg-fifth", 0.1))
+    pageable_pool = shadow_eval._segment_candidate_pool(pageable_segments)
+    assert len(pageable_pool) == len(pageable_segments)
+    assert len({session_id for session_id, _, _ in pageable_pool}) == 5
+
+    crowded_segments = [
+        (f"long-{session_index}", f"seg-{session_index}-{index:03d}", 0.9 - rank / 10_000)
+        for rank, (session_index, index) in enumerate(
+            (session_index, index)
+            for session_index in range(4)
+            for index in range(100)
+        )
+    ]
+    crowded_segments.append(("target", "seg-target", 0.1))
+    crowded_pool = shadow_eval._segment_candidate_pool(crowded_segments)
+    assert len(crowded_pool) == (
+        shadow_eval._RECALL_CANDIDATE_LIMIT
+        * shadow_eval._SEGMENT_RECALL_MAX_PAGES
+    )
+    assert "target" not in {session_id for session_id, _, _ in crowded_pool}
+    crowded_scores = {
+        session_id: max(
+            similarity
+            for candidate_session, _, similarity in crowded_pool
+            if candidate_session == session_id
+        )
+        for session_id, _, _ in crowded_pool
+    }
+    assert shadow_eval._rank_for_target(crowded_scores, "target") is None
+
+
 def test_embeddings_are_cached_by_text_hash_and_reported():
     session_ids = ["cache-a", "cache-b"]
     materials = {

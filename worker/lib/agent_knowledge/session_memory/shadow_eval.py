@@ -17,6 +17,11 @@ import numpy as np
 
 from ..couchdb_source.document_model import SourceDocType, sha256_hash
 from ..model_connectors import LOCAL_EMBEDDING_PROFILE_ID
+from ..rag_ingress.pg_recall import (
+    _RECALL_CANDIDATE_LIMIT,
+    _RECALL_LIMIT,
+    _SEGMENT_RECALL_MAX_PAGES,
+)
 from ..couchdb_source.session_memory_materializer import (
     MaterializedSessionMemory,
     materialize_session_memory,
@@ -236,12 +241,38 @@ def _materialized_without_view(
 def _rank_for_target(
     scores: Mapping[str, float],
     target_session_id_hash: str,
+    *,
+    candidate_limit: int | None = None,
+    tie_order: Mapping[str, int] | None = None,
 ) -> int | None:
-    ordered = sorted(scores, key=lambda key: (-scores[key], key))
+    ordered = sorted(
+        scores,
+        key=lambda key: (
+            -scores[key],
+            tie_order.get(key, key) if tie_order is not None else key,
+        ),
+    )
+    if candidate_limit is not None:
+        ordered = ordered[:candidate_limit]
     try:
         return ordered.index(target_session_id_hash) + 1
     except ValueError:
         return None
+
+
+def _segment_candidate_pool(
+    candidates: Sequence[tuple[str, str, float]],
+) -> list[tuple[str, str, float]]:
+    ordered = sorted(candidates, key=lambda item: (-item[2], item[1]))
+    for page in range(1, _SEGMENT_RECALL_MAX_PAGES + 1):
+        pool = ordered[: page * _RECALL_CANDIDATE_LIMIT]
+        if (
+            len({session_id for session_id, _, _ in pool}) >= _RECALL_LIMIT
+            or len(pool) == len(ordered)
+            or page == _SEGMENT_RECALL_MAX_PAGES
+        ):
+            return pool
+    return []
 
 
 def _segment_count_percentile(counts: Sequence[int], percentile: float) -> float:
@@ -359,7 +390,7 @@ def run_shadow_eval(
         for entry in sampled_by_bucket[bucket]
     ]
     original_m0_vectors: dict[str, np.ndarray] = {}
-    original_s4_vectors: dict[str, tuple[np.ndarray, int]] = {}
+    original_s4_vectors: dict[str, tuple[np.ndarray, tuple[str, ...]]] = {}
     original_metadata: dict[str, tuple[MaterializedSessionMemory, int, str]] = {}
     segment_counts: list[int] = []
     embedding_calls = 0
@@ -401,7 +432,7 @@ def run_shadow_eval(
             segment_vectors = [embed(segment.text) for segment in segments]
             original_s4_vectors[session_id_hash] = (
                 _normalized_matrix(segment_vectors),
-                len(segments),
+                tuple(segment.segment_id for segment in segments),
             )
 
     metrics: dict[str, _Metrics] = {
@@ -449,32 +480,64 @@ def run_shadow_eval(
                 leave_one_out_m0_vector @ query_vector
             )
             metrics["M0"].add(
-                rank=_rank_for_target(m0_scores, target_session_id_hash),
+                rank=_rank_for_target(
+                    m0_scores,
+                    target_session_id_hash,
+                    candidate_limit=_RECALL_CANDIDATE_LIMIT,
+                ),
                 bucket=bucket,
                 position=position,
             )
 
-            s4_similarity_by_id: dict[str, tuple[float, int]] = {}
+            s4_segment_candidates: list[tuple[str, str, float]] = []
+            s4_segment_counts: dict[str, int] = {}
             for candidate_id in candidate_ids:
-                vectors, segment_count = original_s4_vectors[candidate_id]
+                vectors, segment_ids = original_s4_vectors[candidate_id]
                 if candidate_id == target_session_id_hash:
                     vectors = leave_one_out_s4_vectors
-                    segment_count = len(leave_one_out_segments)
+                    segment_ids = tuple(
+                        segment.segment_id for segment in leave_one_out_segments
+                    )
+                segment_count = len(segment_ids)
                 if segment_count < 1 or vectors.size == 0:
                     continue
-                s4_similarity_by_id[candidate_id] = (
-                    float(np.max(vectors @ query_vector)),
-                    segment_count,
+                s4_segment_counts[candidate_id] = segment_count
+                similarities = vectors @ query_vector
+                s4_segment_candidates.extend(
+                    (
+                        candidate_id,
+                        segment_id,
+                        float(similarities[index]),
+                    )
+                    for index, segment_id in enumerate(segment_ids)
                 )
+
+            s4_candidate_pool = _segment_candidate_pool(s4_segment_candidates)
+            s4_similarity_by_id: dict[str, float] = {}
+            s4_tie_order: dict[str, int] = {}
+            for pool_rank, (candidate_id, _, similarity) in enumerate(
+                s4_candidate_pool,
+                start=1,
+            ):
+                s4_tie_order.setdefault(candidate_id, pool_rank)
+                if (
+                    candidate_id not in s4_similarity_by_id
+                    or similarity > s4_similarity_by_id[candidate_id]
+                ):
+                    s4_similarity_by_id[candidate_id] = similarity
 
             for alpha in ALPHAS:
                 scores = {
-                    candidate_id: similarity - alpha * math.log(segment_count)
-                    for candidate_id, (similarity, segment_count)
-                    in s4_similarity_by_id.items()
+                    candidate_id: similarity
+                    - alpha * math.log(s4_segment_counts[candidate_id])
+                    for candidate_id, similarity in s4_similarity_by_id.items()
                 }
                 metrics[ALPHA_KEYS[alpha]].add(
-                    rank=_rank_for_target(scores, target_session_id_hash),
+                    rank=_rank_for_target(
+                        scores,
+                        target_session_id_hash,
+                        tie_order=s4_tie_order,
+                    ),
                     bucket=bucket,
                     position=position,
                 )

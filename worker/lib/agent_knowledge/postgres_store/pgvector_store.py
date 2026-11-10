@@ -1137,6 +1137,7 @@ class PgVectorStore:
         *,
         batch_size: int = 100,
         limit_sessions: int = 20_000,
+        conn: Any | None = None,
     ) -> Iterator[tuple[str, tuple[SessionChunkMeta, ...]]]:
         """본문과 벡터 없이 세션 경계를 유지하며 메타데이터를 읽는다."""
 
@@ -1146,9 +1147,10 @@ class PgVectorStore:
             raise ValueError("limit_sessions must be positive")
         last_session_id: str | None = None
         sessions_yielded = 0
-        with self._scope() as db:
-            with db.cursor() as cur:
-                cur.execute("SET TRANSACTION READ ONLY")
+        with self._scope(conn=conn) as db:
+            if conn is None and self.connection is None:
+                with db.cursor() as cur:
+                    cur.execute("SET TRANSACTION READ ONLY")
             while sessions_yielded < limit_sessions:
                 current_batch_size = min(
                     batch_size,
