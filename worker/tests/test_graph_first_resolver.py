@@ -5,11 +5,13 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 from agent_knowledge.mcp_payload import tool_result_bytes
+from agent_knowledge.couchdb_source.document_model import sha256_hash
 
 import agent_knowledge.llm_brain_core.graph_first_resolver as resolver_module
 from agent_knowledge.llm_brain_core.graph_first_resolver import (
     GraphFirstResolver,
     _ResolveRequest,
+    _segment_excerpt,
     _shrink_card,
 )
 
@@ -86,6 +88,60 @@ class Graph:
         self.calls.append("graph")
         assert kwargs["brain_id"] == "/project/neurons"
         return SimpleNamespace(status=self.status, episodes=self.episodes)
+
+
+class SessionMemoryStore(Store):
+    def search_session_chunks(self, *_args, **_kwargs):
+        return []
+
+
+def _segment_body(index: int, *, marker: str | None = None, marker_at_end: bool = False) -> str:
+    prefix = f"한국어 segment {index} English body: "
+    filler = "한글 English 본문 "
+    body = prefix
+    target_bytes = 4096
+    if marker is None:
+        while len((body + filler).encode("utf-8")) <= target_bytes:
+            body += filler
+        body += "x" * (target_bytes - len(body.encode("utf-8")))
+        return body
+
+    content_bytes = target_bytes - len((body + marker).encode("utf-8"))
+    repetitions = max(1, content_bytes // len(filler.encode("utf-8")))
+    if marker_at_end:
+        return body + filler * repetitions + marker
+    left = filler * (repetitions // 2)
+    right = filler * (repetitions - repetitions // 2)
+    return body + left + marker + right
+
+
+def _segment_hit(index: int, body: str | None = None) -> dict:
+    segment_body = body if body is not None else _segment_body(index)
+    text = (
+        "# session-memory synthetic project\n"
+        f"session_id_hash: sha256:{index:064x}\n"
+        f"segment: {index} turns {index * 2}-{index * 2 + 1}\n"
+        "## conversation\n"
+        "## Transcript\n"
+        f"{segment_body}"
+    )
+    return {
+        "memory_id": f"segment-{index}",
+        "summary": text,
+        "content_hash": sha256_hash(text),
+        "score": 0.99 - index * 0.01,
+        "currentness": "current",
+        "segment_turn_range": {"start": index * 2, "end": index * 2 + 1},
+    }
+
+
+def _segment_resolver(hits: list[dict], *, cards=None, episodes=()):
+    return GraphFirstResolver(
+        SessionMemoryStore(cards=cards),
+        Graph(episodes),
+        lambda _query: [0.1, 0.2],
+        session_memory_search=lambda _query, _project: hits,
+    )
 
 
 def test_query_is_graph_first_then_authority_join_and_preserves_graph_order():
@@ -449,6 +505,162 @@ def test_with_evidence_marks_overflow_and_db_failure_as_explicit_tool_errors(mon
     assert tool_result_bytes(unavailable) <= 4096
 
 
+def test_segment_excerpt_centers_query_hits_without_breaking_utf8_characters():
+    marker = "violet lantern cobalt"
+    text = ("한국어🙂 앞부분 " * 120) + marker + (" 뒷부분🙂 " * 120)
+
+    excerpt = _segment_excerpt(text, 96, {"violet", "lantern", "cobalt"})
+
+    encoded = excerpt.encode("utf-8")
+    assert len(encoded) <= 96
+    assert encoded.decode("utf-8") == excerpt
+    assert marker in excerpt
+
+
+def test_segment_excerpt_uses_prefix_without_hits_and_leaves_short_text_unchanged():
+    text = "앞부분🙂한글 " + "본문🙂한글 " * 50
+
+    excerpt = _segment_excerpt(text, 28, {"absent-marker"})
+
+    assert excerpt.endswith("…")
+    assert text.startswith(excerpt[:-1])
+    assert _segment_excerpt("짧은 🙂", 32, {"absent-marker"}) == "짧은 🙂"
+
+
+def test_query_mode_fits_five_segment_cards_and_preserves_end_marker():
+    marker = "violet lantern cobalt"
+    hits = [
+        _segment_hit(
+            index,
+            _segment_body(
+                index,
+                marker=marker if index == 4 else None,
+                marker_at_end=True,
+            ) if index == 4 else _segment_body(index),
+        )
+        for index in range(5)
+    ]
+    resolver = _segment_resolver(hits)
+    request = _ResolveRequest(project="neurons", query=marker, limit=5)
+    originals = {
+        card["memory_id"]: card["summary"]
+        for card in resolver._session_chunk_cards(request)
+    }
+
+    result = resolver.resolve(project="neurons", mode="query", query=marker, limit=5)
+
+    assert "error_code" not in result
+    assert len(result["items"]) == 5
+    assert tool_result_bytes(result) <= resolver_module._MAX_BYTES
+    assert all(item["summary_truncated"] is True for item in result["items"])
+    for item in result["items"]:
+        assert item["content_hash"] == sha256_hash(item["summary"])
+        excerpt = item["summary"].removeprefix("…").removesuffix("…")
+        assert excerpt in originals[item["id"]]
+    assert any(marker in item["summary"] for item in result["items"])
+    assert all("summary_truncated" not in status for status in result["statuses"])
+
+
+def test_three_segment_cards_receive_more_summary_bytes_than_five():
+    hits = [_segment_hit(index) for index in range(5)]
+    resolver = _segment_resolver(hits)
+
+    five = resolver.resolve(
+        project="neurons",
+        mode="query",
+        query="absent-marker",
+        limit=5,
+    )
+    three = resolver.resolve(
+        project="neurons",
+        mode="query",
+        query="absent-marker",
+        limit=3,
+    )
+
+    assert len(five["items"]) == 5
+    assert len(three["items"]) == 3
+    five_summary_bytes = {
+        item["id"]: len(item["summary"].encode("utf-8"))
+        for item in five["items"]
+    }
+    assert all(
+        len(item["summary"].encode("utf-8")) > five_summary_bytes[item["id"]]
+        for item in three["items"]
+    )
+
+
+def test_segment_summary_fitting_does_not_change_graph_card_content():
+    graph_card = _card("graph-card", HASH_B)
+    graph_card["summary"] = "graph card summary remains unchanged"
+    hits = [_segment_hit(index) for index in range(5)]
+    resolver = _segment_resolver(
+        hits,
+        cards=[graph_card],
+        episodes=[_episode("graph-card", HASH_B)],
+    )
+
+    result = resolver.resolve(
+        project="neurons",
+        mode="query",
+        query="absent-marker",
+        limit=6,
+    )
+
+    assert len(result["items"]) == 6
+    assert any(
+        item.get("source") == "session_memory" and item.get("summary_truncated") is True
+        for item in result["items"]
+    )
+    graph_item = next(item for item in result["items"] if item["id"] == "graph-card")
+    assert graph_item["summary"] == graph_card["summary"]
+    assert graph_item["content_hash"] == graph_card["content_hash"]
+
+
+def test_small_segment_summary_within_budget_is_unchanged():
+    hit = _segment_hit(0, "짧은 본문")
+    resolver = _segment_resolver([hit])
+    original_card = resolver._session_chunk_cards(
+        _ResolveRequest(project="neurons", query="짧은 본문", limit=1)
+    )[0]
+
+    result = resolver.resolve(
+        project="neurons",
+        mode="query",
+        query="짧은 본문",
+        limit=1,
+    )
+
+    item = result["items"][0]
+    assert item["summary"] == original_card["summary"]
+    assert len(item["summary"].encode("utf-8")) < 256
+    assert item["content_hash"] == original_card["content_hash"] == hit["content_hash"]
+    assert "summary_truncated" not in item
+    assert tool_result_bytes(result) <= resolver_module._MAX_BYTES
+
+
+def test_segment_title_is_deduplicated_and_untrimmed_summary_keeps_original_hash():
+    hit = _segment_hit(0)
+    resolver = _segment_resolver([hit])
+    request = _ResolveRequest(project="neurons", query="absent-marker", limit=1)
+    original_card = resolver._session_chunk_cards(request)[0]
+
+    result = resolver.resolve(
+        project="neurons",
+        mode="query",
+        query="absent-marker",
+        limit=1,
+    )
+
+    item = result["items"][0]
+    assert len(item["title"]) <= 121
+    assert item["summary"] == original_card["summary"]
+    assert item["content_hash"] == original_card["content_hash"]
+    assert "summary_truncated" not in item
+    assert "title" not in result["statuses"][0]
+    assert "status" in result["statuses"][0]
+
+
 def test_evidence_revision_or_authorization_change_between_reads_fails_closed():
     store = Store(evidence={"edges": [], "root_hashes": {"mem_a": HASH_B}})
     changed = GraphFirstResolver(store).resolve(project="neurons", mode="list", response_mode="with_evidence")
@@ -603,6 +815,7 @@ def test_session_chunk_fallback_titles_differ_across_sessions():
     # 라벨은 응답 예산(_MAX_BYTES) 안에 두 카드가 모두 직렬화되는 길이로 유지한다.
     assert titles == ["모의투자 작업 S1 초기화", "모의투자 작업 S2 검증"]
     assert all("session-memory" not in status["status"] for status in result["statuses"])
+    assert all("title" in status for status in result["statuses"])
 
 
 def test_context_status_state_token_keeps_title_and_supplements_topical_chunk_fallback():

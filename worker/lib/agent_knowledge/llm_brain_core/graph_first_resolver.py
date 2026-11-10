@@ -6,11 +6,13 @@ import base64
 import hashlib
 import json
 import os
+from bisect import bisect_left, bisect_right
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Annotated, Any, Callable, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from agent_knowledge.couchdb_source.document_model import sha256_hash
 from agent_knowledge.public_safe_util import ensure_public_safe, public_safe_text
 from agent_knowledge.mcp_payload import tool_result_bytes
 from agent_knowledge.session_memory.brain_query import (
@@ -31,6 +33,8 @@ from .temporal_envelope import build_temporal_envelope
 # shrink text) activates before a client would fail to parse the payload.
 # Override via NEURON_LBRAIN_MAX_BYTES for environments that need a different cap.
 _MAX_BYTES = int(os.environ.get("NEURON_LBRAIN_MAX_BYTES", "32768"))
+_SEGMENT_TITLE_MAX_CHARS = 120
+_SEGMENT_SUMMARY_FLOOR_BYTES = 256
 _CARD_LIMIT = 100
 _EVIDENCE_ROOT_LIMIT = 20
 _EVIDENCE_MAX_DEPTH = 5
@@ -754,6 +758,13 @@ class GraphFirstResolver:
                     "",
                 )
                 segment_range = hit.get("segment_turn_range")
+                title = title_line or f"{request.project} session context"
+                if segment_range is not None:
+                    if len(title) > _SEGMENT_TITLE_MAX_CHARS:
+                        title = title[:_SEGMENT_TITLE_MAX_CHARS] + "…"
+                    title = _safe(title, _SEGMENT_TITLE_MAX_CHARS + 1)
+                else:
+                    title = _safe(title, 1000)
                 if segment_range is not None:
                     typed_payload = {"segment_turn_range": segment_range}
                 else:
@@ -765,7 +776,7 @@ class GraphFirstResolver:
                     "memory_id": f"chunk:{chunk_id[:56]}",
                     "project": request.project,
                     "card_type": "status",
-                    "title": _safe(title_line or f"{request.project} session context", 1000),
+                    "title": title,
                     "summary": summary,
                     "typed_payload": typed_payload,
                     "currentness": str(hit.get("currentness") or "current"),
@@ -936,10 +947,39 @@ class GraphFirstResolver:
                 page.pop()
                 payload = self._final_payload(request, page, metadata, offset, len(filtered), fingerprint, error_code, keyset, evidence)
         else:
+            if request.mode == "query":
+                payload = _fit_segment_summaries(
+                    page,
+                    payload,
+                    tokens=_query_tokens(request.query),
+                    rebuild_payload=lambda: self._final_payload(
+                        request,
+                        page,
+                        metadata,
+                        offset,
+                        len(filtered),
+                        fingerprint,
+                        error_code,
+                        keyset,
+                        evidence,
+                    ),
+                )
             while tool_result_bytes(payload) > _MAX_BYTES and len(page) > 1:
                 page.pop()
                 payload = self._final_payload(request, page, metadata, offset, len(filtered), fingerprint, error_code, keyset, evidence)
-            while tool_result_bytes(payload) > _MAX_BYTES and page and _shrink_card(page[0]):
+            while tool_result_bytes(payload) > _MAX_BYTES and page:
+                previous_summary = page[0].get("summary")
+                if not _shrink_card(page[0]):
+                    break
+                if (
+                    request.mode == "query"
+                    and page[0].get("source") == SOURCE_SESSION_MEMORY
+                    and isinstance(page[0].get("segment_turn_range"), Mapping)
+                    and page[0].get("summary") != previous_summary
+                ):
+                    excerpt = str(page[0].get("summary") or "")
+                    page[0]["summary_truncated"] = True
+                    page[0]["content_hash"] = sha256_hash(excerpt)
                 payload = self._final_payload(request, page, metadata, offset, len(filtered), fingerprint, error_code, keyset, evidence)
         if tool_result_bytes(payload) > _MAX_BYTES:
             return self._error_payload(request, error_code="response_budget_exceeded")
@@ -999,7 +1039,7 @@ class GraphFirstResolver:
                     card.get("source") == SOURCE_SESSION_MEMORY
                     and isinstance(card.get("segment_turn_range"), Mapping)
                 ):
-                    excluded_fields.add("summary")
+                    excluded_fields.update({"summary", "summary_truncated", "title"})
                 section_identity = {
                     key: value
                     for key, value in item.items()
@@ -1405,6 +1445,141 @@ def _safe_typed_value(val: Any) -> Any:
     return val
 
 
+def _segment_excerpt(text: str, max_bytes: int, tokens: set[str]) -> str:
+    if max_bytes <= 0:
+        return ""
+
+    offsets = [0]
+    for char in text:
+        offsets.append(offsets[-1] + len(char.encode("utf-8")))
+    if offsets[-1] <= max_bytes:
+        return text
+
+    ellipsis = "…"
+    ellipsis_bytes = len(ellipsis.encode("utf-8"))
+    if max_bytes < ellipsis_bytes:
+        end = bisect_right(offsets, max_bytes) - 1
+        return text[: max(0, end)]
+    if max_bytes < ellipsis_bytes * 2:
+        content_bytes = max_bytes - ellipsis_bytes
+        end = bisect_right(offsets, content_bytes) - 1
+        return text[: max(0, end)] + ellipsis
+
+    lowered_chars: list[str] = []
+    lowered_to_original: list[int] = []
+    for index, char in enumerate(text):
+        lowered_char = char.lower()
+        lowered_chars.append(lowered_char)
+        lowered_to_original.extend([index] * len(lowered_char))
+    lowered = "".join(lowered_chars)
+
+    hit_positions: list[int] = []
+    for token in tokens:
+        needle = token.strip().lower()
+        if not needle:
+            continue
+        search_from = 0
+        while (position := lowered.find(needle, search_from)) >= 0:
+            hit_positions.append(lowered_to_original[position])
+            search_from = position + 1
+    hit_positions.sort()
+
+    window_bytes = max_bytes - (ellipsis_bytes * 2)
+    average_bytes_per_char = offsets[-1] / max(1, len(text))
+    window_chars = max(1, int(window_bytes / average_bytes_per_char))
+    lead_chars = window_chars // 4
+
+    def end_for(start: int) -> int:
+        prefix_bytes = ellipsis_bytes if start > 0 else 0
+        content_bytes = max_bytes - prefix_bytes - ellipsis_bytes
+        end = bisect_right(offsets, offsets[start] + content_bytes) - 1
+        return min(len(text), max(start, end))
+
+    best_start = 0
+    best_end = end_for(0)
+    best_hit_count = -1
+    if hit_positions:
+        for position in hit_positions:
+            min_start = bisect_left(
+                offsets,
+                offsets[position + 1] - window_bytes,
+                0,
+                position + 1,
+            )
+            start = max(0, position - lead_chars, min_start)
+            end = end_for(start)
+            if position >= end:
+                continue
+            hit_count = bisect_left(hit_positions, end) - bisect_left(hit_positions, start)
+            if hit_count > best_hit_count:
+                best_start = start
+                best_end = end
+                best_hit_count = hit_count
+
+    prefix = ellipsis if best_start > 0 else ""
+    suffix = ellipsis if best_end < len(text) else ""
+    return prefix + text[best_start:best_end] + suffix
+
+
+def _fit_segment_summaries(
+    page: list[dict[str, Any]],
+    payload: dict[str, Any],
+    *,
+    tokens: set[str],
+    rebuild_payload: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    segment_cards = [
+        card
+        for card in page
+        if card.get("source") == SOURCE_SESSION_MEMORY
+        and isinstance(card.get("segment_turn_range"), Mapping)
+    ]
+    if not segment_cards or tool_result_bytes(payload) <= _MAX_BYTES:
+        return payload
+
+    fields = ("summary", "content_hash", "summary_truncated")
+    originals = [
+        (
+            card,
+            {key: (key in card, card.get(key)) for key in fields},
+            str(card.get("summary") or ""),
+        )
+        for card in segment_cards
+    ]
+
+    def apply_cap(cap: int) -> dict[str, Any]:
+        for card, original_fields, original_summary in originals:
+            for key, (present, value) in original_fields.items():
+                if present:
+                    card[key] = value
+                else:
+                    card.pop(key, None)
+            if len(original_summary.encode("utf-8")) <= cap:
+                continue
+            excerpt = _segment_excerpt(original_summary, cap, tokens)
+            if excerpt == original_summary:
+                continue
+            card["summary"] = excerpt
+            card["summary_truncated"] = True
+            card["content_hash"] = sha256_hash(excerpt)
+        return rebuild_payload()
+
+    longest_summary = max(len(summary.encode("utf-8")) for _, _, summary in originals)
+    low = _SEGMENT_SUMMARY_FLOOR_BYTES
+    high = longest_summary
+    best_cap: int | None = None
+    while low <= high:
+        cap = (low + high) // 2
+        candidate = apply_cap(cap)
+        if tool_result_bytes(candidate) <= _MAX_BYTES:
+            best_cap = cap
+            low = cap + 1
+        else:
+            high = cap - 1
+
+    return apply_cap(best_cap if best_cap is not None else _SEGMENT_SUMMARY_FLOOR_BYTES)
+
+
 def _item(card: Mapping[str, Any], *, include_created_at: bool = True) -> dict[str, Any]:
     item = {
         "id": _safe(card.get("memory_id") or card.get("id"), 180),
@@ -1423,6 +1598,8 @@ def _item(card: Mapping[str, Any], *, include_created_at: bool = True) -> dict[s
         item["source"] = _safe(card.get("source"), 32)
     if isinstance(card.get("segment_turn_range"), Mapping):
         item["segment_turn_range"] = _safe_typed_value(card["segment_turn_range"])
+    if card.get("summary_truncated") is True:
+        item["summary_truncated"] = True
     if card.get("temporal_conflict"):
         item["temporal_conflict"] = True
     created_at = card.get("created_at") or card.get("observed_at")
