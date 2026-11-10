@@ -10,7 +10,7 @@ from agent_knowledge.couchdb_source.document_model import projection_state_doc_i
 from agent_knowledge.model_connectors import LOCAL_EMBEDDING_PROFILE_ID
 from agent_knowledge.postgres_store.pgvector_store import (
     PgVectorStore,
-    SessionChunk,
+    SessionChunkMeta,
 )
 from agent_knowledge.session_memory import session_memory_stale_plan as stale_plan
 
@@ -23,18 +23,24 @@ def _row(
     chunk_id: str,
     *,
     observed_at: datetime | None = None,
+    created_at: datetime | None = NOW,
+    content_bytes: int | None = None,
     project: str = "synthetic-private-project",
-) -> SessionChunk:
-    return SessionChunk(
+) -> SessionChunkMeta:
+    body = f"synthetic body for {chunk_id}"
+    return SessionChunkMeta(
         chunk_id=chunk_id,
         session_id_hash=session_id_hash,
         project=project,
         provider="synthetic-provider",
-        chunk_index=0,
-        content_markdown=f"synthetic body for {chunk_id}",
         content_hash="sha256:" + "a" * 64,
-        embedding_state="ready",
-        embedding=[0.1, 0.2],
+        content_bytes=(
+            content_bytes
+            if content_bytes is not None
+            else len(body.encode("utf-8"))
+        ),
+        created_at=created_at,
+        updated_at=created_at,
         observed_at=observed_at,
     )
 
@@ -82,11 +88,14 @@ class ReadOnlySourceStore:
 
 
 class ReadOnlyPgStore:
-    def __init__(self, session_rows: list[tuple[str, tuple[SessionChunk, ...]]]) -> None:
+    def __init__(
+        self,
+        session_rows: list[tuple[str, tuple[SessionChunkMeta, ...]]],
+    ) -> None:
         self.session_rows = list(session_rows)
         self.iteration_args: tuple[int, int] | None = None
 
-    def iter_session_chunk_batches(
+    def iter_session_chunk_meta_batches(
         self,
         *,
         batch_size: int,
@@ -121,7 +130,7 @@ class RecordingAuthorityResolver:
 
 
 def _planner(
-    rows: list[tuple[str, tuple[SessionChunk, ...]]],
+    rows: list[tuple[str, tuple[SessionChunkMeta, ...]]],
     states: dict[str, dict],
     accepted_ids: dict[str, set[str]],
     *,
@@ -210,29 +219,213 @@ def test_missing_receipt_is_unresolved_and_never_a_stale_candidate():
     assert resolver.calls == []
 
 
-def test_retention_cutoff_is_strict_and_counts_only_older_stale_rows():
+def test_retention_uses_replacement_created_at_and_strict_cutoff():
     session_id_hash = "synthetic-session-retention"
     cutoff = NOW - timedelta(days=14)
-    current = _row(session_id_hash, "retained-current")
-    on_boundary = _row(
+    current = _row(
         session_id_hash,
-        "stale-on-boundary",
-        observed_at=cutoff,
+        "retained-current",
+        created_at=cutoff - timedelta(microseconds=1),
     )
-    older = _row(
+    old_observation = _row(
         session_id_hash,
-        "stale-before-boundary",
-        observed_at=cutoff - timedelta(microseconds=1),
+        "old-observation",
+        observed_at=NOW - timedelta(days=60),
+    )
+    boundary_current = _row(
+        session_id_hash,
+        "boundary-current",
+        created_at=cutoff,
     )
     report, _, _ = _planner(
-        [(session_id_hash, (current, on_boundary, older))],
+        [(session_id_hash, (current, old_observation, boundary_current))],
         {session_id_hash: _receipt_state(session_id_hash, _v3_receipt(current.chunk_id))},
         {session_id_hash: {current.chunk_id}},
     )
 
     assert report["classifications"]["stale"]["rows"] == 2
-    assert report["classifications"]["stale_past_retention"]["rows"] == 1
-    assert report["by_representation"]["v3"]["stale_past_retention"]["rows"] == 1
+    assert report["classifications"]["stale_past_retention"]["rows"] == 2
+    assert report["by_representation"]["v3"]["stale_past_retention"]["rows"] == 2
+
+
+def test_old_observed_at_does_not_override_recent_replacement_time():
+    session_id_hash = "synthetic-session-recent-replacement"
+    current = _row(
+        session_id_hash,
+        "recent-current",
+        created_at=NOW - timedelta(days=1),
+    )
+    stale = _row(
+        session_id_hash,
+        "old-stale-row",
+        observed_at=NOW - timedelta(days=60),
+        created_at=NOW - timedelta(days=60),
+    )
+    report, _, _ = _planner(
+        [(session_id_hash, (current, stale))],
+        {session_id_hash: _receipt_state(session_id_hash, _v3_receipt(current.chunk_id))},
+        {session_id_hash: {current.chunk_id}},
+    )
+
+    assert report["classifications"]["stale"]["rows"] == 1
+    assert report["classifications"]["stale_past_retention"]["rows"] == 0
+
+
+def test_replacement_created_at_equal_to_cutoff_is_not_past_retention():
+    session_id_hash = "synthetic-session-retention-boundary"
+    cutoff = NOW - timedelta(days=14)
+    current = _row(session_id_hash, "boundary-current", created_at=cutoff)
+    stale = _row(
+        session_id_hash,
+        "very-old-stale",
+        observed_at=NOW - timedelta(days=60),
+    )
+    report, _, _ = _planner(
+        [(session_id_hash, (current, stale))],
+        {session_id_hash: _receipt_state(session_id_hash, _v3_receipt(current.chunk_id))},
+        {session_id_hash: {current.chunk_id}},
+    )
+
+    assert report["classifications"]["stale_past_retention"]["rows"] == 0
+
+
+def test_unknown_replacement_created_at_is_not_past_retention():
+    session_id_hash = "synthetic-session-unknown-replacement-time"
+    current = _row(session_id_hash, "unknown-created-at", created_at=None)
+    stale = _row(
+        session_id_hash,
+        "old-stale",
+        observed_at=NOW - timedelta(days=60),
+    )
+    report, _, _ = _planner(
+        [(session_id_hash, (current, stale))],
+        {session_id_hash: _receipt_state(session_id_hash, _v3_receipt(current.chunk_id))},
+        {session_id_hash: {current.chunk_id}},
+    )
+
+    assert report["classifications"]["stale_past_retention"]["rows"] == 0
+
+
+def test_retention_uses_max_created_at_across_current_segments():
+    session_id_hash = "synthetic-session-max-created-at"
+    older_current = _row(
+        session_id_hash,
+        "older-current-segment",
+        created_at=NOW - timedelta(days=30),
+    )
+    recent_current = _row(
+        session_id_hash,
+        "recent-current-segment",
+        created_at=NOW - timedelta(days=1),
+    )
+    stale = _row(
+        session_id_hash,
+        "stale-segment",
+        observed_at=NOW - timedelta(days=60),
+        created_at=NOW - timedelta(days=60),
+    )
+    report, _, _ = _planner(
+        [(session_id_hash, (older_current, recent_current, stale))],
+        {
+            session_id_hash: _receipt_state(
+                session_id_hash,
+                _v4_receipt([older_current.chunk_id, recent_current.chunk_id]),
+            )
+        },
+        {
+            session_id_hash: {
+                older_current.chunk_id,
+                recent_current.chunk_id,
+            }
+        },
+        authority_metadata={
+            session_id_hash: {
+                "representation": "segment_v1",
+                "segment_ids": [older_current.chunk_id, recent_current.chunk_id],
+            }
+        },
+    )
+
+    assert report["classifications"]["stale_past_retention"]["rows"] == 0
+
+
+def test_other_receipts_protect_rows_even_when_active_receipt_is_unresolved():
+    session_id_hash = "synthetic-session-protected-unresolved"
+    legacy = _row(session_id_hash, "legacy-protected")
+    other_v3 = _row(session_id_hash, "other-profile-v3")
+    other_v4 = _row(session_id_hash, "other-profile-v4")
+    unresolved = _row(session_id_hash, "unresolved-row")
+    state = _receipt_state(
+        session_id_hash,
+        _v3_receipt("active-receipt-row-missing"),
+    )
+    receipts = state["backend_receipts"]
+    receipts["postgres_pgvector"] = {
+        "session_memory_knowledge_id": legacy.chunk_id,
+    }
+    local_receipts = receipts["postgres_pgvector_local"]
+    local_receipts["other-profile-v3"] = _v3_receipt(other_v3.chunk_id)
+    local_receipts["other-profile-v4"] = _v4_receipt([other_v4.chunk_id])
+    report, resolver, _ = _planner(
+        [
+            (
+                session_id_hash,
+                (legacy, other_v3, other_v4, unresolved),
+            )
+        ],
+        {session_id_hash: state},
+        {},
+    )
+
+    assert report["classifications"]["protected_other_receipt"]["rows"] == 3
+    assert report["by_representation"]["v3"]["protected_other_receipt"]["rows"] == 3
+    assert report["classifications"]["unresolved"]["rows"] == 1
+    assert report["failure_reasons"]["current_row_missing"]["rows"] == 1
+    assert resolver.calls == []
+
+
+def test_current_receipt_takes_priority_over_protection():
+    session_id_hash = "synthetic-session-current-priority"
+    current = _row(session_id_hash, "current-also-legacy-protected")
+    state = _receipt_state(
+        session_id_hash,
+        _v3_receipt(current.chunk_id),
+    )
+    state["backend_receipts"]["postgres_pgvector"] = {
+        "session_memory_knowledge_id": current.chunk_id,
+    }
+    report, _, _ = _planner(
+        [(session_id_hash, (current,))],
+        {session_id_hash: state},
+        {session_id_hash: {current.chunk_id}},
+    )
+
+    assert report["classifications"]["current"]["rows"] == 1
+    assert report["classifications"]["protected_other_receipt"]["rows"] == 0
+
+
+def test_empty_authorized_segment_ids_fail_closed_without_keyerror():
+    session_id_hash = "synthetic-session-empty-authorized"
+    segment = _row(session_id_hash, "segment-current")
+    report, _, _ = _planner(
+        [(session_id_hash, (segment,))],
+        {
+            session_id_hash: _receipt_state(
+                session_id_hash,
+                _v4_receipt([segment.chunk_id]),
+            )
+        },
+        {session_id_hash: {segment.chunk_id}},
+        authority_metadata={
+            session_id_hash: {
+                "representation": "segment_v1",
+                "segment_ids": [],
+            }
+        },
+    )
+
+    assert report["classifications"]["unresolved"]["rows"] == 1
+    assert report["failure_reasons"]["authority_rejected"]["rows"] == 1
 
 
 def test_report_contains_no_raw_ids_or_project_names_and_performs_no_writes():
@@ -279,6 +472,9 @@ class _BatchCursor:
 
     def execute(self, query: str, params=()) -> None:
         self.connection.queries.append(query)
+        if query.strip().upper() == "SET TRANSACTION READ ONLY":
+            self.rows = []
+            return
         if "SELECT DISTINCT session_id_hash" in query:
             if "WHERE session_id_hash > %s" in query:
                 last_session_id, limit = params
@@ -321,14 +517,8 @@ def _pg_row(session_id_hash: str, chunk_id: str, index: int) -> dict:
         "session_id_hash": session_id_hash,
         "project": "batch-project",
         "provider": "synthetic-provider",
-        "chunk_index": index,
-        "content_markdown": "body",
-        "token_count": 1,
         "content_hash": "sha256:" + "b" * 64,
-        "embedding_model": "local-model",
-        "embedding_state": "ready",
-        "embedding_revision": 1,
-        "embedding": None,
+        "content_bytes": 4 + index,
         "created_at": NOW,
         "updated_at": NOW,
         "observed_at": NOW,
@@ -348,11 +538,20 @@ def test_pg_chunk_reader_keeps_sessions_whole_and_obeys_session_limit():
     )
     store = PgVectorStore(connection=connection)
 
-    batches = list(store.iter_session_chunk_batches(batch_size=2, limit_sessions=2))
+    batches = list(
+        store.iter_session_chunk_meta_batches(batch_size=2, limit_sessions=2)
+    )
 
     assert [(session_id, len(rows)) for session_id, rows in batches] == [
         ("session-a", 2),
         ("session-b", 1),
     ]
     assert connection.queries
-    assert all(query.lstrip().startswith("SELECT") for query in connection.queries)
+    assert connection.queries[0].strip().upper() == "SET TRANSACTION READ ONLY"
+    select_queries = connection.queries[1:]
+    assert all(query.lstrip().startswith("SELECT") for query in select_queries)
+    row_query = select_queries[1].lower()
+    assert "octet_length(content_markdown) as content_bytes" in row_query
+    assert "select content_markdown" not in row_query
+    assert "embedding" not in row_query
+    assert batches[0][1][0].content_bytes == 4

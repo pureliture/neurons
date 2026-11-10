@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -12,7 +13,10 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from ..couchdb_source.document_model import SourceDocType, sha256_hash
+from ..model_connectors import LOCAL_EMBEDDING_PROFILE_ID
 from ..couchdb_source.session_memory_materializer import (
     MaterializedSessionMemory,
     materialize_session_memory,
@@ -75,6 +79,7 @@ _ALLOWED_KEYS = frozenset(
         "p90",
         "max",
         "embedding_calls",
+        "embedding_cache_hits",
         "elapsed_seconds",
         *BUCKETS,
         *POSITIONS,
@@ -134,6 +139,27 @@ def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
     if left_norm == 0 or right_norm == 0:
         return 0.0
     return dot / (left_norm * right_norm)
+
+
+def _normalize_vector(vector: Sequence[float]) -> np.ndarray:
+    values = np.asarray(vector, dtype=np.float64)
+    if values.ndim != 1 or values.size == 0:
+        raise ValueError("embedding provider returned an invalid vector")
+    norm = float(np.linalg.norm(values))
+    if norm:
+        values = values / norm
+    return values
+
+
+def _normalized_matrix(vectors: Sequence[Sequence[float]]) -> np.ndarray:
+    if not vectors:
+        return np.empty((0, 0), dtype=np.float64)
+    matrix = np.asarray(vectors, dtype=np.float64)
+    if matrix.ndim != 2 or matrix.shape[1] == 0:
+        raise ValueError("embedding provider returned invalid vectors")
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    np.divide(matrix, norms, out=matrix, where=norms != 0)
+    return matrix
 
 
 def _bucket_for_size(size_bytes: int) -> str:
@@ -332,18 +358,27 @@ def run_shadow_eval(
         for bucket in BUCKETS
         for entry in sampled_by_bucket[bucket]
     ]
-    original_m0_vectors: dict[str, list[float]] = {}
-    original_s4_vectors: dict[str, tuple[list[list[float]], int]] = {}
+    original_m0_vectors: dict[str, np.ndarray] = {}
+    original_s4_vectors: dict[str, tuple[np.ndarray, int]] = {}
     original_metadata: dict[str, tuple[MaterializedSessionMemory, int, str]] = {}
     segment_counts: list[int] = []
     embedding_calls = 0
+    embedding_cache_hits = 0
+    embedding_cache: dict[bytes, np.ndarray] = {}
 
-    def embed(text: str) -> list[float]:
-        nonlocal embedding_calls
+    def embed(text: str) -> np.ndarray:
+        nonlocal embedding_calls, embedding_cache_hits
+        cache_key = hashlib.sha256(text.encode("utf-8")).digest()
+        cached = embedding_cache.get(cache_key)
+        if cached is not None:
+            embedding_cache_hits += 1
+            return cached
         embedding_calls += 1
-        vector = [float(value) for value in embedder.embed(text)]
-        if not vector or any(not math.isfinite(value) for value in vector):
+        values = [float(value) for value in embedder.embed(text)]
+        if not values or any(not math.isfinite(value) for value in values):
             raise ValueError("embedding provider returned an invalid vector")
+        vector = _normalize_vector(values)
+        embedding_cache[cache_key] = vector
         return vector
 
     for bucket in BUCKETS:
@@ -360,9 +395,12 @@ def run_shadow_eval(
                 size_bytes,
                 bucket,
             )
-            original_m0_vectors[session_id_hash] = embed(materialized.body)
+            original_m0_vectors[session_id_hash] = embed(
+                _render_m0_body(materialized, materialized.conversation_views)
+            )
+            segment_vectors = [embed(segment.text) for segment in segments]
             original_s4_vectors[session_id_hash] = (
-                [embed(segment.text) for segment in segments],
+                _normalized_matrix(segment_vectors),
                 len(segments),
             )
 
@@ -372,6 +410,11 @@ def run_shadow_eval(
     }
     query_count = 0
     candidate_ids = sorted(original_metadata)
+    candidate_m0_matrix = (
+        np.stack([original_m0_vectors[candidate_id] for candidate_id in candidate_ids])
+        if candidate_ids
+        else np.empty((0, 0), dtype=np.float64)
+    )
     for target_session_id_hash in candidate_ids:
         materialized, _, bucket = original_metadata[target_session_id_hash]
         for view_index, position in _positioned_views(materialized.conversation_views):
@@ -393,43 +436,43 @@ def run_shadow_eval(
                 if leave_one_out.conversation_views
                 else ()
             )
-            leave_one_out_s4_vectors = [
+            leave_one_out_s4_vectors = _normalized_matrix([
                 embed(segment.text) for segment in leave_one_out_segments
-            ]
+            ])
 
+            m0_similarity_vector = candidate_m0_matrix @ query_vector
             m0_scores = {
-                candidate_id: _cosine(
-                    query_vector,
-                    (
-                        leave_one_out_m0_vector
-                        if candidate_id == target_session_id_hash
-                        else original_m0_vectors[candidate_id]
-                    ),
-                )
-                for candidate_id in candidate_ids
+                candidate_id: float(m0_similarity_vector[index])
+                for index, candidate_id in enumerate(candidate_ids)
             }
+            m0_scores[target_session_id_hash] = float(
+                leave_one_out_m0_vector @ query_vector
+            )
             metrics["M0"].add(
                 rank=_rank_for_target(m0_scores, target_session_id_hash),
                 bucket=bucket,
                 position=position,
             )
 
+            s4_similarity_by_id: dict[str, tuple[float, int]] = {}
+            for candidate_id in candidate_ids:
+                vectors, segment_count = original_s4_vectors[candidate_id]
+                if candidate_id == target_session_id_hash:
+                    vectors = leave_one_out_s4_vectors
+                    segment_count = len(leave_one_out_segments)
+                if segment_count < 1 or vectors.size == 0:
+                    continue
+                s4_similarity_by_id[candidate_id] = (
+                    float(np.max(vectors @ query_vector)),
+                    segment_count,
+                )
+
             for alpha in ALPHAS:
-                scores: dict[str, float] = {}
-                for candidate_id in candidate_ids:
-                    if candidate_id == target_session_id_hash:
-                        vectors = leave_one_out_s4_vectors
-                        segment_count = len(leave_one_out_segments)
-                    else:
-                        vectors, segment_count = original_s4_vectors[candidate_id]
-                    if not vectors or segment_count < 1:
-                        continue
-                    max_similarity = max(
-                        _cosine(query_vector, vector) for vector in vectors
-                    )
-                    scores[candidate_id] = max_similarity - alpha * math.log(
-                        segment_count
-                    )
+                scores = {
+                    candidate_id: similarity - alpha * math.log(segment_count)
+                    for candidate_id, (similarity, segment_count)
+                    in s4_similarity_by_id.items()
+                }
                 metrics[ALPHA_KEYS[alpha]].add(
                     rank=_rank_for_target(scores, target_session_id_hash),
                     bucket=bucket,
@@ -473,6 +516,7 @@ def run_shadow_eval(
         },
         "segment_counts": segment_report,
         "embedding_calls": embedding_calls,
+        "embedding_cache_hits": embedding_cache_hits,
         "elapsed_seconds": time.monotonic() - started,
     }
     _validate_safe_report(report)
@@ -531,10 +575,21 @@ def main(
     provider = embedder
     owns_provider = provider is None
     try:
+        try:
+            if provider is None:
+                provider = _build_embedding_provider(env)
+            from ..rag_ingress.pg_backfill import validated_pg_embedding_profile
+
+            if (
+                validated_pg_embedding_profile(provider)
+                != LOCAL_EMBEDDING_PROFILE_ID
+            ):
+                raise ValueError("non-local embedding profile")
+        except Exception:
+            print("shadow_eval_requires_local_profile", file=sys.stderr)
+            return 1
         if source_store is None:
             source_store = _build_source_store(env)
-        if provider is None:
-            provider = _build_embedding_provider(env)
         report = run_shadow_eval(
             store=source_store,
             embedder=provider,
@@ -557,6 +612,7 @@ def main(
                     "sampled_sessions": report["sampling"]["sampled_sessions"],
                     "query_count": report["query_count"],
                     "embedding_calls": report["embedding_calls"],
+                    "embedding_cache_hits": report["embedding_cache_hits"],
                 },
                 sort_keys=True,
                 separators=(",", ":"),

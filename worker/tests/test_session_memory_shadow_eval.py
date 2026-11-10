@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import hashlib
+import math
+from dataclasses import replace
 from types import SimpleNamespace
 
 from agent_knowledge.couchdb_source.document_model import sha256_hash
 from agent_knowledge.couchdb_source.session_memory_materializer import (
     MaterializedSessionMemory,
+)
+from agent_knowledge.model_connectors import (
+    DEFAULT_EMBEDDING_DIM,
+    DEFAULT_EMBEDDING_MODEL,
+    LOCAL_EMBEDDING_DIM,
+    LOCAL_EMBEDDING_MODEL,
 )
 from agent_knowledge.session_memory.chunk_overlap import ChunkView
 from agent_knowledge.session_memory import shadow_eval
@@ -64,8 +72,10 @@ def _materialized(
 class ReadOnlyFakeStore:
     def __init__(self, session_ids: list[str]) -> None:
         self.session_ids = list(session_ids)
+        self.iter_calls = 0
 
     def iter_by_type(self, doc_type: str, *, fields, limit: int):
+        self.iter_calls += 1
         assert doc_type == "transcript_session"
         for session_id_hash in self.session_ids[:limit]:
             yield {"session_id_hash": session_id_hash}
@@ -81,6 +91,9 @@ class ReadOnlyFakeStore:
 
 
 class DeterministicEmbedder:
+    model = LOCAL_EMBEDDING_MODEL
+    size = LOCAL_EMBEDDING_DIM
+
     def __init__(self) -> None:
         self.calls: list[str] = []
 
@@ -153,6 +166,26 @@ def test_leave_one_out_removes_query_view_from_m0_body_and_segments():
             )
         )
         assert query_text not in segment_text
+
+
+def test_original_m0_embedding_uses_the_same_rendered_format_as_leave_one_out():
+    session_id_hash = "session-m0-format"
+    materialized = replace(
+        _materialized(session_id_hash),
+        body="materializer body format differs",
+    )
+    expected_body = shadow_eval._render_m0_body(
+        materialized,
+        materialized.conversation_views,
+    )
+
+    _, embedder, _ = _run(
+        [session_id_hash],
+        {session_id_hash: materialized},
+    )
+
+    assert expected_body in embedder.calls
+    assert materialized.body not in embedder.calls
 
 
 def test_output_whitelist_violation_exits_two_without_writing_report(
@@ -228,3 +261,70 @@ def test_bucket_sampling_and_oversize_exclusion_counts():
         for key, value in report["sampling"]["buckets"].items()
     } == {key: 1 for key in shadow_eval.BUCKETS}
     assert report["sampling"]["buckets"]["lt_16k"]["eligible"] == 1
+
+
+def test_gemini_profile_is_rejected_before_couchdb_reads(tmp_path, capsys):
+    class GeminiEmbedder:
+        model = DEFAULT_EMBEDDING_MODEL
+        size = DEFAULT_EMBEDDING_DIM
+
+        def embed(self, _text: str) -> list[float]:
+            raise AssertionError("Gemini embedding must not be called")
+
+    store = ReadOnlyFakeStore(["should-not-be-read"])
+    result = shadow_eval.main(
+        ["--out", str(tmp_path / "profile-rejected.json")],
+        store=store,
+        embedder=GeminiEmbedder(),
+    )
+    captured = capsys.readouterr()
+
+    assert result == 1
+    assert store.iter_calls == 0
+    assert captured.out == ""
+    assert captured.err == "shadow_eval_requires_local_profile\n"
+
+
+def test_vectorized_similarity_preserves_naive_rank():
+    query = [0.8, -0.3, 0.7]
+    candidate_segments = {
+        "target": [[0.7, -0.2, 0.6], [0.1, 0.9, -0.4]],
+        "second": [[-0.2, 0.6, 0.7]],
+        "third": [[0.8, 0.1, 0.2], [-0.7, -0.5, 0.3]],
+    }
+    alpha = 0.02
+    naive_scores = {
+        candidate_id: max(shadow_eval._cosine(query, vector) for vector in vectors)
+        - alpha * math.log(len(vectors))
+        for candidate_id, vectors in candidate_segments.items()
+    }
+    normalized_query = shadow_eval._normalize_vector(query)
+    vectorized_scores = {
+        candidate_id: float(
+            (shadow_eval._normalized_matrix(vectors) @ normalized_query).max()
+        )
+        - alpha * math.log(len(vectors))
+        for candidate_id, vectors in candidate_segments.items()
+    }
+
+    assert shadow_eval._rank_for_target(naive_scores, "target") == (
+        shadow_eval._rank_for_target(vectorized_scores, "target")
+    )
+    for candidate_id in naive_scores:
+        assert abs(naive_scores[candidate_id] - vectorized_scores[candidate_id]) < 1e-12
+
+
+def test_embeddings_are_cached_by_text_hash_and_reported():
+    session_ids = ["cache-a", "cache-b"]
+    materials = {
+        session_id: _materialized(
+            session_id,
+            ("shared turn", "shared turn", "shared turn"),
+        )
+        for session_id in session_ids
+    }
+
+    report, embedder, _ = _run(session_ids, materials)
+
+    assert report["embedding_calls"] == len(embedder.calls)
+    assert report["embedding_cache_hits"] > 0

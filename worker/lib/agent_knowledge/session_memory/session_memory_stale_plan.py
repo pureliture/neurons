@@ -19,6 +19,7 @@ DEFAULT_LIMIT_SESSIONS = 20_000
 DEFAULT_BATCH_SESSIONS = 100
 CLASSIFICATIONS = (
     "current",
+    "protected_other_receipt",
     "stale",
     "unresolved",
     "stale_past_retention",
@@ -39,7 +40,7 @@ def _empty_counts() -> dict[str, int]:
     return {"rows": 0, "bytes": 0}
 
 
-def _parse_observed_at(value: Any) -> datetime | None:
+def _parse_datetime(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         parsed = value
     elif isinstance(value, str):
@@ -57,6 +58,44 @@ def _parse_observed_at(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _protected_receipt_ids(
+    state_document: dict[str, Any] | None,
+    *,
+    active_profile: str,
+) -> set[str]:
+    if not isinstance(state_document, dict):
+        return set()
+    receipts = state_document.get("backend_receipts")
+    if not isinstance(receipts, dict):
+        return set()
+    protected: set[str] = set()
+    legacy_receipt = receipts.get("postgres_pgvector")
+    if isinstance(legacy_receipt, dict):
+        legacy_id = legacy_receipt.get("session_memory_knowledge_id")
+        if isinstance(legacy_id, str) and legacy_id:
+            protected.add(legacy_id)
+    local_receipts = receipts.get("postgres_pgvector_local")
+    if not isinstance(local_receipts, dict):
+        return protected
+    for profile, receipt in local_receipts.items():
+        if profile == active_profile or not isinstance(receipt, dict):
+            continue
+        version = receipt.get("receipt_version")
+        if version == 3:
+            chunk_id = receipt.get("session_memory_knowledge_id")
+            if isinstance(chunk_id, str) and chunk_id:
+                protected.add(chunk_id)
+        elif version == 4:
+            segment_ids = receipt.get("segment_ids")
+            if isinstance(segment_ids, list):
+                protected.update(
+                    chunk_id
+                    for chunk_id in segment_ids
+                    if isinstance(chunk_id, str) and chunk_id
+                )
+    return protected
 
 
 def _receipt_from_state(
@@ -179,7 +218,7 @@ class SessionMemoryStalePlanner:
         projects: set[str] = set()
         sessions_scanned = 0
 
-        for session_id_hash, rows in self._pg_store.iter_session_chunk_batches(
+        for session_id_hash, rows in self._pg_store.iter_session_chunk_meta_batches(
             batch_size=self._batch_sessions,
             limit_sessions=self._limit_sessions,
         ):
@@ -200,6 +239,10 @@ class SessionMemoryStalePlanner:
             receipt, representation, receipt_reason = _receipt_from_state(
                 state_document,
                 embedding_profile=self._embedding_profile,
+            )
+            protected_ids = _protected_receipt_ids(
+                state_document,
+                active_profile=self._embedding_profile,
             )
             reason = "authority_error" if read_failed else receipt_reason
             authorized_ids: set[str] = set()
@@ -232,6 +275,7 @@ class SessionMemoryStalePlanner:
                                 authorized.get("representation") != "segment_v1"
                                 or not isinstance(resolved_ids, list)
                                 or any(not isinstance(value, str) for value in resolved_ids)
+                                or not resolved_ids
                                 or authority_row.chunk_id not in resolved_ids
                             ):
                                 reason = "authority_rejected"
@@ -244,26 +288,36 @@ class SessionMemoryStalePlanner:
                             authorized_ids = {authority_row.chunk_id}
                             reason = ""
 
-            if not authorized_ids:
-                failure_reasons[reason]["sessions"] += 1
-                failure_reasons[reason]["rows"] += len(rows)
+            if not authorized_ids and not reason:
+                reason = "authority_rejected"
+            replacement_times = [
+                parsed
+                for row in rows
+                if row.chunk_id in authorized_ids
+                if (parsed := _parse_datetime(row.created_at)) is not None
+            ]
+            replacement_at = max(replacement_times, default=None)
+            unresolved_rows = 0
             for row in rows:
                 row_classification = (
-                    "unresolved"
-                    if not authorized_ids
-                    else "current"
+                    "current"
                     if row.chunk_id in authorized_ids
+                    else "protected_other_receipt"
+                    if row.chunk_id in protected_ids
+                    else "unresolved"
+                    if not authorized_ids
                     else "stale"
                 )
-                row_bytes = len(row.content_markdown.encode("utf-8"))
+                row_bytes = row.content_bytes
                 counts[row_classification]["rows"] += 1
                 counts[row_classification]["bytes"] += row_bytes
                 by_representation[representation][row_classification]["rows"] += 1
                 by_representation[representation][row_classification]["bytes"] += row_bytes
+                if row_classification == "unresolved":
+                    unresolved_rows += 1
                 if row_classification == "stale":
                     stale_sessions.add(session_id_hash)
-                    observed_at = _parse_observed_at(row.observed_at)
-                    if observed_at is not None and observed_at < retention_cutoff:
+                    if replacement_at is not None and replacement_at < retention_cutoff:
                         counts["stale_past_retention"]["rows"] += 1
                         counts["stale_past_retention"]["bytes"] += row_bytes
                         by_representation[representation]["stale_past_retention"][
@@ -272,6 +326,9 @@ class SessionMemoryStalePlanner:
                         by_representation[representation]["stale_past_retention"][
                             "bytes"
                         ] += row_bytes
+            if unresolved_rows:
+                failure_reasons[reason]["sessions"] += 1
+                failure_reasons[reason]["rows"] += unresolved_rows
 
         return {
             "schema_version": SCHEMA_VERSION,
