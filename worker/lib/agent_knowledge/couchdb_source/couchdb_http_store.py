@@ -750,16 +750,26 @@ class CouchDBHttpSourceStore:
             selector["doc_type"] = doc_type
         docs: list[dict] = []
         bookmark = ""
+        current_page_size = max(1, page_size)
         while True:
-            body: dict = {"selector": selector, "limit": max(1, page_size)}
+            body: dict = {"selector": selector, "limit": current_page_size}
             if bookmark:
                 body["bookmark"] = bookmark
-            status, payload = self._request(
-                "POST",
-                f"/{self.db}/_find",
-                json_body=body,
-                max_response_bytes=max_response_bytes,
-            )
+            try:
+                status, payload = self._request(
+                    "POST",
+                    f"/{self.db}/_find",
+                    json_body=body,
+                    max_response_bytes=max_response_bytes,
+                )
+            except CouchDBResponseTooLarge:
+                # Keep the same bookmark and retry with fewer rows. Even a
+                # single document above the byte cap fails closed before JSON
+                # decoding rather than allocating an unbounded page.
+                if current_page_size <= 1:
+                    raise
+                current_page_size = max(1, current_page_size // 2)
+                continue
             if status != 200:
                 raise CouchDBError(f"_find failed: HTTP {status}")
             page = payload.get("docs", [])

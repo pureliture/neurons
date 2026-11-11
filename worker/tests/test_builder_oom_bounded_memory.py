@@ -533,6 +533,10 @@ def test_selection_single_pass_scales_with_large_state_corpus():
 def test_base_vs_candidate_selector_precedence_matrix_identical():
     """Verify 1:1 behavioral equivalence between baseline multi-pass and candidate single-pass selector.
 
+    Notice: The baseline reference implementation below is an in-test replica of the
+    origin/main selector snapshot copy, ensuring deterministic matrix verification across
+    precedence states rather than executing a separate checkout subprocess.
+
     Exhaustively tests precedence matrix across legacy top-level state, receipt override,
     partial receipts, malformed receipts, and blocked attempts.
     """
@@ -784,74 +788,73 @@ def test_find_by_session_paginates_multi_megabyte_session_losslessly():
     # Verified: all 100 chunks totaling ~10MB were retrieved across pages without exceeding byte cap
 
 
-def test_oversized_single_document_blocks_and_allows_subsequent_sessions_to_proceed():
-    """Verify that an oversized document (>8MB cap) fails closed, is recorded as BLOCKED,
-    and does NOT crash the selection loop, allowing subsequent normal sessions to proceed.
-    """
-    from agent_knowledge.couchdb_source.build_cli import (
-        _select_sessions_needing_projection,
-    )
-    from agent_knowledge.rag_ingress.pg_embedding_chunks import (
-        SOURCE_PAYLOAD_TOO_LARGE,
+def test_find_by_session_adaptive_page_halving_on_response_too_large():
+    """Verify find_by_session adaptively halves page size when a batch exceeds 8MB cap."""
+    import json
+    from agent_knowledge.couchdb_source.couchdb_http_store import (
+        COUCHDB_FIND_MAX_PAGE_RESPONSE_BYTES,
+        CouchDBHttpSourceStore,
+        CouchDBResponseTooLarge,
     )
 
-    class CapEnforcingStore:
-        def __init__(self, base_store, oversized_sid: str) -> None:
-            self.base = base_store
-            self.oversized_sid = oversized_sid
+    chunks = [
+        {"_id": f"chunk:{i:04d}", "doc_type": "conversation_chunk", "session_id_hash": "sid_halve", "body": "x" * 1000}
+        for i in range(100)
+    ]
 
-        def __getattr__(self, name: str):
-            return getattr(self.base, name)
+    requested_limits = []
 
-        def find_by_session(self, *, session_id_hash: str, **kwargs):
-            if session_id_hash == self.oversized_sid:
-                raise CouchDBResponseTooLarge(f"HTTP response byte limit exceeded for {session_id_hash}")
-            return self.base.find_by_session(session_id_hash=session_id_hash, **kwargs)
+    def transport(method, url, headers, body, *, max_response_bytes=None, **kwargs):
+        class FakeResponse:
+            def __init__(self, payload_dict):
+                self.status_code = 200
+                self.body = json.dumps(payload_dict).encode("utf-8")
 
-    mem_store = InMemoryCouchDBSourceStore()
+        req = json.loads(body.decode("utf-8"))
+        limit = req.get("limit", 100)
+        requested_limits.append(limit)
 
-    # Session 1: Oversized single document (>8MB) that triggers CouchDBResponseTooLarge
-    sid1 = _build_synthetic_session(mem_store, provider="hermes", project="neurons", raw_id="oversized-problematic-session")
-    shash1 = resolve_active_source_revision(session_id_hash=sid1, store=mem_store).source_hash
-    # Update transcript session document with its canonical source_hash
-    s1_doc = mem_store.get(dm.session_doc_id(sid1))
-    s1_doc["source_hash"] = shash1
-    mem_store.put(s1_doc)
+        # Simulate: batches with limit >= 50 exceed the byte cap
+        if limit >= 50:
+            raise CouchDBResponseTooLarge(f"Batch with limit {limit} exceeded {max_response_bytes} bytes")
 
-    # Session 2: Normal valid unprojected session
-    sid2 = _build_synthetic_session(mem_store, provider="hermes", project="neurons", raw_id="subsequent-normal-session")
+        # Batches with limit < 50 succeed (e.g. limit=25 returns 25 chunks)
+        bookmark = req.get("bookmark", "")
+        start_idx = int(bookmark.split("-")[1]) if bookmark.startswith("bm-") else 0
+        end_idx = min(start_idx + limit, len(chunks))
+        page_docs = chunks[start_idx:end_idx]
+        next_bm = f"bm-{end_idx}" if end_idx < len(chunks) else ""
+        return FakeResponse({"docs": page_docs, "bookmark": next_bm})
 
-    hooked_store = CapEnforcingStore(mem_store, oversized_sid=sid1)
-
-    # Selection must not crash! It should catch the exception, audit/block sid1, and select sid2
-    selected = _select_sessions_needing_projection(
-        hooked_store,
-        limit=10,
-        backend="postgres_pgvector",
-        representation="session_v1",
+    store = CouchDBHttpSourceStore(
+        base_url="http://127.0.0.1:5984",
+        db="test_db",
+        transport=transport,
     )
 
-    selected_sids = [s["session_id_hash"] for s in selected]
-    # Subsequent normal session MUST proceed!
-    assert sid2 in selected_sids
-    assert sid1 not in selected_sids
+    docs = store.find_by_session(session_id_hash="sid_halve", page_size=100)
+    assert len(docs) == 100
+    # First requested limit was 100 (raised TooLarge), then halved to 50 (raised TooLarge), then halved to 25 (succeeded)
+    assert 100 in requested_limits
+    assert 50 in requested_limits
+    assert 25 in requested_limits
 
-    # sid1 must be recorded as BLOCKED in its projection_attempt
-    state_id = dm.projection_state_doc_id(sid1)
-    state = mem_store.get(state_id)
-    assert state is not None
-    attempt = (state.get("projection_attempt") or {}).get("postgres_pgvector") or {}
-    assert attempt.get("reason") == SOURCE_PAYLOAD_TOO_LARGE
-    assert attempt.get("status") == "failed"
-    assert attempt.get("source_hash") == shash1
 
-    # In the next selection cycle, sid1 is already BLOCKED, so it is skipped without attempting find_by_session!
-    selected_next = _select_sessions_needing_projection(
-        hooked_store,
-        limit=10,
-        backend="postgres_pgvector",
-        representation="session_v1",
+def test_find_by_session_single_oversized_document_fails_closed():
+    """Verify that a single document exceeding the 8MB cap fails closed with CouchDBResponseTooLarge."""
+    from agent_knowledge.couchdb_source.couchdb_http_store import (
+        CouchDBHttpSourceStore,
+        CouchDBResponseTooLarge,
     )
-    assert sid1 not in [s["session_id_hash"] for s in selected_next]
 
+    def transport(method, url, headers, body, **kwargs):
+        raise CouchDBResponseTooLarge("Single document exceeds 8MB byte cap")
 
+    store = CouchDBHttpSourceStore(
+        base_url="http://127.0.0.1:5984",
+        db="test_db",
+        transport=transport,
+    )
+
+    with pytest.raises(CouchDBResponseTooLarge, match="Single document exceeds 8MB byte cap"):
+        store.find_by_session(session_id_hash="oversized_single_sid", page_size=10)

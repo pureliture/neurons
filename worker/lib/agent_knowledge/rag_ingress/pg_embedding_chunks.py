@@ -25,14 +25,8 @@ PG_INPUT_POLICY_VERSION = 1
 # Deterministic source-scope conflicts (see couchdb_source.hermes_project_scope)
 # are terminal for the same reason: retrying the same source cannot succeed.
 INCONSISTENT_HERMES_PROJECT_SCOPE = "inconsistent_hermes_project_scope"
-SOURCE_PAYLOAD_TOO_LARGE = "source_payload_too_large"
 TERMINAL_INPUT_REASONS = frozenset(
-    {
-        "secret_egress_policy",
-        INVALID_TEXT_NUL,
-        INCONSISTENT_HERMES_PROJECT_SCOPE,
-        SOURCE_PAYLOAD_TOO_LARGE,
-    }
+    {"secret_egress_policy", INVALID_TEXT_NUL, INCONSISTENT_HERMES_PROJECT_SCOPE}
 )
 
 
