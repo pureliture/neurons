@@ -511,21 +511,10 @@ def _evaluate_session_change(
     )
     from .source_revision import resolve_active_source_revision_from_snapshot
 
-    try:
-        documents = store.find_by_session(session_id_hash=session_id_hash)
-        resolved = resolve_active_source_revision_from_snapshot(
-            session_id_hash=session_id_hash, documents=documents
-        )
-    except Exception as exc:
-        _handle_unresolvable_session_in_selection(
-            store=store,
-            session_id_hash=session_id_hash,
-            session_doc={"session_id_hash": session_id_hash},
-            backend="postgres_pgvector",
-            embedding_profile=embedding_profile,
-            exc=exc,
-        )
-        return False, None
+    documents = store.find_by_session(session_id_hash=session_id_hash)
+    resolved = resolve_active_source_revision_from_snapshot(
+        session_id_hash=session_id_hash, documents=documents
+    )
     state_id = projection_state_doc_id(session_id_hash)
     state = store.get(state_id)
     merged: dict = {}
@@ -875,7 +864,7 @@ def _select_sessions_for_cycle(
                 embedding_profile=embedding_profile,
                 representation=representation,
             )
-        except CouchDBResponseTooLarge as exc:  # noqa: BLE001 - fail-safe fallback to the full walk
+        except Exception as exc:  # noqa: BLE001 - fail-safe fallback to the full walk
             print(
                 f"[selection] incremental fallback ({type(exc).__name__})",
                 file=sys.stderr,
@@ -1252,7 +1241,7 @@ def main(argv: list[str] | None = None) -> int:
                 session_reports.append(
                     {"session_id_hash": session_id_hash, "status": outcome, "error_class": ""}
                 )
-            except CouchDBResponseTooLarge as exc:
+            except Exception as exc:
                 failed += 1
                 session_reports.append(
                     {
