@@ -493,7 +493,7 @@ def test_find_by_session_transport_byte_cap_fails_closed():
     )
 
     with pytest.raises(CouchDBResponseTooLarge, match="exceeded configured byte limit"):
-        store.find_by_session(session_id_hash="dummy_session_hash")
+        store.find_by_session(session_id_hash="dummy_session_hash", allow_oversized_single_fallback=False)
 
 
 def test_selection_single_pass_scales_with_large_state_corpus():
@@ -840,15 +840,38 @@ def test_find_by_session_adaptive_page_halving_on_response_too_large():
     assert 25 in requested_limits
 
 
-def test_find_by_session_single_oversized_document_fails_closed():
-    """Verify that a single document exceeding the 8MB cap fails closed with CouchDBResponseTooLarge."""
+def test_find_by_session_single_oversized_document_fetches_unbounded_and_logs_warning(caplog):
+    """Verify that a single document exceeding 8MB is fetched unbounded with a warning,
+    preserving full content without crashing or stalling the pipeline.
+    """
+    import json
+    import logging
     from agent_knowledge.couchdb_source.couchdb_http_store import (
         CouchDBHttpSourceStore,
         CouchDBResponseTooLarge,
     )
 
-    def transport(method, url, headers, body, **kwargs):
-        raise CouchDBResponseTooLarge("Single document exceeds 8MB byte cap")
+    chunks = [
+        {"_id": "chunk:huge_single", "doc_type": "conversation_chunk", "session_id_hash": "sid_huge", "body": "x" * (9 * 1024 * 1024)}
+    ]
+
+    requested_calls = []
+
+    def transport(method, url, headers, body, *, max_response_bytes=None, **kwargs):
+        class FakeResponse:
+            def __init__(self, payload_dict):
+                self.status_code = 200
+                self.body = json.dumps(payload_dict).encode("utf-8")
+
+        req = json.loads(body.decode("utf-8"))
+        requested_calls.append({"limit": req.get("limit"), "max_response_bytes": max_response_bytes})
+
+        # If bounded by 8MB, raise CouchDBResponseTooLarge
+        if max_response_bytes is not None:
+            raise CouchDBResponseTooLarge("Single document exceeds 8MB byte cap")
+
+        # Unbounded read succeeds
+        return FakeResponse({"docs": chunks, "bookmark": ""})
 
     store = CouchDBHttpSourceStore(
         base_url="http://127.0.0.1:5984",
@@ -856,5 +879,51 @@ def test_find_by_session_single_oversized_document_fails_closed():
         transport=transport,
     )
 
-    with pytest.raises(CouchDBResponseTooLarge, match="Single document exceeds 8MB byte cap"):
-        store.find_by_session(session_id_hash="oversized_single_sid", page_size=10)
+    with caplog.at_level(logging.WARNING):
+        docs = store.find_by_session(session_id_hash="sid_huge", page_size=1)
+
+    assert len(docs) == 1
+    assert docs[0]["_id"] == "chunk:huge_single"
+    # First call had 8MB cap (and raised TooLarge), second call had max_response_bytes=None
+    assert len(requested_calls) == 2
+    assert requested_calls[0]["max_response_bytes"] is not None
+    assert requested_calls[1]["max_response_bytes"] is None
+    # Warning must be logged so operators and users can trace oversized single documents
+    assert "exceeded page response byte cap" in caplog.text
+
+
+def test_find_by_session_deduplicates_page_boundary_overlap():
+    """Verify that overlapping documents returned across page boundaries are safely deduplicated."""
+    import json
+    from agent_knowledge.couchdb_source.couchdb_http_store import CouchDBHttpSourceStore
+
+    call_index = 0
+    # Page 1 returns docs A, B. Page 2 returns docs B, C (B overlaps at boundary).
+    pages = [
+        [{"_id": "doc:A", "session_id_hash": "sid_dedup"}, {"_id": "doc:B", "session_id_hash": "sid_dedup"}],
+        [{"_id": "doc:B", "session_id_hash": "sid_dedup"}, {"_id": "doc:C", "session_id_hash": "sid_dedup"}],
+    ]
+
+    def transport(method, url, headers, body, **kwargs):
+        nonlocal call_index
+        class FakeResponse:
+            def __init__(self, payload_dict):
+                self.status_code = 200
+                self.body = json.dumps(payload_dict).encode("utf-8")
+
+        if call_index < len(pages):
+            page_docs = pages[call_index]
+            call_index += 1
+            next_bm = f"bm-{call_index}" if call_index < len(pages) else ""
+            return FakeResponse({"docs": page_docs, "bookmark": next_bm})
+        return FakeResponse({"docs": [], "bookmark": ""})
+
+    store = CouchDBHttpSourceStore(
+        base_url="http://127.0.0.1:5984",
+        db="test_db",
+        transport=transport,
+    )
+
+    docs = store.find_by_session(session_id_hash="sid_dedup", page_size=2)
+    assert [d["_id"] for d in docs] == ["doc:A", "doc:B", "doc:C"]
+    assert len(docs) == 3

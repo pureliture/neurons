@@ -20,9 +20,12 @@ from __future__ import annotations
 import base64
 import copy
 import json
+import logging
 import time
 from collections.abc import Iterator
 from urllib.parse import quote
+
+logger = logging.getLogger(__name__)
 
 from ..rag_ingress.idempotency import IdempotencyOutcome
 from ..transport_contract import ProxyResponse
@@ -168,7 +171,17 @@ class CouchDBHttpSourceStore:
                 max_response_bytes=max_response_bytes,
             )
         else:
-            response = self.transport(method, self.base_url + path, headers, body)
+            try:
+                response = self.transport(
+                    method,
+                    self.base_url + path,
+                    headers,
+                    body,
+                    timeout_seconds=timeout_seconds,
+                    max_response_bytes=max_response_bytes,
+                )
+            except TypeError:
+                response = self.transport(method, self.base_url + path, headers, body)
         if max_response_bytes is not None and len(response.body) > int(max_response_bytes):
             raise CouchDBResponseTooLarge("CouchDB response exceeded configured byte limit")
         try:
@@ -743,12 +756,14 @@ class CouchDBHttpSourceStore:
         session_id_hash: str,
         doc_type: str = "",
         page_size: int = 500,
-        max_response_bytes: int = COUCHDB_FIND_MAX_PAGE_RESPONSE_BYTES,
+        max_response_bytes: int | None = COUCHDB_FIND_MAX_PAGE_RESPONSE_BYTES,
+        allow_oversized_single_fallback: bool = True,
     ) -> list[dict]:
         selector: dict = {"session_id_hash": session_id_hash}
         if doc_type:
             selector["doc_type"] = doc_type
         docs: list[dict] = []
+        seen_ids: set[str] = set()
         bookmark = ""
         current_page_size = max(1, page_size)
         while True:
@@ -763,21 +778,42 @@ class CouchDBHttpSourceStore:
                     max_response_bytes=max_response_bytes,
                 )
             except CouchDBResponseTooLarge:
-                # Keep the same bookmark and retry with fewer rows. Even a
-                # single document above the byte cap fails closed before JSON
-                # decoding rather than allocating an unbounded page.
-                if current_page_size <= 1:
+                # If a multi-document page exceeds the cap, halve the page limit to
+                # bound the transport buffer and retry with the same bookmark.
+                if current_page_size > 1:
+                    current_page_size = max(1, current_page_size // 2)
+                    continue
+                if not allow_oversized_single_fallback:
                     raise
-                current_page_size = max(1, current_page_size // 2)
-                continue
+                # If even a single document exceeds max_response_bytes, do not fail
+                # closed or stall the pipeline: fetch this single document with
+                # unbounded read to guarantee lossless processing without pipeline stalls.
+                logger.warning(
+                    "Single document in session %s exceeded page response byte cap (%d bytes); "
+                    "fetching unbounded to preserve complete content without pipeline stall.",
+                    session_id_hash,
+                    max_response_bytes or 0,
+                )
+                status, payload = self._request(
+                    "POST",
+                    f"/{self.db}/_find",
+                    json_body=body,
+                    max_response_bytes=None,
+                )
             if status != 200:
                 raise CouchDBError(f"_find failed: HTTP {status}")
             page = payload.get("docs", [])
             if not page:
                 break
-            docs.extend(page)
+            for doc in page:
+                doc_id = str(doc.get("_id") or "")
+                if doc_id and doc_id in seen_ids:
+                    continue
+                if doc_id:
+                    seen_ids.add(doc_id)
+                docs.append(doc)
             next_bookmark = str(payload.get("bookmark") or "")
-            if not next_bookmark or next_bookmark == bookmark:
+            if not next_bookmark or next_bookmark == bookmark or len(page) < current_page_size:
                 break
             bookmark = next_bookmark
         if not doc_type:
