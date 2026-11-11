@@ -308,6 +308,21 @@ def _install_diversity_search(
         def get_chunk(self, chunk_id):
             return rows.get(chunk_id)
 
+        def get_session_chunk_by_id_prefix(
+            self,
+            *,
+            project,
+            chunk_id_prefix,
+            conn=None,
+        ):
+            del conn
+            matches = [
+                row
+                for row in rows.values()
+                if row.project == project and row.chunk_id.startswith(chunk_id_prefix)
+            ]
+            return matches[0] if len(matches) == 1 else None
+
     class Embedder:
         model = LOCAL_EMBEDDING_MODEL
         size = LOCAL_EMBEDDING_DIM
@@ -366,6 +381,132 @@ def _receipt(session_id: str, rows) -> dict:
         "provider": "test",
         "project": "synthetic",
     }
+
+
+def _install_fetch_search(
+    monkeypatch,
+    rows,
+    receipt_rows=None,
+    candidate_distances=None,
+):
+    candidates = []
+    approved = {}
+    for index, row in enumerate(rows):
+        candidate = {
+            "chunk_id": row.chunk_id,
+            "session_id_hash": row.session_id_hash,
+            "project": row.project,
+            "provider": row.provider,
+            "content_markdown": row.content_markdown,
+            "content_hash": row.content_hash,
+            "distance": (
+                candidate_distances[index]
+                if candidate_distances is not None
+                else index / 10
+            ),
+            "embedding_state": "ready",
+            "embedding_model": LOCAL_EMBEDDING_MODEL,
+            "embedding_profile": LOCAL_EMBEDDING_PROFILE_ID,
+            "_test_row": row,
+        }
+        candidates.append((row, candidate))
+        approved[row.chunk_id] = candidate
+    receipt_rows = rows if receipt_rows is None else receipt_rows
+    receipts = {rows[0].session_id_hash: _receipt(rows[0].session_id_hash, receipt_rows)}
+    return _install_diversity_search(
+        monkeypatch,
+        stage1_candidates=candidates,
+        approved_candidates=approved,
+        receipts=receipts,
+    )
+
+
+def test_segment_fetch_matches_query_stitched_summary_and_hash(monkeypatch):
+    left, _ = _candidate_row(
+        "fetch-session", "seg_" + "a" * 60, 0, 0.2, "left fetch body"
+    )
+    best, _ = _candidate_row(
+        "fetch-session", "seg_" + "b" * 60, 1, 0.1, "best fetch body"
+    )
+    right, _ = _candidate_row(
+        "fetch-session", "seg_" + "c" * 60, 2, 0.3, "right fetch body"
+    )
+    search, _store, _authority = _install_fetch_search(
+        monkeypatch,
+        [left, best, right],
+        candidate_distances=[0.2, 0.1, 0.3],
+    )
+
+    query_hit = search("synthetic query", "/project/synthetic")[0]
+    fetch_hit = search.fetch_session_memory_segment(best.chunk_id[:56], "synthetic")
+
+    assert fetch_hit is not None
+    assert fetch_hit["summary"] == query_hit["summary"]
+    assert fetch_hit["content_hash"] == query_hit["content_hash"]
+    assert fetch_hit["content_hash"] == sha256_hash(fetch_hit["summary"])
+    assert fetch_hit["returned_segment_ids"] == query_hit["returned_segment_ids"]
+    assert fetch_hit["returned_segment_content_hashes"] == query_hit[
+        "returned_segment_content_hashes"
+    ]
+
+
+def test_segment_fetch_rejects_other_project_and_previous_revision(monkeypatch):
+    row, _ = _candidate_row(
+        "fetch-session", "seg_" + "a" * 60, 0, 0.1, "fetch body"
+    )
+    search, _store, _authority = _install_fetch_search(monkeypatch, [row])
+
+    assert search.fetch_session_memory_segment(row.chunk_id[:56], "other") is None
+
+    current, _ = _candidate_row(
+        "fetch-session", "seg_" + "b" * 60, 1, 0.1, "current revision"
+    )
+    search, _store, _authority = _install_fetch_search(
+        monkeypatch,
+        [row],
+        receipt_rows=[current],
+    )
+    assert search.fetch_session_memory_segment(row.chunk_id[:56], "synthetic") is None
+
+
+def test_segment_fetch_rejects_hash_mismatch_ambiguous_prefix_and_canary(monkeypatch):
+    row, _ = _candidate_row(
+        "fetch-session", "seg_" + "a" * 60, 0, 0.1, "fetch body"
+    )
+    row.content_hash = sha256_hash("different body")
+    search, _store, _authority = _install_fetch_search(monkeypatch, [row])
+    assert search.fetch_session_memory_segment(row.chunk_id[:56], "synthetic") is None
+
+    prefix = "seg_" + "d" * 52
+    left, _ = _candidate_row(
+        "fetch-session", prefix + "0" * 8, 0, 0.1, "left body"
+    )
+    right, _ = _candidate_row(
+        "fetch-session", prefix + "1" * 8, 1, 0.2, "right body"
+    )
+    search, _store, _authority = _install_fetch_search(monkeypatch, [left, right])
+    assert search.fetch_session_memory_segment(prefix, "synthetic") is None
+
+    canary, _ = _candidate_row(
+        "fetch-session", "seg_" + "e" * 60, 0, 0.1, "canary body"
+    )
+    canary.provider = "lbrain-temporal-canary"
+    search, _store, _authority = _install_fetch_search(monkeypatch, [canary])
+    assert search.fetch_session_memory_segment(canary.chunk_id[:56], "synthetic") is None
+
+
+def test_segment_fetch_propagates_authority_errors(monkeypatch):
+    row, _ = _candidate_row(
+        "fetch-session", "seg_" + "a" * 60, 0, 0.1, "fetch body"
+    )
+    search, _store, authority = _install_fetch_search(monkeypatch, [row])
+
+    def fail(_hit):
+        raise RuntimeError("authority unavailable")
+
+    authority.resolve_session_segments = fail
+    with pytest.raises(RuntimeError, match="authority unavailable"):
+        search.fetch_session_memory_segment(row.chunk_id[:56], "synthetic")
 
 
 def test_segment_recall_uses_session_diversity_rounds_to_find_fifth_session(monkeypatch):

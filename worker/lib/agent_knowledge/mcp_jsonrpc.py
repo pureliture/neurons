@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -1044,12 +1045,26 @@ def _dispatch_brain_resolve_tool(tool_name: str, arguments: dict, service: Knowl
             return _tool_result(service.brain_resolve(query=str(arguments.get("query") or "")))
         raise ValueError(f"{tool_name} requires project or repository")
 
+    memory_id = None
+    if "memory_id" in arguments:
+        memory_id = arguments["memory_id"]
+        if (
+            not isinstance(memory_id, str)
+            or len(memory_id) > 64
+            or re.fullmatch(r"chunk:seg_[0-9a-f]{52}", memory_id) is None
+        ):
+            raise ValueError(f"{tool_name} memory_id must be a segment result ID")
+
     query = arguments.get("query", "")
     mode = arguments.get("mode")
     if mode is None:
         # 공용 뇌 기본 경로는 graph-first query다. 질의어가 없으면 query mode가
         # 거부되므로 활성 컨텍스트(context)로 내려간다. 명시 mode는 그대로 존중한다.
-        mode = "query" if isinstance(query, str) and query.strip() else "context"
+        mode = (
+            "query"
+            if memory_id is not None or (isinstance(query, str) and query.strip())
+            else "context"
+        )
     resolve_kwargs: dict[str, Any] = {
         "project": project,
         "query": query,
@@ -1060,6 +1075,8 @@ def _dispatch_brain_resolve_tool(tool_name: str, arguments: dict, service: Knowl
         "cursor": arguments.get("cursor"),
         "include_historical": False,
     }
+    if memory_id is not None:
+        resolve_kwargs["memory_id"] = memory_id
 
     if "include_historical" in arguments and arguments["include_historical"] is not None:
         inc = arguments["include_historical"]
@@ -1079,7 +1096,11 @@ def _dispatch_brain_resolve_tool(tool_name: str, arguments: dict, service: Knowl
             raise ValueError("max_age/min_age must be non-negative integer")
         resolve_kwargs["min_age"] = val
 
-    if resolve_kwargs.get("min_age") is not None and resolve_kwargs.get("max_age") is not None:
+    if (
+        memory_id is None
+        and resolve_kwargs.get("min_age") is not None
+        and resolve_kwargs.get("max_age") is not None
+    ):
         if resolve_kwargs["min_age"] > resolve_kwargs["max_age"]:
             raise ValueError("min_age must be <= max_age")
 
@@ -1088,6 +1109,7 @@ def _dispatch_brain_resolve_tool(tool_name: str, arguments: dict, service: Knowl
     # queries. Callers can override with explicit max_age or as_of.
     if (
         resolve_kwargs.get("mode") == "query"
+        and memory_id is None
         and "max_age" not in arguments
         and not arguments.get("as_of")
     ):

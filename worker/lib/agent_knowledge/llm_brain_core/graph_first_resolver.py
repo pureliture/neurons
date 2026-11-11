@@ -58,6 +58,11 @@ class _ResolveRequest(BaseModel):
     query: str = Field(default="", max_length=2000)
     mode: Literal["list", "context", "query"] = "query"
     response_mode: Literal["slim", "minimal", "with_evidence"] = "slim"
+    memory_id: str | None = Field(
+        default=None,
+        max_length=64,
+        pattern=r"^chunk:seg_[0-9a-f]{52}$",
+    )
     as_of: str = Field(default="", max_length=64)
     limit: int = Field(default=5, ge=1, le=20)
     cursor: str | None = Field(default=None, max_length=2048)
@@ -111,9 +116,18 @@ class _ResolveRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_request(self) -> "_ResolveRequest":
-        if self.mode == "query" and not self.query.strip():
+        if self.memory_id is not None:
+            if self.mode != "query":
+                raise ValueError("memory_id requires query mode")
+            if self.response_mode == "with_evidence":
+                raise ValueError("memory_id does not support with_evidence")
+        elif self.mode == "query" and not self.query.strip():
             raise ValueError("query mode requires a non-empty query")
-        if self.min_age is not None and self.max_age is not None:
+        if (
+            self.memory_id is None
+            and self.min_age is not None
+            and self.max_age is not None
+        ):
             if self.min_age > self.max_age:
                 raise ValueError("min_age must be <= max_age")
         return self
@@ -162,11 +176,13 @@ class GraphFirstResolver:
         graph_adapter: Any | None = None,
         embed_query: Callable[[str], list[float]] | None = None,
         session_memory_search: Callable[[str, str], list[dict[str, Any]]] | None = None,
+        session_memory_fetch: Callable[[str, str], Mapping[str, Any] | None] | None = None,
     ) -> None:
         self._store = store
         self._graph_adapter = graph_adapter
         self._embed_query = embed_query
         self._session_memory_search = session_memory_search
+        self._session_memory_fetch = session_memory_fetch
         self._query_vectors: dict[str, list[float]] = {}
 
     def resolve(
@@ -179,6 +195,7 @@ class GraphFirstResolver:
         as_of: str = "",
         limit: int = 5,
         cursor: str | None = None,
+        memory_id: str | None = None,
         include_historical: bool = False,
         max_age: int | None = None,
         min_age: int | None = None,
@@ -194,6 +211,7 @@ class GraphFirstResolver:
             as_of=as_of,
             limit=limit,
             cursor=cursor,
+            memory_id=memory_id,
             include_historical=include_historical,
             max_age=max_age,
             min_age=min_age,
@@ -201,6 +219,8 @@ class GraphFirstResolver:
             currentness=currentness,
             time_confidence=time_confidence,
         )
+        if request.memory_id is not None:
+            return self._resolve_memory_fetch(request)
         if self._store is None:
             return self._error_payload(request, error_code="authority_store_unavailable")
         if request.mode == "list":
@@ -746,50 +766,13 @@ class GraphFirstResolver:
             for hit in authorized_hits or ():
                 if not isinstance(hit, Mapping):
                     continue
-                text = str(hit.get("summary") or "").strip()
-                chunk_id = str(hit.get("memory_id") or "")
-                if not text or not chunk_id:
-                    continue
-                summary = _safe(_session_chunk_body(text), 65536)
-                if not summary:
-                    continue
-                title_line = next(
-                    (line.strip("#* -") for line in summary.splitlines() if line.strip("#* -")),
-                    "",
+                card = self._session_memory_card(
+                    request,
+                    hit,
+                    summary_max_chars=65536,
                 )
-                segment_range = hit.get("segment_turn_range")
-                title = title_line or f"{request.project} session context"
-                if segment_range is not None:
-                    if len(title) > _SEGMENT_TITLE_MAX_CHARS:
-                        title = title[:_SEGMENT_TITLE_MAX_CHARS] + "…"
-                    title = _safe(title, _SEGMENT_TITLE_MAX_CHARS + 1)
-                else:
-                    title = _safe(title, 1000)
-                if segment_range is not None:
-                    typed_payload = {"segment_turn_range": segment_range}
-                else:
-                    typed_payload = {
-                        "status": summary,
-                        "status_value": summary,
-                    }
-                card = {
-                    "memory_id": f"chunk:{chunk_id[:56]}",
-                    "project": request.project,
-                    "card_type": "status",
-                    "title": title,
-                    "summary": summary,
-                    "typed_payload": typed_payload,
-                    "currentness": str(hit.get("currentness") or "current"),
-                    "content_hash": str(hit.get("content_hash") or ""),
-                    "source": SOURCE_SESSION_MEMORY,
-                    "semantic_score": hit.get("score"),
-                }
-                if segment_range is not None:
-                    card["segment_turn_range"] = segment_range
-                if hit.get("observed_at") is not None:
-                    card["observed_at"] = hit.get("observed_at")
-                if hit.get("recorded_at") is not None:
-                    card["created_at"] = hit.get("recorded_at")
+                if card is None:
+                    continue
                 cards.append(card)
                 if len(cards) >= request.limit + 1:
                     break
@@ -864,6 +847,168 @@ class GraphFirstResolver:
             if len(results) >= request.limit + 1:
                 break
         return results
+
+    def _session_memory_card(
+        self,
+        request: _ResolveRequest,
+        hit: Mapping[str, Any],
+        *,
+        summary_max_chars: int,
+    ) -> dict[str, Any] | None:
+        text = str(hit.get("summary") or "").strip()
+        chunk_id = str(hit.get("memory_id") or "")
+        if not text or not chunk_id:
+            return None
+        body = _session_chunk_body(text)
+        summary = _safe(body, summary_max_chars)
+        if not summary:
+            return None
+        title_line = next(
+            (line.strip("#* -") for line in summary.splitlines() if line.strip("#* -")),
+            "",
+        )
+        segment_range = hit.get("segment_turn_range")
+        title = title_line or f"{request.project} session context"
+        if segment_range is not None:
+            if len(title) > _SEGMENT_TITLE_MAX_CHARS:
+                title = title[:_SEGMENT_TITLE_MAX_CHARS] + "…"
+            title = _safe(title, _SEGMENT_TITLE_MAX_CHARS + 1)
+            typed_payload = {"segment_turn_range": segment_range}
+        else:
+            title = _safe(title, 1000)
+            typed_payload = {
+                "status": summary,
+                "status_value": summary,
+            }
+        card = {
+            "memory_id": f"chunk:{chunk_id[:56]}",
+            "project": request.project,
+            "card_type": "status",
+            "title": title,
+            "summary": summary,
+            "typed_payload": typed_payload,
+            "currentness": str(hit.get("currentness") or "current"),
+            "content_hash": str(hit.get("content_hash") or ""),
+            "source": SOURCE_SESSION_MEMORY,
+            "semantic_score": hit.get("score"),
+        }
+        if segment_range is not None:
+            card["segment_turn_range"] = segment_range
+        if hit.get("observed_at") is not None:
+            card["observed_at"] = hit.get("observed_at")
+        if hit.get("recorded_at") is not None:
+            card["created_at"] = hit.get("recorded_at")
+        return card
+
+    def _resolve_memory_fetch(self, request: _ResolveRequest) -> dict[str, Any]:
+        fetch = self._session_memory_fetch
+        if not callable(fetch):
+            return self._error_payload(request, error_code="memory_fetch_unavailable")
+        try:
+            hit = fetch(request.memory_id[len("chunk:"):], request.project)
+        except Exception:
+            return self._error_payload(request, error_code="authority_store_unavailable")
+        if not isinstance(hit, Mapping):
+            return self._error_payload(request, error_code="memory_not_found")
+
+        raw_summary = str(hit.get("summary") or "").strip()
+        body = _session_chunk_body(raw_summary)
+        card = self._session_memory_card(
+            request,
+            hit,
+            summary_max_chars=len(body) + 1,
+        )
+        if card is None or card["memory_id"] != request.memory_id:
+            return self._error_payload(request, error_code="memory_not_found")
+
+        full_body = str(card["summary"])
+        full_content_hash = sha256_hash(full_body)
+        card["content_hash"] = full_content_hash
+        page_request = _ResolveRequest(
+            project=request.project,
+            query="",
+            mode="query",
+            response_mode=request.response_mode,
+            memory_id=request.memory_id,
+            limit=1,
+            cursor=request.cursor,
+        )
+        fingerprint = _fingerprint(page_request, [card])
+        cursor = self._decode_cursor(request.cursor, fingerprint)
+        if cursor.after_id is not None:
+            raise ValueError("invalid memory fetch cursor")
+
+        encoded_body = full_body.encode("utf-8")
+        total_bytes = len(encoded_body)
+        boundaries = [0]
+        for character in full_body:
+            boundaries.append(boundaries[-1] + len(character.encode("utf-8")))
+        if cursor.offset >= total_bytes:
+            raise ValueError("invalid memory fetch cursor offset")
+        start_index = bisect_left(boundaries, cursor.offset)
+        if start_index >= len(boundaries) or boundaries[start_index] != cursor.offset:
+            raise ValueError("invalid memory fetch cursor offset")
+
+        metadata = self._metadata(
+            retrieval_path="session_memory_fetch",
+            graph_status="not_used",
+            authority_join_status="verified",
+            fallback_used=False,
+            projection_lag_ms=None,
+            authority_source="postgres",
+            session_memory_merged=True,
+        )
+
+        def page_payload(end_index: int) -> dict[str, Any]:
+            end = boundaries[end_index]
+            fragment = encoded_body[cursor.offset:end].decode("utf-8")
+            page_card = dict(card)
+            page_card["summary"] = fragment
+            has_more = end < total_bytes
+            if cursor.offset == 0 and end == total_bytes:
+                page_card["content_hash"] = full_content_hash
+                page_card.pop("summary_truncated", None)
+                page_card.pop("full_content_hash", None)
+                page_card.pop("summary_byte_range", None)
+            else:
+                page_card["content_hash"] = sha256_hash(fragment)
+                page_card["summary_truncated"] = True
+                page_card["full_content_hash"] = full_content_hash
+                page_card["summary_byte_range"] = {
+                    "start": cursor.offset,
+                    "end": end,
+                    "total": total_bytes,
+                }
+            payload = self._payload(
+                page_request,
+                [page_card],
+                metadata,
+                has_more=has_more,
+                error_code=None,
+                evidence=None,
+            )
+            payload["next_cursor"] = (
+                _encode_cursor(fingerprint, end) if has_more else None
+            )
+            return payload
+
+        low = start_index + 1
+        high = len(boundaries) - 1
+        best_payload: dict[str, Any] | None = None
+        while low <= high:
+            middle = (low + high) // 2
+            candidate = page_payload(middle)
+            if tool_result_bytes(candidate) <= _MAX_BYTES:
+                best_payload = candidate
+                low = middle + 1
+            else:
+                high = middle - 1
+        if best_payload is None:
+            return self._error_payload(request, error_code="response_budget_exceeded")
+        ensure_public_safe(best_payload, "GraphFirstResolver memory fetch response")
+        if tool_result_bytes(best_payload) > _MAX_BYTES:
+            return self._error_payload(request, error_code="response_budget_exceeded")
+        return best_payload
 
     def _serialize(
         self,
@@ -1039,7 +1184,15 @@ class GraphFirstResolver:
                     card.get("source") == SOURCE_SESSION_MEMORY
                     and isinstance(card.get("segment_turn_range"), Mapping)
                 ):
-                    excluded_fields.update({"summary", "summary_truncated", "title"})
+                    excluded_fields.update(
+                        {
+                            "summary",
+                            "summary_truncated",
+                            "summary_byte_range",
+                            "full_content_hash",
+                            "title",
+                        }
+                    )
                 section_identity = {
                     key: value
                     for key, value in item.items()
@@ -1062,7 +1215,10 @@ class GraphFirstResolver:
                 )
             # Minimal mode: drop diagnostic/heavy fields to keep the payload small.
             if minimal and not context_mode:
-                for heavy in ("typed_payload", "content_hash", "created_at", "authority_source"):
+                heavy_fields = ["typed_payload", "created_at", "authority_source"]
+                if request.memory_id is None:
+                    heavy_fields.append("content_hash")
+                for heavy in heavy_fields:
                     item.pop(heavy, None)
             items.append(item)
             raw_typed = card.get("typed_payload")
@@ -1581,11 +1737,17 @@ def _fit_segment_summaries(
 
 
 def _item(card: Mapping[str, Any], *, include_created_at: bool = True) -> dict[str, Any]:
+    summary = (
+        str(card.get("summary") or "")
+        if card.get("source") == SOURCE_SESSION_MEMORY
+        and isinstance(card.get("summary_byte_range"), Mapping)
+        else _safe(card.get("summary"), 65536)
+    )
     item = {
         "id": _safe(card.get("memory_id") or card.get("id"), 180),
         "card_type": _safe(card.get("card_type"), 64),
         "title": _safe(card.get("title"), 1000),
-        "summary": _safe(card.get("summary"), 65536),
+        "summary": summary,
         "currentness": _safe(card.get("currentness") or "current", 32),
         "content_hash": _safe(card.get("content_hash"), 80),
     }
@@ -1600,6 +1762,10 @@ def _item(card: Mapping[str, Any], *, include_created_at: bool = True) -> dict[s
         item["segment_turn_range"] = _safe_typed_value(card["segment_turn_range"])
     if card.get("summary_truncated") is True:
         item["summary_truncated"] = True
+    if isinstance(card.get("summary_byte_range"), Mapping):
+        item["summary_byte_range"] = _safe_typed_value(card["summary_byte_range"])
+    if card.get("full_content_hash"):
+        item["full_content_hash"] = _safe(card.get("full_content_hash"), 80)
     if card.get("temporal_conflict"):
         item["temporal_conflict"] = True
     created_at = card.get("created_at") or card.get("observed_at")

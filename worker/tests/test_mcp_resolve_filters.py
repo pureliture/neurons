@@ -98,6 +98,10 @@ def test_brain_resolve_mcp_schema_properties():
     assert schema["additionalProperties"] is False
     props = schema["properties"]
 
+    assert props["memory_id"]["type"] == "string"
+    assert props["memory_id"]["maxLength"] == 64
+    assert props["memory_id"]["pattern"] == r"^chunk:seg_[0-9a-f]{52}$"
+
     # Verify all 6 M5 parameters exist in schema
     assert "include_historical" in props
     assert props["include_historical"]["type"] == "boolean"
@@ -258,6 +262,7 @@ def test_mcp_dispatch_passes_valid_filters():
         {"currentness": "broken"},
         {"time_confidence": "perfect"},
         {"include_historical": "yes"},  # string passed where bool expected
+        {"memory_id": "chunk:abc"},
     ],
 )
 def test_mcp_dispatch_invalid_params_yield_32602(invalid_args):
@@ -471,6 +476,29 @@ def test_mcp_brain_resolve_default_mode_is_query_when_query_present_and_context_
     # 기본 query mode는 기존 명시 query mode와 같은 90일 max_age 기본값을 쓴다.
     assert seen[0]["max_age"] == 90 * 86400
     assert "max_age" not in seen[1] and "max_age" not in seen[3]
+
+
+def test_mcp_brain_resolve_memory_id_defaults_to_query_without_max_age():
+    from agent_knowledge.mcp_jsonrpc import _dispatch_brain_resolve_tool
+
+    seen = []
+
+    class _Service:
+        def brain_memory_resolve(self, **kwargs):
+            seen.append(kwargs)
+            return {"items": [], "metadata": {}}
+
+    memory_id = "chunk:seg_" + "a" * 52
+    _dispatch_brain_resolve_tool(
+        BRAIN_RESOLVE_TOOL_NAME,
+        {"project": "neurons", "memory_id": memory_id},
+        _Service(),
+    )
+
+    assert seen[0]["memory_id"] == memory_id
+    assert seen[0]["mode"] == "query"
+    assert seen[0]["query"] == ""
+    assert "max_age" not in seen[0]
 
 
 def test_mcp_brain_resolve_schema_default_mode_is_query():

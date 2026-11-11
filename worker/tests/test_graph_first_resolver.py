@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -142,6 +144,31 @@ def _segment_resolver(hits: list[dict], *, cards=None, episodes=()):
         lambda _query: [0.1, 0.2],
         session_memory_search=lambda _query, _project: hits,
     )
+
+
+def _memory_fetch_hit(body: str) -> dict:
+    chunk_id = "seg_" + "a" * 52 + "b" * 8
+    text = (
+        "# session-memory synthetic project\n"
+        "session_id_hash: sha256:" + "a" * 64 + "\n"
+        "segment: 0 turns 1-2\n"
+        "## conversation\n"
+        "## Transcript\n"
+        f"{body}"
+    )
+    return {
+        "memory_id": chunk_id,
+        "summary": text,
+        "content_hash": sha256_hash(text),
+        "score": 0.9,
+        "currentness": "current",
+        "segment_turn_range": {"start": 1, "end": 2},
+    }
+
+
+def _public_memory_body(hit: dict) -> str:
+    body = resolver_module._session_chunk_body(hit["summary"].strip())
+    return resolver_module._safe(body, len(body) + 1)
 
 
 def test_query_is_graph_first_then_authority_join_and_preserves_graph_order():
@@ -659,6 +686,228 @@ def test_segment_title_is_deduplicated_and_untrimmed_summary_keeps_original_hash
     assert "summary_truncated" not in item
     assert "title" not in result["statuses"][0]
     assert "status" in result["statuses"][0]
+
+
+def test_memory_fetch_returns_small_public_body_with_hash_in_minimal_mode():
+    hit = _memory_fetch_hit("한글🙂본문 " * 630)
+    memory_id = f"chunk:{hit['memory_id'][:56]}"
+    resolver = GraphFirstResolver(
+        SessionMemoryStore(),
+        session_memory_fetch=lambda _prefix, _project: hit,
+    )
+
+    result = resolver.resolve(
+        project="neurons",
+        memory_id=memory_id,
+        response_mode="minimal",
+        as_of="2020-01-01",
+        include_historical=True,
+        max_age=0,
+        currentness="retired",
+        time_confidence="anomalous",
+        limit=20,
+    )
+
+    item = result["items"][0]
+    expected = _public_memory_body(hit)
+    assert "error_code" not in result
+    assert item["summary"] == expected
+    assert item["content_hash"] == sha256_hash(expected)
+    assert "summary_truncated" not in item
+    assert "full_content_hash" not in item
+    assert "summary_byte_range" not in item
+    assert result["next_cursor"] is None
+    assert "temporal_view" not in result
+    assert result["metadata"] == {
+        "retrieval_path": "session_memory_fetch",
+        "graph_status": "not_used",
+        "authority_join_status": "verified",
+        "fallback_used": False,
+        "projection_lag_ms": None,
+        "authority_source": "postgres",
+        "session_memory_merged": True,
+        "has_more": False,
+        "sources": {"graph_card": 0, "session_memory": 1},
+        "temporal_coverage": {
+            "items": 1,
+            "with_observed_at": 0,
+            "unknown_age": 1,
+            "anomalous_time": 0,
+        },
+    }
+    assert tool_result_bytes(result) <= resolver_module._MAX_BYTES
+    assert "summary" not in result["statuses"][0]
+    assert "full_content_hash" not in result["statuses"][0]
+    assert "summary_byte_range" not in result["statuses"][0]
+
+
+def test_memory_fetch_round_trips_from_a_truncated_query_item():
+    marker = "fetch marker"
+    body = ("앞 내용🙂 " * 1600) + marker + ("뒤 내용🙂 " * 1600)
+    hit = _memory_fetch_hit(body)
+    memory_id = f"chunk:{hit['memory_id'][:56]}"
+    resolver = GraphFirstResolver(
+        SessionMemoryStore(),
+        Graph([]),
+        lambda _query: [0.1, 0.2],
+        session_memory_search=lambda _query, _project: [hit],
+        session_memory_fetch=lambda _prefix, _project: hit,
+    )
+
+    query_result = resolver.resolve(
+        project="neurons",
+        query=marker,
+        mode="query",
+        limit=1,
+    )
+    query_item = query_result["items"][0]
+    assert query_item["summary_truncated"] is True
+    assert query_item["id"] == memory_id
+    excerpt_body = query_item["summary"].removeprefix("…").removesuffix("…")
+    expected = _public_memory_body(hit)
+    assert excerpt_body in expected
+
+    pages = [
+        resolver.resolve(
+            project="neurons",
+            memory_id=query_item["id"],
+        )
+    ]
+    while pages[-1]["next_cursor"]:
+        pages.append(
+            resolver.resolve(
+                project="neurons",
+                memory_id=query_item["id"],
+                cursor=pages[-1]["next_cursor"],
+            )
+        )
+
+    fragments = [page["items"][0]["summary"] for page in pages]
+    assert "".join(fragments) == expected
+    assert all(tool_result_bytes(page) <= resolver_module._MAX_BYTES for page in pages)
+    assert all(page["items"][0]["content_hash"] == sha256_hash(fragment)
+               for page, fragment in zip(pages, fragments))
+    assert all(page["items"][0]["full_content_hash"] == sha256_hash(expected)
+               for page in pages)
+    ranges = [page["items"][0]["summary_byte_range"] for page in pages]
+    assert ranges[0]["start"] == 0
+    assert all(left["end"] == right["start"] for left, right in zip(ranges, ranges[1:]))
+    assert ranges[-1]["end"] == ranges[-1]["total"] == len(expected.encode("utf-8"))
+    assert pages[-1]["next_cursor"] is None
+
+
+def test_memory_fetch_pages_large_korean_body_and_rejects_invalid_cursors():
+    hit = _memory_fetch_hit("한국어🙂본문 " * 6100)
+    memory_id = f"chunk:{hit['memory_id'][:56]}"
+    expected = _public_memory_body(hit)
+    active_hit = {"value": hit}
+    resolver = GraphFirstResolver(
+        None,
+        session_memory_fetch=lambda _prefix, _project: active_hit["value"],
+    )
+
+    first = resolver.resolve(project="neurons", memory_id=memory_id)
+    assert first["next_cursor"] is not None
+    cursor = first["next_cursor"]
+    decoded = json.loads(
+        base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)).decode("utf-8")
+    )
+    invalid_cursors = (
+        ("A" if cursor[0] != "A" else "B") + cursor[1:],
+        resolver_module._encode_cursor(decoded[0], decoded[1] + 1),
+        resolver_module._encode_cursor(
+            decoded[0],
+            len(expected.encode("utf-8")),
+        ),
+    )
+
+    for invalid_cursor in invalid_cursors:
+        with pytest.raises(ValueError, match="cursor"):
+            resolver.resolve(
+                project="neurons",
+                memory_id=memory_id,
+                cursor=invalid_cursor,
+            )
+
+    pages = [first]
+    while pages[-1]["next_cursor"]:
+        pages.append(
+            resolver.resolve(
+                project="neurons",
+                memory_id=memory_id,
+                cursor=pages[-1]["next_cursor"],
+            )
+        )
+    fragments = [page["items"][0]["summary"] for page in pages]
+    assert len(pages) > 1
+    assert all(tool_result_bytes(page) <= resolver_module._MAX_BYTES for page in pages)
+    assert "".join(fragments) == expected
+    assert sha256_hash("".join(fragments)) == pages[0]["items"][0]["full_content_hash"]
+    assert all(item["content_hash"] == sha256_hash(item["summary"])
+               for page in pages for item in page["items"])
+    ranges = [page["items"][0]["summary_byte_range"] for page in pages]
+    assert ranges[0]["start"] == 0
+    assert all(left["end"] == right["start"] for left, right in zip(ranges, ranges[1:]))
+    assert ranges[-1]["end"] == ranges[-1]["total"] == len(expected.encode("utf-8"))
+    assert pages[-1]["next_cursor"] is None
+
+    active_hit["value"] = _memory_fetch_hit("한국어🙂본문 " * 6100 + "changed")
+    with pytest.raises(ValueError, match="cursor"):
+        resolver.resolve(
+            project="neurons",
+            memory_id=memory_id,
+            cursor=cursor,
+        )
+
+
+def test_memory_fetch_errors_and_request_validation():
+    hit = _memory_fetch_hit("본문")
+    memory_id = f"chunk:{hit['memory_id'][:56]}"
+
+    assert GraphFirstResolver(None).resolve(
+        project="neurons",
+        memory_id=memory_id,
+    )["error_code"] == "memory_fetch_unavailable"
+    assert GraphFirstResolver(
+        None,
+        session_memory_fetch=lambda _prefix, _project: None,
+    ).resolve(project="neurons", memory_id=memory_id)["error_code"] == "memory_not_found"
+
+    def fail_fetch(_prefix, _project):
+        raise RuntimeError("authority unavailable")
+
+    assert GraphFirstResolver(
+        None,
+        session_memory_fetch=fail_fetch,
+    ).resolve(project="neurons", memory_id=memory_id)["error_code"] == "authority_store_unavailable"
+    mismatch = dict(hit, memory_id="seg_" + "c" * 60)
+    assert GraphFirstResolver(
+        None,
+        session_memory_fetch=lambda _prefix, _project: mismatch,
+    ).resolve(project="neurons", memory_id=memory_id)["error_code"] == "memory_not_found"
+
+    request = _ResolveRequest(project="neurons", memory_id=memory_id)
+    assert request.query == ""
+    for values in (
+        {"mode": "context"},
+        {"response_mode": "with_evidence"},
+        {"memory_id": "chunk:abc"},
+        {"memory_id": "chunk:" + "a" * 56},
+        {"memory_id": "chunk:session_" + "a" * 48},
+    ):
+        with pytest.raises(ValidationError):
+            _ResolveRequest(project="neurons", **({"memory_id": memory_id} | values))
+
+
+def test_memory_fetch_reports_budget_error_when_no_utf8_character_fits(monkeypatch):
+    hit = _memory_fetch_hit("본문")
+    memory_id = f"chunk:{hit['memory_id'][:56]}"
+    monkeypatch.setattr(resolver_module, "_MAX_BYTES", 1)
+    result = GraphFirstResolver(
+        None,
+        session_memory_fetch=lambda _prefix, _project: hit,
+    ).resolve(project="neurons", memory_id=memory_id)
+    assert result["error_code"] == "response_budget_exceeded"
 
 
 def test_evidence_revision_or_authorization_change_between_reads_fails_closed():

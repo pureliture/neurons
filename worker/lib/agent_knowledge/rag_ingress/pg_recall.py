@@ -505,6 +505,109 @@ def build_pg_brain_query_search_from_env(environ: Any) -> BrainQuerySearch | Non
             return _search(query, f"/project/{project}")
 
         setattr(_search, "search_session_memory_segments", _search_session_memory_segments)
+
+        def _fetch_session_memory_segment(
+            chunk_id_prefix: str,
+            project: str,
+        ) -> dict[str, Any] | None:
+            if direct_migrated:
+                return None
+            row = pg_store.get_session_chunk_by_id_prefix(
+                project=project,
+                chunk_id_prefix=chunk_id_prefix,
+            )
+            if (
+                row is None
+                or row.project != project
+                or sha256_hash(row.content_markdown) != row.content_hash
+                or _is_synthetic_canary_pg_row(row.provider)
+            ):
+                return None
+
+            authority_resolver = CouchDBProjectionStateAuthorityResolver(
+                couch_store,
+                filters={"project": project},
+                backend="postgres_pgvector_local",
+                embedding_profile=active_profile,
+                pg_store=pg_store,
+            )
+            authorized = authority_resolver.resolve_session_segments(
+                {
+                    "session_id_hash": row.session_id_hash,
+                    "provider": row.provider,
+                    "project": row.project,
+                }
+            )
+            if (
+                authorized is None
+                or authorized.get("representation") != "segment_v1"
+                or authorized.get("provider") != row.provider
+                or authorized.get("project") != row.project
+            ):
+                return None
+            segment_ids = list(authorized.get("segment_ids") or ())
+            segment_content_hashes = list(
+                authorized.get("segment_content_hashes") or ()
+            )
+            if (
+                not segment_ids
+                or len(segment_content_hashes) != len(segment_ids)
+                or any(
+                    not isinstance(segment_id, str)
+                    or re.fullmatch(r"seg_[0-9a-f]{60}", segment_id) is None
+                    for segment_id in segment_ids
+                )
+                or any(
+                    not isinstance(content_hash, str)
+                    or re.fullmatch(r"sha256:[0-9a-f]{64}", content_hash) is None
+                    for content_hash in segment_content_hashes
+                )
+            ):
+                return None
+            try:
+                segment_index = segment_ids.index(row.chunk_id)
+            except ValueError:
+                return None
+            if segment_content_hashes[segment_index] != row.content_hash:
+                return None
+
+            currentness = str(
+                getattr(row, "authority_currentness", getattr(row, "currentness", "current"))
+                or "current"
+            )
+            hit = {
+                "result_type": "session_memory",
+                "retrieval_lane": "pg_semantic",
+                "memory_id": row.chunk_id,
+                "card_type": "",
+                "summary": row.content_markdown,
+                "provider": row.provider,
+                "project": row.project,
+                "currentness": currentness,
+                "score": 0.0,
+                "content_hash": row.content_hash,
+                "temporal": _session_temporal_block(
+                    observed_at=row.observed_at,
+                    recorded_at=row.created_at,
+                    as_of=None,
+                    currentness=currentness,
+                    projection_lag_seconds=None,
+                ),
+                "session_id_hash": row.session_id_hash,
+                "representation": "segment_v1",
+                "segment_ids": segment_ids,
+                "segment_content_hashes": segment_content_hashes,
+            }
+            grouped = _group_segment_recall_hits(
+                [hit],
+                pg_store=pg_store,
+                authority_resolver=authority_resolver,
+                length_penalty=segment_length_penalty,
+                authority_receipts={row.session_id_hash: authorized},
+            )
+            return grouped[0] if len(grouped) == 1 else None
+
+        setattr(_search, "fetch_session_memory_segment", _fetch_session_memory_segment)
     return _search
 
 
