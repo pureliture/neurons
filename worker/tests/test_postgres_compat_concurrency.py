@@ -34,7 +34,16 @@ class _MockCursor:
     def execute(self, query, params=None):
         self.conn.executed_statements.append(query)
         if "pg_proc.prosrc" in query:
-            self.conn.last_result = (self.conn.current_prosrc,)
+            if self.conn.current_prosrc is None:
+                self.conn.last_result = None
+            else:
+                self.conn.last_result = (
+                    getattr(self.conn, "ret_typname", "float8"),
+                    getattr(self.conn, "prokind", "f"),
+                    getattr(self.conn, "provolatile", "s"),
+                    getattr(self.conn, "lanname", "plpgsql"),
+                    self.conn.current_prosrc,
+                )
             return
         if "pg_advisory_xact_lock" in query:
             self.conn.advisory_lock_count += 1
@@ -51,10 +60,12 @@ class _MockCursor:
 
 
 class _MockPsycopgConnection:
-    def __init__(self, *, prosrc=None, fail_on_ddl=False):
+    def __init__(self, *, prosrc=None, fail_on_ddl=False, provolatile="s", ret_typname="float8"):
         self.read_only = False
         self.current_prosrc = prosrc
         self.fail_on_ddl = fail_on_ddl
+        self.provolatile = provolatile
+        self.ret_typname = ret_typname
         self.executed_statements = []
         self.last_result = None
         self.commit_count = 0
@@ -167,14 +178,30 @@ def test_normalize_plpgsql_body_preserves_internal_spacing():
 
 
 def test_check_sql_contains_strict_signature_guards():
-    """카탈로그 조회 쿼리가 올바른 인자(text), 리턴형(float8), 스키마 우선순위를 엄격히 대조함을 검증."""
+    """카탈로그 조회 쿼리가 올바른 인자(text), 스키마 우선순위를 엄격히 대조함을 검증."""
     sql = _CHECK_JULIANDAY_SQL
     assert "pg_proc.proname = 'julianday'" in sql
     assert "pg_proc.proargtypes[0] = 'pg_catalog.text'::regtype" in sql
-    assert "ret.typname = 'float8'" in sql
-    assert "lang.lanname = 'plpgsql'" in sql
+    assert "ret.typname" in sql
+    assert "pg_proc.prokind" in sql
+    assert "pg_proc.provolatile" in sql
+    assert "lang.lanname" in sql
     assert "current_schemas(true)" in sql
     assert "ORDER BY array_position(current_schemas(true), pg_namespace.nspname::text)" in sql
+
+
+def test_synthetic_fast_path_rejects_when_first_schema_function_is_volatile(monkeypatch):
+    """[Synthetic] search_path 상 첫 번째 함수의 본문이 동일하더라도 VOLATILE 등 잘못된 속성이면
+    Fast Path를 기각하고 Slow Path로 안전하게 DDL 갱신함을 검증 (CodeRabbit/Codex P2 review 검증)."""
+    mock_conn = _MockPsycopgConnection(prosrc=_JULIANDAY_BODY, provolatile="v")
+    monkeypatch.setattr(postgres_db_adapter.psycopg, "connect", lambda *args, **kwargs: mock_conn)
+
+    adapter = PostgresLedgerDbAdapter("postgresql://fake:5432/test")
+    conn = adapter.connect()
+
+    assert mock_conn.advisory_lock_count == 1
+    assert any("CREATE OR REPLACE FUNCTION" in s for s in mock_conn.executed_statements)
+    assert mock_conn.commit_count == 1
 
 
 def test_connection_commits_and_remains_idle_after_connect(monkeypatch):

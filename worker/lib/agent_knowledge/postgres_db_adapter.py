@@ -110,7 +110,12 @@ $JD$ LANGUAGE plpgsql STABLE;
 """
 
 _CHECK_JULIANDAY_SQL = """
-SELECT pg_proc.prosrc
+SELECT
+    ret.typname,
+    pg_proc.prokind,
+    pg_proc.provolatile,
+    lang.lanname,
+    pg_proc.prosrc
 FROM pg_proc
 JOIN pg_namespace ON pg_proc.pronamespace = pg_namespace.oid
 JOIN pg_type ret ON pg_proc.prorettype = ret.oid
@@ -118,10 +123,6 @@ JOIN pg_language lang ON pg_proc.prolang = lang.oid
 WHERE pg_proc.proname = 'julianday'
   AND pg_proc.pronargs = 1
   AND pg_proc.proargtypes[0] = 'pg_catalog.text'::regtype
-  AND ret.typname = 'float8'
-  AND pg_proc.prokind = 'f'
-  AND pg_proc.provolatile = 's'
-  AND lang.lanname = 'plpgsql'
   AND pg_namespace.nspname = ANY(current_schemas(true))
 ORDER BY array_position(current_schemas(true), pg_namespace.nspname::text)
 LIMIT 1;
@@ -220,9 +221,18 @@ class _PgConnection:
         with self._conn.cursor() as cursor:
             cursor.execute(_CHECK_JULIANDAY_SQL)
             row = cursor.fetchone()
-            if not row or not row[0]:
+            if not row:
                 return False
-            existing = _normalize_plpgsql_body(row[0])
+            ret_typname, prokind, provolatile, lanname, prosrc = row
+            if (
+                ret_typname != "float8"
+                or prokind != "f"
+                or provolatile != "s"
+                or lanname != "plpgsql"
+                or not prosrc
+            ):
+                return False
+            existing = _normalize_plpgsql_body(prosrc)
             expected = _normalize_plpgsql_body(_JULIANDAY_BODY)
             return existing == expected
 
@@ -242,15 +252,7 @@ class _PgConnection:
             with self._conn.cursor() as cursor:
                 cursor.execute(_LOCK_COMPAT_SHIM_SQL)
                 # 잠금 획득 후 대기하는 동안 다른 연결이 이미 생성했을 수 있으므로 재확인
-                cursor.execute(_CHECK_JULIANDAY_SQL)
-                row = cursor.fetchone()
-                needs_create = True
-                if row and row[0]:
-                    existing = _normalize_plpgsql_body(row[0])
-                    expected = _normalize_plpgsql_body(_JULIANDAY_BODY)
-                    if existing == expected:
-                        needs_create = False
-                if needs_create:
+                if not self._is_julianday_defined_and_current():
                     cursor.execute(_JULIANDAY_SHIM)
             self._conn.commit()  # 자문 잠금 자동 해제 및 트랜잭션 IDLE 확정
         except psycopg.Error as exc:
