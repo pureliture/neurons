@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import os
+import sys
 from bisect import bisect_left, bisect_right
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Annotated, Any, Callable, Literal, Mapping
@@ -916,7 +917,7 @@ class GraphFirstResolver:
         card = self._session_memory_card(
             request,
             hit,
-            summary_max_chars=len(body) + 1,
+            summary_max_chars=sys.maxsize,
         )
         if card is None or card["memory_id"] != request.memory_id:
             return self._error_payload(request, error_code="memory_not_found")

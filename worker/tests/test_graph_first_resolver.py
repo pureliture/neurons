@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import base64
 import json
+import sys
 from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 from agent_knowledge.mcp_payload import tool_result_bytes
 from agent_knowledge.couchdb_source.document_model import sha256_hash
+from agent_knowledge.public_safe_util import public_safe_text
+from agent_knowledge.session_memory.transcript_model import TRUNCATED_TEXT_MARKER
 
 import agent_knowledge.llm_brain_core.graph_first_resolver as resolver_module
 from agent_knowledge.llm_brain_core.graph_first_resolver import (
@@ -739,6 +742,42 @@ def test_memory_fetch_returns_small_public_body_with_hash_in_minimal_mode():
     assert "summary" not in result["statuses"][0]
     assert "full_content_hash" not in result["statuses"][0]
     assert "summary_byte_range" not in result["statuses"][0]
+
+
+def test_memory_fetch_does_not_truncate_when_public_redaction_expands_text():
+    secrets = [f"Bearer t{index}" for index in range(1600)]
+    hit = _memory_fetch_hit(" ".join(secrets))
+    memory_id = f"chunk:{hit['memory_id'][:56]}"
+    resolver = GraphFirstResolver(
+        None,
+        session_memory_fetch=lambda _prefix, _project: hit,
+    )
+
+    pages = [
+        resolver.resolve(
+            project="neurons",
+            memory_id=memory_id,
+        )
+    ]
+    while pages[-1]["next_cursor"]:
+        pages.append(
+            resolver.resolve(
+                project="neurons",
+                memory_id=memory_id,
+                cursor=pages[-1]["next_cursor"],
+            )
+        )
+
+    fetched_body = "".join(page["items"][0]["summary"] for page in pages)
+    expected_body = public_safe_text(
+        resolver_module._session_chunk_body(hit["summary"]),
+        max_chars=sys.maxsize,
+    )
+    assert len(expected_body) > len(" ".join(secrets))
+    assert len(pages) > 1
+    assert TRUNCATED_TEXT_MARKER not in fetched_body, "fetch body must not be truncated"
+    assert fetched_body == expected_body, "fetch pages must preserve the full public-safe body"
+    assert not any(secret in fetched_body for secret in secrets)
 
 
 def test_memory_fetch_round_trips_from_a_truncated_query_item():
