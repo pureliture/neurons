@@ -1,36 +1,47 @@
-"""Regression tests for builder OOM bounded paging and materialization.
+"""Regression tests for builder bounded memory, fail-closed drift defense, and canonical contracts.
 
-Asserts:
-1. Bounded Paging: In a store with many already-projected sessions, the selection
-   fast-path skips heavy `find_by_session` store reads (0 calls for projected sessions).
-2. Large Session Materialization & Hash Integrity: A synthetic large session with many
-   conversation turns and large tool evidence bodies materializes deterministically with
-   exact matching sha256 content_hash and source_hash.
-3. Drift Protection & Lossless Reprocessing: Modified source_hash or representation mismatch
-   is never short-circuited and is correctly re-queued for projection.
-4. Safe Failure Isolation & ACK Retention: Failed projections retain their state in CouchDB
-   and checkpoint without loss, arbitrary quarantine, or deletion.
+Contract Properties Verified:
+1. Fail-Closed on Body Tamper with Unchanged Manifest:
+   When chunk body changes but pointer/manifest remains unchanged, resolution strictly
+   fails closed (SourceRevisionResolutionError) rather than silently projecting corrupted content.
+2. Mixed Large Sessions & Many Sessions Peak Memory Bounded:
+   Sequential materialization of 30 sessions (mixed normal + large 500KB+ bodies) runs
+   with bounded memory overhead (verified via tracemalloc peak allocation).
+3. Drift Protection & Lossless Reprocessing:
+   Modified source revision (via chunk revision) is detected by canonical selector and
+   re-queued for projection without loss.
+4. Representation Drift Re-queueing:
+   Representation switch (session_v1 -> segment_v1) strictly re-queues already-projected sessions.
+5. Safe Failure Isolation & Data Retention:
+   Failing projection records FAILED status in projection_state backend receipts without
+   corrupting, deleting, or dropping source transcript documents.
 """
 
 from __future__ import annotations
 
 import hashlib
+import tracemalloc
 
 import pytest
 
-from agent_knowledge.couchdb_source import document_model as dm
+from agent_knowledge.couchdb_source import build_cli, document_model as dm
 from agent_knowledge.couchdb_source.build_cli import (
     _select_sessions_needing_projection,
 )
 from agent_knowledge.couchdb_source.session_memory_materializer import (
     materialize_session_memory,
     project_session_memory,
-    update_coverage_with_tool_evidence,
+)
+from agent_knowledge.couchdb_source.source_revision import (
+    SourceRevisionResolutionError,
+    activate_source_revision,
+    resolve_active_source_revision,
+    resolve_active_source_revision_from_snapshot,
 )
 from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
-from agent_knowledge.session_memory.transcript_model import (
-    TranscriptChunk,
-    TranscriptSession,
+from test_couchdb_build_cli import (
+    _build_synthetic_session,
+    _mark_projected,
 )
 
 
@@ -38,287 +49,141 @@ def _h(text: str) -> str:
     return f"sha256:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
 
 
-class SpyCouchDBSourceStore(InMemoryCouchDBSourceStore):
-    """Store wrapper tracking find_by_session call counts for bounded paging validation."""
+def test_body_change_with_same_manifest_fails_closed():
+    """Verify fail-closed behavior when chunk body changes but manifest remains unupdated.
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.find_by_session_calls: list[str] = []
-
-    def find_by_session(self, *, session_id_hash: str) -> list[dict]:
-        self.find_by_session_calls.append(session_id_hash)
-        return super().find_by_session(session_id_hash=session_id_hash)
-
-
-def _seed_session_with_state(
-    store: InMemoryCouchDBSourceStore,
-    *,
-    session_id_hash: str,
-    provider: str = "hermes",
-    project: str = "neurons",
-    source_hash: str = "",
-    projected: bool = False,
-    representation: str = "session_v1",
-) -> str:
-    effective_source_hash = source_hash or _h(f"source_hash_for_{session_id_hash}")
-    session = TranscriptSession(
-        session_id_hash=session_id_hash,
-        provider=provider,
-        project=project,
-        started_at="2026-11-11T00:00:00Z",
-        source_hash=effective_source_hash,
-    )
-    session_doc = dm.build_transcript_session_document(session=session)
-    store.put(session_doc)
-
-    chunk = TranscriptChunk.from_text(
-        chunk_id="chunk_00",
-        session_id_hash=session_id_hash,
-        provider=provider,
-        project=project,
-        turn_start_index=0,
-        turn_end_index=0,
-        text="test conversation chunk body",
-    )
-    chunk_doc = dm.build_conversation_chunk_document(chunk=chunk)
-    store.put(chunk_doc)
-
-    cov = dm.build_coverage_manifest_document(
-        session_id_hash=session_id_hash,
-        provider=provider,
-        project=project,
-        conversation_chunk_count=1,
-        tool_evidence_bundle_count=0,
-        conversation_content_hashes=[chunk_doc["content_hash"]],
-        tool_evidence_coverage_hashes=[],
-        conversation_revision_tokens=[
-            dm.build_source_revision_token(
-                chunk_doc,
-                material_hash_field="content_hash",
-            )
-        ],
-        project_authority={"project": project, "ambiguous": False, "eligible_for_retirement": True},
-    )
-    store.put(cov)
-
-    if projected:
-        proj_state = dm.build_projection_state_document(
-            session_id_hash=session_id_hash,
-            provider=provider,
-            project=project,
-            target_profile="session-memory",
-            projection_status=dm.ProjectionStatus.PROJECTED,
-            active_content_hash=chunk_doc["content_hash"],
-            session_memory_knowledge_id="chunk_id_test",
-            projected_source_hash=effective_source_hash,
-        )
-        proj_state["backend_receipts"] = {
-            "postgres_pgvector": {
-                "receipt_version": 4 if representation == "segment_v1" else 2,
-                "projection_status": "projected",
-                "projected_source_hash": effective_source_hash,
-                "session_id_hash": session_id_hash,
-            }
-        }
-        store.put(proj_state)
-
-    return effective_source_hash
-
-
-def test_bounded_paging_skips_find_by_session_for_projected_sessions():
-    """Verify that already-projected sessions skip heavy find_by_session calls."""
-    store = SpyCouchDBSourceStore()
-
-    # Seed 50 already-projected sessions
-    for i in range(50):
-        sid = _h(f"projected_{i}")
-        _seed_session_with_state(
-            store,
-            session_id_hash=sid,
-            source_hash=_h(f"hash_v1_{i}"),
-            projected=True,
-        )
-
-    # Seed 2 unprojected sessions
-    unproj_1 = _h("unprojected_1")
-    unproj_2 = _h("unprojected_2")
-    _seed_session_with_state(store, session_id_hash=unproj_1, source_hash=_h("hash_unproj_1"), projected=False)
-    _seed_session_with_state(store, session_id_hash=unproj_2, source_hash=_h("hash_unproj_2"), projected=False)
-
-    store.find_by_session_calls.clear()
-
-    # Run selection
-    selected = _select_sessions_needing_projection(
-        store,
-        limit=10,
-        backend="postgres_pgvector",
-        representation="session_v1",
-    )
-
-    # Selected must only contain the 2 unprojected sessions
-    selected_ids = {s.get("session_id_hash") for s in selected}
-    assert unproj_1 in selected_ids
-    assert unproj_2 in selected_ids
-    assert len(selected) == 2
-
-    # find_by_session must NOT have been called for any of the 50 projected sessions!
-    # Only called for unprojected sessions needing active revision resolution.
-    assert len(store.find_by_session_calls) == 2
-    assert set(store.find_by_session_calls) == {unproj_1, unproj_2}
-
-
-def test_synthetic_large_session_materialization_and_hash_integrity():
-    """Verify memory bounded materialization for a synthetic large session with exact hash match."""
+    If a naive short-circuit was present or drift checks were bypassed, tampered content
+    would either be projected or silently ignored. Canonical resolution strictly raises
+    SourceRevisionResolutionError ('active source revision source changed').
+    """
     store = InMemoryCouchDBSourceStore()
-    sid = _h("large_session_001")
-    provider = "hermes"
-    project = "neurons"
+    sid = _build_synthetic_session(store, provider="hermes", project="neurons", raw_id="tamper-test")
+    activated = activate_source_revision(store=store, session_id_hash=sid)
 
-    session = TranscriptSession(
-        session_id_hash=sid,
-        provider=provider,
-        project=project,
-        started_at="2026-11-11T00:00:00Z",
-    )
-    store.put(dm.build_transcript_session_document(session=session))
+    # 1. Baseline: resolution succeeds when body and manifest match
+    resolved = resolve_active_source_revision(session_id_hash=sid, store=store)
+    assert resolved.source_hash == activated.source_hash
+    assert not resolved.is_legacy_unpinned
 
-    # Create 20 large conversation chunks (each ~50KB)
-    chunk_hashes = []
-    chunk_tokens = []
-    for i in range(20):
-        body_part = f"Turn {i}: " + ("x" * 50_000)
-        chunk = TranscriptChunk.from_text(
-            chunk_id=f"chunk_{i:02d}",
+    # 2. Tamper: mutate the exact snapshot source document referenced by the active manifest member
+    manifest = store.get(activated.manifest_id)
+    assert manifest is not None and "members" in manifest
+    # Find chunk member
+    chunk_member = next(m for m in manifest["members"] if m.get("source_doc_type") == dm.SourceDocType.CONVERSATION_CHUNK)
+    target_doc_id = chunk_member["source_document_id"]
+    target_doc = dict(store.get(target_doc_id))
+    target_doc["body"] += " tampered-in-place-without-manifest-update"
+    target_doc["content_hash"] = dm.sha256_hash(target_doc["body"])
+    # Bypass normal put to simulate underlying storage corruption
+    store._docs[target_doc_id] = target_doc
+
+    # 3. Fail-Closed assertion: resolve_active_source_revision must reject with SourceRevisionResolutionError
+    with pytest.raises(SourceRevisionResolutionError, match="active source revision source changed"):
+        resolve_active_source_revision(session_id_hash=sid, store=store)
+
+    # Snapshot-based resolution in selection must also fail closed
+    with pytest.raises(SourceRevisionResolutionError, match="active source revision source changed"):
+        resolve_active_source_revision_from_snapshot(
             session_id_hash=sid,
-            provider=provider,
-            project=project,
-            turn_start_index=i,
-            turn_end_index=i,
-            text=body_part,
-        )
-        chunk_doc = dm.build_conversation_chunk_document(chunk=chunk)
-        store.put(chunk_doc)
-        chunk_hashes.append(chunk_doc["content_hash"])
-        chunk_tokens.append(
-            dm.build_source_revision_token(chunk_doc, material_hash_field="content_hash")
+            documents=store.find_by_session(session_id_hash=sid),
         )
 
-    # Add 5 large tool evidence bundles (each ~100KB)
-    bundle_hashes = []
-    bundle_tokens = []
-    for j in range(5):
-        bundle_body = f"Tool Evidence {j}: " + ("y" * 100_000)
-        rec_hash = _h(f"rec_{j}")
-        bundle_doc = dm.build_tool_evidence_bundle_document(
-            session_id_hash=sid,
-            provider=provider,
-            project=project,
-            part_index=j,
-            part_count=5,
-            evidence_index_start=j * 10,
-            evidence_index_end=(j + 1) * 10 - 1,
-            record_content_hashes=[rec_hash],
-            body=bundle_body,
+
+def test_mixed_large_and_many_sessions_peak_memory_bounded():
+    """Verify that processing mixed large and normal sessions maintains bounded peak memory."""
+    store = InMemoryCouchDBSourceStore()
+    sids: list[str] = []
+
+    # Seed 25 normal sessions + 5 large sessions (total 30 sessions)
+    for i in range(30):
+        is_large = (i % 6 == 0)
+        body = ("large turn content " * 25_000) if is_large else f"turn content for session {i}"
+        sid = _build_synthetic_session(
+            store,
+            provider="hermes",
+            project="neurons",
+            raw_id=f"session-{i:03d}",
+            body=body,
         )
-        store.put(bundle_doc)
-        bundle_hashes.append(bundle_doc["coverage_hash"])
-        bundle_tokens.append(
-            dm.build_source_revision_token(bundle_doc, material_hash_field="coverage_hash")
-        )
+        sids.append(sid)
 
-    cov = dm.build_coverage_manifest_document(
-        session_id_hash=sid,
-        provider=provider,
-        project=project,
-        conversation_chunk_count=20,
-        tool_evidence_bundle_count=5,
-        conversation_content_hashes=chunk_hashes,
-        tool_evidence_coverage_hashes=bundle_hashes,
-        conversation_revision_tokens=chunk_tokens,
-        tool_evidence_revision_tokens=bundle_tokens,
-        project_authority={"project": project, "ambiguous": False, "eligible_for_retirement": True},
-    )
-    store.put(cov)
+    # Measure memory during sequential materialization
+    tracemalloc.start()
+    tracemalloc.reset_peak()
 
-    # Materialize
-    mat = materialize_session_memory(session_id_hash=sid, store=store)
+    materialized_count = 0
+    total_body_bytes = 0
+    for sid in sids:
+        mat = materialize_session_memory(session_id_hash=sid, store=store)
+        assert mat.fully_materialized is True
+        materialized_count += 1
+        total_body_bytes += len(mat.body)
+        # Verify deterministic hash
+        assert mat.content_hash == dm.sha256_hash(mat.body)
+        del mat
 
-    assert mat.fully_materialized is True
-    assert mat.conversation_chunk_count == 20
-    assert mat.tool_evidence_bundle_count == 5
-    assert len(mat.body) > 1_500_000  # > 1.5MB text body
-    # Strict hash validation
-    expected_content_hash = dm.sha256_hash(mat.body)
-    assert mat.content_hash == expected_content_hash
-    assert "materialization_loss" not in mat.notes
+    current_mem, peak_mem = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert materialized_count == 30
+    assert total_body_bytes > 2_000_000  # Total content processed exceeds 2MB
+    # Peak heap allocation during loop must remain well bounded (e.g. under 15MB, far below 1Gi)
+    assert peak_mem < 15 * 1024 * 1024, f"Peak memory {peak_mem / 1024 / 1024:.2f}MB exceeded 15MB budget"
 
 
 def test_drift_protection_requeues_when_source_hash_changes():
     """Verify that source hash drift re-queues already-projected sessions without skipping."""
-    store = SpyCouchDBSourceStore()
-    sid = _h("session_drift_001")
-    v1_hash = _h("source_hash_v1")
-    v2_hash = _h("source_hash_v2")
+    store = InMemoryCouchDBSourceStore()
+    sid = _build_synthetic_session(store, provider="hermes", project="neurons", raw_id="drift-test")
+    _mark_projected(store, sid, "hermes", "neurons")
 
-    # Seed projected with source_hash_v1
-    _seed_session_with_state(
-        store,
-        session_id_hash=sid,
-        source_hash=v1_hash,
-        projected=True,
-    )
-
-    # Now update the session document to source_hash_v2 (source modified)
-    session_doc = store.get(dm.session_doc_id(sid))
-    session_doc["source_hash"] = v2_hash
-    store.put(session_doc)
-
-    store.find_by_session_calls.clear()
-
+    # 1. Initially already projected: must not be selected
     selected = _select_sessions_needing_projection(
         store,
         limit=10,
         backend="postgres_pgvector",
         representation="session_v1",
     )
+    assert sid not in {s.get("session_id_hash") for s in selected}
 
-    # Must be selected due to drift
-    assert len(selected) == 1
-    assert selected[0]["session_id_hash"] == sid
-    assert sid in store.find_by_session_calls
+    # 2. Modify source chunk body and content_hash
+    docs = store.find_by_session(session_id_hash=sid)
+    chunk = next(d for d in docs if d.get("doc_type") == dm.SourceDocType.CONVERSATION_CHUNK)
+    chunk["body"] += " updated conversation suffix"
+    chunk["content_hash"] = dm.sha256_hash(chunk["body"])
+    store.put(chunk)
+
+    # 3. Canonical selector must re-queue session due to source_hash drift
+    selected = _select_sessions_needing_projection(
+        store,
+        limit=10,
+        backend="postgres_pgvector",
+        representation="session_v1",
+    )
+    selected_ids = {s.get("session_id_hash") for s in selected}
+    assert sid in selected_ids
 
 
 def test_representation_drift_requeues_session():
     """Verify that representation mismatch (session_v1 vs segment_v1) re-queues the session."""
     store = InMemoryCouchDBSourceStore()
-    sid = _h("session_rep_drift_001")
-    v1_hash = _h("source_hash_v1")
+    sid = _build_synthetic_session(store, provider="hermes", project="neurons", raw_id="rep-drift")
+    _mark_projected(store, sid, "hermes", "neurons")
 
-    # Seed projected as session_v1
-    _seed_session_with_state(
-        store,
-        session_id_hash=sid,
-        source_hash=v1_hash,
-        projected=True,
-        representation="session_v1",
-    )
-
-    # When querying for segment_v1, it must NOT skip and must be re-queued
+    # Querying for segment_v1 when projected as session_v1 must re-queue
     selected = _select_sessions_needing_projection(
         store,
         limit=10,
         backend="postgres_pgvector",
         representation="segment_v1",
     )
-    assert len(selected) == 1
-    assert selected[0]["session_id_hash"] == sid
+    assert sid in {s.get("session_id_hash") for s in selected}
 
 
 def test_failed_projection_retains_state_and_does_not_drop_work():
     """Verify that a failing projector records FAILED without dropping or deleting source."""
     store = InMemoryCouchDBSourceStore()
-    sid = _h("session_failure_retention_001")
-    _seed_session_with_state(store, session_id_hash=sid, projected=False)
+    sid = _build_synthetic_session(store, provider="hermes", project="neurons", raw_id="fail-test")
 
     class FailingProjector:
         def project(self, *, target_profile: str, document: dict) -> str:
@@ -341,6 +206,7 @@ def test_failed_projection_retains_state_and_does_not_drop_work():
     receipt = (saved_state.get("backend_receipts") or {}).get("postgres_pgvector", {})
     assert receipt.get("projection_status") == dm.ProjectionStatus.FAILED
     assert receipt.get("failure_reason") == "RuntimeError"
-    # Session document must remain intact
-    session_doc = store.get(dm.session_doc_id(sid))
-    assert session_doc is not None
+
+    # Transcript documents must remain intact
+    docs = store.find_by_session(session_id_hash=sid)
+    assert len(docs) >= 3  # session + chunk + coverage

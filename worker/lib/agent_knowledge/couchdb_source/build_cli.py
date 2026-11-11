@@ -209,7 +209,7 @@ def _select_sessions_needing_projection(
         _iter_by_type(
             store,
             SourceDocType.TRANSCRIPT_SESSION,
-            fields=["_id", "session_id_hash", "provider", "project", "source_hash"],
+            fields=["_id", "session_id_hash", "provider", "project"],
             selector=scope_selector,
             page_size=max(1, limit) if limit > 0 else 1000,
         )
@@ -229,25 +229,6 @@ def _select_sessions_needing_projection(
             continue
         canonical_session_ids.add(session_id_hash)
         projected_source_hash = projected_source_hashes.get(session_id_hash, "")
-
-        # --- Bounded Selection Fast Path (O(1) Short-circuit Skip) ---
-        # When a canonical session carries its current source_hash in the transcript_session
-        # document and matches the already-projected hash & representation without being blocked,
-        # skip store.find_by_session snapshot loading entirely to bound memory.
-        session_source_hash = str(session.get("source_hash") or "")
-        matching_rep = (
-            backend != "postgres_pgvector"
-            or projected_representations.get(session_id_hash, "session_v1") == representation
-        )
-        if (
-            session_source_hash
-            and projected_source_hash
-            and session_source_hash == projected_source_hash
-            and matching_rep
-            and blocked_source_hashes.get(session_id_hash) != session_source_hash
-        ):
-            continue
-
         resolved = resolve_active_source_revision_from_snapshot(
             session_id_hash=session_id_hash,
             documents=store.find_by_session(session_id_hash=session_id_hash),
@@ -1180,10 +1161,8 @@ def main(argv: list[str] | None = None) -> int:
             segments_total += int(getattr(projector, "last_segments_total", 0) or 0)
             segments_reused += int(getattr(projector, "last_segments_reused", 0) or 0)
             segments_embedded += int(getattr(projector, "last_segments_embedded", 0) or 0)
-            # Bound in-memory references across iterations and release large body allocations
-            del result
-            import gc
-            gc.collect()
+            # Release per-session projection allocations across iterations
+            result = None
     finally:
         _close_if_supported(projector)
 
