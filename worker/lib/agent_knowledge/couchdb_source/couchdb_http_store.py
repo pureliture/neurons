@@ -131,24 +131,27 @@ class CouchDBHttpSourceStore:
         self.base_url = base_url.rstrip("/")
         self.db = db
         self.transport = transport or _urllib_transport
-        self._transport_supports_bounded_read = self._check_transport_supports_bounded(self.transport)
+        self._transport_accepts_timeout, self._transport_accepts_max_response_bytes = (
+            self._inspect_transport_params(self.transport)
+        )
         self.auth_header = auth_header
         self.request_timeout_seconds = request_timeout_seconds
         self.deadline_monotonic = deadline_monotonic
 
     @staticmethod
-    def _check_transport_supports_bounded(transport) -> bool:
+    def _inspect_transport_params(transport) -> tuple[bool, bool]:
         if transport is _urllib_transport:
-            return True
+            return True, True
         try:
             sig = inspect.signature(transport)
             params = sig.parameters
-            return (
-                "max_response_bytes" in params
-                or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
-            )
+            has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+            accepts_timeout = has_var_keyword or "timeout_seconds" in params
+            accepts_max_response_bytes = has_var_keyword or "max_response_bytes" in params
+            return accepts_timeout, accepts_max_response_bytes
         except (ValueError, TypeError):
-            return False
+            # If inspection fails (e.g. built-in C functions without signature), pass only positional args
+            return False, False
 
     # --- HTTP plumbing --------------------------------------------------------
 
@@ -173,20 +176,28 @@ class CouchDBHttpSourceStore:
             if remaining <= 0:
                 raise CouchDBError("operation deadline exceeded")
             timeout_seconds = min(timeout_seconds, remaining)
-        if self._transport_supports_bounded_read:
-            # The transport accepts bounded read arguments. Call exactly once without retrying
-            # to guarantee mutations (POST/PUT) are never duplicated on ambiguous errors.
-            response = self.transport(
-                method,
-                self.base_url + path,
-                headers,
-                body,
-                timeout_seconds=timeout_seconds,
-                max_response_bytes=max_response_bytes,
-            )
-        else:
-            response = self.transport(method, self.base_url + path, headers, body)
+
+        transport_kwargs = {}
+        if self._transport_accepts_timeout:
+            transport_kwargs["timeout_seconds"] = timeout_seconds
+        if self._transport_accepts_max_response_bytes:
+            transport_kwargs["max_response_bytes"] = max_response_bytes
+
+        # Call transport exactly once without runtime catch-and-retry
+        # to guarantee mutations (POST/PUT) are never duplicated on ambiguous errors.
+        response = self.transport(
+            method,
+            self.base_url + path,
+            headers,
+            body,
+            **transport_kwargs,
+        )
+
         if max_response_bytes is not None and len(response.body) > int(max_response_bytes):
+            # Note: For custom transports that do not accept max_response_bytes, the transport
+            # may already have buffered the entire body in memory before this check runs.
+            # This check enforces the fail-closed boundary, but does not guarantee O(1) streaming
+            # allocation for cap-unsupported custom transports.
             raise CouchDBResponseTooLarge("CouchDB response exceeded configured byte limit")
         try:
             payload = json.loads(response.body.decode("utf-8") or "{}") if response.body else {}
@@ -798,12 +809,12 @@ class CouchDBHttpSourceStore:
             for doc in page:
                 doc_id = str(doc.get("_id") or "")
                 if not doc_id:
-                    continue
+                    raise CouchDBError("malformed CouchDB document without _id")
                 doc_hash = payload_hash(doc) if callable(payload_hash) else str(doc.get("_rev") or "")
                 if doc_id in seen_docs:
                     if seen_docs[doc_id] != doc_hash:
                         raise SourceStoreConflict(
-                            f"conflicting duplicate document {doc_id} detected across page boundary"
+                            "conflicting duplicate document detected across page boundary"
                         )
                     continue
                 seen_docs[doc_id] = doc_hash

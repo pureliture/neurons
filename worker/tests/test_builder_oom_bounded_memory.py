@@ -910,8 +910,90 @@ def test_find_by_session_conflicting_duplicate_fails_closed():
         transport=transport,
     )
 
-    with pytest.raises(SourceStoreConflict, match="conflicting duplicate document doc:B detected across page boundary"):
+    with pytest.raises(SourceStoreConflict, match="conflicting duplicate document detected across page boundary") as exc_info:
         store.find_by_session(session_id_hash="sid_conflict", page_size=1)
+    # Critical: Raw document ID must NEVER be leaked in exception messages (privacy & non-identification rule)
+    assert "doc:B" not in str(exc_info.value)
+
+
+def test_find_by_session_malformed_doc_without_id_fails_closed():
+    """Verify that documents missing _id are not silently omitted and fail closed with CouchDBError."""
+    import json
+    from agent_knowledge.couchdb_source.couchdb_http_store import CouchDBHttpSourceStore, CouchDBError
+
+    pages = [
+        [{"session_id_hash": "sid_noid", "body": "missing_id_doc"}],
+    ]
+
+    def transport(method, url, headers, body, **kwargs):
+        class FakeResponse:
+            def __init__(self, payload_dict):
+                self.status_code = 200
+                self.body = json.dumps(payload_dict).encode("utf-8")
+        return FakeResponse({"docs": pages[0], "bookmark": ""})
+
+    store = CouchDBHttpSourceStore(
+        base_url="http://127.0.0.1:5984",
+        db="test_db",
+        transport=transport,
+    )
+
+    with pytest.raises(CouchDBError, match="malformed CouchDB document without _id"):
+        store.find_by_session(session_id_hash="sid_noid", page_size=10)
+
+
+def test_transport_signature_adaptation_matrix():
+    """Verify that custom transports with varied signatures are invoked safely without TypeErrors."""
+    import json
+    from agent_knowledge.couchdb_source.couchdb_http_store import CouchDBHttpSourceStore
+
+    class FakeResponse:
+        def __init__(self):
+            self.status_code = 200
+            self.body = json.dumps({"docs": [], "bookmark": ""}).encode("utf-8")
+
+    # Case 1: Positional only (legacy custom transport without timeout or cap params)
+    invoked_args_1 = {}
+    def pos_only(method, url, headers, body):
+        invoked_args_1["method"] = method
+        return FakeResponse()
+
+    store1 = CouchDBHttpSourceStore(base_url="http://127.0.0.1:5984", db="test_db", transport=pos_only)
+    store1._request("GET", "/test_db", max_response_bytes=1024)
+    assert invoked_args_1["method"] == "GET"
+
+    # Case 2: Accepts timeout_seconds only (does not accept max_response_bytes)
+    invoked_args_2 = {}
+    def timeout_only(method, url, headers, body, timeout_seconds=10):
+        invoked_args_2["timeout_seconds"] = timeout_seconds
+        return FakeResponse()
+
+    store2 = CouchDBHttpSourceStore(base_url="http://127.0.0.1:5984", db="test_db", transport=timeout_only)
+    # Passing max_response_bytes must NOT raise TypeError even though timeout_only doesn't accept it!
+    store2._request("GET", "/test_db", max_response_bytes=1024)
+    assert "timeout_seconds" in invoked_args_2
+
+    # Case 3: Accepts max_response_bytes only (does not accept timeout_seconds)
+    invoked_args_3 = {}
+    def max_bytes_only(method, url, headers, body, max_response_bytes=None):
+        invoked_args_3["max_response_bytes"] = max_response_bytes
+        return FakeResponse()
+
+    store3 = CouchDBHttpSourceStore(base_url="http://127.0.0.1:5984", db="test_db", transport=max_bytes_only)
+    # Must NOT raise TypeError even though max_bytes_only doesn't accept timeout_seconds!
+    store3._request("GET", "/test_db", max_response_bytes=2048)
+    assert invoked_args_3["max_response_bytes"] == 2048
+
+    # Case 4: Full kwargs transport
+    invoked_args_4 = {}
+    def full_kwargs(method, url, headers, body, **kwargs):
+        invoked_args_4.update(kwargs)
+        return FakeResponse()
+
+    store4 = CouchDBHttpSourceStore(base_url="http://127.0.0.1:5984", db="test_db", transport=full_kwargs)
+    store4._request("GET", "/test_db", max_response_bytes=4096)
+    assert "timeout_seconds" in invoked_args_4
+    assert invoked_args_4["max_response_bytes"] == 4096
 
 
 def test_find_by_session_sparse_pages_does_not_early_terminate():
