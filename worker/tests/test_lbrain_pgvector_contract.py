@@ -396,6 +396,10 @@ def test_live_session_chunk_prefix_lookup_is_project_scoped_and_rejects_ambiguit
             with conn.cursor() as cur:
                 for row in rows:
                     cur.execute(
+                        "DELETE FROM embedding_outbox WHERE target_type = %s AND target_id = %s",
+                        ("session_chunk", row.chunk_id),
+                    )
+                    cur.execute(
                         "DELETE FROM session_memory_chunks WHERE chunk_id = %s",
                         (row.chunk_id,),
                     )
