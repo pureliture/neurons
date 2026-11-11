@@ -204,6 +204,42 @@ def test_synthetic_fast_path_rejects_when_first_schema_function_is_volatile(monk
     assert mock_conn.commit_count == 1
 
 
+def test_synthetic_slow_path_fails_closed_when_return_type_cannot_be_replaced(monkeypatch):
+    """[Synthetic] 기존 함수의 반환형이 달라 PostgreSQL CREATE OR REPLACE가 42P13 에러를 낼 때,
+    어댑터가 이를 허위 성공으로 삼키지 않고 정상적으로 호출자에게 에러를 유출(Fail-Closed)함을 검증."""
+    class _IncompatibleTypeConnection(_MockPsycopgConnection):
+        def cursor(self):
+            class _IncompatibleCursor(_MockCursor):
+                def execute(self, query, params=None):
+                    self.conn.executed_statements.append(query)
+                    if "pg_proc.prosrc" in query:
+                        # 반환형이 int4로 다른 기존 함수
+                        self.conn.last_result = ("int4", "f", "s", "plpgsql", self.conn.current_prosrc)
+                        return
+                    if "pg_advisory_xact_lock" in query:
+                        self.conn.advisory_lock_count += 1
+                        return
+                    if "CREATE OR REPLACE FUNCTION julianday" in query:
+                        exc = errors.FeatureNotSupported("cannot change return type of existing function")
+                        exc.sqlstate = "42P13"
+                        raise exc
+            return _IncompatibleCursor(self)
+
+    mock_conn = _IncompatibleTypeConnection(prosrc=_JULIANDAY_BODY, ret_typname="int4")
+    monkeypatch.setattr(postgres_db_adapter.psycopg, "connect", lambda *args, **kwargs: mock_conn)
+
+    adapter = PostgresLedgerDbAdapter("postgresql://fake:5432/test")
+    try:
+        adapter.connect()
+    except errors.FeatureNotSupported as exc:
+        assert "cannot change return type" in str(exc)
+        assert getattr(exc, "sqlstate", None) == "42P13"
+    else:
+        raise AssertionError("Incompatible function return type error must be re-raised")
+
+    assert mock_conn.rollback_count == 1
+
+
 def test_connection_commits_and_remains_idle_after_connect(monkeypatch):
     """연결 완료 후 항상 commit되어 트랜잭션이 IDLE 상태(미커밋 상태 방지)로 유지됨을 검증."""
     mock_conn = _MockPsycopgConnection(prosrc=_JULIANDAY_BODY)
