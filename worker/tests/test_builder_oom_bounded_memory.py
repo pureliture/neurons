@@ -493,7 +493,10 @@ def test_find_by_session_transport_byte_cap_fails_closed():
     )
 
     with pytest.raises(CouchDBResponseTooLarge, match="exceeded configured byte limit"):
-        store.find_by_session(session_id_hash="dummy_session_hash")
+        store.find_by_session(
+            session_id_hash="dummy_session_hash",
+            allow_oversized_single_fallback=False,
+        )
 
 
 def test_selection_single_pass_scales_with_large_state_corpus():
@@ -838,6 +841,73 @@ def test_find_by_session_adaptive_page_halving_on_response_too_large():
     assert 100 in requested_limits
     assert 50 in requested_limits
     assert 25 in requested_limits
+
+
+def test_find_by_session_single_oversized_document_fetches_unbounded_and_logs_warning(caplog):
+    """Verify that a single document exceeding 8MB falls back to unbounded read with non-identifying warning."""
+    import json
+    import logging
+    from agent_knowledge.couchdb_source.couchdb_http_store import CouchDBHttpSourceStore, CouchDBResponseTooLarge
+
+    chunks = [
+        {"_id": "chunk:huge_single", "doc_type": "conversation_chunk", "session_id_hash": "sid_huge", "body": "x" * (9 * 1024 * 1024)}
+    ]
+
+    requested_calls = []
+
+    def transport(method, url, headers, body, *, max_response_bytes=None, **kwargs):
+        class FakeResponse:
+            def __init__(self, payload_dict):
+                self.status_code = 200
+                self.body = json.dumps(payload_dict).encode("utf-8")
+
+        requested_calls.append({"max_response_bytes": max_response_bytes})
+        if max_response_bytes is not None:
+            raise CouchDBResponseTooLarge("Single document exceeds 8MB byte cap")
+
+        # Unbounded read succeeds
+        return FakeResponse({"docs": chunks, "bookmark": ""})
+
+    store = CouchDBHttpSourceStore(
+        base_url="http://127.0.0.1:5984",
+        db="test_db",
+        transport=transport,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        docs = store.find_by_session(session_id_hash="sid_huge", page_size=1)
+
+    assert len(docs) == 1
+    assert docs[0]["_id"] == "chunk:huge_single"
+    assert len(requested_calls) == 2
+    assert requested_calls[0]["max_response_bytes"] is not None
+    assert requested_calls[1]["max_response_bytes"] is None
+    # Crucial: Warning must be non-identifying (no session_id_hash or doc_id leaked)
+    assert "exceeded page response byte cap" in caplog.text
+    assert "sid_huge" not in caplog.text
+    assert "chunk:huge_single" not in caplog.text
+
+
+def test_find_by_session_strict_mode_fails_closed_on_oversized_single():
+    """Verify that allow_oversized_single_fallback=False strictly fails closed on oversized single docs."""
+    import json
+    from agent_knowledge.couchdb_source.couchdb_http_store import CouchDBHttpSourceStore, CouchDBResponseTooLarge
+
+    def transport(method, url, headers, body, *, max_response_bytes=None, **kwargs):
+        raise CouchDBResponseTooLarge("Single document exceeds 8MB byte cap")
+
+    store = CouchDBHttpSourceStore(
+        base_url="http://127.0.0.1:5984",
+        db="test_db",
+        transport=transport,
+    )
+
+    with pytest.raises(CouchDBResponseTooLarge, match="Single document exceeds 8MB byte cap"):
+        store.find_by_session(
+            session_id_hash="sid_strict",
+            page_size=1,
+            allow_oversized_single_fallback=False,
+        )
 
 
 def test_find_by_session_deduplicates_page_boundary_overlap():

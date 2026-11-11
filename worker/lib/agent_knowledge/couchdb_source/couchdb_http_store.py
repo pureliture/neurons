@@ -771,7 +771,8 @@ class CouchDBHttpSourceStore:
         session_id_hash: str,
         doc_type: str = "",
         page_size: int = 500,
-        max_response_bytes: int = COUCHDB_FIND_MAX_PAGE_RESPONSE_BYTES,
+        max_response_bytes: int | None = COUCHDB_FIND_MAX_PAGE_RESPONSE_BYTES,
+        allow_oversized_single_fallback: bool = True,
     ) -> list[dict]:
         selector: dict = {"session_id_hash": session_id_hash}
         if doc_type:
@@ -794,13 +795,25 @@ class CouchDBHttpSourceStore:
             except CouchDBResponseTooLarge:
                 # If a multi-document page exceeds the cap, halve the page limit to
                 # bound the transport buffer and retry with the same bookmark.
-                if current_page_size <= 1:
-                    # Single document exceeds cap: fail closed without unbounded allocation.
-                    # Preserves memory safety boundaries rather than silently dropping content
-                    # or triggering 1Gi cgroup OOM.
+                if current_page_size > 1:
+                    current_page_size = max(1, current_page_size // 2)
+                    continue
+                # Single document exceeds the page response byte cap.
+                # To preserve existing behavior for valid previously supported documents
+                # without introducing a silent new hard business restriction that halts
+                # the entire Builder pipeline, fall back to unbounded read if allowed.
+                if not allow_oversized_single_fallback:
                     raise
-                current_page_size = max(1, current_page_size // 2)
-                continue
+                logger.warning(
+                    "Single CouchDB document exceeded page response byte cap; "
+                    "fetching unbounded to preserve valid existing document"
+                )
+                status, payload = self._request(
+                    "POST",
+                    f"/{self.db}/_find",
+                    json_body=body,
+                    max_response_bytes=None,
+                )
             if status != 200:
                 raise CouchDBError(f"_find failed: HTTP {status}")
             page = payload.get("docs", [])
