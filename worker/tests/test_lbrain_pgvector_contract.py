@@ -355,6 +355,57 @@ def test_live_candidate_and_outbox_are_read_back_from_same_postgres(tmp_path: Pa
 
 
 @live_pg
+def test_live_session_chunk_prefix_lookup_is_project_scoped_and_rejects_ambiguity():
+    store = PgVectorStore(dsn=PG_DSN)
+    store.execute_ddl()
+    prefix = f"seg_{uuid.uuid4().hex}"
+    project = "lbrain-prefix-project"
+    rows = [
+        SessionChunk(
+            chunk_id=chunk_id,
+            session_id_hash=_hash(f"{prefix}:{suffix}"),
+            project=row_project,
+            content_markdown=f"prefix lookup body {suffix}",
+            content_hash=_hash(f"prefix lookup body {suffix}"),
+        )
+        for chunk_id, suffix, row_project in (
+            (f"{prefix}-a", "a", project),
+            (f"{prefix}-b", "b", project),
+            (f"{prefix}-foreign", "foreign", "lbrain-prefix-foreign"),
+            (f"segx{prefix[4:]}-a", "lookalike", project),
+        )
+    ]
+    try:
+        for row in rows:
+            store.insert_chunk(row)
+
+        assert store.get_session_chunk_by_id_prefix(
+            project=project,
+            chunk_id_prefix=f"{prefix}-a",
+        ) == rows[0]
+        assert store.get_session_chunk_by_id_prefix(
+            project=project,
+            chunk_id_prefix=prefix,
+        ) is None
+        assert store.get_session_chunk_by_id_prefix(
+            project="lbrain-prefix-foreign",
+            chunk_id_prefix=prefix,
+        ) == rows[2]
+    finally:
+        with store.transaction() as conn:
+            with conn.cursor() as cur:
+                for row in rows:
+                    cur.execute(
+                        "DELETE FROM embedding_outbox WHERE target_type = %s AND target_id = %s",
+                        ("session_chunk", row.chunk_id),
+                    )
+                    cur.execute(
+                        "DELETE FROM session_memory_chunks WHERE chunk_id = %s",
+                        (row.chunk_id,),
+                    )
+
+
+@live_pg
 def test_live_candidate_and_outbox_roll_back_as_one_transaction(tmp_path: Path):
     store = PgVectorStore(dsn=PG_DSN)
     store.execute_ddl()

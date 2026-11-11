@@ -227,7 +227,8 @@ def list_public_agent_tools() -> list[dict]:
                 "Graphiti/Neo4j 우선 질의 후 PG 권위 card와 다른 에이전트의 session-memory를 "
                 "rank fusion으로 병합해 돌려준다(items[].source=graph_card|session_memory). "
                 "프로젝트 활성 컨텍스트(mode='context'), 카드 목록(mode='list')도 지원한다. "
-                "그래프 장애·미투영 시 PG fallback과 검색 경로·신선도(metadata.freshness)를 명시한다."
+                "그래프 장애·미투영 시 PG fallback과 검색 경로·신선도(metadata.freshness)를 명시한다. "
+                "summary_truncated segment의 items[].id를 memory_id로 보내면 query 없이 전체 본문을 cursor로 이어 받을 수 있다."
             ),
             "inputSchema": {
                 "type": "object",
@@ -273,6 +274,17 @@ def list_public_agent_tools() -> list[dict]:
                         "type": "string",
                         "maxLength": 2048,
                         "description": "이전 응답의 next_cursor. 동일한 query·project·mode·limit으로 사용",
+                    },
+                    "memory_id": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "pattern": r"^chunk:seg_[0-9a-f]{52}$",
+                        "description": (
+                            "query 결과에서 summary_truncated가 붙은 segment 항목의 items[].id를 넣으면 "
+                            "해당 결과 1건의 전체 본문을 반환한다. query는 필요 없고, 응답 상한을 넘으면 "
+                            "next_cursor로 이어 받는다. 이 경로에서는 as_of·age·currentness·"
+                            "time_confidence·include_historical·limit 필터를 적용하지 않는다."
+                        ),
                     },
                     "include_historical": {
                         "type": "boolean",

@@ -217,6 +217,10 @@ vendored (`lib/agent_knowledge/`):
   후보 세션의 점수는 전체 segment 중 최고 유사도로 계산하고, 페널티는 세션 전체 segment 수를 기준으로 한다.
   후보 풀 밖 정답은 미검색(rank `None`)이다.
   표본 이외의 source 본문이나 식별 정보는 보고서에 기록하지 않는다.
+- `segment_v1` GraphFirst query 응답은 32 KiB UTF-8 JSON 예산을 segment 결과에 균등 배분한다.
+  예산에 맞춰 summary를 발췌한 항목은 `summary_truncated: true`를 표시하고,
+  `content_hash`를 반환된 발췌문의 SHA-256으로 다시 계산한다. `limit`이 커지면
+  항목별 본문에 배분되는 바이트가 줄고, 작아지면 늘어난다.
 - Stale planner는 `uv run neuron-knowledge session-memory-stale-plan --retention-days 14 --limit-sessions 20000`
   로 실행한다. PG와 CouchDB를 읽기만 하고
   활성 local receipt 및 authority 판정에 실패한 행은 `unresolved`로 남긴다. legacy receipt와

@@ -2333,6 +2333,11 @@ class KnowledgeSearchService:
                 "search_session_memory_segments",
                 None,
             ),
+            session_memory_fetch=getattr(
+                self._pg_search,
+                "fetch_session_memory_segment",
+                None,
+            ),
         ).resolve(**arguments)
 
     def get_temporal_coverage_metrics(self, project: str) -> dict[str, Any]:

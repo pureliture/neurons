@@ -1132,6 +1132,40 @@ class PgVectorStore:
                 row = cur.fetchone()
         return _chunk_from_row(row) if row is not None else None
 
+    def get_session_chunk_by_id_prefix(
+        self,
+        *,
+        project: str,
+        chunk_id_prefix: str,
+        conn: Any | None = None,
+    ) -> SessionChunk | None:
+        """프로젝트 범위에서 ID prefix로 유일한 session chunk를 조회한다."""
+
+        escaped_prefix = (
+            chunk_id_prefix.replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        with self._scope(conn=conn) as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT chunk_id, session_id_hash, project, provider, chunk_index,
+                           content_markdown, token_count, content_hash, embedding_model,
+                           embedding_state, embedding_revision, embedding,
+                           created_at, updated_at, observed_at
+                      FROM session_memory_chunks
+                   WHERE project = %s AND chunk_id LIKE %s ESCAPE '\\'
+                   ORDER BY chunk_id
+                   LIMIT 2
+                  """,
+                    (project, f"{escaped_prefix}%"),
+                )
+                rows = cur.fetchall()
+        if len(rows) != 1:
+            return None
+        return _chunk_from_row(rows[0])
+
     def iter_session_chunk_meta_batches(
         self,
         *,
