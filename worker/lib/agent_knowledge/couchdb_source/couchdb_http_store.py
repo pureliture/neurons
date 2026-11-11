@@ -742,6 +742,7 @@ class CouchDBHttpSourceStore:
         *,
         session_id_hash: str,
         doc_type: str = "",
+        page_size: int = 500,
         max_response_bytes: int = COUCHDB_FIND_MAX_PAGE_RESPONSE_BYTES,
     ) -> list[dict]:
         selector: dict = {"session_id_hash": session_id_hash}
@@ -750,7 +751,7 @@ class CouchDBHttpSourceStore:
         docs: list[dict] = []
         bookmark = ""
         while True:
-            body: dict = {"selector": selector, "limit": 10000}
+            body: dict = {"selector": selector, "limit": max(1, page_size)}
             if bookmark:
                 body["bookmark"] = bookmark
             status, payload = self._request(

@@ -27,8 +27,10 @@ from types import SimpleNamespace
 from agent_knowledge.rag_ingress.pg_embedding_chunks import (
     INCONSISTENT_HERMES_PROJECT_SCOPE,
     PG_INPUT_POLICY_VERSION,
+    SOURCE_PAYLOAD_TOO_LARGE,
     TERMINAL_INPUT_REASONS,
 )
+from .couchdb_http_store import CouchDBResponseTooLarge
 
 BUILD_CLI_SCHEMA_VERSION = "couchdb_session_memory_build.v1"
 BUILD_CLI_OPERATION = "couchdb_session_memory_build"
@@ -117,6 +119,67 @@ def _blocked_source_hash_from_state(
     return ""
 
 
+def _handle_unresolvable_session_in_selection(
+    *,
+    store,
+    session_id_hash: str,
+    session_doc: dict,
+    backend: str,
+    embedding_profile: str = "",
+    exc: Exception,
+) -> None:
+    """Safely record terminal failure or attempt audit when a session cannot be resolved.
+
+    Prevents unbounded CronJob crash-loops when encountering documents that exceed
+    the hard response size cap or have unrecoverable structure, while protecting
+    subsequent sessions in the cycle from starvation.
+    """
+    from .document_model import ProjectionStatus, SourceDocType, projection_state_doc_id
+    from ..rag_ingress.pg_embedding_chunks import (
+        PG_INPUT_POLICY_VERSION,
+        SOURCE_PAYLOAD_TOO_LARGE,
+    )
+
+    if backend != "postgres_pgvector":
+        return
+
+    state_id = projection_state_doc_id(session_id_hash)
+    try:
+        existing = store.get(state_id)
+        if not isinstance(existing, dict):
+            existing = {
+                "_id": state_id,
+                "doc_type": SourceDocType.PROJECTION_STATE,
+                "session_id_hash": session_id_hash,
+            }
+        lane = _pg_receipt_lane(embedding_profile)
+        attempts = dict(existing.get("projection_attempt") or {})
+        source_hash = str(session_doc.get("source_hash") or "")
+        reason = (
+            SOURCE_PAYLOAD_TOO_LARGE
+            if getattr(exc, "code", "") == "couchdb_response_too_large"
+            else type(exc).__name__
+        )
+        attempts[lane] = {
+            "status": ProjectionStatus.FAILED,
+            "reason": reason,
+            "source_hash": source_hash,
+            "policy_version": PG_INPUT_POLICY_VERSION,
+        }
+        updated = {**existing, "projection_attempt": attempts}
+        if source_hash:
+            updated["terminal_failure_policy_version"] = PG_INPUT_POLICY_VERSION
+            updated["terminal_failure_source_hash"] = source_hash
+            updated["terminal_failure_reason"] = reason
+
+        put_fn = getattr(store, "put", None)
+        if callable(put_fn):
+            put_fn(updated)
+    except Exception:
+        # Best-effort audit write during selection must never break the cycle
+        pass
+
+
 def _select_sessions_needing_projection(
     store,
     limit: int,
@@ -143,7 +206,6 @@ def _select_sessions_needing_projection(
     from .source_revision import resolve_active_source_revision_from_snapshot
 
     scope_selector = _scope_selector(project=project, provider=provider)
-    hash_field = "backend_receipts" if backend == "postgres_pgvector" else "projected_source_hash"
     raw_states = store.find_by_type(
         SourceDocType.PROJECTION_STATE,
         fields=[
@@ -151,14 +213,16 @@ def _select_sessions_needing_projection(
             "session_id_hash",
             "projection_status",
             "source_hash",
+            "projected_source_hash",
             "failure_reason",
             "failure_source_hash",
             "projection_attempt",
-            hash_field,
+            "backend_receipts",
         ],
         selector=scope_selector if backend == "postgres_pgvector" else {"projection_status": ProjectionStatus.PROJECTED, **scope_selector},
     )
     blocked_source_hashes: dict[str, str] = {}
+    blocked_oversized_sessions: set[str] = set()
     projected_source_hashes: dict[str, str] = {}
     projected_representations: dict[str, str] = {}
 
@@ -177,15 +241,26 @@ def _select_sessions_needing_projection(
             if blocked:
                 blocked_source_hashes[session_id_hash] = blocked
 
+            lane = _pg_receipt_lane(embedding_profile)
+            attempt = (state.get("projection_attempt") or {}).get(lane) or {}
+            if (
+                str(attempt.get("status") or "") == ProjectionStatus.FAILED
+                and str(attempt.get("reason") or "") == SOURCE_PAYLOAD_TOO_LARGE
+            ):
+                blocked_oversized_sessions.add(session_id_hash)
+
             receipt = _pg_receipt(state, embedding_profile=embedding_profile)
-            if str(receipt.get("projection_status") or "") == ProjectionStatus.PROJECTED:
-                projected_source_hashes[session_id_hash] = str(receipt.get("projected_source_hash") or "")
-                projected_representations[session_id_hash] = _pg_receipt_representation(
-                    {**state, **receipt}, embedding_profile=embedding_profile
-                )
+            effective_state = {**state, **receipt} if receipt else state
         else:
-            if str(state.get("projection_status") or "") == ProjectionStatus.PROJECTED:
-                projected_source_hashes[session_id_hash] = str(state.get("projected_source_hash") or "")
+            effective_state = state
+
+        if str(effective_state.get("projection_status") or "") == ProjectionStatus.PROJECTED:
+            projected_source_hashes[session_id_hash] = str(
+                effective_state.get("projected_source_hash") or ""
+            )
+            projected_representations[session_id_hash] = _pg_receipt_representation(
+                effective_state, embedding_profile=embedding_profile
+            )
     del raw_states
 
     selected: list[dict] = []
@@ -196,7 +271,7 @@ def _select_sessions_needing_projection(
         _iter_by_type(
             store,
             SourceDocType.TRANSCRIPT_SESSION,
-            fields=["_id", "session_id_hash", "provider", "project"],
+            fields=["_id", "session_id_hash", "provider", "project", "source_hash"],
             selector=scope_selector,
             page_size=max(1, limit) if limit > 0 else 1000,
         )
@@ -207,7 +282,7 @@ def _select_sessions_needing_projection(
         except StopIteration:
             break
         session_id_hash = str(session.get("session_id_hash") or "")
-        if not session_id_hash:
+        if not session_id_hash or session_id_hash in blocked_oversized_sessions:
             continue
         if str(session.get("_id") or "") != session_doc_id(session_id_hash):
             if session_id_hash not in current_only_seen:
@@ -216,18 +291,32 @@ def _select_sessions_needing_projection(
             continue
         canonical_session_ids.add(session_id_hash)
         projected_source_hash = projected_source_hashes.get(session_id_hash, "")
-        resolved = resolve_active_source_revision_from_snapshot(
-            session_id_hash=session_id_hash,
-            documents=store.find_by_session(session_id_hash=session_id_hash),
-        )
+        try:
+            documents = store.find_by_session(session_id_hash=session_id_hash)
+            resolved = resolve_active_source_revision_from_snapshot(
+                session_id_hash=session_id_hash,
+                documents=documents,
+            )
+        except CouchDBResponseTooLarge as exc:
+            _handle_unresolvable_session_in_selection(
+                store=store,
+                session_id_hash=session_id_hash,
+                session_doc=session,
+                backend=backend,
+                embedding_profile=embedding_profile,
+                exc=exc,
+            )
+            continue
         if not resolved.is_legacy_unpinned:
             if len(resolved.sessions) != 1:
+                del resolved
                 continue
             active_session = resolved.sessions[0]
             if (
                 (project and str(active_session.get("project") or "") != project)
                 or (provider and str(active_session.get("provider") or "") != provider)
             ):
+                del resolved
                 continue
         current_source_hash = resolved.source_hash
         if (
@@ -241,6 +330,7 @@ def _select_sessions_needing_projection(
             )
         ):
             if blocked_source_hashes.get(session_id_hash) == current_source_hash:
+                del resolved
                 continue
             selected.append(session)
         del resolved
@@ -254,17 +344,30 @@ def _select_sessions_needing_projection(
     for session_id_hash in current_only_session_ids:
         if limit > 0 and len(selected) >= limit:
             break
-        if session_id_hash in canonical_session_ids:
+        if session_id_hash in canonical_session_ids or session_id_hash in blocked_oversized_sessions:
             continue
-        source_snapshot = store.find_by_session(session_id_hash=session_id_hash)
-        resolved = resolve_active_source_revision_from_snapshot(
-            session_id_hash=session_id_hash,
-            documents=source_snapshot,
-        )
+        try:
+            source_snapshot = store.find_by_session(session_id_hash=session_id_hash)
+            resolved = resolve_active_source_revision_from_snapshot(
+                session_id_hash=session_id_hash,
+                documents=source_snapshot,
+            )
+        except CouchDBResponseTooLarge as exc:
+            _handle_unresolvable_session_in_selection(
+                store=store,
+                session_id_hash=session_id_hash,
+                session_doc={"session_id_hash": session_id_hash},
+                backend=backend,
+                embedding_profile=embedding_profile,
+                exc=exc,
+            )
+            continue
         if resolved.is_legacy_unpinned or len(resolved.sessions) != 1:
+            del resolved
             continue
         session = resolved.sessions[0]
         if str(session.get("_id") or "") == session_doc_id(session_id_hash):
+            del resolved
             continue
         if not str(session.get("source_snapshot_schema_version") or ""):
             try:
@@ -276,11 +379,13 @@ def _select_sessions_needing_projection(
                     str(session.get("supersedes_source_document_hash") or ""),
                 )
             except ValueError:
+                del resolved
                 continue
         if (
             (project and str(session.get("project") or "") != project)
             or (provider and str(session.get("provider") or "") != provider)
         ):
+            del resolved
             continue
         projected_source_hash = projected_source_hashes.get(session_id_hash, "")
         if (
@@ -294,6 +399,7 @@ def _select_sessions_needing_projection(
             )
         ):
             if blocked_source_hashes.get(session_id_hash) == resolved.source_hash:
+                del resolved
                 continue
             selected.append(session)
         del resolved
@@ -405,10 +511,21 @@ def _evaluate_session_change(
     )
     from .source_revision import resolve_active_source_revision_from_snapshot
 
-    documents = store.find_by_session(session_id_hash=session_id_hash)
-    resolved = resolve_active_source_revision_from_snapshot(
-        session_id_hash=session_id_hash, documents=documents
-    )
+    try:
+        documents = store.find_by_session(session_id_hash=session_id_hash)
+        resolved = resolve_active_source_revision_from_snapshot(
+            session_id_hash=session_id_hash, documents=documents
+        )
+    except Exception as exc:
+        _handle_unresolvable_session_in_selection(
+            store=store,
+            session_id_hash=session_id_hash,
+            session_doc={"session_id_hash": session_id_hash},
+            backend="postgres_pgvector",
+            embedding_profile=embedding_profile,
+            exc=exc,
+        )
+        return False, None
     state_id = projection_state_doc_id(session_id_hash)
     state = store.get(state_id)
     merged: dict = {}
@@ -758,7 +875,7 @@ def _select_sessions_for_cycle(
                 embedding_profile=embedding_profile,
                 representation=representation,
             )
-        except Exception as exc:  # noqa: BLE001 - fail-safe fallback to the full walk
+        except CouchDBResponseTooLarge as exc:  # noqa: BLE001 - fail-safe fallback to the full walk
             print(
                 f"[selection] incremental fallback ({type(exc).__name__})",
                 file=sys.stderr,
@@ -1135,7 +1252,7 @@ def main(argv: list[str] | None = None) -> int:
                 session_reports.append(
                     {"session_id_hash": session_id_hash, "status": outcome, "error_class": ""}
                 )
-            except Exception as exc:
+            except CouchDBResponseTooLarge as exc:
                 failed += 1
                 session_reports.append(
                     {

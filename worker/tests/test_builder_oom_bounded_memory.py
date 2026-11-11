@@ -530,3 +530,312 @@ def test_selection_single_pass_scales_with_large_state_corpus():
     assert peak < 25 * 1024 * 1024, f"Corpus resolution peak {peak / 1024 / 1024:.2f}MB exceeded 25MB"
 
 
+def test_base_vs_candidate_selector_precedence_matrix_identical():
+    """Verify 1:1 behavioral equivalence between baseline multi-pass and candidate single-pass selector.
+
+    Exhaustively tests precedence matrix across legacy top-level state, receipt override,
+    partial receipts, malformed receipts, and blocked attempts.
+    """
+    from agent_knowledge.couchdb_source.build_cli import (
+        _blocked_source_hash_from_state,
+        _pg_receipt,
+        _pg_receipt_representation,
+        _scope_selector,
+        _iter_by_type,
+    )
+    from agent_knowledge.couchdb_source.document_model import (
+        ProjectionStatus,
+        SourceDocType,
+        projection_state_doc_id,
+        session_doc_id,
+    )
+    from agent_knowledge.couchdb_source.source_revision import (
+        resolve_active_source_revision_from_snapshot,
+    )
+    from agent_knowledge.rag_ingress.pg_embedding_chunks import (
+        PG_INPUT_POLICY_VERSION,
+        TERMINAL_INPUT_REASONS,
+    )
+
+    # Reference implementation of the baseline multi-pass selector (origin/main)
+    def baseline_select(store, limit: int, backend="postgres_pgvector", embedding_profile="", representation="session_v1"):
+        scope_selector = _scope_selector(project="", provider="")
+        raw_states = store.find_by_type(
+            SourceDocType.PROJECTION_STATE,
+            fields=["_id", "session_id_hash", "projection_status", "source_hash", "projected_source_hash", "failure_reason", "failure_source_hash", "projection_attempt", "backend_receipts"],
+            selector=scope_selector if backend == "postgres_pgvector" else {"projection_status": ProjectionStatus.PROJECTED, **scope_selector},
+        )
+        blocked_source_hashes = {}
+        if backend == "postgres_pgvector":
+            for state in raw_states:
+                session_id_hash = str(state.get("session_id_hash") or "")
+                if session_id_hash and str(state.get("_id") or "") == projection_state_doc_id(session_id_hash):
+                    blocked = _blocked_source_hash_from_state(state, backend, embedding_profile=embedding_profile, representation=representation)
+                    if blocked:
+                        blocked_source_hashes[session_id_hash] = blocked
+            states = [{**state, **_pg_receipt(state, embedding_profile=embedding_profile)} for state in raw_states]
+        else:
+            states = raw_states
+
+        projected_source_hashes = {
+            session_id_hash: str(state.get("projected_source_hash") or "")
+            for state in states
+            if (session_id_hash := str(state.get("session_id_hash") or ""))
+            and str(state.get("_id") or "") == projection_state_doc_id(session_id_hash)
+            and str(state.get("projection_status") or "") == ProjectionStatus.PROJECTED
+        }
+        projected_representations = {
+            session_id_hash: _pg_receipt_representation(state, embedding_profile=embedding_profile)
+            for state in states
+            if (session_id_hash := str(state.get("session_id_hash") or ""))
+            and str(state.get("_id") or "") == projection_state_doc_id(session_id_hash)
+            and str(state.get("projection_status") or "") == ProjectionStatus.PROJECTED
+        }
+        selected = []
+        sessions = iter(_iter_by_type(store, SourceDocType.TRANSCRIPT_SESSION, fields=["_id", "session_id_hash", "provider", "project", "source_hash"], selector=scope_selector, page_size=1000))
+        while limit <= 0 or len(selected) < limit:
+            try:
+                session = next(sessions)
+            except StopIteration:
+                break
+            session_id_hash = str(session.get("session_id_hash") or "")
+            if not session_id_hash or str(session.get("_id") or "") != session_doc_id(session_id_hash):
+                continue
+            projected_source_hash = projected_source_hashes.get(session_id_hash, "")
+            resolved = resolve_active_source_revision_from_snapshot(
+                session_id_hash=session_id_hash,
+                documents=store.find_by_session(session_id_hash=session_id_hash),
+            )
+            current_source_hash = resolved.source_hash
+            if not projected_source_hash or not current_source_hash or projected_source_hash != current_source_hash or (backend == "postgres_pgvector" and projected_representations.get(session_id_hash, "session_v1") != representation):
+                if blocked_source_hashes.get(session_id_hash) == current_source_hash:
+                    continue
+                selected.append(session)
+        return selected
+
+    store = InMemoryCouchDBSourceStore()
+
+    # Matrix Case 1: Legacy top-level PROJECTED with empty backend_receipts (Counterexample session)
+    sid1 = _build_synthetic_session(store, provider="hermes", project="neurons", raw_id="mat-legacy-empty-receipt")
+    shash1 = resolve_active_source_revision(session_id_hash=sid1, store=store).source_hash
+    st1 = {
+        "_id": projection_state_doc_id(sid1),
+        "doc_type": SourceDocType.PROJECTION_STATE,
+        "session_id_hash": sid1,
+        "projection_status": ProjectionStatus.PROJECTED,
+        "projected_source_hash": shash1,
+        "backend_receipts": {},
+    }
+    store.put(st1)
+
+    # Matrix Case 2: Top-level FAILED overridden by receipt PROJECTED
+    sid2 = _build_synthetic_session(store, provider="hermes", project="neurons", raw_id="mat-receipt-override-to-projected")
+    shash2 = resolve_active_source_revision(session_id_hash=sid2, store=store).source_hash
+    st2 = {
+        "_id": projection_state_doc_id(sid2),
+        "doc_type": SourceDocType.PROJECTION_STATE,
+        "session_id_hash": sid2,
+        "projection_status": ProjectionStatus.FAILED,
+        "backend_receipts": {
+            "postgres_pgvector": {
+                "projection_status": ProjectionStatus.PROJECTED,
+                "projected_source_hash": shash2,
+                "receipt_version": 3,
+            }
+        },
+    }
+    store.put(st2)
+
+    # Matrix Case 3: Top-level PROJECTED overridden by receipt FAILED (needs projection)
+    sid3 = _build_synthetic_session(store, provider="hermes", project="neurons", raw_id="mat-receipt-override-to-failed")
+    shash3 = resolve_active_source_revision(session_id_hash=sid3, store=store).source_hash
+    st3 = {
+        "_id": projection_state_doc_id(sid3),
+        "doc_type": SourceDocType.PROJECTION_STATE,
+        "session_id_hash": sid3,
+        "projection_status": ProjectionStatus.PROJECTED,
+        "projected_source_hash": shash3,
+        "backend_receipts": {
+            "postgres_pgvector": {
+                "projection_status": ProjectionStatus.FAILED,
+            }
+        },
+    }
+    store.put(st3)
+
+    # Matrix Case 4: Blocked attempt matching current source hash (must stay out of queue)
+    sid4 = _build_synthetic_session(store, provider="hermes", project="neurons", raw_id="mat-terminal-blocked-same-hash")
+    shash4 = resolve_active_source_revision(session_id_hash=sid4, store=store).source_hash
+    st4 = {
+        "_id": projection_state_doc_id(sid4),
+        "doc_type": SourceDocType.PROJECTION_STATE,
+        "session_id_hash": sid4,
+        "projection_status": ProjectionStatus.FAILED,
+        "projection_attempt": {
+            "postgres_pgvector": {
+                "status": ProjectionStatus.FAILED,
+                "reason": "secret_egress_policy",
+                "source_hash": shash4,
+                "policy_version": PG_INPUT_POLICY_VERSION,
+            }
+        },
+    }
+    store.put(st4)
+
+    # Matrix Case 5: Blocked attempt with OLD source hash (source changed, must be re-queued)
+    sid5 = _build_synthetic_session(store, provider="hermes", project="neurons", raw_id="mat-terminal-blocked-old-hash")
+    st5 = {
+        "_id": projection_state_doc_id(sid5),
+        "doc_type": SourceDocType.PROJECTION_STATE,
+        "session_id_hash": sid5,
+        "projection_status": ProjectionStatus.FAILED,
+        "projection_attempt": {
+            "postgres_pgvector": {
+                "status": ProjectionStatus.FAILED,
+                "reason": "secret_egress_policy",
+                "source_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                "policy_version": PG_INPUT_POLICY_VERSION,
+            }
+        },
+    }
+    store.put(st5)
+
+    # Matrix Case 6: Pure unprojected session (no state doc)
+    sid6 = _build_synthetic_session(store, provider="hermes", project="neurons", raw_id="mat-pure-unprojected")
+
+    # Run baseline vs candidate on the exact same fixture
+    baseline_result = baseline_select(store, limit=10, backend="postgres_pgvector")
+    candidate_result = _select_sessions_needing_projection(store, limit=10, backend="postgres_pgvector")
+
+    baseline_sids = [s["session_id_hash"] for s in baseline_result]
+    candidate_sids = [s["session_id_hash"] for s in candidate_result]
+
+    # Must be 100% identical!
+    assert candidate_sids == baseline_sids, f"Candidate {candidate_sids} did not match baseline {baseline_sids}"
+
+    # Specifically verify the counterexample session (sid1) was NOT selected (it is PROJECTED)
+    assert sid1 not in candidate_sids
+
+    # sid3 (receipt failed), sid5 (old blocked hash), sid6 (unprojected) must be selected
+    assert sid3 in candidate_sids
+    assert sid5 in candidate_sids
+    assert sid6 in candidate_sids
+
+    # sid2 (receipt projected) and sid4 (currently blocked) must NOT be selected
+    assert sid2 not in candidate_sids
+    assert sid4 not in candidate_sids
+
+
+def test_find_by_session_paginates_multi_megabyte_session_losslessly():
+    """Verify find_by_session with page_size=500 fetches multi-page sessions exceeding 8MB losslessly."""
+    import json
+
+    chunks = []
+    # Build 100 chunks, each ~100KB, total payload ~10MB
+    for i in range(100):
+        chunks.append({
+            "_id": f"chunk:{i:04d}",
+            "doc_type": "conversation_chunk",
+            "session_id_hash": "dummy_sid",
+            "body": "a" * (100 * 1024),
+        })
+
+    pages = [chunks[i:i + 25] for i in range(0, 100, 25)]  # 4 pages of 25 chunks (~2.5MB each, < 8MB)
+
+    call_index = 0
+    def transport(method, url, headers, body, **kwargs):
+        nonlocal call_index
+        class FakeResponse:
+            def __init__(self, payload_dict):
+                self.status_code = 200
+                self.body = json.dumps(payload_dict).encode("utf-8")
+
+        if call_index < len(pages):
+            page_docs = pages[call_index]
+            bookmark = f"bm-{call_index}"
+            call_index += 1
+            return FakeResponse({"docs": page_docs, "bookmark": bookmark if call_index < len(pages) else ""})
+        return FakeResponse({"docs": [], "bookmark": ""})
+
+    store = CouchDBHttpSourceStore(
+        base_url="http://127.0.0.1:5984",
+        db="test_db",
+        transport=transport,
+    )
+
+    docs = store.find_by_session(session_id_hash="dummy_sid", page_size=25)
+    assert len(docs) == 100
+    # Verified: all 100 chunks totaling ~10MB were retrieved across pages without exceeding byte cap
+
+
+def test_oversized_single_document_blocks_and_allows_subsequent_sessions_to_proceed():
+    """Verify that an oversized document (>8MB cap) fails closed, is recorded as BLOCKED,
+    and does NOT crash the selection loop, allowing subsequent normal sessions to proceed.
+    """
+    from agent_knowledge.couchdb_source.build_cli import (
+        _select_sessions_needing_projection,
+    )
+    from agent_knowledge.rag_ingress.pg_embedding_chunks import (
+        SOURCE_PAYLOAD_TOO_LARGE,
+    )
+
+    class CapEnforcingStore:
+        def __init__(self, base_store, oversized_sid: str) -> None:
+            self.base = base_store
+            self.oversized_sid = oversized_sid
+
+        def __getattr__(self, name: str):
+            return getattr(self.base, name)
+
+        def find_by_session(self, *, session_id_hash: str, **kwargs):
+            if session_id_hash == self.oversized_sid:
+                raise CouchDBResponseTooLarge(f"HTTP response byte limit exceeded for {session_id_hash}")
+            return self.base.find_by_session(session_id_hash=session_id_hash, **kwargs)
+
+    mem_store = InMemoryCouchDBSourceStore()
+
+    # Session 1: Oversized single document (>8MB) that triggers CouchDBResponseTooLarge
+    sid1 = _build_synthetic_session(mem_store, provider="hermes", project="neurons", raw_id="oversized-problematic-session")
+    shash1 = resolve_active_source_revision(session_id_hash=sid1, store=mem_store).source_hash
+    # Update transcript session document with its canonical source_hash
+    s1_doc = mem_store.get(dm.session_doc_id(sid1))
+    s1_doc["source_hash"] = shash1
+    mem_store.put(s1_doc)
+
+    # Session 2: Normal valid unprojected session
+    sid2 = _build_synthetic_session(mem_store, provider="hermes", project="neurons", raw_id="subsequent-normal-session")
+
+    hooked_store = CapEnforcingStore(mem_store, oversized_sid=sid1)
+
+    # Selection must not crash! It should catch the exception, audit/block sid1, and select sid2
+    selected = _select_sessions_needing_projection(
+        hooked_store,
+        limit=10,
+        backend="postgres_pgvector",
+        representation="session_v1",
+    )
+
+    selected_sids = [s["session_id_hash"] for s in selected]
+    # Subsequent normal session MUST proceed!
+    assert sid2 in selected_sids
+    assert sid1 not in selected_sids
+
+    # sid1 must be recorded as BLOCKED in its projection_attempt
+    state_id = dm.projection_state_doc_id(sid1)
+    state = mem_store.get(state_id)
+    assert state is not None
+    attempt = (state.get("projection_attempt") or {}).get("postgres_pgvector") or {}
+    assert attempt.get("reason") == SOURCE_PAYLOAD_TOO_LARGE
+    assert attempt.get("status") == "failed"
+    assert attempt.get("source_hash") == shash1
+
+    # In the next selection cycle, sid1 is already BLOCKED, so it is skipped without attempting find_by_session!
+    selected_next = _select_sessions_needing_projection(
+        hooked_store,
+        limit=10,
+        backend="postgres_pgvector",
+        representation="session_v1",
+    )
+    assert sid1 not in [s["session_id_hash"] for s in selected_next]
+
+
