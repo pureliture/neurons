@@ -159,48 +159,38 @@ def _select_sessions_needing_projection(
         selector=scope_selector if backend == "postgres_pgvector" else {"projection_status": ProjectionStatus.PROJECTED, **scope_selector},
     )
     blocked_source_hashes: dict[str, str] = {}
-    if backend == "postgres_pgvector":
-        # Terminal input failures are policy outcomes, not transient faults. Leave the
-        # session out of the queue while its source revision equals the blocked one; a
-        # source change (or operator action) naturally re-queues it. Read the raw
-        # state here: backend_receipts is merged below and can hide a failed attempt
-        # behind the last successful projected receipt.
-        for state in raw_states:
-            session_id_hash = str(state.get("session_id_hash") or "")
-            if (
-                session_id_hash
-                and str(state.get("_id") or "") == projection_state_doc_id(session_id_hash)
-            ):
-                blocked = _blocked_source_hash_from_state(
-                    state,
-                    backend,
-                    embedding_profile=embedding_profile,
-                    representation=representation,
-                )
-                if blocked:
-                    blocked_source_hashes[session_id_hash] = blocked
-        states = [
-            {**state, **_pg_receipt(state, embedding_profile=embedding_profile)}
-            for state in raw_states
-        ]
-    else:
-        states = raw_states
-    projected_source_hashes = {
-        session_id_hash: str(state.get("projected_source_hash") or "")
-        for state in states
-        if (session_id_hash := str(state.get("session_id_hash") or ""))
-        and str(state.get("_id") or "") == projection_state_doc_id(session_id_hash)
-        and str(state.get("projection_status") or "") == ProjectionStatus.PROJECTED
-    }
-    projected_representations = {
-        session_id_hash: _pg_receipt_representation(
-            state, embedding_profile=embedding_profile
-        )
-        for state in states
-        if (session_id_hash := str(state.get("session_id_hash") or ""))
-        and str(state.get("_id") or "") == projection_state_doc_id(session_id_hash)
-        and str(state.get("projection_status") or "") == ProjectionStatus.PROJECTED
-    }
+    projected_source_hashes: dict[str, str] = {}
+    projected_representations: dict[str, str] = {}
+
+    for state in raw_states:
+        session_id_hash = str(state.get("session_id_hash") or "")
+        if not session_id_hash or str(state.get("_id") or "") != projection_state_doc_id(session_id_hash):
+            continue
+
+        if backend == "postgres_pgvector":
+            blocked = _blocked_source_hash_from_state(
+                state,
+                backend,
+                embedding_profile=embedding_profile,
+                representation=representation,
+            )
+            if blocked:
+                blocked_source_hashes[session_id_hash] = blocked
+
+            receipt = _pg_receipt(state, embedding_profile=embedding_profile)
+            effective_state = {**state, **receipt} if receipt else state
+        else:
+            effective_state = state
+
+        if str(effective_state.get("projection_status") or "") == ProjectionStatus.PROJECTED:
+            projected_source_hashes[session_id_hash] = str(
+                effective_state.get("projected_source_hash") or ""
+            )
+            projected_representations[session_id_hash] = _pg_receipt_representation(
+                effective_state, embedding_profile=embedding_profile
+            )
+    del raw_states
+
     selected: list[dict] = []
     canonical_session_ids: set[str] = set()
     current_only_session_ids: list[str] = []
@@ -211,7 +201,7 @@ def _select_sessions_needing_projection(
             SourceDocType.TRANSCRIPT_SESSION,
             fields=["_id", "session_id_hash", "provider", "project"],
             selector=scope_selector,
-            page_size=max(1, limit) if limit > 0 else 10000,
+            page_size=max(1, limit) if limit > 0 else 1000,
         )
     )
     while limit <= 0 or len(selected) < limit:
@@ -229,18 +219,21 @@ def _select_sessions_needing_projection(
             continue
         canonical_session_ids.add(session_id_hash)
         projected_source_hash = projected_source_hashes.get(session_id_hash, "")
+        documents = store.find_by_session(session_id_hash=session_id_hash)
         resolved = resolve_active_source_revision_from_snapshot(
             session_id_hash=session_id_hash,
-            documents=store.find_by_session(session_id_hash=session_id_hash),
+            documents=documents,
         )
         if not resolved.is_legacy_unpinned:
             if len(resolved.sessions) != 1:
+                del resolved
                 continue
             active_session = resolved.sessions[0]
             if (
                 (project and str(active_session.get("project") or "") != project)
                 or (provider and str(active_session.get("provider") or "") != provider)
             ):
+                del resolved
                 continue
         current_source_hash = resolved.source_hash
         if (
@@ -254,8 +247,10 @@ def _select_sessions_needing_projection(
             )
         ):
             if blocked_source_hashes.get(session_id_hash) == current_source_hash:
+                del resolved
                 continue
             selected.append(session)
+        del resolved
 
     # A corrective current-source import can legitimately have no canonical
     # legacy session row. Only then use the current session that a valid active
@@ -274,9 +269,11 @@ def _select_sessions_needing_projection(
             documents=source_snapshot,
         )
         if resolved.is_legacy_unpinned or len(resolved.sessions) != 1:
+            del resolved
             continue
         session = resolved.sessions[0]
         if str(session.get("_id") or "") == session_doc_id(session_id_hash):
+            del resolved
             continue
         if not str(session.get("source_snapshot_schema_version") or ""):
             try:
@@ -288,11 +285,13 @@ def _select_sessions_needing_projection(
                     str(session.get("supersedes_source_document_hash") or ""),
                 )
             except ValueError:
+                del resolved
                 continue
         if (
             (project and str(session.get("project") or "") != project)
             or (provider and str(session.get("provider") or "") != provider)
         ):
+            del resolved
             continue
         projected_source_hash = projected_source_hashes.get(session_id_hash, "")
         if (
@@ -306,8 +305,12 @@ def _select_sessions_needing_projection(
             )
         ):
             if blocked_source_hashes.get(session_id_hash) == resolved.source_hash:
+                del resolved
                 continue
             selected.append(session)
+        del resolved
+
+    del projected_source_hashes, blocked_source_hashes, projected_representations
     return selected
 
 
@@ -1161,6 +1164,8 @@ def main(argv: list[str] | None = None) -> int:
             segments_total += int(getattr(projector, "last_segments_total", 0) or 0)
             segments_reused += int(getattr(projector, "last_segments_reused", 0) or 0)
             segments_embedded += int(getattr(projector, "last_segments_embedded", 0) or 0)
+            # Release per-session projection allocations across iterations
+            result = None
     finally:
         _close_if_supported(projector)
 

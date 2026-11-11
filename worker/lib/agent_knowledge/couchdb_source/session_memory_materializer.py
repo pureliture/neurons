@@ -111,7 +111,11 @@ class RecordingSessionMemoryProjector:
         return ref
 
 
-def update_coverage_with_tool_evidence(*, session_id_hash: str, store: CouchDBSourceStore) -> dict | None:
+def update_coverage_with_tool_evidence(
+    *,
+    session_id_hash: str,
+    store: CouchDBSourceStore,
+) -> dict | None:
     """Rebuild the per-session coverage manifest with current tool evidence counts.
 
     Preserves the project_authority / ledger_comparison blocks from the existing
@@ -119,7 +123,10 @@ def update_coverage_with_tool_evidence(*, session_id_hash: str, store: CouchDBSo
     """
 
     for _attempt in range(3):
-        snapshot = _coverage_snapshot(session_id_hash=session_id_hash, store=store)
+        snapshot = _coverage_snapshot(
+            session_id_hash=session_id_hash,
+            store=store,
+        )
         if snapshot is None:
             return None
         (
@@ -156,7 +163,10 @@ def update_coverage_with_tool_evidence(*, session_id_hash: str, store: CouchDBSo
         # revision was computed before a concurrent distinct chunk arrived. Read
         # the complete source again and converge only when the persisted manifest
         # and session row cover that latest snapshot.
-        current = _coverage_snapshot(session_id_hash=session_id_hash, store=store)
+        current = _coverage_snapshot(
+            session_id_hash=session_id_hash,
+            store=store,
+        )
         if current is None:
             continue
         (
@@ -186,7 +196,9 @@ def update_coverage_with_tool_evidence(*, session_id_hash: str, store: CouchDBSo
 
 
 def _coverage_snapshot(
-    *, session_id_hash: str, store: CouchDBSourceStore
+    *,
+    session_id_hash: str,
+    store: CouchDBSourceStore,
 ) -> tuple[dict, list[dict], str, str, bool] | None:
     resolved = resolve_active_source_revision(
         session_id_hash=session_id_hash,
@@ -338,7 +350,11 @@ def _chunk_to_view(chunk: dict) -> ChunkView:
     )
 
 
-def materialize_session_memory(*, session_id_hash: str, store: CouchDBSourceStore) -> MaterializedSessionMemory:
+def materialize_session_memory(
+    *,
+    session_id_hash: str,
+    store: CouchDBSourceStore,
+) -> MaterializedSessionMemory:
     """Materialize the resolved source revision into one session-memory body.
 
     Resolution re-hashes every resident conversation chunk and tool evidence
@@ -381,22 +397,20 @@ def materialize_session_memory(*, session_id_hash: str, store: CouchDBSourceStor
         str(bundle.get("body", "")).rstrip() for bundle in bundles
     )
 
-    lines = [
-        f"# session-memory {provider} {project}",
-        f"session_id_hash: {session_id_hash}",
-        "",
-        "## conversation",
-    ]
+    import io
+    buf = io.StringIO()
+    buf.write(f"# session-memory {provider} {project}\nsession_id_hash: {session_id_hash}\n\n## conversation\n")
     for view in body_views:
-        lines.append("")
-        lines.append(view.text.rstrip())
-    lines.append("")
-    lines.append("## tool_evidence_summary")
+        buf.write("\n")
+        buf.write(view.text.rstrip())
+        buf.write("\n")
+    buf.write("\n## tool_evidence_summary\n")
     for evidence_body in tool_evidence_bodies:
-        # Full materialization: embed the bundle body so recall needs no CouchDB ref.
-        lines.append("")
-        lines.append(evidence_body)
-    body = "\n".join(lines).rstrip() + "\n"
+        buf.write("\n")
+        buf.write(evidence_body)
+        buf.write("\n")
+    body = buf.getvalue().rstrip() + "\n"
+    buf.close()
 
     notes: list[str] = []
     if scope.inconsistent:
@@ -1093,8 +1107,14 @@ def materialize_and_project(
 ) -> dict:
     """End-to-end M3 step for one session: refresh coverage, materialize, project."""
 
-    update_coverage_with_tool_evidence(session_id_hash=session_id_hash, store=store)
-    materialized = materialize_session_memory(session_id_hash=session_id_hash, store=store)
+    update_coverage_with_tool_evidence(
+        session_id_hash=session_id_hash,
+        store=store,
+    )
+    materialized = materialize_session_memory(
+        session_id_hash=session_id_hash,
+        store=store,
+    )
     projection = None
     if projector is not None:
         projection = project_session_memory(
@@ -1103,7 +1123,7 @@ def materialize_and_project(
             projector=projector,
             backend=backend,
         )
-    return {
+    result = {
         "session_id_hash": session_id_hash,
         "fully_materialized": materialized.fully_materialized,
         "conversation_chunk_count": materialized.conversation_chunk_count,
@@ -1116,6 +1136,8 @@ def materialize_and_project(
         "notes": list(materialized.notes),
         "projection": projection,
     }
+    del materialized
+    return result
 
 
 __all__ = [

@@ -228,7 +228,15 @@ class CouchDBSourceStore(Protocol):
         page_size: int = 10000,
     ) -> list[dict]: ...
 
-    def find_by_session(self, *, session_id_hash: str, doc_type: str = "") -> list[dict]: ...
+    def find_by_session(
+        self,
+        *,
+        session_id_hash: str,
+        doc_type: str = "",
+        page_size: int = 500,
+        max_response_bytes: int | None = 8 * 1024 * 1024,
+        allow_oversized_single_fallback: bool = True,
+    ) -> list[dict]: ...
 
     def iter_by_session(
         self,
@@ -890,7 +898,15 @@ class InMemoryCouchDBSourceStore:
         self._note_change(doc_id)
         return StoredRevision(doc_id=doc_id, rev=rev, outcome="conflict_resolved")
 
-    def find_by_session(self, *, session_id_hash: str, doc_type: str = "") -> list[dict]:
+    def find_by_session(
+        self,
+        *,
+        session_id_hash: str,
+        doc_type: str = "",
+        page_size: int = 500,
+        max_response_bytes: int | None = 8 * 1024 * 1024,
+        allow_oversized_single_fallback: bool = True,
+    ) -> list[dict]:
         results = [
             copy.deepcopy(doc)
             for doc in self._docs.values()

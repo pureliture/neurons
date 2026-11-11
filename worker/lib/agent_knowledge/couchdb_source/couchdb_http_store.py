@@ -19,10 +19,14 @@ from __future__ import annotations
 
 import base64
 import copy
+import inspect
 import json
+import logging
 import time
 from collections.abc import Iterator
 from urllib.parse import quote
+
+logger = logging.getLogger(__name__)
 
 from ..rag_ingress.idempotency import IdempotencyOutcome
 from ..transport_contract import ProxyResponse
@@ -127,9 +131,27 @@ class CouchDBHttpSourceStore:
         self.base_url = base_url.rstrip("/")
         self.db = db
         self.transport = transport or _urllib_transport
+        self._transport_accepts_timeout, self._transport_accepts_max_response_bytes = (
+            self._inspect_transport_params(self.transport)
+        )
         self.auth_header = auth_header
         self.request_timeout_seconds = request_timeout_seconds
         self.deadline_monotonic = deadline_monotonic
+
+    @staticmethod
+    def _inspect_transport_params(transport) -> tuple[bool, bool]:
+        if transport is _urllib_transport:
+            return True, True
+        try:
+            sig = inspect.signature(transport)
+            params = sig.parameters
+            has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+            accepts_timeout = has_var_keyword or "timeout_seconds" in params
+            accepts_max_response_bytes = has_var_keyword or "max_response_bytes" in params
+            return accepts_timeout, accepts_max_response_bytes
+        except (ValueError, TypeError):
+            # If inspection fails (e.g. built-in C functions without signature), pass only positional args
+            return False, False
 
     # --- HTTP plumbing --------------------------------------------------------
 
@@ -154,22 +176,28 @@ class CouchDBHttpSourceStore:
             if remaining <= 0:
                 raise CouchDBError("operation deadline exceeded")
             timeout_seconds = min(timeout_seconds, remaining)
-        if self.transport is _urllib_transport:
-            # The default urllib transport reads at most cap + 1 bytes. An
-            # injected transport is a test seam and may allocate its response
-            # before returning; the post-return check below is not a hard
-            # allocation bound for arbitrary injected transports.
-            response = self.transport(
-                method,
-                self.base_url + path,
-                headers,
-                body,
-                timeout_seconds=timeout_seconds,
-                max_response_bytes=max_response_bytes,
-            )
-        else:
-            response = self.transport(method, self.base_url + path, headers, body)
+
+        transport_kwargs = {}
+        if self._transport_accepts_timeout:
+            transport_kwargs["timeout_seconds"] = timeout_seconds
+        if self._transport_accepts_max_response_bytes:
+            transport_kwargs["max_response_bytes"] = max_response_bytes
+
+        # Call transport exactly once without runtime catch-and-retry
+        # to guarantee mutations (POST/PUT) are never duplicated on ambiguous errors.
+        response = self.transport(
+            method,
+            self.base_url + path,
+            headers,
+            body,
+            **transport_kwargs,
+        )
+
         if max_response_bytes is not None and len(response.body) > int(max_response_bytes):
+            # Note: For custom transports that do not accept max_response_bytes, the transport
+            # may already have buffered the entire body in memory before this check runs.
+            # This check enforces the fail-closed boundary, but does not guarantee O(1) streaming
+            # allocation for cap-unsupported custom transports.
             raise CouchDBResponseTooLarge("CouchDB response exceeded configured byte limit")
         try:
             payload = json.loads(response.body.decode("utf-8") or "{}") if response.body else {}
@@ -737,24 +765,76 @@ class CouchDBHttpSourceStore:
             "execution_stats": payload.get("execution_stats"),
         }
 
-    def find_by_session(self, *, session_id_hash: str, doc_type: str = "") -> list[dict]:
+    def find_by_session(
+        self,
+        *,
+        session_id_hash: str,
+        doc_type: str = "",
+        page_size: int = 500,
+        max_response_bytes: int | None = COUCHDB_FIND_MAX_PAGE_RESPONSE_BYTES,
+        allow_oversized_single_fallback: bool = True,
+    ) -> list[dict]:
         selector: dict = {"session_id_hash": session_id_hash}
         if doc_type:
             selector["doc_type"] = doc_type
         docs: list[dict] = []
+        seen_docs: dict[str, str] = {}
         bookmark = ""
+        current_page_size = max(1, page_size)
         while True:
-            body: dict = {"selector": selector, "limit": 10000}
+            body: dict = {"selector": selector, "limit": current_page_size}
             if bookmark:
                 body["bookmark"] = bookmark
-            status, payload = self._request("POST", f"/{self.db}/_find", json_body=body)
+            try:
+                status, payload = self._request(
+                    "POST",
+                    f"/{self.db}/_find",
+                    json_body=body,
+                    max_response_bytes=max_response_bytes,
+                )
+            except CouchDBResponseTooLarge:
+                # If a multi-document page exceeds the cap, halve the page limit to
+                # bound the transport buffer and retry with the same bookmark.
+                if current_page_size > 1:
+                    current_page_size = max(1, current_page_size // 2)
+                    continue
+                # Single document exceeds the page response byte cap.
+                # To preserve existing behavior for valid previously supported documents
+                # without introducing a silent new hard business restriction that halts
+                # the entire Builder pipeline, fall back to unbounded read if allowed.
+                if not allow_oversized_single_fallback:
+                    raise
+                logger.warning(
+                    "Single CouchDB document exceeded page response byte cap; "
+                    "fetching unbounded to preserve valid existing document"
+                )
+                status, payload = self._request(
+                    "POST",
+                    f"/{self.db}/_find",
+                    json_body=body,
+                    max_response_bytes=None,
+                )
             if status != 200:
                 raise CouchDBError(f"_find failed: HTTP {status}")
             page = payload.get("docs", [])
             if not page:
                 break
-            docs.extend(page)
+            for doc in page:
+                doc_id = str(doc.get("_id") or "")
+                if not doc_id:
+                    raise CouchDBError("malformed CouchDB document without _id")
+                doc_hash = payload_hash(doc) if callable(payload_hash) else str(doc.get("_rev") or "")
+                if doc_id in seen_docs:
+                    if seen_docs[doc_id] != doc_hash:
+                        raise SourceStoreConflict(
+                            "conflicting duplicate document detected across page boundary"
+                        )
+                    continue
+                seen_docs[doc_id] = doc_hash
+                docs.append(doc)
             next_bookmark = str(payload.get("bookmark") or "")
+            # Only terminate when bookmark is missing or unchanged. Sparse pages in CouchDB Mango
+            # (len(page) < current_page_size) can legitimately occur under selector filtering.
             if not next_bookmark or next_bookmark == bookmark:
                 break
             bookmark = next_bookmark
