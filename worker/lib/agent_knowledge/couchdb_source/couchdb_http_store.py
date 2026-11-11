@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import inspect
 import json
 import logging
 import time
@@ -130,9 +131,24 @@ class CouchDBHttpSourceStore:
         self.base_url = base_url.rstrip("/")
         self.db = db
         self.transport = transport or _urllib_transport
+        self._transport_supports_bounded_read = self._check_transport_supports_bounded(self.transport)
         self.auth_header = auth_header
         self.request_timeout_seconds = request_timeout_seconds
         self.deadline_monotonic = deadline_monotonic
+
+    @staticmethod
+    def _check_transport_supports_bounded(transport) -> bool:
+        if transport is _urllib_transport:
+            return True
+        try:
+            sig = inspect.signature(transport)
+            params = sig.parameters
+            return (
+                "max_response_bytes" in params
+                or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+            )
+        except (ValueError, TypeError):
+            return False
 
     # --- HTTP plumbing --------------------------------------------------------
 
@@ -157,11 +173,9 @@ class CouchDBHttpSourceStore:
             if remaining <= 0:
                 raise CouchDBError("operation deadline exceeded")
             timeout_seconds = min(timeout_seconds, remaining)
-        if self.transport is _urllib_transport:
-            # The default urllib transport reads at most cap + 1 bytes. An
-            # injected transport is a test seam and may allocate its response
-            # before returning; the post-return check below is not a hard
-            # allocation bound for arbitrary injected transports.
+        if self._transport_supports_bounded_read:
+            # The transport accepts bounded read arguments. Call exactly once without retrying
+            # to guarantee mutations (POST/PUT) are never duplicated on ambiguous errors.
             response = self.transport(
                 method,
                 self.base_url + path,
@@ -171,17 +185,7 @@ class CouchDBHttpSourceStore:
                 max_response_bytes=max_response_bytes,
             )
         else:
-            try:
-                response = self.transport(
-                    method,
-                    self.base_url + path,
-                    headers,
-                    body,
-                    timeout_seconds=timeout_seconds,
-                    max_response_bytes=max_response_bytes,
-                )
-            except TypeError:
-                response = self.transport(method, self.base_url + path, headers, body)
+            response = self.transport(method, self.base_url + path, headers, body)
         if max_response_bytes is not None and len(response.body) > int(max_response_bytes):
             raise CouchDBResponseTooLarge("CouchDB response exceeded configured byte limit")
         try:
@@ -756,14 +760,13 @@ class CouchDBHttpSourceStore:
         session_id_hash: str,
         doc_type: str = "",
         page_size: int = 500,
-        max_response_bytes: int | None = COUCHDB_FIND_MAX_PAGE_RESPONSE_BYTES,
-        allow_oversized_single_fallback: bool = True,
+        max_response_bytes: int = COUCHDB_FIND_MAX_PAGE_RESPONSE_BYTES,
     ) -> list[dict]:
         selector: dict = {"session_id_hash": session_id_hash}
         if doc_type:
             selector["doc_type"] = doc_type
         docs: list[dict] = []
-        seen_ids: set[str] = set()
+        seen_docs: dict[str, str] = {}
         bookmark = ""
         current_page_size = max(1, page_size)
         while True:
@@ -780,26 +783,13 @@ class CouchDBHttpSourceStore:
             except CouchDBResponseTooLarge:
                 # If a multi-document page exceeds the cap, halve the page limit to
                 # bound the transport buffer and retry with the same bookmark.
-                if current_page_size > 1:
-                    current_page_size = max(1, current_page_size // 2)
-                    continue
-                if not allow_oversized_single_fallback:
+                if current_page_size <= 1:
+                    # Single document exceeds cap: fail closed without unbounded allocation.
+                    # Preserves memory safety boundaries rather than silently dropping content
+                    # or triggering 1Gi cgroup OOM.
                     raise
-                # If even a single document exceeds max_response_bytes, do not fail
-                # closed or stall the pipeline: fetch this single document with
-                # unbounded read to guarantee lossless processing without pipeline stalls.
-                logger.warning(
-                    "Single document in session %s exceeded page response byte cap (%d bytes); "
-                    "fetching unbounded to preserve complete content without pipeline stall.",
-                    session_id_hash,
-                    max_response_bytes or 0,
-                )
-                status, payload = self._request(
-                    "POST",
-                    f"/{self.db}/_find",
-                    json_body=body,
-                    max_response_bytes=None,
-                )
+                current_page_size = max(1, current_page_size // 2)
+                continue
             if status != 200:
                 raise CouchDBError(f"_find failed: HTTP {status}")
             page = payload.get("docs", [])
@@ -807,13 +797,21 @@ class CouchDBHttpSourceStore:
                 break
             for doc in page:
                 doc_id = str(doc.get("_id") or "")
-                if doc_id and doc_id in seen_ids:
+                if not doc_id:
                     continue
-                if doc_id:
-                    seen_ids.add(doc_id)
+                doc_hash = payload_hash(doc) if callable(payload_hash) else str(doc.get("_rev") or "")
+                if doc_id in seen_docs:
+                    if seen_docs[doc_id] != doc_hash:
+                        raise SourceStoreConflict(
+                            f"conflicting duplicate document {doc_id} detected across page boundary"
+                        )
+                    continue
+                seen_docs[doc_id] = doc_hash
                 docs.append(doc)
             next_bookmark = str(payload.get("bookmark") or "")
-            if not next_bookmark or next_bookmark == bookmark or len(page) < current_page_size:
+            # Only terminate when bookmark is missing or unchanged. Sparse pages in CouchDB Mango
+            # (len(page) < current_page_size) can legitimately occur under selector filtering.
+            if not next_bookmark or next_bookmark == bookmark:
                 break
             bookmark = next_bookmark
         if not doc_type:

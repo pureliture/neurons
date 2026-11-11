@@ -493,7 +493,7 @@ def test_find_by_session_transport_byte_cap_fails_closed():
     )
 
     with pytest.raises(CouchDBResponseTooLarge, match="exceeded configured byte limit"):
-        store.find_by_session(session_id_hash="dummy_session_hash", allow_oversized_single_fallback=False)
+        store.find_by_session(session_id_hash="dummy_session_hash")
 
 
 def test_selection_single_pass_scales_with_large_state_corpus():
@@ -840,68 +840,16 @@ def test_find_by_session_adaptive_page_halving_on_response_too_large():
     assert 25 in requested_limits
 
 
-def test_find_by_session_single_oversized_document_fetches_unbounded_and_logs_warning(caplog):
-    """Verify that a single document exceeding 8MB is fetched unbounded with a warning,
-    preserving full content without crashing or stalling the pipeline.
-    """
-    import json
-    import logging
-    from agent_knowledge.couchdb_source.couchdb_http_store import (
-        CouchDBHttpSourceStore,
-        CouchDBResponseTooLarge,
-    )
-
-    chunks = [
-        {"_id": "chunk:huge_single", "doc_type": "conversation_chunk", "session_id_hash": "sid_huge", "body": "x" * (9 * 1024 * 1024)}
-    ]
-
-    requested_calls = []
-
-    def transport(method, url, headers, body, *, max_response_bytes=None, **kwargs):
-        class FakeResponse:
-            def __init__(self, payload_dict):
-                self.status_code = 200
-                self.body = json.dumps(payload_dict).encode("utf-8")
-
-        req = json.loads(body.decode("utf-8"))
-        requested_calls.append({"limit": req.get("limit"), "max_response_bytes": max_response_bytes})
-
-        # If bounded by 8MB, raise CouchDBResponseTooLarge
-        if max_response_bytes is not None:
-            raise CouchDBResponseTooLarge("Single document exceeds 8MB byte cap")
-
-        # Unbounded read succeeds
-        return FakeResponse({"docs": chunks, "bookmark": ""})
-
-    store = CouchDBHttpSourceStore(
-        base_url="http://127.0.0.1:5984",
-        db="test_db",
-        transport=transport,
-    )
-
-    with caplog.at_level(logging.WARNING):
-        docs = store.find_by_session(session_id_hash="sid_huge", page_size=1)
-
-    assert len(docs) == 1
-    assert docs[0]["_id"] == "chunk:huge_single"
-    # First call had 8MB cap (and raised TooLarge), second call had max_response_bytes=None
-    assert len(requested_calls) == 2
-    assert requested_calls[0]["max_response_bytes"] is not None
-    assert requested_calls[1]["max_response_bytes"] is None
-    # Warning must be logged so operators and users can trace oversized single documents
-    assert "exceeded page response byte cap" in caplog.text
-
-
 def test_find_by_session_deduplicates_page_boundary_overlap():
-    """Verify that overlapping documents returned across page boundaries are safely deduplicated."""
+    """Verify that identical overlapping documents returned across page boundaries are safely deduplicated."""
     import json
     from agent_knowledge.couchdb_source.couchdb_http_store import CouchDBHttpSourceStore
 
     call_index = 0
-    # Page 1 returns docs A, B. Page 2 returns docs B, C (B overlaps at boundary).
+    # Page 1 returns docs A, B. Page 2 returns docs B, C (identical B overlaps at boundary).
     pages = [
-        [{"_id": "doc:A", "session_id_hash": "sid_dedup"}, {"_id": "doc:B", "session_id_hash": "sid_dedup"}],
-        [{"_id": "doc:B", "session_id_hash": "sid_dedup"}, {"_id": "doc:C", "session_id_hash": "sid_dedup"}],
+        [{"_id": "doc:A", "session_id_hash": "sid_dedup", "payload_hash": "hA"}, {"_id": "doc:B", "session_id_hash": "sid_dedup", "payload_hash": "hB"}],
+        [{"_id": "doc:B", "session_id_hash": "sid_dedup", "payload_hash": "hB"}, {"_id": "doc:C", "session_id_hash": "sid_dedup", "payload_hash": "hC"}],
     ]
 
     def transport(method, url, headers, body, **kwargs):
@@ -927,3 +875,103 @@ def test_find_by_session_deduplicates_page_boundary_overlap():
     docs = store.find_by_session(session_id_hash="sid_dedup", page_size=2)
     assert [d["_id"] for d in docs] == ["doc:A", "doc:B", "doc:C"]
     assert len(docs) == 3
+
+
+def test_find_by_session_conflicting_duplicate_fails_closed():
+    """Verify that conflicting duplicate documents at page boundaries fail closed with SourceStoreConflict."""
+    import json
+    from agent_knowledge.couchdb_source.couchdb_http_store import CouchDBHttpSourceStore
+    from agent_knowledge.couchdb_source.source_store import SourceStoreConflict
+
+    call_index = 0
+    # Page 1 returns doc B with body v1. Page 2 returns doc B with mutated body v2!
+    pages = [
+        [{"_id": "doc:B", "session_id_hash": "sid_conflict", "body": "v1"}],
+        [{"_id": "doc:B", "session_id_hash": "sid_conflict", "body": "v2"}],
+    ]
+
+    def transport(method, url, headers, body, **kwargs):
+        nonlocal call_index
+        class FakeResponse:
+            def __init__(self, payload_dict):
+                self.status_code = 200
+                self.body = json.dumps(payload_dict).encode("utf-8")
+
+        if call_index < len(pages):
+            page_docs = pages[call_index]
+            call_index += 1
+            next_bm = f"bm-{call_index}" if call_index < len(pages) else ""
+            return FakeResponse({"docs": page_docs, "bookmark": next_bm})
+        return FakeResponse({"docs": [], "bookmark": ""})
+
+    store = CouchDBHttpSourceStore(
+        base_url="http://127.0.0.1:5984",
+        db="test_db",
+        transport=transport,
+    )
+
+    with pytest.raises(SourceStoreConflict, match="conflicting duplicate document doc:B detected across page boundary"):
+        store.find_by_session(session_id_hash="sid_conflict", page_size=1)
+
+
+def test_find_by_session_sparse_pages_does_not_early_terminate():
+    """Verify that sparse pages (len(page) < limit) in CouchDB Mango do not cause premature termination."""
+    import json
+    from agent_knowledge.couchdb_source.couchdb_http_store import CouchDBHttpSourceStore
+
+    call_index = 0
+    # Limit is 5. Page 1 returns only 2 docs (due to post-index Mango filtering), but has bookmark.
+    # Page 2 returns remaining 2 docs.
+    pages = [
+        [{"_id": "doc:1", "session_id_hash": "sid_sparse"}, {"_id": "doc:2", "session_id_hash": "sid_sparse"}],
+        [{"_id": "doc:3", "session_id_hash": "sid_sparse"}, {"_id": "doc:4", "session_id_hash": "sid_sparse"}],
+    ]
+
+    def transport(method, url, headers, body, **kwargs):
+        nonlocal call_index
+        class FakeResponse:
+            def __init__(self, payload_dict):
+                self.status_code = 200
+                self.body = json.dumps(payload_dict).encode("utf-8")
+
+        if call_index < len(pages):
+            page_docs = pages[call_index]
+            call_index += 1
+            next_bm = f"bm-{call_index}" if call_index < len(pages) else ""
+            return FakeResponse({"docs": page_docs, "bookmark": next_bm})
+        return FakeResponse({"docs": [], "bookmark": ""})
+
+    store = CouchDBHttpSourceStore(
+        base_url="http://127.0.0.1:5984",
+        db="test_db",
+        transport=transport,
+    )
+
+    docs = store.find_by_session(session_id_hash="sid_sparse", page_size=5)
+    # Must retrieve all 4 docs without early break after page 1!
+    assert [d["_id"] for d in docs] == ["doc:1", "doc:2", "doc:3", "doc:4"]
+
+
+def test_post_transport_typeerror_never_retries_mutation():
+    """Verify that transport TypeErrors during POST/PUT mutations never cause retry duplicate executions."""
+    from agent_knowledge.couchdb_source.couchdb_http_store import CouchDBHttpSourceStore
+
+    call_count = 0
+
+    def failing_mutation_transport(method, url, headers, body):
+        nonlocal call_count
+        call_count += 1
+        # Simulate an internal TypeError occurring during execution after socket write
+        raise TypeError("internal transport signature failure")
+
+    store = CouchDBHttpSourceStore(
+        base_url="http://127.0.0.1:5984",
+        db="test_db",
+        transport=failing_mutation_transport,
+    )
+
+    with pytest.raises(TypeError, match="internal transport signature failure"):
+        store._request("POST", "/test_db/_find", json_body={"dummy": True})
+
+    # Crucial: Must be called EXACTLY once. Zero duplicate retries on ambiguous mutation failure!
+    assert call_count == 1

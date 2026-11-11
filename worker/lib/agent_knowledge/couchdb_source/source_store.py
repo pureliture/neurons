@@ -234,8 +234,7 @@ class CouchDBSourceStore(Protocol):
         session_id_hash: str,
         doc_type: str = "",
         page_size: int = 500,
-        max_response_bytes: int | None = 8 * 1024 * 1024,
-        allow_oversized_single_fallback: bool = True,
+        max_response_bytes: int = 8 * 1024 * 1024,
     ) -> list[dict]: ...
 
     def iter_by_session(
@@ -904,8 +903,7 @@ class InMemoryCouchDBSourceStore:
         session_id_hash: str,
         doc_type: str = "",
         page_size: int = 500,
-        max_response_bytes: int | None = 8 * 1024 * 1024,
-        allow_oversized_single_fallback: bool = True,
+        max_response_bytes: int = 8 * 1024 * 1024,
     ) -> list[dict]:
         results = [
             copy.deepcopy(doc)
