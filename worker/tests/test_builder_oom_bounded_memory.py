@@ -32,6 +32,11 @@ import tracemalloc
 import pytest
 
 from agent_knowledge.couchdb_source import build_cli, document_model as dm
+from agent_knowledge.couchdb_source.couchdb_http_store import (
+    COUCHDB_FIND_MAX_PAGE_RESPONSE_BYTES,
+    CouchDBHttpSourceStore,
+    CouchDBResponseTooLarge,
+)
 from agent_knowledge.couchdb_source.document_model import TranscriptChunk
 from agent_knowledge.couchdb_source.build_cli import (
     _select_sessions_needing_projection,
@@ -463,4 +468,65 @@ def test_continuous_concurrent_mutation_fails_closed():
             session_id_hash=sid,
             store=hooked_store,
         )
+
+
+def test_find_by_session_transport_byte_cap_fails_closed():
+    """Verify that find_by_session enforces COUCHDB_FIND_MAX_PAGE_RESPONSE_BYTES cap.
+
+    Prevents unbounded HTTP JSON payload from overwhelming the worker heap before/during parsing.
+    """
+    class FakeResponse:
+        def __init__(self, body: bytes) -> None:
+            self.status_code = 200
+            self.body = body
+
+    # Simulate an HTTP response exceeding 8MB
+    oversized_bytes = b"x" * (COUCHDB_FIND_MAX_PAGE_RESPONSE_BYTES + 1024)
+
+    def oversized_transport(method, url, headers, body, **kwargs):
+        return FakeResponse(oversized_bytes)
+
+    store = CouchDBHttpSourceStore(
+        base_url="http://127.0.0.1:5984",
+        db="test_db",
+        transport=oversized_transport,
+    )
+
+    with pytest.raises(CouchDBResponseTooLarge, match="exceeded configured byte limit"):
+        store.find_by_session(session_id_hash="dummy_session_hash")
+
+
+def test_selection_single_pass_scales_with_large_state_corpus():
+    """Verify single-pass streaming selection under a large corpus (200 sessions).
+
+    Asserts:
+    1. Memory peak remains bounded under safe upper limit (< 25MB) during state resolution.
+    2. Strict adherence to selection limit (10 items) prioritizing unprojected work without memory leaks.
+    """
+    store = InMemoryCouchDBSourceStore()
+
+    # Seed 180 projected sessions + 20 unprojected sessions (total 200 sessions)
+    for i in range(180):
+        s_done = _build_synthetic_session(store, provider="hermes", project="neurons", raw_id=f"corpus-done-{i:03d}")
+        _mark_projected(store, s_done, "hermes", "neurons")
+
+    for i in range(20):
+        _build_synthetic_session(store, provider="hermes", project="neurons", raw_id=f"corpus-pending-{i:03d}")
+
+    tracemalloc.start()
+    tracemalloc.reset_peak()
+
+    selected = _select_sessions_needing_projection(
+        store,
+        limit=10,
+        backend="postgres_pgvector",
+        representation="session_v1",
+    )
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+
+    assert len(selected) == 10
+    # Peak heap allocation during 200-session resolution strictly bounded
+    assert peak < 25 * 1024 * 1024, f"Corpus resolution peak {peak / 1024 / 1024:.2f}MB exceeded 25MB"
+
 

@@ -737,7 +737,13 @@ class CouchDBHttpSourceStore:
             "execution_stats": payload.get("execution_stats"),
         }
 
-    def find_by_session(self, *, session_id_hash: str, doc_type: str = "") -> list[dict]:
+    def find_by_session(
+        self,
+        *,
+        session_id_hash: str,
+        doc_type: str = "",
+        max_response_bytes: int = COUCHDB_FIND_MAX_PAGE_RESPONSE_BYTES,
+    ) -> list[dict]:
         selector: dict = {"session_id_hash": session_id_hash}
         if doc_type:
             selector["doc_type"] = doc_type
@@ -747,7 +753,12 @@ class CouchDBHttpSourceStore:
             body: dict = {"selector": selector, "limit": 10000}
             if bookmark:
                 body["bookmark"] = bookmark
-            status, payload = self._request("POST", f"/{self.db}/_find", json_body=body)
+            status, payload = self._request(
+                "POST",
+                f"/{self.db}/_find",
+                json_body=body,
+                max_response_bytes=max_response_bytes,
+            )
             if status != 200:
                 raise CouchDBError(f"_find failed: HTTP {status}")
             page = payload.get("docs", [])
