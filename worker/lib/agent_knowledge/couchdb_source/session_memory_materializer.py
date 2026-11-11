@@ -381,22 +381,19 @@ def materialize_session_memory(*, session_id_hash: str, store: CouchDBSourceStor
         str(bundle.get("body", "")).rstrip() for bundle in bundles
     )
 
-    lines = [
-        f"# session-memory {provider} {project}",
-        f"session_id_hash: {session_id_hash}",
-        "",
-        "## conversation",
-    ]
+    import io
+    buf = io.StringIO()
+    buf.write(f"# session-memory {provider} {project}\nsession_id_hash: {session_id_hash}\n\n## conversation\n")
     for view in body_views:
-        lines.append("")
-        lines.append(view.text.rstrip())
-    lines.append("")
-    lines.append("## tool_evidence_summary")
+        buf.write("\n")
+        buf.write(view.text.rstrip())
+        buf.write("\n")
+    buf.write("\n## tool_evidence_summary\n")
     for evidence_body in tool_evidence_bodies:
-        # Full materialization: embed the bundle body so recall needs no CouchDB ref.
-        lines.append("")
-        lines.append(evidence_body)
-    body = "\n".join(lines).rstrip() + "\n"
+        buf.write("\n")
+        buf.write(evidence_body)
+        buf.write("\n")
+    body = buf.getvalue().rstrip() + "\n"
 
     notes: list[str] = []
     if scope.inconsistent:
