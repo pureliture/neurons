@@ -155,6 +155,15 @@ def _handle_unresolvable_session_in_selection(
         lane = _pg_receipt_lane(embedding_profile)
         attempts = dict(existing.get("projection_attempt") or {})
         source_hash = str(session_doc.get("source_hash") or "")
+        if not source_hash:
+            source_hash = str(existing.get("source_hash") or "")
+        if not source_hash:
+            try:
+                full_session = store.get(str(session_doc.get("_id") or ""))
+                if isinstance(full_session, dict):
+                    source_hash = str(full_session.get("source_hash") or "")
+            except Exception:
+                pass
         reason = (
             SOURCE_PAYLOAD_TOO_LARGE
             if getattr(exc, "code", "") == "couchdb_response_too_large"
@@ -206,6 +215,7 @@ def _select_sessions_needing_projection(
     from .source_revision import resolve_active_source_revision_from_snapshot
 
     scope_selector = _scope_selector(project=project, provider=provider)
+    hash_field = "backend_receipts" if backend == "postgres_pgvector" else "projected_source_hash"
     raw_states = store.find_by_type(
         SourceDocType.PROJECTION_STATE,
         fields=[
@@ -213,11 +223,10 @@ def _select_sessions_needing_projection(
             "session_id_hash",
             "projection_status",
             "source_hash",
-            "projected_source_hash",
             "failure_reason",
             "failure_source_hash",
             "projection_attempt",
-            "backend_receipts",
+            hash_field,
         ],
         selector=scope_selector if backend == "postgres_pgvector" else {"projection_status": ProjectionStatus.PROJECTED, **scope_selector},
     )
@@ -271,7 +280,7 @@ def _select_sessions_needing_projection(
         _iter_by_type(
             store,
             SourceDocType.TRANSCRIPT_SESSION,
-            fields=["_id", "session_id_hash", "provider", "project", "source_hash"],
+            fields=["_id", "session_id_hash", "provider", "project"],
             selector=scope_selector,
             page_size=max(1, limit) if limit > 0 else 1000,
         )

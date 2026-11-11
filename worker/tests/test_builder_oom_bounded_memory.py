@@ -560,9 +560,19 @@ def test_base_vs_candidate_selector_precedence_matrix_identical():
     # Reference implementation of the baseline multi-pass selector (origin/main)
     def baseline_select(store, limit: int, backend="postgres_pgvector", embedding_profile="", representation="session_v1"):
         scope_selector = _scope_selector(project="", provider="")
+        hash_field = "backend_receipts" if backend == "postgres_pgvector" else "projected_source_hash"
         raw_states = store.find_by_type(
             SourceDocType.PROJECTION_STATE,
-            fields=["_id", "session_id_hash", "projection_status", "source_hash", "projected_source_hash", "failure_reason", "failure_source_hash", "projection_attempt", "backend_receipts"],
+            fields=[
+                "_id",
+                "session_id_hash",
+                "projection_status",
+                "source_hash",
+                "failure_reason",
+                "failure_source_hash",
+                "projection_attempt",
+                hash_field,
+            ],
             selector=scope_selector if backend == "postgres_pgvector" else {"projection_status": ProjectionStatus.PROJECTED, **scope_selector},
         )
         blocked_source_hashes = {}
@@ -592,7 +602,7 @@ def test_base_vs_candidate_selector_precedence_matrix_identical():
             and str(state.get("projection_status") or "") == ProjectionStatus.PROJECTED
         }
         selected = []
-        sessions = iter(_iter_by_type(store, SourceDocType.TRANSCRIPT_SESSION, fields=["_id", "session_id_hash", "provider", "project", "source_hash"], selector=scope_selector, page_size=1000))
+        sessions = iter(_iter_by_type(store, SourceDocType.TRANSCRIPT_SESSION, fields=["_id", "session_id_hash", "provider", "project"], selector=scope_selector, page_size=1000))
         while limit <= 0 or len(selected) < limit:
             try:
                 session = next(sessions)
@@ -703,7 +713,7 @@ def test_base_vs_candidate_selector_precedence_matrix_identical():
     # Matrix Case 6: Pure unprojected session (no state doc)
     sid6 = _build_synthetic_session(store, provider="hermes", project="neurons", raw_id="mat-pure-unprojected")
 
-    # Run baseline vs candidate on the exact same fixture
+    # Run baseline vs candidate on the exact same fixture (postgres_pgvector)
     baseline_result = baseline_select(store, limit=10, backend="postgres_pgvector")
     candidate_result = _select_sessions_needing_projection(store, limit=10, backend="postgres_pgvector")
 
@@ -713,17 +723,23 @@ def test_base_vs_candidate_selector_precedence_matrix_identical():
     # Must be 100% identical!
     assert candidate_sids == baseline_sids, f"Candidate {candidate_sids} did not match baseline {baseline_sids}"
 
-    # Specifically verify the counterexample session (sid1) was NOT selected (it is PROJECTED)
-    assert sid1 not in candidate_sids
-
+    # For postgres_pgvector:
+    # sid1 (legacy top-level projected but no pg receipt) MUST be selected for pgvector projection
+    assert sid1 in candidate_sids
     # sid3 (receipt failed), sid5 (old blocked hash), sid6 (unprojected) must be selected
     assert sid3 in candidate_sids
     assert sid5 in candidate_sids
     assert sid6 in candidate_sids
-
     # sid2 (receipt projected) and sid4 (currently blocked) must NOT be selected
     assert sid2 not in candidate_sids
     assert sid4 not in candidate_sids
+
+    # Run baseline vs candidate for non-pgvector (e.g. neo4j)
+    baseline_neo4j = baseline_select(store, limit=10, backend="neo4j")
+    candidate_neo4j = _select_sessions_needing_projection(store, limit=10, backend="neo4j")
+    assert [s["session_id_hash"] for s in candidate_neo4j] == [s["session_id_hash"] for s in baseline_neo4j]
+    # In neo4j backend, sid1 has top-level projected status, so it must NOT be selected
+    assert sid1 not in [s["session_id_hash"] for s in candidate_neo4j]
 
 
 def test_find_by_session_paginates_multi_megabyte_session_losslessly():
