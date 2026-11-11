@@ -115,7 +115,6 @@ def update_coverage_with_tool_evidence(
     *,
     session_id_hash: str,
     store: CouchDBSourceStore,
-    resolved: ResolvedSourceRevision | None = None,
 ) -> dict | None:
     """Rebuild the per-session coverage manifest with current tool evidence counts.
 
@@ -127,7 +126,6 @@ def update_coverage_with_tool_evidence(
         snapshot = _coverage_snapshot(
             session_id_hash=session_id_hash,
             store=store,
-            resolved=resolved if _attempt == 0 else None,
         )
         if snapshot is None:
             return None
@@ -168,7 +166,6 @@ def update_coverage_with_tool_evidence(
         current = _coverage_snapshot(
             session_id_hash=session_id_hash,
             store=store,
-            resolved=resolved if (_attempt == 0 and not is_legacy_unpinned) else None,
         )
         if current is None:
             continue
@@ -202,13 +199,11 @@ def _coverage_snapshot(
     *,
     session_id_hash: str,
     store: CouchDBSourceStore,
-    resolved: ResolvedSourceRevision | None = None,
 ) -> tuple[dict, list[dict], str, str, bool] | None:
-    if resolved is None:
-        resolved = resolve_active_source_revision(
-            session_id_hash=session_id_hash,
-            store=store,
-        )
+    resolved = resolve_active_source_revision(
+        session_id_hash=session_id_hash,
+        store=store,
+    )
     sessions = list(resolved.sessions)
     chunks = list(resolved.conversation_chunks)
     bundles = list(resolved.tool_evidence_bundles)
@@ -359,7 +354,6 @@ def materialize_session_memory(
     *,
     session_id_hash: str,
     store: CouchDBSourceStore,
-    resolved: ResolvedSourceRevision | None = None,
 ) -> MaterializedSessionMemory:
     """Materialize the resolved source revision into one session-memory body.
 
@@ -369,11 +363,10 @@ def materialize_session_memory(
     compares stored hash metadata and relies on this step for content checks.
     """
 
-    if resolved is None:
-        resolved = resolve_active_source_revision(
-            session_id_hash=session_id_hash,
-            store=store,
-        )
+    resolved = resolve_active_source_revision(
+        session_id_hash=session_id_hash,
+        store=store,
+    )
     sessions = list(resolved.sessions)
     chunks = list(resolved.conversation_chunks)
     bundles = list(resolved.tool_evidence_bundles)
@@ -1114,21 +1107,14 @@ def materialize_and_project(
 ) -> dict:
     """End-to-end M3 step for one session: refresh coverage, materialize, project."""
 
-    resolved = resolve_active_source_revision(
-        session_id_hash=session_id_hash,
-        store=store,
-    )
     update_coverage_with_tool_evidence(
         session_id_hash=session_id_hash,
         store=store,
-        resolved=resolved,
     )
     materialized = materialize_session_memory(
         session_id_hash=session_id_hash,
         store=store,
-        resolved=resolved,
     )
-    del resolved
     projection = None
     if projector is not None:
         projection = project_session_memory(

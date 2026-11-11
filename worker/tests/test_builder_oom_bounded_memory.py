@@ -32,6 +32,7 @@ import tracemalloc
 import pytest
 
 from agent_knowledge.couchdb_source import build_cli, document_model as dm
+from agent_knowledge.couchdb_source.document_model import TranscriptChunk
 from agent_knowledge.couchdb_source.build_cli import (
     _select_sessions_needing_projection,
 )
@@ -47,7 +48,10 @@ from agent_knowledge.couchdb_source.source_revision import (
     resolve_active_source_revision,
     resolve_active_source_revision_from_snapshot,
 )
-from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
+from agent_knowledge.couchdb_source.source_store import (
+    InMemoryCouchDBSourceStore,
+    SourceStoreError,
+)
 from test_couchdb_build_cli import (
     _build_synthetic_session,
     _mark_projected,
@@ -140,16 +144,33 @@ def test_mixed_large_and_many_sessions_peak_memory_bounded():
 
 
 def test_baseline_vs_candidate_peak_memory_and_byte_equality():
-    """Quantitatively compare Baseline (duplicate resolution) vs Candidate (shared resolution).
+    """Quantitatively compare Baseline vs Candidate materialization with canonical re-read.
 
-    Proves:
-    1. Exact byte-for-byte output identity (body, content_hash, source_hash).
-    2. Lower heap peak allocation in candidate path compared to baseline path.
+    Scope & Limitations (Important Contract Truths):
+    - tracemalloc is started AFTER seeding the store; therefore, the initial CouchDB
+      in-memory source document footprint (~1.5MB JSON) is NOT captured in the traced delta.
+    - Single large session bodies inherently require O(N) memory to construct and hash;
+      peak memory scales linearly with session text length.
+    - This test does NOT claim to resolve 1Gi cgroup OOM for arbitrarily large single sessions,
+      as CouchDB JSON transport cap remains unbounded at the store transport layer.
+    - It proves:
+      1. Exact byte-for-byte output identity (body, content_hash, source_hash, chunk_count).
+      2. Memory peak remains strictly bounded within the allocated transient budget under canonical re-read.
     """
-    store = InMemoryCouchDBSourceStore()
-    # Synthesize a large session with 10 chunks (~1.5MB total)
-    sid = _build_synthetic_session(
-        store,
+    # Fresh store for baseline
+    store_base = InMemoryCouchDBSourceStore()
+    sid_base = _build_synthetic_session(
+        store_base,
+        provider="hermes",
+        project="neurons",
+        raw_id="large-compare-session",
+        body="synthetic large token payload " * 15_000,
+    )
+
+    # Fresh store for candidate
+    store_cand = InMemoryCouchDBSourceStore()
+    sid_cand = _build_synthetic_session(
+        store_cand,
         provider="hermes",
         project="neurons",
         raw_id="large-compare-session",
@@ -160,33 +181,35 @@ def test_baseline_vs_candidate_peak_memory_and_byte_equality():
         def project(self, *, target_profile: str, document: dict) -> str:
             return "projected-ok"
 
-    # --- Run Baseline Measurement ---
-    # Baseline performs 2 separate resolve_active_source_revision calls
+    # --- Run Baseline Measurement (Fresh input, canonical re-read path) ---
     tracemalloc.start()
     tracemalloc.reset_peak()
-    update_coverage_with_tool_evidence(session_id_hash=sid, store=store)
-    mat_baseline = materialize_session_memory(session_id_hash=sid, store=store)
+    update_coverage_with_tool_evidence(session_id_hash=sid_base, store=store_base)
+    mat_baseline = materialize_session_memory(session_id_hash=sid_base, store=store_base)
     baseline_peak = tracemalloc.get_traced_memory()[1]
     tracemalloc.stop()
 
-    # --- Run Candidate Measurement ---
-    # Candidate shares a single resolved instance across steps
+    # --- Run Candidate Measurement (Fresh input, full materialize_and_project path) ---
     tracemalloc.start()
     tracemalloc.reset_peak()
-    resolved_shared = resolve_active_source_revision(session_id_hash=sid, store=store)
-    update_coverage_with_tool_evidence(session_id_hash=sid, store=store, resolved=resolved_shared)
-    mat_candidate = materialize_session_memory(session_id_hash=sid, store=store, resolved=resolved_shared)
+    res_candidate = materialize_and_project(
+        session_id_hash=sid_cand,
+        store=store_cand,
+        projector=DummyProjector(),
+        backend="postgres_pgvector",
+    )
     candidate_peak = tracemalloc.get_traced_memory()[1]
     tracemalloc.stop()
 
-    # 1. Byte-for-byte exact equality
-    assert mat_candidate.body == mat_baseline.body, "Candidate body must match baseline byte-for-byte"
-    assert mat_candidate.content_hash == mat_baseline.content_hash, "Content hash must match baseline"
-    assert mat_candidate.source_hash == mat_baseline.source_hash, "Source hash must match baseline"
-    assert mat_candidate.conversation_chunk_count == mat_baseline.conversation_chunk_count
+    # 1. Byte-for-byte exact equality between independent runs
+    assert res_candidate["content_hash"] == mat_baseline.content_hash, "Content hash must match baseline"
+    assert res_candidate["source_hash"] == mat_baseline.source_hash, "Source hash must match baseline"
+    assert res_candidate["conversation_chunk_count"] == mat_baseline.conversation_chunk_count
+    assert res_candidate["fully_materialized"] is True
 
-    # 2. Peak memory comparison (candidate uses less peak memory by avoiding redundant doc loading)
-    assert candidate_peak <= baseline_peak, f"Candidate peak {candidate_peak} should be <= baseline {baseline_peak}"
+    # 2. Peak memory budget check (bounded transient heap overhead under 15MB)
+    assert candidate_peak < 15 * 1024 * 1024, f"Candidate peak {candidate_peak / 1024 / 1024:.2f}MB exceeded budget"
+    assert baseline_peak < 15 * 1024 * 1024, f"Baseline peak {baseline_peak / 1024 / 1024:.2f}MB exceeded budget"
 
 
 def test_prod_args_limit_10_full_cycle_simulation():
@@ -332,3 +355,108 @@ def test_failed_projection_retains_state_and_does_not_drop_work():
     # Transcript documents must remain intact
     docs = store.find_by_session(session_id_hash=sid)
     assert len(docs) >= 3  # session + chunk + coverage
+
+
+def test_concurrent_revision_advance_during_coverage_put_re_reads_and_converges():
+    """Deterministic RED test proving stale snapshot reuse vs fresh re-read.
+
+    When store.put writes the coverage manifest, a concurrent chunk arrival or
+    active revision change must be detected by the subsequent re-read (_coverage_snapshot).
+    If a stale snapshot is reused (as in commit f945b66), the function immediately returns
+    a stale manifest (1 chunk) instead of re-reading and converging on the latest revision (2 chunks).
+    """
+    store = InMemoryCouchDBSourceStore()
+    sid = _build_synthetic_session(store, provider="hermes", project="neurons", raw_id="concurrent-rev-test")
+    activated_v1 = activate_source_revision(store=store, session_id_hash=sid)
+
+    # Hook store.put: on the first coverage manifest write, insert chunk 2 and advance active revision
+    class HookedStore(InMemoryCouchDBSourceStore):
+        def __init__(self, base: InMemoryCouchDBSourceStore) -> None:
+            super().__init__()
+            self._docs = base._docs
+            self._changes_log = base._changes_log
+            self.mutation_fired = False
+
+        def put(self, doc: dict) -> dict:
+            res = super().put(doc)
+            if doc.get("doc_type") == dm.SourceDocType.COVERAGE_MANIFEST and not self.mutation_fired:
+                self.mutation_fired = True
+                # Add a second chunk to the session concurrently
+                chunk = TranscriptChunk.from_text(
+                    chunk_id="chunk_01",
+                    session_id_hash=sid,
+                    provider="hermes",
+                    project="neurons",
+                    turn_start_index=1,
+                    turn_end_index=1,
+                    text="turn 2 body",
+                )
+                chunk_doc = dm.build_conversation_chunk_document(chunk=chunk)
+                super().put(chunk_doc)
+                # Advance active revision to rev 2 (now with 2 chunks)
+                activate_source_revision(store=self, session_id_hash=sid)
+            return res
+
+    hooked_store = HookedStore(store)
+
+    # Resolve initial revision
+    initial_resolved = resolve_active_source_revision(session_id_hash=sid, store=hooked_store)
+    assert initial_resolved.source_hash == activated_v1.source_hash
+
+    # Calling update_coverage_with_tool_evidence without stale snapshot
+    # Fresh re-read contract must re-read, detect the mismatch, and converge to chunk_count == 2.
+    cov = update_coverage_with_tool_evidence(
+        session_id_hash=sid,
+        store=hooked_store,
+    )
+    assert cov is not None
+    # With proper re-read, it converges on the latest revision with 2 chunks.
+    assert cov["conversation_chunk_count"] == 2, (
+        f"Expected coverage to converge to 2 chunks after concurrent advance, got {cov.get('conversation_chunk_count')}"
+    )
+
+
+def test_continuous_concurrent_mutation_fails_closed():
+    """Verify that continuous concurrent source changes fail closed with SourceStoreError.
+
+    If snapshot reuse bypasses re-reading, it never detects continuous concurrency and falsely succeeds.
+    """
+    store = InMemoryCouchDBSourceStore()
+    sid = _build_synthetic_session(store, provider="hermes", project="neurons", raw_id="fail-closed-test")
+    activate_source_revision(store=store, session_id_hash=sid)
+
+    class AlwaysAdvancingStore(InMemoryCouchDBSourceStore):
+        def __init__(self, base: InMemoryCouchDBSourceStore) -> None:
+            super().__init__()
+            self._docs = base._docs
+            self._changes_log = base._changes_log
+            self.advance_count = 0
+
+        def put(self, doc: dict) -> dict:
+            res = super().put(doc)
+            if doc.get("doc_type") == dm.SourceDocType.COVERAGE_MANIFEST:
+                self.advance_count += 1
+                chunk = TranscriptChunk.from_text(
+                    chunk_id=f"chunk_{self.advance_count + 1:02d}",
+                    session_id_hash=sid,
+                    provider="hermes",
+                    project="neurons",
+                    turn_start_index=self.advance_count + 1,
+                    turn_end_index=self.advance_count + 1,
+                    text=f"continuous turn {self.advance_count}",
+                )
+                chunk_doc = dm.build_conversation_chunk_document(chunk=chunk)
+                super().put(chunk_doc)
+                activate_source_revision(store=self, session_id_hash=sid)
+            return res
+
+    hooked_store = AlwaysAdvancingStore(store)
+    initial_resolved = resolve_active_source_revision(session_id_hash=sid, store=hooked_store)
+
+    # Must fail closed with SourceStoreError after retry exhaustion
+    with pytest.raises(SourceStoreError, match="coverage manifest did not converge after concurrent source updates"):
+        update_coverage_with_tool_evidence(
+            session_id_hash=sid,
+            store=hooked_store,
+        )
+
