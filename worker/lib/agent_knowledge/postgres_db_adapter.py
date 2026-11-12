@@ -86,14 +86,12 @@ def _options_with_deadline(dsn: str, *, timeout_ms: int) -> str:
     return " ".join(value for value in (configured, deadline) if value)
 
 
-# SQLite ``julianday(t)`` 호환 shim. caller(GC/dirty-sync)가 age-gate 델타 비교에 쓰는
+# SQLite ``julianday(t)`` 호환 shim 본문. caller(GC/dirty-sync)가 age-gate 델타 비교에 쓰는
 # ``julianday(replace(col,'Z','+00:00'))`` / ``julianday('now')`` 를 SQL 무수정으로 PG에서
 # 동작시킨다. Julian Day Number = epoch초/86400 + 2440587.5(Unix epoch=JD 2440587.5). 모든
 # 사용처가 델타(a-b, a>=b)라 절대값보다 단조성·일관성이 핵심. 빈/무효 입력은 SQLite처럼 NULL
 # 반환(plpgsql 예외처리) — caller가 nullif로 거르지만 방어적으로.
-_JULIANDAY_SHIM = """
-CREATE OR REPLACE FUNCTION julianday(t text) RETURNS double precision AS $JD$
-DECLARE ts timestamptz;
+_JULIANDAY_BODY = """DECLARE ts timestamptz;
 BEGIN
   IF t IS NULL THEN RETURN NULL; END IF;
   IF t = 'now' THEN RETURN extract(epoch FROM now()) / 86400.0 + 2440587.5; END IF;
@@ -103,9 +101,40 @@ BEGIN
     RETURN NULL;
   END;
   RETURN extract(epoch FROM ts) / 86400.0 + 2440587.5;
-END;
+END;"""
+
+_JULIANDAY_SHIM = f"""
+CREATE OR REPLACE FUNCTION julianday(t text) RETURNS double precision AS $JD$
+{_JULIANDAY_BODY}
 $JD$ LANGUAGE plpgsql STABLE;
 """
+
+_CHECK_JULIANDAY_SQL = """
+SELECT
+    ret.typname,
+    pg_proc.prokind,
+    pg_proc.provolatile,
+    lang.lanname,
+    pg_proc.prosrc
+FROM pg_proc
+JOIN pg_namespace ON pg_proc.pronamespace = pg_namespace.oid
+JOIN pg_type ret ON pg_proc.prorettype = ret.oid
+JOIN pg_language lang ON pg_proc.prolang = lang.oid
+WHERE pg_proc.proname = 'julianday'
+  AND pg_proc.pronargs = 1
+  AND pg_proc.proargtypes[0] = 'pg_catalog.text'::regtype
+  AND pg_namespace.nspname = ANY(current_schemas(true))
+ORDER BY array_position(current_schemas(true), pg_namespace.nspname::text)
+LIMIT 1;
+"""
+
+_LOCK_COMPAT_SHIM_SQL = "SELECT pg_advisory_xact_lock(hashtext('julianday_compat_shim'))"
+
+
+def _normalize_plpgsql_body(text: str) -> str:
+    """줄 단위 좌우 공백만 정규화하여 SQL 문자열 리터럴 내부 공백을 보존하면서 대조한다."""
+    return "\n".join(line.strip() for line in text.strip().splitlines() if line.strip())
+
 
 
 class _PgResult:
@@ -188,11 +217,63 @@ class _PgConnection:
                 (f"{max(1, int(remaining * 1000))}ms",),
             )
 
-    def _ensure_compat_functions(self) -> None:
-        # SQLite 호환 함수(julianday) 보장 — idempotent CREATE OR REPLACE, 연결당 1회.
+    def _is_julianday_defined_and_current(self) -> bool:
         with self._conn.cursor() as cursor:
-            cursor.execute(_JULIANDAY_SHIM)
-        self._conn.commit()
+            cursor.execute(_CHECK_JULIANDAY_SQL)
+            row = cursor.fetchone()
+            if not row:
+                return False
+            ret_typname, prokind, provolatile, lanname, prosrc = row
+            if (
+                ret_typname != "float8"
+                or prokind != "f"
+                or provolatile != "s"
+                or lanname != "plpgsql"
+                or not prosrc
+            ):
+                return False
+            existing = _normalize_plpgsql_body(prosrc)
+            expected = _normalize_plpgsql_body(_JULIANDAY_BODY)
+            return existing == expected
+
+    def _ensure_compat_functions(self) -> None:
+        # SQLite 호환 함수(julianday) 보장 — idempotent, 동시성 안전 보장.
+        # 1. Fast Path: 현재 search_path 상에 올바른 정의의 함수가 이미 존재하면 DDL 0건 수행 후 트랜잭션 IDLE 확정.
+        try:
+            if self._is_julianday_defined_and_current():
+                self._conn.commit()
+                return
+        except psycopg.Error:
+            self._conn.rollback()
+            raise
+
+        # 2. Slow Path: 함수가 없거나 정의가 다른 경우 트랜잭션 자문 잠금을 획득하여 신규 프로세스 간 동시 DDL 직렬화.
+        try:
+            with self._conn.cursor() as cursor:
+                cursor.execute(_LOCK_COMPAT_SHIM_SQL)
+                # 잠금 획득 후 대기하는 동안 다른 연결이 이미 생성했을 수 있으므로 재확인
+                if not self._is_julianday_defined_and_current():
+                    cursor.execute(_JULIANDAY_SHIM)
+            self._conn.commit()  # 자문 잠금 자동 해제 및 트랜잭션 IDLE 확정
+        except psycopg.Error as exc:
+            self._conn.rollback()
+            # 롤링 배포 중 구버전 프로세스(자문 잠금 미사용)와의 경합 등 실제 카탈로그 락 충돌에 한해서만
+            # 롤백 후 다른 연결에 의해 올바른 함수가 생성 완료되었는지 확인하여 복원한다.
+            err_msg = str(exc).lower()
+            sqlstate = getattr(exc, "sqlstate", None)
+            is_concurrent_catalog_error = (
+                "tuple concurrently updated" in err_msg
+                or (sqlstate == "55P03" and "catalog" in err_msg)
+            )
+            if is_concurrent_catalog_error:
+                try:
+                    if self._is_julianday_defined_and_current():
+                        self._conn.commit()
+                        return
+                except psycopg.Error:
+                    self._conn.rollback()
+            # 무관한 에러(권한 부족, 구문 오류, search_path 위반 등)이거나 여전히 함수가 없으면 원래 예외 re-raise
+            raise
 
     def execute(self, sql: str, params=None) -> _PgResult:
         if _is_noop_pragma(sql):
