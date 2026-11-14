@@ -974,7 +974,7 @@ def main(argv: list[str] | None = None) -> int:
             embedding_profile = validated_pg_embedding_profile(
                 SimpleNamespace(model=cfg["model"], size=cfg["dim"])
             )
-        except Exception:
+        except (ValueError, KeyError, TypeError):
             embedding_profile = ""
 
     # --- Session selection --------------------------------------------------
