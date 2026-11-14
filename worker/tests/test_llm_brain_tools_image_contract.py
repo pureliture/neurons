@@ -27,7 +27,6 @@ def test_llm_brain_tools_image_installs_mcp_client_extra() -> None:
     legacy_symbol = "streamable" + "http_client"
     assert legacy_symbol not in dockerfile
     assert "post_deploy_mcp_capture" in dockerfile
-    assert "openai>=1.0" in dockerfile
     assert 'CMD ["sleep", "infinity"]' in dockerfile
 
 

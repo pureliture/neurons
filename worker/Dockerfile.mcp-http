@@ -22,7 +22,7 @@ RUN PYTHONPATH=/app/lib python -m agent_knowledge.runtime_build_identity \
     --content-root /app \
     --output /app/build-identity.json
 # mcp-http transport and the optional embedding API client.
-RUN pip install --no-cache-dir ".[mcp-http]" "openai>=1.0"
+RUN pip install --no-cache-dir ".[mcp-http]" "openai>=1.91.0,<3" "httpx>=0.27,<1"
 
 # open_read_only는 --ledger 경로의 존재만 검증한다(실 데이터는 NEURON_LEDGER_PG_DSN→PG).
 # placeholder ledger 파일을 둔다.

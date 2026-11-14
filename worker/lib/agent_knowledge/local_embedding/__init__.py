@@ -63,15 +63,19 @@ from .profile import (
     verify_model2vec_library_version,
     verify_model_directory,
 )
-from .evaluation import (
-    EvalCorpusCard,
-    EvalEntityPairCase,
-    EvalQueryCase,
-    LocalEmbeddingQualityReport,
-    build_sanitized_entity_dedup_pairs,
-    build_sanitized_eval_corpus,
-    build_sanitized_eval_queries,
-    run_sanitized_quality_evaluation,
+# Evaluation helpers pull in graphiti_core and are loaded lazily via __getattr__
+# so lightweight canonical/profile imports stay independent of graph runtime deps.
+_EVALUATION_EXPORTS = frozenset(
+    {
+        "EvalCorpusCard",
+        "EvalEntityPairCase",
+        "EvalQueryCase",
+        "LocalEmbeddingQualityReport",
+        "build_sanitized_entity_dedup_pairs",
+        "build_sanitized_eval_corpus",
+        "build_sanitized_eval_queries",
+        "run_sanitized_quality_evaluation",
+    }
 )
 from .service import (
     EncodedBatchResult,
@@ -81,16 +85,18 @@ from .service import (
     LocalModel2VecEngine,
     create_local_embedding_http_server,
 )
-from .transition import (
-    LocalEmbeddingCutoverReport,
-    Neo4jBackfillProgress,
-    PgBackfillProgress,
-    backfill_neo4j_local_embeddings,
-    backfill_pg_local_embeddings,
-    enqueue_missing_pg_local_embeddings,
-    evaluate_cutover_readiness,
-    inspect_neo4j_local_embedding_state,
-    inspect_pg_local_embedding_state,
+_TRANSITION_EXPORTS = frozenset(
+    {
+        "LocalEmbeddingCutoverReport",
+        "Neo4jBackfillProgress",
+        "PgBackfillProgress",
+        "backfill_neo4j_local_embeddings",
+        "backfill_pg_local_embeddings",
+        "enqueue_missing_pg_local_embeddings",
+        "evaluate_cutover_readiness",
+        "inspect_neo4j_local_embedding_state",
+        "inspect_pg_local_embedding_state",
+    }
 )
 
 __all__ = [
@@ -153,3 +159,15 @@ __all__ = [
     "verify_model2vec_library_version",
     "verify_model_directory",
 ]
+
+
+def __getattr__(name: str):
+    if name in _EVALUATION_EXPORTS:
+        from . import evaluation as _evaluation
+
+        return getattr(_evaluation, name)
+    if name in _TRANSITION_EXPORTS:
+        from . import transition as _transition
+
+        return getattr(_transition, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

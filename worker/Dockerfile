@@ -27,7 +27,7 @@ COPY lib ./lib
 
 RUN python -m pip install --no-cache-dir ".[local-embedding]" \
     && python -m pip install --no-cache-dir "nats-py>=2.6" \
-    && python -m pip install --no-cache-dir "openai>=1.0"
+    && python -m pip install --no-cache-dir "openai>=1.91.0,<3" "httpx>=0.27,<1"
 
 # Image-owned canonical state parent. Docker copies this 0700 directory into an
 # empty named volume before the non-root app starts; the app never repairs
