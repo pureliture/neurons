@@ -24,11 +24,61 @@ from ..model_connectors import (
     resolve_embedding_profile_id,
     resolve_embedding_spec,
 )
+from ..local_embedding.client import LocalEmbeddingClientError
+from ..pipeline_progress import emit_progress
 from ..rag_ingress.pg_backfill import validated_pg_embedding_profile
 from ..rag_ingress.pg_embedding_privacy import assert_pg_embedding_egress_safe
 from ..rag_ingress.embedding_provider import build_openai_embedding_provider
 from .outbox_worker import LocalEmbeddingOutboxWorker, OutboxWorker
 from .pgvector_store import PgVectorStore
+
+LOCAL_EMBEDDING_INPUT_MAX_BYTES = 524288
+DEFAULT_EMBEDDING_INPUT_MAX_BYTES = 32768
+
+
+def assert_embedding_input_budget(text: str, profile: str) -> None:
+    """Reject payloads above the consumer's egress budget as a typed terminal error.
+
+    A bare ValueError here was recorded as ``terminal_error:ValueError`` and was
+    indistinguishable from a model-side failure. The budget itself is
+    intentional (the segmenter may emit an oversized single-view segment), so
+    the error stays non-retryable and carries an explicit code instead.
+    """
+
+    max_bytes = (
+        LOCAL_EMBEDDING_INPUT_MAX_BYTES
+        if profile == LOCAL_EMBEDDING_PROFILE_ID
+        else DEFAULT_EMBEDDING_INPUT_MAX_BYTES
+    )
+    if len(text.encode("utf-8")) > max_bytes:
+        raise LocalEmbeddingClientError(
+            "embedding_input_budget_exceeded",
+            "embedding input exceeds the profile UTF-8 byte budget",
+            retryable=False,
+        )
+
+
+def build_embed_fn(provider: Any, profile: str, report: dict[str, Any]):
+    """Return the outbox embed function used by this consumer.
+
+    The privacy gate stays first and unchanged. Non-local profiles keep the
+    fixed paid-endpoint egress budget. The local profile has no whole-document
+    cap: the provider streams the document through
+    `CanonicalLocalEmbeddingClient._embed_single_document`, which sends at most
+    `LOCAL_MODEL2VEC_MAX_CHUNK_BYTES` (8 KiB) inputs and aggregates with the
+    existing byte-length weights. That removes the 524288-byte rejection that
+    dead-lettered oversized local segments without raising any cap on request
+    size or materializing every chunk vector.
+    """
+
+    def embed(text: str) -> list[float]:
+        assert_pg_embedding_egress_safe(text)
+        if profile != LOCAL_EMBEDDING_PROFILE_ID:
+            assert_embedding_input_budget(text, profile)
+        report["model_calls"] += 1
+        return provider.embed(text)
+
+    return embed
 
 
 def _positive_int(value: str) -> int:
@@ -98,18 +148,23 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
     stop = threading.Event()
     previous_sigterm = None
     try:
-        provider = build_openai_embedding_provider(environ=env)
+        import inspect
+
+        try:
+            params = inspect.signature(build_openai_embedding_provider).parameters
+        except (TypeError, ValueError):
+            params = {}
+        if "progress_callback" in params or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+        ):
+            provider = build_openai_embedding_provider(environ=env, progress_callback=emit_progress)
+        else:
+            provider = build_openai_embedding_provider(environ=env)
         profile = validated_pg_embedding_profile(provider)
         if profile != report["profile"]:
             raise ValueError("embedding_profile_mismatch")
 
-        def embed(text: str) -> list[float]:
-            assert_pg_embedding_egress_safe(text)
-            max_bytes = 524288 if profile == LOCAL_EMBEDDING_PROFILE_ID else 32768
-            if len(text.encode("utf-8")) > max_bytes:
-                raise ValueError("embedding_input_budget_exceeded")
-            report["model_calls"] += 1
-            return provider.embed(text)
+        embed = build_embed_fn(provider, profile, report)
 
         store = PgVectorStore(dsn=dsn)
         if profile == LOCAL_EMBEDDING_PROFILE_ID and hasattr(store, "claim_local_outbox_leases"):

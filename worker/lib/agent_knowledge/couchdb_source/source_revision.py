@@ -674,10 +674,22 @@ def _validate_provenance(
         raise SourceStoreConflict("source revision provenance is invalid") from exc
 
 
+def _emit_progress(progress_callback, done: int, total: int) -> None:
+    """Telemetry must never break source resolution."""
+
+    if progress_callback is None:
+        return
+    try:
+        progress_callback(int(done), int(total))
+    except Exception:
+        return
+
+
 def _load_legacy_documents(
     *,
     store: CouchDBSourceStore,
     session_id_hash: str,
+    progress_callback=None,
 ) -> list[dict]:
     documents: list[dict] = []
     for doc_type in (
@@ -685,14 +697,21 @@ def _load_legacy_documents(
         dm.SourceDocType.CONVERSATION_CHUNK,
         dm.SourceDocType.TOOL_EVIDENCE_BUNDLE,
     ):
+        base = len(documents)
+
+        def emit_page(done: int, _total: int, *, _base: int = base) -> None:
+            _emit_progress(progress_callback, _base + int(done), 0)
+
         documents.extend(
             document
             for document in store.find_by_session(
                 session_id_hash=session_id_hash,
                 doc_type=doc_type,
+                progress_callback=emit_page,
             )
             if not _is_immutable_source_copy(document)
         )
+        _emit_progress(progress_callback, len(documents), 0)
     documents.sort(key=lambda document: str(document.get("_id") or ""))
     return documents
 
@@ -1117,13 +1136,18 @@ def resolve_active_source_revision(
     *,
     session_id_hash: str,
     store: CouchDBSourceStore,
+    progress_callback=None,
 ) -> ResolvedSourceRevision:
     """Resolve an active immutable revision, or the legacy set only if unpinned."""
 
     dm.assert_hash_like("session_id_hash", session_id_hash)
     pointer = store.get(dm.active_source_revision_pointer_doc_id(session_id_hash))
     if pointer is None:
-        documents = _load_legacy_documents(store=store, session_id_hash=session_id_hash)
+        documents = _load_legacy_documents(
+            store=store,
+            session_id_hash=session_id_hash,
+            progress_callback=progress_callback,
+        )
         return _resolved(
             session_id_hash=session_id_hash,
             documents=documents,
@@ -1143,15 +1167,18 @@ def resolve_active_source_revision(
         expected_manifest_hash=parsed_pointer["manifest_hash"],
         expected_source_hash=parsed_pointer["source_hash"],
     )
-    documents = [
-        _validate_member_and_source(
-            get_document=store.get,
-            session_id_hash=session_id_hash,
-            source_revision=parsed_pointer["active_revision"],
-            membership=member,
+    documents = []
+    for index, member in enumerate(members, start=1):
+        documents.append(
+            _validate_member_and_source(
+                get_document=store.get,
+                session_id_hash=session_id_hash,
+                source_revision=parsed_pointer["active_revision"],
+                membership=member,
+            )
         )
-        for member in members
-    ]
+        # Verified member fetch/hash-check completed: real work, no ids/content.
+        _emit_progress(progress_callback, index, len(members))
     if _resolved_source_hash(documents) != parsed_pointer["source_hash"]:
         raise SourceRevisionResolutionError("active source revision hash changed")
     return _resolved(

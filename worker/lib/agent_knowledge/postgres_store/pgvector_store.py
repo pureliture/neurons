@@ -4159,6 +4159,110 @@ class PgVectorStore:
             "updated_at": _as_aware_datetime(_row_value(row, "updated_at", 6)),
         }
 
+    def has_dead_letter_local_outbox(
+        self,
+        *,
+        target_type: str,
+        target_id: str,
+        profile_id: str = LOCAL_EMBEDDING_PROFILE_ID,
+        source_content_hash: str = "",
+        input_hash: str = "",
+        conn: Any | None = None,
+    ) -> bool:
+        """True when the latest local outbox job for this target is dead-lettered.
+
+        The ``NOT EXISTS newer outbox_id`` guard makes a requeued/completed job
+        supersede an older dead letter, so recovery is observable. Optional
+        source/input hashes keep a failure for older content from blocking a
+        changed chunk.
+        """
+
+        if target_type not in {"session_chunk", "memory_card"}:
+            raise ValueError(f"unsupported target_type: {target_type}")
+        if not target_id:
+            raise ValueError("target_id is required")
+        with self._scope(conn=conn) as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                          FROM local_embedding_outbox q
+                         WHERE q.target_type = %s
+                           AND q.target_id = %s
+                           AND q.profile_id = %s
+                           AND q.status = 'dead_letter'
+                           AND (%s = '' OR q.source_content_hash = %s)
+                           AND (%s = '' OR q.input_hash = %s)
+                           AND NOT EXISTS (
+                               SELECT 1
+                                 FROM local_embedding_outbox n
+                                WHERE n.target_type = q.target_type
+                                  AND n.target_id = q.target_id
+                                  AND n.profile_id = q.profile_id
+                                  AND n.outbox_id > q.outbox_id
+                           )
+                    )
+                    """,
+                    (
+                        target_type,
+                        target_id,
+                        profile_id,
+                        str(source_content_hash or ""),
+                        str(source_content_hash or ""),
+                        str(input_hash or ""),
+                        str(input_hash or ""),
+                    ),
+                )
+                row = cur.fetchone()
+        return bool(_row_value(row, "exists", 0)) if row is not None else False
+
+    def has_dead_letter_local_outbox_for_session(
+        self,
+        *,
+        session_id_hash: str,
+        profile_id: str = LOCAL_EMBEDDING_PROFILE_ID,
+        conn: Any | None = None,
+    ) -> bool:
+        """True when any current session chunk has a latest dead-lettered local job.
+
+        Joining ``session_memory_chunks`` covers multi-segment sessions without
+        persisting segment ids in the projection receipt. A newer outbox row for
+        the same target (requeue/processing/completed/cancelled) supersedes the
+        dead letter, which is what allows same-source recovery.
+        """
+
+        if not session_id_hash:
+            raise ValueError("session_id_hash is required")
+        with self._scope(conn=conn) as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                          FROM session_memory_chunks c
+                          JOIN local_embedding_outbox q
+                            ON q.target_type = 'session_chunk'
+                           AND q.target_id = c.chunk_id
+                           AND q.profile_id = %s
+                         WHERE c.session_id_hash = %s
+                           AND q.status = 'dead_letter'
+                           AND q.source_content_hash = c.content_hash
+                           AND NOT EXISTS (
+                               SELECT 1
+                                 FROM local_embedding_outbox n
+                                WHERE n.target_type = q.target_type
+                                  AND n.target_id = q.target_id
+                                  AND n.profile_id = q.profile_id
+                                  AND n.outbox_id > q.outbox_id
+                           )
+                    )
+                    """,
+                    (profile_id, session_id_hash),
+                )
+                row = cur.fetchone()
+        return bool(_row_value(row, "exists", 0)) if row is not None else False
+
     def upsert_graph_operation_journal(
         self,
         *,

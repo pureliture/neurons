@@ -240,7 +240,12 @@ def test_pg_session_projector_requires_ready_local_vector_before_receipt() -> No
 
     proj_src = inspect.getsource(PgSessionMemoryProjector._project_local_profile)
     assert "local_row.get(\"state\") != \"ready\"" in proj_src
-    assert "raise EmbeddingChunksPending()" in proj_src
+    assert "_raise_local_pending_or_terminal(" in proj_src
+    helper_src = inspect.getsource(
+        PgSessionMemoryProjector._raise_local_pending_or_terminal
+    )
+    assert "raise EmbeddingChunksPending()" in helper_src
+    assert "raise LocalEmbeddingTerminalFailure()" in helper_src
 
 
 def test_transition_calculates_session_receipts_by_unique_session_and_validates_metadata() -> None:

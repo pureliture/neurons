@@ -244,10 +244,11 @@ def test_runtime_materialization_retries_until_persisted_snapshot_is_current(tmp
         armed = False
         injected = False
 
-        def find_by_session(self, *, session_id_hash, doc_type=None):
+        def find_by_session(self, *, session_id_hash, doc_type=None, progress_callback=None):
             documents = super().find_by_session(
                 session_id_hash=session_id_hash,
                 doc_type=doc_type,
+                progress_callback=progress_callback,
             )
             if (
                 self.armed
@@ -314,10 +315,11 @@ def test_runtime_materialization_leaves_latest_unchanged_when_source_never_stabi
         armed = False
         injected = 0
 
-        def find_by_session(self, *, session_id_hash, doc_type=None):
+        def find_by_session(self, *, session_id_hash, doc_type=None, progress_callback=None):
             documents = super().find_by_session(
                 session_id_hash=session_id_hash,
                 doc_type=doc_type,
+                progress_callback=progress_callback,
             )
             if self.armed and doc_type == dm.SourceDocType.TOOL_EVIDENCE_BUNDLE:
                 self.injected += 1

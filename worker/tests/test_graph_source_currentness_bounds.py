@@ -63,7 +63,9 @@ class _PagedSourceStore:
     def read_change_sequence(self) -> str:
         return str(self.sequence)
 
-    def find_by_session(self, *, session_id_hash: str, doc_type: str = "") -> list[dict]:
+    def find_by_session(
+        self, *, session_id_hash: str, doc_type: str = "", progress_callback=None
+    ) -> list[dict]:
         self.find_by_session_calls += 1
         rows = [
             doc

@@ -692,7 +692,9 @@ def test_malformed_active_pointer_raises_resolution_error() -> None:
 
 
 class _ExactAllowlistStore(InMemoryCouchDBSourceStore):
-    def find_by_session(self, *, session_id_hash: str, doc_type: str = "") -> list[dict]:
+    def find_by_session(
+        self, *, session_id_hash: str, doc_type: str = "", progress_callback=None
+    ) -> list[dict]:
         raise AssertionError("explicit allowlist activation must not discover legacy documents")
 
 

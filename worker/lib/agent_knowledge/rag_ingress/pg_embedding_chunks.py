@@ -28,10 +28,23 @@ INCONSISTENT_HERMES_PROJECT_SCOPE = "inconsistent_hermes_project_scope"
 TERMINAL_INPUT_REASONS = frozenset(
     {"secret_egress_policy", INVALID_TEXT_NUL, INCONSISTENT_HERMES_PROJECT_SCOPE}
 )
+# A dead-lettered local embedding is terminal for the current source revision, but
+# unlike the input-policy reasons above it is recoverable after an operator requeue.
+LOCAL_EMBEDDING_DEAD_LETTER = "local_embedding_dead_letter"
 
 
 class InvalidProjectionText(ValueError):
     pass
+
+
+class LocalEmbeddingTerminalFailure(Exception):
+    """The current local embedding job is dead-lettered (terminal until requeued)."""
+
+    code = LOCAL_EMBEDDING_DEAD_LETTER
+
+    def __init__(self, code: str = LOCAL_EMBEDDING_DEAD_LETTER) -> None:
+        super().__init__(code)
+        self.code = str(code or LOCAL_EMBEDDING_DEAD_LETTER)
 
 
 class EmbeddingChunksPending(Exception):

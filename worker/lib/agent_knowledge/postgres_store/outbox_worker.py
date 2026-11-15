@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from contextlib import nullcontext
 import math
 import threading
 import time
@@ -325,6 +326,71 @@ class GraphProjectionWorker:
         self._stop_event.set()
 
 
+class _LocalOutboxLeaseHeartbeat:
+    """Renew claimed local outbox leases while a slow embedding is in flight.
+
+    A 113 MB document can require hundreds of batches. Without renewal the
+    original ``lease_seconds`` would expire mid-document, letting another
+    worker reclaim the job and duplicate model calls. This heartbeat only
+    extends leases for jobs still owned by this worker/fencing token; if the
+    lease was already reclaimed, renewal returns False and the worker skips
+    its completion CAS instead of writing with a stale token.
+    """
+
+    def __init__(self, store, worker_id: str, jobs, lease_seconds: int) -> None:
+        self._store = store
+        self._worker_id = worker_id
+        self._lease_seconds = max(1, int(lease_seconds))
+        self._active: dict[int, int] = {
+            int(job.outbox_id): int(job.fencing_token) for job in jobs
+        }
+        self._lost: set[int] = set()
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._interval = max(0.1, float(lease_seconds) / 3.0)
+        self._thread = threading.Thread(
+            target=self._run, name="local-outbox-lease-heartbeat", daemon=True
+        )
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=max(1.0, self._interval))
+        return False
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            with self._lock:
+                active = list(self._active.items())
+            for outbox_id, fencing_token in active:
+                try:
+                    renewed = self._store.renew_local_outbox_lease(
+                        outbox_id=outbox_id,
+                        worker_id=self._worker_id,
+                        fencing_token=fencing_token,
+                        lease_seconds=self._lease_seconds,
+                    )
+                except Exception:
+                    # A transient DB failure leaves the existing lease in place;
+                    # retry on the next tick instead of declaring ownership lost.
+                    continue
+                if not renewed:
+                    with self._lock:
+                        self._lost.add(outbox_id)
+
+    def mark_done(self, outbox_id: int) -> None:
+        with self._lock:
+            self._active.pop(int(outbox_id), None)
+
+    def lease_lost(self, outbox_id: int) -> bool:
+        with self._lock:
+            return int(outbox_id) in self._lost
+
+
 class LocalEmbeddingOutboxWorker:
     """Leased worker for local_embedding_outbox (D2 lock-order, fence epoch & incarnation CAS)."""
 
@@ -375,36 +441,53 @@ class LocalEmbeddingOutboxWorker:
             return 0
 
         processed_count = 0
-        for job in jobs:
-            self.last_batch_attempted += 1
-            try:
-                completed = self.process_job(job)
-                if completed:
-                    self.last_batch_completed += 1
-                else:
-                    self.last_batch_stale += 1
-                processed_count += 1
-            except Exception as exc:
-                self.last_batch_failed += 1
-                retryable = getattr(exc, "retryable", None)
-                if retryable is None:
-                    retryable = not isinstance(exc, (ValueError, TypeError))
-                reason_code = getattr(exc, "code", None) or type(exc).__name__
-                error_code = ("retryable_error:" if retryable else "terminal_error:") + str(reason_code)
-                logger.error("Local embedding outbox processing failed (%s)", error_code)
-                try:
-                    self.store.mark_local_outbox_failed(
-                        outbox_id=job.outbox_id,
-                        worker_id=self.worker_id,
-                        fencing_token=job.fencing_token,
-                        error_code=error_code,
-                        retryable=bool(retryable),
-                        max_retries=self.max_retries,
-                        profile_id=self.embedding_profile,
-                    )
-                except ValueError:
-                    logger.warning("Local embedding failure not recorded: lease_not_owned")
-                processed_count += 1
+        # An injected caller-owned connection is not safe to use from the
+        # heartbeat thread; dsn-owned stores open a fresh connection per call.
+        heartbeat = (
+            _LocalOutboxLeaseHeartbeat(
+                self.store, self.worker_id, jobs, self.lease_seconds
+            )
+            if getattr(self.store, "connection", None) is None
+            else None
+        )
+        self._lease_heartbeat = heartbeat
+        try:
+            with (heartbeat if heartbeat is not None else nullcontext()):
+                for job in jobs:
+                    self.last_batch_attempted += 1
+                    try:
+                        completed = self.process_job(job)
+                        if completed:
+                            self.last_batch_completed += 1
+                        else:
+                            self.last_batch_stale += 1
+                        processed_count += 1
+                    except Exception as exc:
+                        self.last_batch_failed += 1
+                        retryable = getattr(exc, "retryable", None)
+                        if retryable is None:
+                            retryable = not isinstance(exc, (ValueError, TypeError))
+                        reason_code = getattr(exc, "code", None) or type(exc).__name__
+                        error_code = ("retryable_error:" if retryable else "terminal_error:") + str(reason_code)
+                        logger.error("Local embedding outbox processing failed (%s)", error_code)
+                        try:
+                            self.store.mark_local_outbox_failed(
+                                outbox_id=job.outbox_id,
+                                worker_id=self.worker_id,
+                                fencing_token=job.fencing_token,
+                                error_code=error_code,
+                                retryable=bool(retryable),
+                                max_retries=self.max_retries,
+                                profile_id=self.embedding_profile,
+                            )
+                        except ValueError:
+                            logger.warning("Local embedding failure not recorded: lease_not_owned")
+                        processed_count += 1
+                    finally:
+                        if heartbeat is not None:
+                            heartbeat.mark_done(job.outbox_id)
+        finally:
+            self._lease_heartbeat = None
 
         return processed_count
 
@@ -415,6 +498,11 @@ class LocalEmbeddingOutboxWorker:
             raise ValueError(
                 f"Local embedding function returned invalid vector length {len(vector) if vector else 0}"
             )
+        heartbeat = getattr(self, "_lease_heartbeat", None)
+        if heartbeat is not None and heartbeat.lease_lost(job.outbox_id):
+            # Another worker reclaimed this job while the model call was in
+            # flight; its fencing token is newer, so do not attempt a stale CAS.
+            return False
         return self.store.complete_local_outbox_cas(
             outbox_id=job.outbox_id,
             worker_id=self.worker_id,

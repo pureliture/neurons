@@ -23,11 +23,13 @@ def test_build_once_writes_matching_live_approval_for_couchdb_builder() -> None:
     assert "state/couchdb-build-approval.json" in script
 
 
-def test_build_once_enforces_process_timeout() -> None:
+def test_build_once_has_explicit_unlimited_timeout_policy() -> None:
     script = Path("deploy/session-memory/build-once.sh").read_text(encoding="utf-8")
 
     assert "SESSION_MEMORY_BUILD_TIMEOUT_SECONDS" in script
-    assert "timeout \"${SESSION_MEMORY_BUILD_TIMEOUT_SECONDS:-300}\"" in script
+    assert "timeout_mode" in script and "unlimited" in script
+    assert 'timeout "$timeout_seconds"' in script
+    assert 'timeout "${SESSION_MEMORY_BUILD_TIMEOUT_SECONDS:-300}"' not in script
 
 
 

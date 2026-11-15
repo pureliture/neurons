@@ -1693,3 +1693,308 @@ def test_status_cli_exit_code_is_nonzero_for_partial_report(tmp_path, monkeypatc
     assert json.loads(capsys.readouterr().out)["status"] == "ok"
     assert status_cli.main(argv) == 1
     assert json.loads(capsys.readouterr().out)["status"] == "partial"
+
+
+def test_projection_surfaces_http_status_and_safe_provider_error_codes_without_raw_message(tmp_path):
+    import httpx
+    import openai
+    from graphiti_core.llm_client.errors import RateLimitError as GraphitiRateLimitError
+
+    store = InMemoryCouchDBSourceStore()
+    sid_code = _seed_session(store, raw_id="bad-req-code")
+    sid_unsafe_code = _seed_session(store, raw_id="bad-req-unsafe-code")
+    sid_regex_bypass = _seed_session(store, raw_id="bad-req-regex-bypass")
+    sid_ratelimit = _seed_session(store, raw_id="rate-limit-wrapped")
+    dead_letter = tmp_path / "dead-letter.jsonl"
+    progress = tmp_path / "progress.jsonl"
+
+    class _ProviderErrorGraph(_EntityFlagFakeGraph):
+        def upsert_episode(self, episode):  # type: ignore[no-untyped-def]
+            sid = episode.payload.get("session_id_hash")
+            req = httpx.Request("POST", "https://api.example.invalid/v1/chat/completions")
+            if sid == sid_code:
+                resp = httpx.Response(
+                    400,
+                    request=req,
+                    json={
+                        "error": {
+                            "message": "Sensitive transcript /Users/bob API_KEY=topsecret123 sk-"
+                            + "abcdef1234567890",
+                            "type": "invalid_request_error",
+                            "code": "context_length_exceeded",
+                        }
+                    },
+                )
+                raise openai.BadRequestError("400 sensitive body", response=resp, body=resp.json())
+            if sid == sid_unsafe_code:
+                # Upstream puts a secret into `code`: closed allowlist replaces `code` with
+                # `unknown_error_code` and uses known `type` in `reason_code`.
+                resp = httpx.Response(
+                    400,
+                    request=req,
+                    json={
+                        "error": {
+                            "message": "raw prompt echo",
+                            "type": "invalid_request_error",
+                            "code": "sk-proj-" + "secret1234567890abcdef",
+                        }
+                    },
+                )
+                raise openai.BadRequestError("400 unsafe code", response=resp, body=resp.json())
+            if sid == sid_regex_bypass:
+                # Counterexample: separator-bearing personal/secret strings that would pass a
+                # regex/prefix denylist must still be replaced with generic enum values.
+                resp = httpx.Response(
+                    400,
+                    request=req,
+                    json={
+                        "error": {
+                            "message": "raw prompt echo",
+                            "type": "project_secret:codename-apollo",
+                            "code": "alice.kim:diabetes-record",
+                        }
+                    },
+                )
+                raise openai.BadRequestError("400 regex-bypass leak", response=resp, body=resp.json())
+            if sid == sid_ratelimit:
+                resp = httpx.Response(
+                    429,
+                    request=req,
+                    json={
+                        "error": {
+                            "message": "Quota details for org secret",
+                            "type": "tokens",
+                            "code": "rate_limit_exceeded",
+                        }
+                    },
+                )
+                cause = openai.RateLimitError("429 secret", response=resp, body=resp.json())
+                raise GraphitiRateLimitError("wrapped rate limit /Users/bob") from cause
+            return super().upsert_episode(episode)
+
+    report = _project(
+        tmp_path=tmp_path,
+        store=store,
+        graph_adapter=_ProviderErrorGraph(),
+        limit=5,
+        dead_letter_jsonl=dead_letter,
+        progress_jsonl=progress,
+    )
+
+    rendered_report = json.dumps(report, sort_keys=True)
+    raw_dead_letter = dead_letter.read_text(encoding="utf-8")
+    raw_progress = progress.read_text(encoding="utf-8")
+
+    assert report["status"] == "failed"
+    assert report["projection"]["failed"] == 4
+    assert report["projection"]["failure_reasons"] == {
+        "BadRequestError:http_400:context_length_exceeded": 1,
+        "BadRequestError:http_400:invalid_request_error": 1,
+        "BadRequestError:http_400:unknown_error_code": 1,
+        "RateLimitError:http_429:rate_limit_exceeded": 1,
+    }
+
+    dl_rows = {
+        row["session_id_hash"]: row
+        for row in (json.loads(line) for line in raw_dead_letter.splitlines())
+    }
+    assert dl_rows[sid_code]["reason_code"] == "BadRequestError:http_400:context_length_exceeded"
+    assert dl_rows[sid_code]["http_status"] == 400
+    assert dl_rows[sid_code]["error_code"] == "context_length_exceeded"
+    assert dl_rows[sid_unsafe_code]["reason_code"] == "BadRequestError:http_400:invalid_request_error"
+    assert dl_rows[sid_unsafe_code]["error_code"] == "unknown_error_code"
+    assert dl_rows[sid_regex_bypass]["reason_code"] == "BadRequestError:http_400:unknown_error_code"
+    assert dl_rows[sid_regex_bypass]["error_code"] == "unknown_error_code"
+    assert dl_rows[sid_regex_bypass]["error_type"] == "unknown_error_type"
+    assert dl_rows[sid_ratelimit]["reason_code"] == "RateLimitError:http_429:rate_limit_exceeded"
+    assert dl_rows[sid_ratelimit]["http_status"] == 429
+
+    for blob in (rendered_report, raw_dead_letter, raw_progress):
+        assert "/Users/bob" not in blob
+        assert "topsecret123" not in blob
+        assert ("sk-" + "abcdef1234567890") not in blob
+        assert ("sk-proj-" + "secret") not in blob
+        assert "raw prompt echo" not in blob
+        assert "alice.kim" not in blob
+        assert "diabetes" not in blob
+        assert "apollo" not in blob
+
+
+def test_bounded_selection_snapshot_race_fails_closed_with_safe_reason_code(
+    tmp_path, monkeypatch
+):
+    from agent_knowledge.llm_brain_core.graph_trigger_cli import run_graph_trigger
+
+    store = InMemoryCouchDBSourceStore()
+    _seed_session(store, raw_id="race-initial")
+    pass_counter = {"calls": 0}
+    orig_iter = couchdb_projection_cli._iter_session_revisions
+
+    def _churning_iter(source_store, *, project, provider):
+        pass_counter["calls"] += 1
+        yield from orig_iter(source_store, project=project, provider=provider)
+        # Inject a new session after each pass so pass 1 and pass 2 never match across attempts.
+        _seed_session(store, raw_id=f"race-injected-{pass_counter['calls']}")
+
+    monkeypatch.setattr(couchdb_projection_cli, "_iter_session_revisions", _churning_iter)
+    monkeypatch.setattr(couchdb_projection_cli, "_build_source_store", lambda **_kwargs: store)
+
+    trigger_report = run_graph_trigger(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        runtime_dir=tmp_path / "runtime",
+        execute=True,
+        couchdb_url="http://127.0.0.1:5984",
+    )
+
+    assert trigger_report["status"] == "failed"
+    assert trigger_report["mutation_performed"] is False
+    assert trigger_report["step"]["exit_code"] == 1
+    assert trigger_report["step"]["report"]["error_class"] == "ValueError"
+    assert trigger_report["step"]["report"]["reason_code"] == "graph_source_snapshot_changed"
+
+    # Transient single-burst arrival (including a brand-new project between pass 1 and pass 2)
+    # must recover cleanly on the second bounded snapshot attempt instead of crashing early.
+    recover_store = InMemoryCouchDBSourceStore()
+    _seed_session(recover_store, raw_id="recover-base", project="neurons")
+    recover_calls = {"n": 0}
+
+    def _transient_iter(source_store, *, project, provider):
+        recover_calls["n"] += 1
+        yield from orig_iter(source_store, project=project, provider=provider)
+        if recover_calls["n"] == 1:
+            _seed_session(recover_store, raw_id="recover-same-proj", project="neurons")
+            _seed_session(recover_store, raw_id="recover-new-proj", project="neurons-ops")
+
+    monkeypatch.setattr(couchdb_projection_cli, "_iter_session_revisions", _transient_iter)
+    recovered = run_couchdb_projection(
+        ledger_path=tmp_path / "recover" / "ledger.sqlite3",
+        source_store=recover_store,
+        limit=5,
+        project="",
+        provider=PROVIDER,
+        enable_graph=True,
+        graph_required=False,
+        extract_entities=True,
+        graph_adapter=_EntityFlagFakeGraph(),
+    )
+    assert recovered["status"] == "ok"
+    assert recovered["projection"]["projected"] == 3
+
+
+def test_projection_records_safe_error_param_and_step_across_dead_letter_progress_and_summary(
+    tmp_path,
+):
+    import httpx
+    import openai
+    from agent_knowledge.public_safe_util import ensure_public_safe
+
+    store = InMemoryCouchDBSourceStore()
+    sid_messages = _seed_session(store, raw_id="400-param-messages")
+    sid_schema = _seed_session(store, raw_id="400-param-schema")
+    sid_poisoned = _seed_session(store, raw_id="400-param-poisoned")
+    dead_letter = tmp_path / "dl-param-step.jsonl"
+    progress = tmp_path / "prog-param-step.jsonl"
+
+    class _ParamStepErrorGraph(_EntityFlagFakeGraph):
+        def upsert_episode(self, episode):
+            sid = str(episode.payload.get("session_id_hash") or "")
+            req = httpx.Request("POST", "https://llm.example.invalid/v1/chat/completions")
+            if sid == sid_messages:
+                resp = httpx.Response(
+                    400,
+                    request=req,
+                    json={
+                        "error": {
+                            "message": "Context overflow /Users/alice Bearer sk-" + "1234567890",
+                            "type": "invalid_request_error",
+                            "param": "messages[1].content",
+                            "code": None,
+                        }
+                    },
+                )
+                exc = openai.BadRequestError("400 messages", response=resp, body=resp.json())
+                exc.error_step = "dedupe_nodes.nodes"  # type: ignore[attr-defined]
+                raise exc
+            if sid == sid_schema:
+                resp = httpx.Response(
+                    400,
+                    request=req,
+                    json={
+                        "error": {
+                            "message": "anyOf unsupported in schema",
+                            "type": "invalid_request_error",
+                            "param": "response_format.json_schema.schema",
+                            "code": None,
+                        }
+                    },
+                )
+                exc = openai.BadRequestError("400 schema", response=resp, body=resp.json())
+                exc.error_step = "extract_edges.edge"  # type: ignore[attr-defined]
+                raise exc
+            if sid == sid_poisoned:
+                resp = httpx.Response(
+                    400,
+                    request=req,
+                    json={
+                        "error": {
+                            "message": "raw transcript leak",
+                            "type": "invalid_request_error",
+                            "param": "alice.kim:secret-param",
+                            "code": None,
+                        }
+                    },
+                )
+                exc = openai.BadRequestError("400 poisoned", response=resp, body=resp.json())
+                exc.error_step = "step:/Users/alice/private"  # type: ignore[attr-defined]
+                raise exc
+            return super().upsert_episode(episode)
+
+    report = _project(
+        tmp_path=tmp_path,
+        store=store,
+        graph_adapter=_ParamStepErrorGraph(),
+        limit=5,
+        dead_letter_jsonl=dead_letter,
+        progress_jsonl=progress,
+    )
+    ensure_public_safe(report, field="projection_report_param_step")
+    assert report["status"] == "failed"
+    assert report["projection"]["failure_params"] == {
+        "messages[].content": 1,
+        "response_format.json_schema.schema": 1,
+        "unknown_error_param": 1,
+    }
+    assert report["projection"]["failure_steps"] == {
+        "dedupe_nodes.nodes": 1,
+        "extract_edges.edge": 1,
+        "unknown_error_step": 1,
+    }
+
+    dl_rows = {
+        row["session_id_hash"]: row
+        for row in (json.loads(line) for line in dead_letter.read_text(encoding="utf-8").splitlines())
+    }
+    assert dl_rows[sid_messages]["error_param"] == "messages[].content"
+    assert dl_rows[sid_messages]["error_step"] == "dedupe_nodes.nodes"
+    assert dl_rows[sid_schema]["error_param"] == "response_format.json_schema.schema"
+    assert dl_rows[sid_schema]["error_step"] == "extract_edges.edge"
+    assert dl_rows[sid_poisoned]["error_param"] == "unknown_error_param"
+    assert dl_rows[sid_poisoned]["error_step"] == "unknown_error_step"
+
+    prog_rows = [
+        json.loads(line)
+        for line in progress.read_text(encoding="utf-8").splitlines()
+        if json.loads(line).get("event") == "progress"
+    ]
+    assert {r.get("error_step") for r in prog_rows} == {
+        "dedupe_nodes.nodes",
+        "extract_edges.edge",
+        "unknown_error_step",
+    }
+    for raw_blob in (
+        json.dumps(report, sort_keys=True),
+        dead_letter.read_text(encoding="utf-8"),
+        progress.read_text(encoding="utf-8"),
+    ):
+        assert "alice" not in raw_blob
+        assert ("sk-" + "1234567890") not in raw_blob
