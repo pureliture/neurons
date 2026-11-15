@@ -583,3 +583,62 @@ def test_pg_projector_wires_progress_into_the_embedding_client(monkeypatch) -> N
     }
     build_cli._build_pg_projector(env)
     assert captured["callback"] is build_cli.emit_progress
+
+
+def test_pg_projector_and_outbox_cli_accept_legacy_single_kwarg_provider_factory(
+    monkeypatch,
+) -> None:
+    """Monkeypatched factories taking only `(*, environ)` must keep working without TypeError."""
+    from agent_knowledge.postgres_store import embedding_outbox_cli, pgvector_store
+    from agent_knowledge.rag_ingress import embedding_provider, pg_backfill, pg_embedding_chunks
+
+    called = {"count": 0}
+
+    class _Provider:
+        model = "gemini-embedding-2"
+        size = 3072
+
+        def close(self):
+            return None
+
+    def legacy_factory(*, environ):
+        called["count"] += 1
+        assert environ["NEURON_LBRAIN_PGVECTOR_DSN"].startswith("postgresql://")
+        return _Provider()
+
+    monkeypatch.setattr(embedding_provider, "build_openai_embedding_provider", legacy_factory)
+    monkeypatch.setattr(pg_embedding_chunks, "BoundedPgEmbedding", lambda *a, **kw: object())
+    monkeypatch.setattr(pg_backfill, "PgSessionMemoryProjector", lambda **kw: "ok-projector")
+    monkeypatch.setattr(pgvector_store, "PgVectorStore", lambda **kw: object())
+
+    env = {
+        "NEURON_LBRAIN_PGVECTOR_DSN": "postgresql://u:p@127.0.0.1:5432/db",
+        "LLM_BRAIN_EMBEDDING_BASE_URL": "http://127.0.0.1:1/v1",
+        "LLM_BRAIN_EMBEDDING_MODEL": "gemini-embedding-2",
+        "LLM_BRAIN_EMBEDDING_DIM": "3072",
+    }
+    assert build_cli._build_pg_projector(env) == "ok-projector"
+    assert called["count"] == 1
+
+    monkeypatch.setattr(embedding_outbox_cli, "build_openai_embedding_provider", legacy_factory)
+    monkeypatch.setattr(embedding_outbox_cli, "PgVectorStore", lambda **kw: object())
+
+    class _IdleWorker:
+        last_batch_attempted = 0
+        last_batch_completed = 0
+        last_batch_failed = 0
+        last_batch_stale = 0
+
+        def __init__(self, **kwargs):
+            self.batch_size = kwargs.get("batch_size", 1)
+
+        def run_once(self):
+            return 0
+
+    monkeypatch.setattr(embedding_outbox_cli, "OutboxWorker", _IdleWorker)
+    rc = embedding_outbox_cli.main(
+        ["--execute", "--allow-model-calls", "--once", "--lease-seconds", "180"],
+        environ=env,
+    )
+    assert rc == 0
+    assert called["count"] == 2

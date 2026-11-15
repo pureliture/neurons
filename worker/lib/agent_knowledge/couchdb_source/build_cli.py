@@ -1346,13 +1346,23 @@ def _build_pg_projector(environ):
     )
     if not dsn:
         return None
+    import inspect
     from ..rag_ingress.pg_backfill import PgSessionMemoryProjector
     from ..postgres_store.pgvector_store import PgVectorStore
     from ..rag_ingress.embedding_provider import build_openai_embedding_provider, resolve_embedding_config
     from ..rag_ingress.pg_embedding_chunks import BoundedPgEmbedding
 
     store = PgVectorStore(dsn=dsn, pgvector_version=environ.get("LLM_BRAIN_PGVECTOR_VERSION", "0.8.0"))
-    provider = build_openai_embedding_provider(environ=environ, progress_callback=emit_progress)
+    try:
+        params = inspect.signature(build_openai_embedding_provider).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if "progress_callback" in params or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+    ):
+        provider = build_openai_embedding_provider(environ=environ, progress_callback=emit_progress)
+    else:
+        provider = build_openai_embedding_provider(environ=environ)
     try:
         chunks = BoundedPgEmbedding(
             provider,

@@ -148,7 +148,18 @@ def main(argv: list[str] | None = None, *, environ: Mapping[str, str] | None = N
     stop = threading.Event()
     previous_sigterm = None
     try:
-        provider = build_openai_embedding_provider(environ=env, progress_callback=emit_progress)
+        import inspect
+
+        try:
+            params = inspect.signature(build_openai_embedding_provider).parameters
+        except (TypeError, ValueError):
+            params = {}
+        if "progress_callback" in params or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+        ):
+            provider = build_openai_embedding_provider(environ=env, progress_callback=emit_progress)
+        else:
+            provider = build_openai_embedding_provider(environ=env)
         profile = validated_pg_embedding_profile(provider)
         if profile != report["profile"]:
             raise ValueError("embedding_profile_mismatch")
