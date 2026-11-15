@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from ._util import extract_safe_error_diagnostics
 from .graph import GraphMemoryAdapter
 from .ledger_adapter import EXTRACTION_LEVEL_ENTITY, EXTRACTION_LEVEL_EPISODIC
 from .models import OntologyEpisode, SessionMemoryArtifact, SourceRefRecord
@@ -159,13 +160,17 @@ class GraphProjectionWorker:
             try:
                 result = self._graph_adapter.upsert_episode(episode)
             except Exception as exc:
-                failures.append(
-                    {
-                        "episode_id": episode.episode_id,
-                        "entity_type": episode.entity_type,
-                        "reason_code": type(exc).__name__,
-                    }
-                )
+                diag = extract_safe_error_diagnostics(exc)
+                failure_entry: dict[str, Any] = {
+                    "episode_id": episode.episode_id,
+                    "entity_type": episode.entity_type,
+                    "reason_code": diag["reason_code"],
+                    "error_class": diag["error_class"],
+                }
+                for key in ("http_status", "error_code", "error_type", "error_param", "error_step"):
+                    if key in diag:
+                        failure_entry[key] = diag[key]
+                failures.append(failure_entry)
                 continue
             result_text = str(result or "")
             if result_text == "skipped_disabled":
@@ -211,9 +216,15 @@ class GraphProjectionWorker:
 
 
 def _failure(card: dict[str, Any], exc: Exception, *, phase: str) -> dict[str, Any]:
-    return {
+    diag = extract_safe_error_diagnostics(exc)
+    entry: dict[str, Any] = {
         "memory_id": str(card.get("memory_id") or ""),
         "card_type": str(card.get("card_type") or ""),
         "phase": phase,
-        "reason_code": type(exc).__name__,
+        "reason_code": diag["reason_code"],
+        "error_class": diag["error_class"],
     }
+    for key in ("http_status", "error_code", "error_type", "error_param", "error_step"):
+        if key in diag:
+            entry[key] = diag[key]
+    return entry

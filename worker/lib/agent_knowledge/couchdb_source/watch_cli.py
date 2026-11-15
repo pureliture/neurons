@@ -25,10 +25,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import datetime
+import inspect
 import json
 import os
+import re
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 from collections.abc import Callable, Mapping
 
@@ -186,6 +190,110 @@ def parse_build_report(output: str) -> dict:
     return report if isinstance(report, dict) else {}
 
 
+async def _keep_messages_in_progress(
+    messages, interval_seconds: float, stop: asyncio.Event, failure: dict
+) -> None:
+    """Extend JetStream ack_wait while a long build is running.
+
+    `Msg.in_progress()` is transport liveness for the unacked messages, not a
+    claim that the build made progress. A missing or failing renewal is recorded
+    as a fail-closed batch outcome: the caller must not ack the batch.
+    """
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=max(0.1, float(interval_seconds)))
+            return
+        except asyncio.TimeoutError:
+            pass
+        for msg in messages:
+            fn = getattr(msg, "in_progress", None)
+            if not callable(fn):
+                failure["ack_renewal_failed"] = True
+                return
+            try:
+                result = fn()
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                failure["ack_renewal_failed"] = True
+                return
+
+
+async def _run_with_in_progress(messages, ack_wait_seconds: int, awaitable_factory):
+    if not messages:
+        result = await awaitable_factory()
+        return result, True
+    stop = asyncio.Event()
+    failure = {"ack_renewal_failed": False}
+    task = asyncio.create_task(
+        _keep_messages_in_progress(
+            messages, max(0.1, ack_wait_seconds / 3.0), stop, failure
+        )
+    )
+    try:
+        result = await awaitable_factory()
+        return result, not bool(failure["ack_renewal_failed"])
+    finally:
+        stop.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+_OUTCOMES_SCHEMA = "build_outcomes.v1"
+_OUTCOME_STATUSES = frozenset({"projected", "pending", "skipped", "failed"})
+_SESSION_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_ERROR_CLASS_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.:-]{0,63}$")
+_OUTCOMES_MAX_BYTES = 1048576
+_OUTCOMES_MAX_ROWS = 4096
+
+
+def _load_build_outcomes(path: str) -> dict[str, dict]:
+    """Load the internal 0600 outcomes file written by stream_report.py."""
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(_OUTCOMES_MAX_BYTES + 1)
+    except OSError:
+        return {}
+    if len(raw) > _OUTCOMES_MAX_BYTES:
+        return {}
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict) or payload.get("schema_version") != _OUTCOMES_SCHEMA:
+        return {}
+    rows = payload.get("sessions")
+    if not isinstance(rows, list):
+        return {}
+    outcomes: dict[str, dict] = {}
+    for row in rows[:_OUTCOMES_MAX_ROWS]:
+        if not isinstance(row, dict):
+            continue
+        sid = row.get("session_id_hash")
+        status = row.get("status")
+        if not isinstance(sid, str) or not _SESSION_HASH_RE.fullmatch(sid):
+            continue
+        if status not in _OUTCOME_STATUSES:
+            continue
+        error_class = row.get("error_class")
+        if not isinstance(error_class, str) or not _ERROR_CLASS_RE.fullmatch(error_class):
+            error_class = "unknown" if error_class else ""
+        outcomes[sid] = {
+            "session_id_hash": sid,
+            "status": status,
+            "error_class": error_class,
+        }
+    return outcomes
+
+
+def _pump_stderr(stream) -> None:
+    try:
+        for line in iter(stream.readline, ""):
+            sys.stderr.write(line)
+            sys.stderr.flush()
+    except (OSError, ValueError):
+        return
+
+
 def run_build_script(
     session_ids: tuple[str, ...],
     *,
@@ -197,25 +305,57 @@ def run_build_script(
         env["SESSION_MEMORY_BUILD_SESSION_IDS"] = ",".join(session_ids)
     else:
         env.pop("SESSION_MEMORY_BUILD_SESSION_IDS", None)
+    fd, outcomes_path = tempfile.mkstemp(prefix="session-memory-outcomes-", suffix=".json")
+    os.close(fd)
+    env["SESSION_MEMORY_BUILD_OUTCOMES_FILE"] = outcomes_path
+    # No overall subprocess deadline: the approved policy keeps only per-request
+    # HTTP timeouts inside the build. `build_timeout_seconds` still sizes
+    # ack_wait/health defaults; it no longer kills the build.
     try:
-        completed = subprocess.run(
+        process = subprocess.Popen(
             ["bash", settings.build_script],
             env=env,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=settings.build_timeout_seconds + 60,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
         )
-    except subprocess.TimeoutExpired:
-        return 124, {}
     except OSError:
+        outcomes = _load_build_outcomes(outcomes_path)
+        try:
+            os.unlink(outcomes_path)
+        except OSError:
+            pass
         return 127, {}
-    if completed.stdout:
-        sys.stdout.write(completed.stdout)
+    assert process.stdout is not None and process.stderr is not None
+    stderr_thread = threading.Thread(
+        target=_pump_stderr, args=(process.stderr,), daemon=True
+    )
+    stderr_thread.start()
+    # Stream stdout (progress events and the final summary) while retaining the
+    # last bounded JSON line for the report. A whole-output buffer would delay
+    # every progress line until the build finished.
+    last_json = ""
+    max_report_bytes = 1048576
+    for line in iter(process.stdout.readline, ""):
+        sys.stdout.write(line)
         sys.stdout.flush()
-    if completed.stderr:
-        sys.stderr.write(completed.stderr)
-        sys.stderr.flush()
-    return int(completed.returncode), parse_build_report(completed.stdout)
+        trimmed = line.strip()
+        if trimmed.startswith("{"):
+            last_json = line if len(trimmed) <= max_report_bytes else ""
+    rc = process.wait()
+    stderr_thread.join(timeout=5)
+    outcomes = _load_build_outcomes(outcomes_path)
+    try:
+        os.unlink(outcomes_path)
+    except OSError:
+        pass
+    report = parse_build_report(last_json)
+    if outcomes:
+        report = {**report, "sessions": list(outcomes.values())}
+    return int(rc), report
 
 
 def session_outcomes(report: dict) -> dict[str, dict]:
@@ -233,6 +373,8 @@ def classify_message(
     outcomes: dict[str, dict],
 ) -> tuple[str, str]:
     """Return (decision, error_class) with decision in {ack, nak}."""
+    if rc == 125:
+        return "nak", "ack_renewal_failed"
     row = outcomes.get(event.session_id_hash)
     if row is None:
         # The build did not report this session (crash, timeout, env error): retry.
@@ -296,10 +438,27 @@ async def run_consume_loop(
     def cycles_done() -> bool:
         return max_cycles is not None and counters["cycles"] >= max_cycles
 
-    async def run_cycle(session_ids: tuple[str, ...], reason: str) -> tuple[int, dict]:
+    async def run_cycle(
+        session_ids: tuple[str, ...], reason: str, messages: tuple[object, ...] = ()
+    ) -> tuple[int, dict]:
         heartbeat(phase="building", last_reason=reason, batch_size=len(session_ids))
-        rc, report = await asyncio.to_thread(run_build, session_ids)
+        (rc, report), renewal_ok = await _run_with_in_progress(
+            messages,
+            settings.ack_wait_seconds,
+            lambda: asyncio.to_thread(run_build, session_ids),
+        )
         counters["cycles"] += 1
+        if not renewal_ok:
+            # Do not ack a batch whose ack renewal failed; retry it with the
+            # normal nak/backoff path instead of silently risking redelivery.
+            heartbeat(
+                phase="build_done",
+                last_reason=reason,
+                last_build_rc=125,
+                last_build_at=_utc_now_iso(),
+            )
+            log("[watch] ack_renewal_failed")
+            return 125, {}
         if rc == 0:
             counters["consecutive_failures"] = 0
         else:
@@ -372,7 +531,9 @@ async def run_consume_loop(
                 continue
             session_ids = tuple(dict.fromkeys(event.session_id_hash for _, event in parsed))
             counters["event_cycles"] += 1
-            rc, report = await run_cycle(session_ids, "changes")
+            rc, report = await run_cycle(
+                session_ids, "changes", messages=tuple(msg for msg, _ in parsed)
+            )
             last_build = monotonic()
             outcomes = session_outcomes(report)
             for msg, event in parsed:

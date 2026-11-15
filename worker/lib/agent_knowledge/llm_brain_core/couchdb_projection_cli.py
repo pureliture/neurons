@@ -23,6 +23,7 @@ from agent_knowledge.couchdb_source.source_revision import (
 from agent_knowledge.couchdb_source.source_store import CouchDBSourceStore
 from agent_knowledge.ledger import Ledger
 
+from ._util import extract_safe_error_diagnostics
 from .ledger_adapter import (
     EXTRACTION_LEVEL_ENTITY,
     EXTRACTION_LEVEL_EPISODIC,
@@ -111,15 +112,21 @@ def main(argv: list[str] | None = None) -> int:
             runtime_dir=Path(args.runtime_dir) if args.runtime_dir else None,
         )
     except Exception as exc:
+        diag = extract_safe_error_diagnostics(exc)
+        error_report: dict[str, Any] = {
+            "schema_version": COUCHDB_GRAPH_PROJECTION_SCHEMA_VERSION,
+            "status": "failed",
+            "error_class": diag["error_class"],
+            "reason_code": diag["reason_code"],
+            "message": "couchdb graph projection failed",
+            "raw_paths_printed": False,
+        }
+        for key in ("http_status", "error_code", "error_type", "error_param", "error_step"):
+            if key in diag:
+                error_report[key] = diag[key]
         print(
             json.dumps(
-                {
-                    "schema_version": COUCHDB_GRAPH_PROJECTION_SCHEMA_VERSION,
-                    "status": "failed",
-                    "error_class": type(exc).__name__,
-                    "message": "couchdb graph projection failed",
-                    "raw_paths_printed": False,
-                },
+                error_report,
                 sort_keys=True,
             ),
             file=sys.stderr,
@@ -205,6 +212,8 @@ def run_couchdb_projection(
         by_provider: Counter[str] = Counter()
         by_project: Counter[str] = Counter()
         failure_reasons: Counter[str] = Counter()
+        failure_params: Counter[str] = Counter()
+        failure_steps: Counter[str] = Counter()
         projected = duplicates = failed = skipped_resumed = skipped_disabled = 0
         skipped_inconsistent = 0
         processed = 0
@@ -251,6 +260,7 @@ def run_couchdb_projection(
             by_provider[session_provider] += 1
             status = "unknown"
             reason = ""
+            error_meta: dict[str, Any] = {}
             try:
                 episode = session_episode_from_couchdb_source(
                     session_id_hash=session_id_hash,
@@ -271,26 +281,35 @@ def run_couchdb_projection(
                         skipped_resumed += 1
                         status = "skipped_resumed"
                     else:
-                        status, reason, p, d, sd, f = _project_one(worker, episode)
+                        status, reason, error_meta, p, d, sd, f = _project_one_with_diagnostics(
+                            worker, episode
+                        )
                         projected += p
                         duplicates += d
                         skipped_disabled += sd
                         failed += f
 
                 else:
-                    status, reason, p, d, sd, f = _project_one(worker, episode)
+                    status, reason, error_meta, p, d, sd, f = _project_one_with_diagnostics(
+                        worker, episode
+                    )
                     projected += p
                     duplicates += d
                     skipped_disabled += sd
                     failed += f
                 if reason:
                     failure_reasons[reason] += 1
+                    if error_meta.get("error_param"):
+                        failure_params[str(error_meta["error_param"])] += 1
+                    if error_meta.get("error_step"):
+                        failure_steps[str(error_meta["error_step"])] += 1
                     _write_dead_letter(
                         dead_letter_jsonl,
                         session=session,
                         run_id=run_id,
                         reason_code=reason,
                         stage="project",
+                        diagnostics=error_meta,
                     )
             except InconsistentHermesProjectScope:
                 # Deterministic source-scope conflict: retrying cannot succeed,
@@ -308,16 +327,27 @@ def run_couchdb_projection(
                     reason=reason,
                 )
             except Exception as exc:
+                diag = extract_safe_error_diagnostics(exc)
                 failed += 1
                 status = "failed"
-                reason = type(exc).__name__
+                reason = str(diag["reason_code"])
+                error_meta = {
+                    key: diag[key]
+                    for key in ("error_class", "http_status", "error_code", "error_type", "error_param", "error_step")
+                    if key in diag
+                }
                 failure_reasons[reason] += 1
+                if error_meta.get("error_param"):
+                    failure_params[str(error_meta["error_param"])] += 1
+                if error_meta.get("error_step"):
+                    failure_steps[str(error_meta["error_step"])] += 1
                 _write_dead_letter(
                     dead_letter_jsonl,
                     session=session,
                     run_id=run_id,
                     reason_code=reason,
                     stage="materialize_or_project",
+                    diagnostics=error_meta,
                 )
             elapsed_ms = int((time.monotonic() - item_started) * 1000)
             durations.append(elapsed_ms)
@@ -327,26 +357,27 @@ def run_couchdb_projection(
                 or status in ("failed", "skipped_inconsistent")
                 or index == len(sessions)
             ):
-                _write_jsonl(
-                    progress_jsonl,
-                    {
-                        "event": "progress",
-                        "run_id": run_id,
-                        "index": index,
-                        "selected": len(sessions),
-                        "status": status,
-                        "reason_code": reason,
-                        "elapsed_ms": elapsed_ms,
-                        "project_ref": _project_ref(session_project),
-                        "provider": session_provider,
-                        "projected": projected,
-                        "duplicates": duplicates,
-                        "failed": failed,
-                        "skipped_resumed": skipped_resumed,
-                        "skipped_disabled": skipped_disabled,
-                        "skipped_inconsistent": skipped_inconsistent,
-                    },
-                )
+                progress_payload: dict[str, Any] = {
+                    "event": "progress",
+                    "run_id": run_id,
+                    "index": index,
+                    "selected": len(sessions),
+                    "status": status,
+                    "reason_code": reason,
+                    "elapsed_ms": elapsed_ms,
+                    "project_ref": _project_ref(session_project),
+                    "provider": session_provider,
+                    "projected": projected,
+                    "duplicates": duplicates,
+                    "failed": failed,
+                    "skipped_resumed": skipped_resumed,
+                    "skipped_disabled": skipped_disabled,
+                    "skipped_inconsistent": skipped_inconsistent,
+                }
+                for key in ("error_class", "http_status", "error_code", "error_type", "error_param", "error_step"):
+                    if key in error_meta:
+                        progress_payload[key] = error_meta[key]
+                _write_jsonl(progress_jsonl, progress_payload)
             if max_projects and (projected + duplicates) >= max_projects:
                 stopped_after_max_projects = True
                 break
@@ -443,6 +474,8 @@ def run_couchdb_projection(
                 "failed": failed,
                 "failure_rate": (failed / attempted) if attempted else 0.0,
                 "failure_reasons": dict(sorted(failure_reasons.items())),
+                "failure_params": dict(sorted(failure_params.items())),
+                "failure_steps": dict(sorted(failure_steps.items())),
                 "stopped_after_max_projects": stopped_after_max_projects,
             },
             "metrics": {
@@ -685,7 +718,10 @@ def _select_sessions_bounded(
             counts["current" if is_current else "pending"] += 1
             _update_selection_digest(first_digest, session, is_current=is_current)
             if len(project_counts) > MAX_GRAPH_SELECTION_PROJECTS:
-                raise ValueError("graph selection exceeds the project-scope bound")
+                raise _selection_value_error(
+                    "graph selection exceeds the project-scope bound",
+                    reason_code="graph_selection_project_scope_exceeded",
+                )
 
         project_order = sorted(
             project_counts,
@@ -715,6 +751,8 @@ def _select_sessions_bounded(
         unresolved_reasons: Counter[str] = Counter()
         unresolved: list[dict[str, Any]] = []
         selected_by_slot: dict[int, dict[str, Any]] = {}
+        selected_session_ids: set[str] = set()
+        snapshot_drifted = False
 
         for session in _iter_session_revisions(
             source_store,
@@ -748,6 +786,12 @@ def _select_sessions_bounded(
             positions = current_positions if lane == "current" else pending_positions
             ordinals = current_ordinals if lane == "current" else pending_ordinals
             ordinal = ordinals[session_project]
+            if session_project not in positions or ordinal >= lane_counts.get(session_project, 0):
+                # A session or project arrived between pass 1 and pass 2: mark the
+                # snapshot drifted so the bounded retry runs instead of raising a
+                # spurious KeyError or modulo wrap-around slot collision.
+                snapshot_drifted = True
+                break
             ordinals[session_project] += 1
             rank = _round_robin_rank(
                 ordinal,
@@ -759,12 +803,19 @@ def _select_sessions_bounded(
             absolute_rank = rank + (pending_total if lane == "current" else 0)
             slot = (absolute_rank - normalized_offset) % eligible_count if eligible_count else 0
             if slot < selection_limit:
-                if slot in selected_by_slot:
-                    raise ValueError("graph selection source contains duplicate session identity")
+                sid_value = str(session.get("session_id_hash") or "")
+                if slot in selected_by_slot or (sid_value and sid_value in selected_session_ids):
+                    raise _selection_value_error(
+                        "graph selection source contains duplicate session identity",
+                        reason_code="graph_selection_duplicate_session",
+                    )
                 selected_by_slot[slot] = session
+                if sid_value:
+                    selected_session_ids.add(sid_value)
 
         if (
-            source_count != observed_source_count
+            snapshot_drifted
+            or source_count != observed_source_count
             or unresolved_count != observed_unresolved_count
             or project_counts != observed_counts
             or first_digest.digest() != second_digest.digest()
@@ -782,7 +833,16 @@ def _select_sessions_bounded(
             unresolved=unresolved,
         )
 
-    raise ValueError("graph source changed during bounded selection; retry the projection")
+    raise _selection_value_error(
+        "graph source changed during bounded selection; retry the projection",
+        reason_code="graph_source_snapshot_changed",
+    )
+
+
+def _selection_value_error(message: str, *, reason_code: str) -> ValueError:
+    exc = ValueError(message)
+    exc.reason_code = reason_code  # type: ignore[attr-defined]
+    return exc
 
 
 def _iter_session_revisions(
@@ -929,12 +989,21 @@ def _filter_sessions(
     ]
 
 
-def _project_one(worker: GraphProjectionWorker, episode: Any) -> tuple[str, str, int, int, int, int]:
+def _project_one_with_diagnostics(
+    worker: GraphProjectionWorker, episode: Any
+) -> tuple[str, str, dict[str, Any], int, int, int, int]:
     report = worker.project_episodes([episode], resume_projected_ids=set())
     if report.failed:
+        first_failure = report.failures[0] if report.failures else {}
+        diag_meta = {
+            key: first_failure[key]
+            for key in ("error_class", "http_status", "error_code", "error_type", "error_param", "error_step")
+            if key in first_failure
+        }
         return (
             "failed",
-            str(report.failures[0].get("reason_code") or "projection_failed"),
+            str(first_failure.get("reason_code") or "projection_failed"),
+            diag_meta,
             int(report.projected),
             int(report.duplicates),
             int(report.skipped_disabled),
@@ -946,6 +1015,7 @@ def _project_one(worker: GraphProjectionWorker, episode: Any) -> tuple[str, str,
         return (
             "skipped_disabled",
             "",
+            {},
             int(report.projected),
             int(report.duplicates),
             int(report.skipped_disabled),
@@ -954,11 +1024,19 @@ def _project_one(worker: GraphProjectionWorker, episode: Any) -> tuple[str, str,
     return (
         "projected" if report.projected else "duplicate",
         "",
+        {},
         int(report.projected),
         int(report.duplicates),
         0,
         0,
     )
+
+
+def _project_one(worker: GraphProjectionWorker, episode: Any) -> tuple[str, str, int, int, int, int]:
+    status, reason, _diag_meta, projected, duplicates, skipped_disabled, failed = (
+        _project_one_with_diagnostics(worker, episode)
+    )
+    return status, reason, projected, duplicates, skipped_disabled, failed
 
 
 def _write_dead_letter(
@@ -968,18 +1046,21 @@ def _write_dead_letter(
     run_id: str = "",
     reason_code: str,
     stage: str,
+    diagnostics: dict[str, Any] | None = None,
 ) -> None:
-    _write_jsonl(
-        path,
-        {
-            "session_id_hash": str(session.get("session_id_hash") or ""),
-            "run_id": run_id,
-            "project_ref": _project_ref(str(session.get("project") or "")),
-            "provider": str(session.get("provider") or ""),
-            "reason_code": reason_code,
-            "stage": stage,
-        },
-    )
+    payload: dict[str, Any] = {
+        "session_id_hash": str(session.get("session_id_hash") or ""),
+        "run_id": run_id,
+        "project_ref": _project_ref(str(session.get("project") or "")),
+        "provider": str(session.get("provider") or ""),
+        "reason_code": reason_code,
+        "stage": stage,
+    }
+    if diagnostics:
+        for key in ("error_class", "http_status", "error_code", "error_type", "error_param", "error_step"):
+            if key in diagnostics:
+                payload[key] = diagnostics[key]
+    _write_jsonl(path, payload)
 
 
 def _write_jsonl(path: Path | None, payload: dict[str, Any]) -> None:

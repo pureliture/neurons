@@ -1139,3 +1139,499 @@ def test_iter_by_session_remembers_no_sort_fallback_across_pages():
     assert len(rejected) == 1
     assert all("sort" not in body for body in fake.find_bodies)
     assert [body["limit"] for body in fake.find_bodies] == [2, 2, 2]
+
+
+def test_iter_by_session_caches_no_usable_index_across_sessions_without_repeating_400():
+    fake = FakeCouch()
+    store = _store(fake)
+    store.ensure_database()
+    for s_idx in range(3):
+        sid = dm.build_session_id_hash("codex", f"cached-sess-{s_idx}")
+        for c_idx in range(5):
+            doc_id = f"conversation_chunk:{s_idx}:{c_idx}"
+            fake.dbs["transcript_source"][doc_id] = {
+                "_id": doc_id,
+                "doc_type": dm.SourceDocType.CONVERSATION_CHUNK,
+                "session_id_hash": sid,
+            }
+    real_request = store._request
+    rejected: list[dict] = []
+
+    def _request(method, path, json_body=None, **kwargs):
+        if path.endswith("/_find") and json_body is not None and "sort" in json_body:
+            rejected.append(dict(json_body))
+            return 400, {"error": "no_usable_index", "reason": "no index exists for this sort"}
+        return real_request(method, path, json_body=json_body, **kwargs)
+
+    store._request = _request  # type: ignore[method-assign]
+
+    for s_idx in range(3):
+        sid = dm.build_session_id_hash("codex", f"cached-sess-{s_idx}")
+        docs = list(
+            store.iter_by_session(
+                session_id_hash=sid,
+                doc_type=dm.SourceDocType.CONVERSATION_CHUNK,
+                fields=["_id", "session_id_hash", "doc_type"],
+                page_size=2,
+            )
+        )
+        assert [doc["_id"] for doc in docs] == [f"conversation_chunk:{s_idx}:{c_idx}" for c_idx in range(5)]
+
+    # Exactly one 400 probe for (db, doc_type, selector_shape, sort_spec) across all 3 sessions.
+    assert len(rejected) == 1
+
+
+def test_iter_by_session_no_usable_index_cache_scopes_by_doc_type_selector_and_recovers_after_ttl(monkeypatch):
+    from agent_knowledge.couchdb_source.source_revision import (
+        SourceRevisionSnapshotChangedError,
+        resolve_source_hash_for_currentness,
+    )
+
+    clock = {"now": 100.0}
+    monkeypatch.setattr(couchdb_http_store.time, "monotonic", lambda: clock["now"])
+
+    fake = FakeCouch()
+    store = CouchDBHttpSourceStore(
+        base_url="http://couch.test:5984",
+        db="transcript_source",
+        transport=fake,
+        no_usable_index_ttl_seconds=60.0,
+    )
+    store.ensure_database()
+
+    sid_a = dm.build_session_id_hash("codex", "scope-a")
+    sid_b = dm.build_session_id_hash("codex", "scope-b")
+    for sid, label in ((sid_a, "a"), (sid_b, "b")):
+        store.put(
+            dm.build_transcript_session_document(
+                session=TranscriptSession(
+                    session_id_hash=sid,
+                    provider="codex",
+                    project="neurons",
+                    started_at="2026-11-01T00:00:00Z",
+                    ended_at="2026-11-01T00:05:00Z",
+                )
+            )
+        )
+        for idx in range(3):
+            chunk = TranscriptChunk.from_text(
+                chunk_id=f"chunk_{label}_{idx}",
+                session_id_hash=sid,
+                provider="codex",
+                project="neurons",
+                turn_start_index=idx,
+                turn_end_index=idx,
+                text=f"body {label} {idx}",
+            )
+            store.put(dm.build_conversation_chunk_document(chunk=chunk))
+        fake.dbs["transcript_source"][f"tool_evidence_bundle:{label}:0"] = {
+            "_id": f"tool_evidence_bundle:{label}:0",
+            "doc_type": dm.SourceDocType.TOOL_EVIDENCE_BUNDLE,
+            "session_id_hash": sid,
+            "provider": "codex",
+            "project": "neurons",
+            "part_index": 1,
+            "part_count": 1,
+            "evidence_index_start": 0,
+            "evidence_index_end": 0,
+            "coverage_hash": dm.sha256_hash(f"cov-{label}"),
+        }
+
+    chunk_index_ready = {"value": False}
+    rejected_chunk_sorts = 0
+    accepted_bundle_sorts = 0
+    accepted_chunk_sorts = 0
+    reverse_unsorted = {"value": True}
+    real_request = store._request
+
+    def _request(method, path, json_body=None, **kwargs):
+        nonlocal rejected_chunk_sorts, accepted_bundle_sorts, accepted_chunk_sorts
+        if path.endswith("/_find") and json_body is not None:
+            doc_type = (json_body.get("selector") or {}).get("doc_type")
+            if "sort" in json_body:
+                if doc_type == dm.SourceDocType.CONVERSATION_CHUNK and not chunk_index_ready["value"]:
+                    rejected_chunk_sorts += 1
+                    return 400, {"error": "no_usable_index", "reason": "missing chunk sort index"}
+                if doc_type == dm.SourceDocType.TOOL_EVIDENCE_BUNDLE:
+                    accepted_bundle_sorts += 1
+                if doc_type == dm.SourceDocType.CONVERSATION_CHUNK and chunk_index_ready["value"]:
+                    accepted_chunk_sorts += 1
+                return real_request(method, path, json_body=json_body, **kwargs)
+            # Simulate fallback index returning docs in reverse _id order when sort is omitted.
+            status, payload = real_request(method, path, json_body=json_body, **kwargs)
+            if status == 200 and reverse_unsorted["value"] and doc_type == dm.SourceDocType.CONVERSATION_CHUNK:
+                matching = list(reversed(fake._matching_docs(fake.dbs["transcript_source"], json_body["selector"])))
+                start = int(str(json_body.get("bookmark") or "0"))
+                limit = int(json_body.get("limit") or len(matching) or 1)
+                page = fake._project_fields(matching[start : start + limit], json_body.get("fields") or [])
+                out = {"docs": page}
+                if start + limit < len(matching):
+                    out["bookmark"] = str(start + limit)
+                return 200, out
+            return status, payload
+        return real_request(method, path, json_body=json_body, **kwargs)
+
+    store._request = _request  # type: ignore[method-assign]
+
+    # 1) Partial index isolation: conversation_chunk caches no_usable_index once,
+    # while tool_evidence_bundle keeps sending sort=[{"_id": "asc"}].
+    hash_a_unsorted = resolve_source_hash_for_currentness(session_id_hash=sid_a, store=store)
+    hash_b_unsorted = resolve_source_hash_for_currentness(session_id_hash=sid_b, store=store)
+    assert rejected_chunk_sorts == 1
+    assert accepted_bundle_sorts >= 4
+
+    # 2) Future index creation: once TTL expires, sort=[{"_id": "asc"}] is re-probed
+    # and produces the exact same source_hash (zero semantic drift).
+    chunk_index_ready["value"] = True
+    clock["now"] = 161.0
+    hash_a_sorted = resolve_source_hash_for_currentness(session_id_hash=sid_a, store=store)
+    hash_b_sorted = resolve_source_hash_for_currentness(session_id_hash=sid_b, store=store)
+    assert accepted_chunk_sorts >= 4
+    assert hash_a_sorted == hash_a_unsorted
+    assert hash_b_sorted == hash_b_unsorted
+
+    # 3) Snapshot race fail-closed semantics preserved even when no_usable_index is cached:
+    chunk_index_ready["value"] = False
+    clock["now"] = 300.0
+    # Prime the cache on sid_a first so sid_b runs with zero 400 round-trips.
+    _ = resolve_source_hash_for_currentness(session_id_hash=sid_a, store=store)
+    rejected_before_race = rejected_chunk_sorts
+
+    chunk_reads = {"n": 0}
+    base_request = store._request
+
+    def _mutating_request(method, path, json_body=None, **kwargs):
+        status, payload = base_request(method, path, json_body=json_body, **kwargs)
+        if (
+            path.endswith("/_find")
+            and json_body is not None
+            and (json_body.get("selector") or {}).get("session_id_hash") == sid_b
+            and (json_body.get("selector") or {}).get("doc_type") == dm.SourceDocType.CONVERSATION_CHUNK
+            and not json_body.get("bookmark")
+        ):
+            chunk_reads["n"] += 1
+            # Mutate sid_b chunk hash on every scan so both attempts see drift -> fail-closed.
+            for doc in fake.dbs["transcript_source"].values():
+                if doc.get("session_id_hash") == sid_b and doc.get("doc_type") == dm.SourceDocType.CONVERSATION_CHUNK:
+                    doc["content_hash"] = dm.sha256_hash(f"drift-{chunk_reads['n']}")
+                    break
+        return status, payload
+
+    store._request = _mutating_request  # type: ignore[method-assign]
+    with pytest.raises(SourceRevisionSnapshotChangedError):
+        resolve_source_hash_for_currentness(session_id_hash=sid_b, store=store)
+    assert rejected_chunk_sorts == rejected_before_race
+
+
+def test_iter_by_session_pins_unsorted_mode_across_pages_even_if_ttl_expires_mid_iteration(monkeypatch):
+    clock = {"now": 50.0}
+    monkeypatch.setattr(couchdb_http_store.time, "monotonic", lambda: clock["now"])
+
+    fake = FakeCouch()
+    store = CouchDBHttpSourceStore(
+        base_url="http://couch.test:5984",
+        db="transcript_source",
+        transport=fake,
+        no_usable_index_ttl_seconds=10.0,
+    )
+    store.ensure_database()
+    for s_label in ("prime", "paged"):
+        sid = dm.build_session_id_hash("codex", f"mid-ttl-{s_label}")
+        for idx in range(5):
+            doc_id = f"conversation_chunk:{s_label}:{idx}"
+            fake.dbs["transcript_source"][doc_id] = {
+                "_id": doc_id,
+                "doc_type": dm.SourceDocType.CONVERSATION_CHUNK,
+                "session_id_hash": sid,
+            }
+
+    index_created = {"value": False}
+    sort_flags_by_call: list[bool] = []
+    real_request = store._request
+
+    def _request(method, path, json_body=None, **kwargs):
+        if path.endswith("/_find") and json_body is not None:
+            has_sort = "sort" in json_body
+            sort_flags_by_call.append(has_sort)
+            if has_sort and not index_created["value"]:
+                return 400, {"error": "no_usable_index", "reason": "no index"}
+            status, payload = real_request(method, path, json_body=json_body, **kwargs)
+            # Advance clock past TTL and mark index ready right after page 1 of "paged" session.
+            if json_body.get("bookmark") == "" or "bookmark" not in json_body:
+                if (json_body.get("selector") or {}).get("session_id_hash") == dm.build_session_id_hash("codex", "mid-ttl-paged"):
+                    clock["now"] = 100.0
+                    index_created["value"] = True
+            return status, payload
+        return real_request(method, path, json_body=json_body, **kwargs)
+
+    store._request = _request  # type: ignore[method-assign]
+
+    # Prime no_usable_index cache on first session.
+    _ = list(
+        store.iter_by_session(
+            session_id_hash=dm.build_session_id_hash("codex", "mid-ttl-prime"),
+            doc_type=dm.SourceDocType.CONVERSATION_CHUNK,
+            fields=["_id"],
+            page_size=2,
+        )
+    )
+    sort_flags_by_call.clear()
+
+    # Second session starts while cache is valid; TTL expires after page 1,
+    # yet pages 2 and 3 must stay unsorted so bookmarks are never mixed across plans.
+    paged_docs = list(
+        store.iter_by_session(
+            session_id_hash=dm.build_session_id_hash("codex", "mid-ttl-paged"),
+            doc_type=dm.SourceDocType.CONVERSATION_CHUNK,
+            fields=["_id"],
+            page_size=2,
+        )
+    )
+    assert len(paged_docs) == 5
+    assert sort_flags_by_call == [False, False, False]
+
+    # Next fresh iter_by_session call now sees the expired TTL and uses the new sort index.
+    sort_flags_by_call.clear()
+    fresh_docs = list(
+        store.iter_by_session(
+            session_id_hash=dm.build_session_id_hash("codex", "mid-ttl-paged"),
+            doc_type=dm.SourceDocType.CONVERSATION_CHUNK,
+            fields=["_id"],
+            page_size=2,
+        )
+    )
+    assert len(fresh_docs) == 5
+    assert sort_flags_by_call == [True, True, True]
+
+
+def test_no_usable_index_cache_enforces_entry_bound_and_never_bypasses_page_byte_cap():
+    fake = FakeCouch()
+    store = _store(fake)
+    store.ensure_database()
+
+    # Bound check: inserting >64 distinct selector shapes never grows cache past 64 entries.
+    for idx in range(80):
+        store._remember_unusable_sort(("transcript_source", "conversation_chunk", ((f"k{idx}", "$scalar"),), ()))
+    assert len(store._no_usable_index_until) <= 64
+
+    # Security/bound check: even when no_usable_index is cached (unsorted fast path),
+    # max_page_bytes cap still fails closed with CouchDBResponseTooLarge.
+    sid = dm.build_session_id_hash("codex", "byte-cap-cached")
+    fake.dbs["transcript_source"]["conversation_chunk:oversized"] = {
+        "_id": "conversation_chunk:oversized",
+        "doc_type": dm.SourceDocType.CONVERSATION_CHUNK,
+        "session_id_hash": sid,
+        "body": "x" * 2048,
+    }
+    prime_sid = dm.build_session_id_hash("codex", "byte-cap-prime")
+    real_request = store._request
+
+    def _reject_sort(method, path, json_body=None, **kwargs):
+        if path.endswith("/_find") and json_body is not None and "sort" in json_body:
+            return 400, {"error": "no_usable_index", "reason": "no index"}
+        return real_request(method, path, json_body=json_body, **kwargs)
+
+    store._request = _reject_sort  # type: ignore[method-assign]
+    assert list(
+        store.iter_by_session(
+            session_id_hash=prime_sid,
+            doc_type=dm.SourceDocType.CONVERSATION_CHUNK,
+            page_size=2,
+            max_page_bytes=128,
+        )
+    ) == []
+    with pytest.raises(CouchDBResponseTooLarge):
+        list(
+            store.iter_by_session(
+                session_id_hash=sid,
+                doc_type=dm.SourceDocType.CONVERSATION_CHUNK,
+                page_size=2,
+                max_page_bytes=128,
+            )
+        )
+
+
+def test_no_usable_index_cache_avoids_deep_list_type_and_partial_index_value_collisions():
+    fake = FakeCouch()
+    store = _store(fake)
+    store.ensure_database()
+    sid = dm.build_session_id_hash("codex", "partial-idx-session")
+    fake.dbs["transcript_source"]["conversation_chunk:active"] = {
+        "_id": "conversation_chunk:active",
+        "doc_type": dm.SourceDocType.CONVERSATION_CHUNK,
+        "session_id_hash": sid,
+        "active": True,
+        "flag": True,
+    }
+    fake.dbs["transcript_source"]["conversation_chunk:inactive"] = {
+        "_id": "conversation_chunk:inactive",
+        "doc_type": dm.SourceDocType.CONVERSATION_CHUNK,
+        "session_id_hash": sid,
+        "active": False,
+        "flag": 1,
+    }
+
+    # Build two deep (>=10 levels) and wide (>16 list elements) selectors that differ
+    # only beyond depth 8 / index 16: they must NOT collide in the cache key.
+    deep_a: dict = {"leaf": "alpha"}
+    deep_b: dict = {"leaf": "beta"}
+    for level in range(10):
+        deep_a = {f"lvl_{level}": deep_a}
+        deep_b = {f"lvl_{level}": deep_b}
+    wide_a = {"tags": {"$in": [f"t{i}" for i in range(16)] + ["tail_a"]}}
+    wide_b = {"tags": {"$in": [f"t{i}" for i in range(16)] + ["tail_b"]}}
+
+    # Simulate a Mango partial index with `partial_filter_selector: {"active": true}` and
+    # another with `{"flag": true}` (distinct from integer `1`), plus usable indexes on
+    # `deep_b` and `wide_b` while `deep_a` and `wide_a` have no usable index.
+    sorted_Accepted: list[dict] = []
+    real_request = store._request
+
+    def _request(method, path, json_body=None, **kwargs):
+        if path.endswith("/_find") and json_body is not None and "sort" in json_body:
+            sel = json_body.get("selector") or {}
+            if sel.get("active") is False:
+                return 400, {"error": "no_usable_index", "reason": "partial index requires active=true"}
+            if "flag" in sel and sel.get("flag") is not True:
+                return 400, {"error": "no_usable_index", "reason": "partial index requires boolean true"}
+            if "lvl_9" in sel and sel == {**deep_a, "session_id_hash": sid, "doc_type": dm.SourceDocType.CONVERSATION_CHUNK}:
+                return 400, {"error": "no_usable_index", "reason": "deep_a unindexed"}
+            if "tags" in sel and sel["tags"]["$in"][-1] == "tail_a":
+                return 400, {"error": "no_usable_index", "reason": "wide_a unindexed"}
+            sorted_Accepted.append(dict(sel))
+        return real_request(method, path, json_body=json_body, **kwargs)
+
+    store._request = _request  # type: ignore[method-assign]
+
+    # 1) `active=False` hits 400 and caches unusable sort, but `active=True` matches the
+    # partial index and MUST still send `sort=[{"_id": "asc"}]` instead of colliding.
+    _ = list(
+        store.iter_by_session(
+            session_id_hash=sid,
+            doc_type=dm.SourceDocType.CONVERSATION_CHUNK,
+            selector={"active": False},
+        )
+    )
+    active_docs = list(
+        store.iter_by_session(
+            session_id_hash=sid,
+            doc_type=dm.SourceDocType.CONVERSATION_CHUNK,
+            selector={"active": True},
+        )
+    )
+    assert [d["_id"] for d in active_docs] == ["conversation_chunk:active"]
+    assert any(sel.get("active") is True for sel in sorted_Accepted)
+
+    # 2) `flag=1` (int) must not poison `flag=True` (bool) despite `1 == True` in Python.
+    _ = list(
+        store.iter_by_session(
+            session_id_hash=sid,
+            doc_type=dm.SourceDocType.CONVERSATION_CHUNK,
+            selector={"flag": 1},
+        )
+    )
+    _ = list(
+        store.iter_by_session(
+            session_id_hash=sid,
+            doc_type=dm.SourceDocType.CONVERSATION_CHUNK,
+            selector={"flag": True},
+        )
+    )
+    assert any(sel.get("flag") is True for sel in sorted_Accepted)
+
+    # 3) Selectors differing beyond depth 8 or list index 16 must not poison each other.
+    _ = list(
+        store.iter_by_session(
+            session_id_hash=sid,
+            doc_type=dm.SourceDocType.CONVERSATION_CHUNK,
+            selector=deep_a,
+        )
+    )
+    _ = list(
+        store.iter_by_session(
+            session_id_hash=sid,
+            doc_type=dm.SourceDocType.CONVERSATION_CHUNK,
+            selector=deep_b,
+        )
+    )
+    assert any("lvl_9" in sel and sel != {**deep_a, "session_id_hash": sid, "doc_type": dm.SourceDocType.CONVERSATION_CHUNK} for sel in sorted_Accepted)
+
+    _ = list(
+        store.iter_by_session(
+            session_id_hash=sid,
+            doc_type=dm.SourceDocType.CONVERSATION_CHUNK,
+            selector=wide_a,
+        )
+    )
+    _ = list(
+        store.iter_by_session(
+            session_id_hash=sid,
+            doc_type=dm.SourceDocType.CONVERSATION_CHUNK,
+            selector=wide_b,
+        )
+    )
+    assert any("tags" in sel and sel["tags"]["$in"][-1] == "tail_b" for sel in sorted_Accepted)
+
+
+def test_iter_by_session_fails_closed_if_sort_index_disappears_after_sorted_bookmark():
+    fake = FakeCouch()
+    store = _store(fake)
+    store.ensure_database()
+    sid = dm.build_session_id_hash("codex", "mid-page-drop")
+    for idx in range(5):
+        fake.dbs["transcript_source"][f"conversation_chunk:{idx}"] = {
+            "_id": f"conversation_chunk:{idx}",
+            "doc_type": dm.SourceDocType.CONVERSATION_CHUNK,
+            "session_id_hash": sid,
+        }
+
+    index_alive = {"value": True}
+    unsorted_with_bookmark = []
+    real_request = store._request
+
+    def _request(method, path, json_body=None, **kwargs):
+        if path.endswith("/_find") and json_body is not None:
+            if "sort" in json_body:
+                if not index_alive["value"]:
+                    return 400, {"error": "no_usable_index", "reason": "index dropped mid-scan"}
+                status, payload = real_request(method, path, json_body=json_body, **kwargs)
+                # Drop the sort index right after page 1 returns a sorted bookmark.
+                index_alive["value"] = False
+                return status, payload
+            if json_body.get("bookmark") and not index_alive["value"] and len(unsorted_with_bookmark) == 0:
+                # Track if any request illegally sent a sorted-plan bookmark without sort.
+                if str(json_body.get("bookmark")) == "2":
+                    unsorted_with_bookmark.append(dict(json_body))
+        return real_request(method, path, json_body=json_body, **kwargs)
+
+    store._request = _request  # type: ignore[method-assign]
+
+    # Mid-pagination index disappearance MUST fail closed instead of reusing the sorted
+    # bookmark ("2") on an unsorted fallback query.
+    with pytest.raises(CouchDBError) as exc_info:
+        it = store.iter_by_session(
+            session_id_hash=sid,
+            doc_type=dm.SourceDocType.CONVERSATION_CHUNK,
+            fields=["_id"],
+            page_size=2,
+        )
+        first = next(it)
+        assert first["_id"] == "conversation_chunk:0"
+        second = next(it)
+        assert second["_id"] == "conversation_chunk:1"
+        _ = list(it)
+
+    assert exc_info.value.status_code == 400
+    assert unsorted_with_bookmark == []
+
+    # A subsequent fresh iteration starts cleanly from page 1 (bookmark="") without sort
+    # and yields the complete 5-document set without repeating a 400.
+    recovered_docs = list(
+        store.iter_by_session(
+            session_id_hash=sid,
+            doc_type=dm.SourceDocType.CONVERSATION_CHUNK,
+            fields=["_id"],
+            page_size=2,
+        )
+    )
+    assert [d["_id"] for d in recovered_docs] == [f"conversation_chunk:{i}" for i in range(5)]

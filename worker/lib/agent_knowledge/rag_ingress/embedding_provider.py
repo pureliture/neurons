@@ -81,6 +81,7 @@ def build_openai_embedding_provider(
     *,
     environ: Mapping[str, str] | None = None,
     embed_fn: EmbedFn | None = None,
+    progress_callback: Callable[[str, int, int], None] | None = None,
 ) -> OpenAICompatibleEmbeddingProvider:
     """환경 설정에서 embedding provider를 만든다.
 
@@ -100,11 +101,11 @@ def build_openai_embedding_provider(
     size = int(config["dim"])
     if embed_fn is None:
         api_key = env.get("LLM_BRAIN_EMBEDDING_API_KEY") or env.get("OPENAI_API_KEY") or ""
-        embed_fn = _openai_embed_fn(model=model, base_url=str(config["base_url"]), api_key=api_key, environ=env)
+        embed_fn = _openai_embed_fn(model=model, base_url=str(config["base_url"]), api_key=api_key, environ=env, progress_callback=progress_callback)
     return OpenAICompatibleEmbeddingProvider(embed_fn=embed_fn, size=size, model=model)
 
 
-def _openai_embed_fn(*, model: str, base_url: str, api_key: str, environ: Mapping[str, str] | None = None) -> EmbedFn:
+def _openai_embed_fn(*, model: str, base_url: str, api_key: str, environ: Mapping[str, str] | None = None, progress_callback: Callable[[str, int, int], None] | None = None) -> EmbedFn:
     import os
     import math
 
@@ -154,6 +155,7 @@ def _openai_embed_fn(*, model: str, base_url: str, api_key: str, environ: Mappin
             api_key=api_key or "local-model2vec",
             timeout_seconds=timeout_seconds,
             use_openai_sdk=True,
+            progress_callback=progress_callback,
         )
 
         def _embed_local(text: str) -> list[float]:

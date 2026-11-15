@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import base64
 import copy
+import hashlib
 import json
 import time
-from collections.abc import Iterator
+from collections import OrderedDict
+from collections.abc import Iterator, Mapping
 from urllib.parse import quote
 
 from ..rag_ingress.idempotency import IdempotencyOutcome
@@ -50,6 +52,14 @@ from .source_store import (
 class CouchDBError(RuntimeError):
     """Raised on a non-success CouchDB HTTP response or connection failure."""
 
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = (
+            status_code
+            if isinstance(status_code, int) and not isinstance(status_code, bool)
+            else None
+        )
+
 
 def basic_auth_header(*, user: str, password: str) -> str:
     """Single shared implementation for CouchDB Basic auth headers."""
@@ -71,6 +81,59 @@ def _is_no_usable_index(payload: object) -> bool:
     if not isinstance(payload, dict):
         return False
     return str(payload.get("error") or "") == "no_usable_index"
+
+
+DEFAULT_NO_USABLE_INDEX_TTL_SECONDS = 300.0
+_MAX_NO_USABLE_INDEX_CACHE_ENTRIES = 64
+_DEFAULT_SESSION_SORT: tuple[dict[str, str], ...] = ({"_id": "asc"},)
+
+
+def _canonical_typed_node(value: object, *, _seen: set[int] | None = None) -> object:
+    """Encode a Mango query structure with explicit runtime types and zero truncation.
+
+    Preserving exact values, list lengths, nesting depth, and scalar runtime types
+    (distinguishing ``bool`` from ``int``/``float``) prevents cache collisions across
+    deep selectors, wide ``$in``/``$or`` clauses, and ``partial_filter_selector``
+    predicates that depend on constant field values.
+    """
+    if value is None:
+        return ("null", None)
+    if isinstance(value, bool):
+        return ("bool", value)
+    if isinstance(value, int):
+        return ("int", value)
+    if isinstance(value, float):
+        return ("float", repr(value))
+    if isinstance(value, str):
+        return ("str", value)
+    active = _seen if _seen is not None else set()
+    obj_id = id(value)
+    if obj_id in active:
+        raise ValueError("cyclic Mango query structure is not allowed")
+    active.add(obj_id)
+    try:
+        if isinstance(value, Mapping):
+            return (
+                "map",
+                [
+                    [str(key), _canonical_typed_node(sub, _seen=active)]
+                    for key, sub in sorted(value.items(), key=lambda item: str(item[0]))
+                ],
+            )
+        if isinstance(value, (list, tuple)):
+            return ("seq", [_canonical_typed_node(item, _seen=active) for item in value])
+    finally:
+        active.discard(obj_id)
+    return ("repr", type(value).__qualname__, str(value))
+
+
+def _canonical_mango_digest(value: object) -> str:
+    encoded = json.dumps(
+        _canonical_typed_node(value),
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 COUCHDB_FIND_MAX_PAGE_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -123,6 +186,7 @@ class CouchDBHttpSourceStore:
         auth_header: str = "",
         request_timeout_seconds: float = 30,
         deadline_monotonic: float | None = None,
+        no_usable_index_ttl_seconds: float = DEFAULT_NO_USABLE_INDEX_TTL_SECONDS,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.db = db
@@ -130,6 +194,36 @@ class CouchDBHttpSourceStore:
         self.auth_header = auth_header
         self.request_timeout_seconds = request_timeout_seconds
         self.deadline_monotonic = deadline_monotonic
+        self.no_usable_index_ttl_seconds = max(0.0, float(no_usable_index_ttl_seconds))
+        self._no_usable_index_until: OrderedDict[tuple[object, ...], float] = OrderedDict()
+
+    def _is_sort_unusable_cached(self, cache_key: tuple[object, ...]) -> bool:
+        if self.no_usable_index_ttl_seconds <= 0:
+            return False
+        now = time.monotonic()
+        expires_at = self._no_usable_index_until.get(cache_key)
+        if expires_at is None:
+            return False
+        if now >= expires_at:
+            self._no_usable_index_until.pop(cache_key, None)
+            return False
+        self._no_usable_index_until.move_to_end(cache_key)
+        return True
+
+    def _remember_unusable_sort(self, cache_key: tuple[object, ...]) -> None:
+        if self.no_usable_index_ttl_seconds <= 0:
+            return
+        now = time.monotonic()
+        expired = [key for key, exp in self._no_usable_index_until.items() if now >= exp]
+        for key in expired:
+            self._no_usable_index_until.pop(key, None)
+        self._no_usable_index_until[cache_key] = now + self.no_usable_index_ttl_seconds
+        self._no_usable_index_until.move_to_end(cache_key)
+        while len(self._no_usable_index_until) > _MAX_NO_USABLE_INDEX_CACHE_ENTRIES:
+            self._no_usable_index_until.popitem(last=False)
+
+    def _clear_unusable_sort(self, cache_key: tuple[object, ...]) -> None:
+        self._no_usable_index_until.pop(cache_key, None)
 
     # --- HTTP plumbing --------------------------------------------------------
 
@@ -186,7 +280,7 @@ class CouchDBHttpSourceStore:
         """Create the database if it does not exist (idempotent)."""
         status, _ = self._request("PUT", f"/{self.db}")
         if status not in (201, 202, 412):  # 412 = already exists
-            raise CouchDBError(f"could not ensure database {self.db!r}: HTTP {status}")
+            raise CouchDBError(f"could not ensure database {self.db!r}: HTTP {status}", status_code=status)
 
     # --- CouchDBSourceStore protocol -----------------------------------------
 
@@ -195,7 +289,7 @@ class CouchDBHttpSourceStore:
         if status == 404:
             return None
         if status != 200:
-            raise CouchDBError(f"GET {doc_id} failed: HTTP {status}")
+            raise CouchDBError(f"GET {doc_id} failed: HTTP {status}", status_code=status)
         return payload
 
     def get_bounded(self, doc_id: str, *, max_response_bytes: int) -> dict | None:
@@ -211,7 +305,7 @@ class CouchDBHttpSourceStore:
         if status == 404:
             return None
         if status != 200:
-            raise CouchDBError(f"bounded GET {doc_id} failed: HTTP {status}")
+            raise CouchDBError(f"bounded GET {doc_id} failed: HTTP {status}", status_code=status)
         if not isinstance(payload, dict):
             raise CouchDBError("bounded GET returned an invalid document")
         return payload
@@ -309,7 +403,7 @@ class CouchDBHttpSourceStore:
                 )
             raise SourceStoreConflict("immutable source document already exists")
         if status not in (201, 202) or not response.get("ok"):
-            raise CouchDBError(f"immutable source write failed: HTTP {status}")
+            raise CouchDBError(f"immutable source write failed: HTTP {status}", status_code=status)
         return StoredRevision(
             doc_id=doc_id,
             rev=str(response.get("rev") or ""),
@@ -367,7 +461,7 @@ class CouchDBHttpSourceStore:
         if status == 409:
             raise SourceStoreConflict("conditional source revision changed")
         if status not in (201, 202) or not response.get("ok"):
-            raise CouchDBError(f"conditional source write failed: HTTP {status}")
+            raise CouchDBError(f"conditional source write failed: HTTP {status}", status_code=status)
         return StoredRevision(
             doc_id=doc_id,
             rev=str(response.get("rev") or ""),
@@ -434,7 +528,10 @@ class CouchDBHttpSourceStore:
             if status == 409:
                 continue
             if status not in (201, 202) or not response.get("ok"):
-                raise CouchDBError(f"transcript session aggregate merge failed: HTTP {status}")
+                raise CouchDBError(
+                    f"transcript session aggregate merge failed: HTTP {status}",
+                    status_code=status,
+                )
             return StoredRevision(
                 doc_id=doc_id,
                 rev=str(response.get("rev") or ""),
@@ -513,7 +610,7 @@ class CouchDBHttpSourceStore:
         if status == 409:
             raise SourceStoreConflict("conditional temporal patch revision changed")
         if status not in (201, 202) or not response.get("ok"):
-            raise CouchDBError(f"conditional temporal patch failed: HTTP {status}")
+            raise CouchDBError(f"conditional temporal patch failed: HTTP {status}", status_code=status)
         return StoredRevision(
             doc_id=doc_id,
             rev=str(response.get("rev") or ""),
@@ -539,7 +636,7 @@ class CouchDBHttpSourceStore:
                 stored.pop("_rev", None)
             status, payload = self._request("PUT", self._doc_path(doc_id), json_body=stored)
         if status not in (201, 202) or not payload.get("ok"):
-            raise CouchDBError(f"PUT {doc_id} failed: HTTP {status}")
+            raise CouchDBError(f"PUT {doc_id} failed: HTTP {status}", status_code=status)
         return str(payload.get("rev", ""))
 
     def iter_by_type(
@@ -589,7 +686,7 @@ class CouchDBHttpSourceStore:
                 page_size = max(1, page_limit // 2)
                 continue
             if status != 200:
-                raise CouchDBError(f"_find by type failed: HTTP {status}")
+                raise CouchDBError(f"_find by type failed: HTTP {status}", status_code=status)
             docs = payload.get("docs", [])
             if not docs:
                 return
@@ -650,7 +747,7 @@ class CouchDBHttpSourceStore:
             },
         )
         if status != 200:
-            raise CouchDBError(f"_explain failed: HTTP {status}")
+            raise CouchDBError(f"_explain failed: HTTP {status}", status_code=status)
         return payload
 
     def read_change_sequence(self) -> str:
@@ -658,7 +755,10 @@ class CouchDBHttpSourceStore:
 
         status, payload = self._request("GET", f"/{self.db}")
         if status != 200 or "update_seq" not in payload:
-            raise CouchDBError("database update sequence read failed")
+            raise CouchDBError(
+                "database update sequence read failed",
+                status_code=status if status != 200 else None,
+            )
         return str(payload["update_seq"])
 
     def changes_since(self, *, since: str, limit: int = 2000) -> list[dict[str, object]]:
@@ -678,7 +778,7 @@ class CouchDBHttpSourceStore:
                 f"&limit={min(target - len(rows), 1000)}&style=main_only",
             )
             if status != 200:
-                raise CouchDBError(f"_changes failed: HTTP {status}")
+                raise CouchDBError(f"_changes failed: HTTP {status}", status_code=status)
             page = payload.get("results") if isinstance(payload, dict) else None
             if not page:
                 break
@@ -731,13 +831,15 @@ class CouchDBHttpSourceStore:
             },
         )
         if status != 200:
-            raise CouchDBError(f"_find execution-stats query failed: HTTP {status}")
+            raise CouchDBError(f"_find execution-stats query failed: HTTP {status}", status_code=status)
         return {
             "documents": payload.get("docs"),
             "execution_stats": payload.get("execution_stats"),
         }
 
-    def find_by_session(self, *, session_id_hash: str, doc_type: str = "") -> list[dict]:
+    def find_by_session(
+        self, *, session_id_hash: str, doc_type: str = "", progress_callback=None
+    ) -> list[dict]:
         selector: dict = {"session_id_hash": session_id_hash}
         if doc_type:
             selector["doc_type"] = doc_type
@@ -749,11 +851,17 @@ class CouchDBHttpSourceStore:
                 body["bookmark"] = bookmark
             status, payload = self._request("POST", f"/{self.db}/_find", json_body=body)
             if status != 200:
-                raise CouchDBError(f"_find failed: HTTP {status}")
+                raise CouchDBError(f"_find failed: HTTP {status}", status_code=status)
             page = payload.get("docs", [])
             if not page:
                 break
             docs.extend(page)
+            # One event per successfully fetched page: no content or ids.
+            if progress_callback is not None:
+                try:
+                    progress_callback(len(docs), 0)
+                except Exception:
+                    pass
             next_bookmark = str(payload.get("bookmark") or "")
             if not next_bookmark or next_bookmark == bookmark:
                 break
@@ -789,16 +897,32 @@ class CouchDBHttpSourceStore:
         }
         size = min(SESSION_QUERY_MAX_PAGE_SIZE, max(1, int(page_size)))
         bookmark = ""
-        use_sort = True
+        sort_spec = [dict(item) for item in _DEFAULT_SESSION_SORT]
+        normalized_fields = list(fields) if fields else None
+        # Scope the bounded TTL cache to endpoint, database, doc_type, lossless typed
+        # extra_selector digest, sort digest, and projected field list so partial
+        # indexes on doc_type or extra_selector constants, deep/wide selectors, and
+        # covering-index field projections never collide across distinct query plans.
+        cache_key = (
+            self.base_url,
+            self.db,
+            doc_type,
+            _canonical_mango_digest(extra_selector),
+            _canonical_mango_digest(sort_spec),
+            _canonical_mango_digest(normalized_fields),
+        )
+        # Pin `use_sort` once per iter_by_session call so a TTL boundary mid-scan
+        # can never mix sorted and unsorted bookmarks across pages.
+        use_sort = not self._is_sort_unusable_cached(cache_key)
         while True:
             body: dict = {
                 "selector": query_selector,
                 "limit": size,
             }
             if use_sort:
-                body["sort"] = [{"_id": "asc"}]
-            if fields:
-                body["fields"] = list(fields)
+                body["sort"] = sort_spec
+            if normalized_fields:
+                body["fields"] = list(normalized_fields)
             if bookmark:
                 body["bookmark"] = bookmark
             status, payload = self._request(
@@ -808,11 +932,19 @@ class CouchDBHttpSourceStore:
                 max_response_bytes=max_page_bytes,
             )
             if status == 400 and _is_no_usable_index(payload) and use_sort:
-                # Some databases have no index matching the sort, so _find
-                # rejects the request. Drop the sort and retry without it
-                # (CouchDB returns documents in its default order). The index
-                # does not appear mid-iteration, so remember the decision and
-                # stop paying a rejected request on every later page.
+                # Remember the rejection under a bounded TTL scoped to the exact
+                # non-session query shape so later sessions skip the rejected 400
+                # round-trip while future index creation recovers after the TTL.
+                self._remember_unusable_sort(cache_key)
+                if bookmark:
+                    # If the sort index was dropped after page 1 already issued a
+                    # sorted-index bookmark, never pass that bookmark to an unsorted
+                    # fallback query (which would mix incompatible cursors). Fail
+                    # closed so the caller/retry restarts cleanly from page 1.
+                    raise CouchDBError(
+                        "_find by session sort index disappeared mid-pagination: HTTP 400",
+                        status_code=400,
+                    )
                 use_sort = False
                 body = dict(body)
                 body.pop("sort", None)
@@ -822,8 +954,10 @@ class CouchDBHttpSourceStore:
                     json_body=body,
                     max_response_bytes=max_page_bytes,
                 )
+            elif status == 200 and use_sort and not bookmark:
+                self._clear_unusable_sort(cache_key)
             if status != 200:
-                raise CouchDBError(f"_find by session failed: HTTP {status}")
+                raise CouchDBError(f"_find by session failed: HTTP {status}", status_code=status)
             docs = payload.get("docs") if isinstance(payload, dict) else None
             if not isinstance(docs, list):
                 raise CouchDBError("_find by session returned an invalid page")
@@ -856,7 +990,7 @@ class CouchDBHttpSourceStore:
             return True
         if status == 404:
             return False
-        raise CouchDBError(f"DELETE {doc_id} failed: HTTP {status}")
+        raise CouchDBError(f"DELETE {doc_id} failed: HTTP {status}", status_code=status)
 
 
 __all__ = ["CouchDBHttpSourceStore", "CouchDBError"]

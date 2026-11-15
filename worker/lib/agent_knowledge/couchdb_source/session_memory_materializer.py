@@ -338,7 +338,23 @@ def _chunk_to_view(chunk: dict) -> ChunkView:
     )
 
 
-def materialize_session_memory(*, session_id_hash: str, store: CouchDBSourceStore) -> MaterializedSessionMemory:
+def _emit_progress(progress_callback, stage: str, done: int, total: int) -> None:
+    """Telemetry must never break materialization."""
+
+    if progress_callback is None:
+        return
+    try:
+        progress_callback(stage, int(done), int(total))
+    except Exception:
+        return
+
+
+def materialize_session_memory(
+    *,
+    session_id_hash: str,
+    store: CouchDBSourceStore,
+    progress_callback=None,
+) -> MaterializedSessionMemory:
     """Materialize the resolved source revision into one session-memory body.
 
     Resolution re-hashes every resident conversation chunk and tool evidence
@@ -347,9 +363,13 @@ def materialize_session_memory(*, session_id_hash: str, store: CouchDBSourceStor
     compares stored hash metadata and relies on this step for content checks.
     """
 
+    def _fetched(done: int, total: int) -> None:
+        _emit_progress(progress_callback, "materialization", done, total)
+
     resolved = resolve_active_source_revision(
         session_id_hash=session_id_hash,
         store=store,
+        progress_callback=_fetched if progress_callback is not None else None,
     )
     sessions = list(resolved.sessions)
     chunks = list(resolved.conversation_chunks)
@@ -380,6 +400,7 @@ def materialize_session_memory(*, session_id_hash: str, store: CouchDBSourceStor
     tool_evidence_bodies = tuple(
         str(bundle.get("body", "")).rstrip() for bundle in bundles
     )
+    total_segments = len(body_views) + len(tool_evidence_bodies)
 
     lines = [
         f"# session-memory {provider} {project}",
@@ -387,15 +408,22 @@ def materialize_session_memory(*, session_id_hash: str, store: CouchDBSourceStor
         "",
         "## conversation",
     ]
-    for view in body_views:
+    for index, view in enumerate(body_views, start=1):
         lines.append("")
         lines.append(view.text.rstrip())
+        _emit_progress(progress_callback, "materialization_body", index, total_segments)
     lines.append("")
     lines.append("## tool_evidence_summary")
-    for evidence_body in tool_evidence_bodies:
+    for extra_index, evidence_body in enumerate(tool_evidence_bodies, start=1):
         # Full materialization: embed the bundle body so recall needs no CouchDB ref.
         lines.append("")
         lines.append(evidence_body)
+        _emit_progress(
+            progress_callback,
+            "materialization_body",
+            len(body_views) + extra_index,
+            total_segments,
+        )
     body = "\n".join(lines).rstrip() + "\n"
 
     notes: list[str] = []
@@ -520,6 +548,12 @@ def _projection_state_for_materialization(
         }
         receipts["postgres_pgvector_local"] = local_map
         doc["backend_receipts"] = receipts
+        if projection_status == ProjectionStatus.PROJECTED:
+            # A successful local projection must not leave a stale terminal
+            # failure summary behind; the attempt map above is the authority.
+            doc.pop("failure_source_hash", None)
+        elif failure_source_hash:
+            doc["failure_source_hash"] = failure_source_hash
         return doc
     if backend == "postgres_pgvector":
         doc = dict(existing) if existing else build_projection_state_document(
@@ -1006,6 +1040,7 @@ def project_session_memory(
     except Exception as exc:  # backend/projection failure -> keep source, mark failed
         from ..rag_ingress.pg_embedding_chunks import (
             EmbeddingChunksPending, InvalidProjectionText, INVALID_TEXT_NUL,
+            LocalEmbeddingTerminalFailure,
         )
         if isinstance(exc, EmbeddingChunksPending):
             commit_status, _state = _commit_projection_state_if_source_current(
@@ -1020,6 +1055,8 @@ def project_session_memory(
                 result["state_write_skipped"] = commit_status
             return result
         failure_reason = type(exc).__name__
+        if isinstance(exc, LocalEmbeddingTerminalFailure):
+            failure_reason = exc.code
         if isinstance(exc, InvalidProjectionText):
             failure_reason = INVALID_TEXT_NUL
         if isinstance(exc, ValueError):
@@ -1090,11 +1127,16 @@ def materialize_and_project(
     store: CouchDBSourceStore,
     projector: SessionMemoryProjector | None = None,
     backend: str = "postgres_pgvector",
+    progress_callback=None,
 ) -> dict:
     """End-to-end M3 step for one session: refresh coverage, materialize, project."""
 
     update_coverage_with_tool_evidence(session_id_hash=session_id_hash, store=store)
-    materialized = materialize_session_memory(session_id_hash=session_id_hash, store=store)
+    materialized = materialize_session_memory(
+        session_id_hash=session_id_hash,
+        store=store,
+        progress_callback=progress_callback,
+    )
     projection = None
     if projector is not None:
         projection = project_session_memory(

@@ -1,6 +1,9 @@
 import asyncio
 import json
+import select
+import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -29,6 +32,9 @@ class FakeMsg:
 
     async def term(self):
         self.calls.append(("term", None))
+
+    def in_progress(self):
+        self.calls.append(("in_progress", None))
 
 
 class FakeSub:
@@ -264,6 +270,44 @@ def test_consume_requires_existing_build_script(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["error"] == "env_missing"
 
 
+def test_ack_wait_in_progress_heartbeat_during_long_build(tmp_path):
+    msg = FakeMsg(_event_bytes(H1))
+    sub = FakeSub([[msg]])
+    js = FakeJs(sub)
+    settings, env = _settings(tmp_path, SESSION_MEMORY_WATCH_ACK_WAIT_SECONDS="1")
+
+    def run_build(ids):
+        if ids:
+            time.sleep(0.7)
+        return 0, {"sessions": [{"session_id_hash": H1, "status": "projected"}]}
+
+    _run(settings, env, js, run_build, max_cycles=1)
+
+    assert any(call[0] == "in_progress" for call in msg.calls)
+    assert ("ack", None) in msg.calls
+
+
+def test_ack_renewal_failure_is_nak_not_ack(tmp_path):
+    class BadMsg(FakeMsg):
+        def in_progress(self):
+            raise RuntimeError("synthetic in_progress failure")
+
+    msg = BadMsg(_event_bytes(H1))
+    sub = FakeSub([[msg]])
+    js = FakeJs(sub)
+    settings, env = _settings(tmp_path, SESSION_MEMORY_WATCH_ACK_WAIT_SECONDS="1")
+
+    def run_build(ids):
+        if ids:
+            time.sleep(0.7)
+        return 0, {"sessions": [{"session_id_hash": H1, "status": "projected"}]}
+
+    _run(settings, env, js, run_build, max_cycles=1)
+
+    assert ("ack", None) not in msg.calls
+    assert any(call[0] == "nak" for call in msg.calls)
+
+
 def test_run_build_script_passes_session_ids_env_and_parses_report(tmp_path):
     script = tmp_path / "build.sh"
     script.write_text("#!/bin/sh\necho \"ids=${SESSION_MEMORY_BUILD_SESSION_IDS:-none}\"\necho '{\"sessions\": [], \"projected\": 0}'\nexit 0\n")
@@ -274,6 +318,87 @@ def test_run_build_script_passes_session_ids_env_and_parses_report(tmp_path):
     assert rc == 0 and report == {"sessions": [], "projected": 0}
     rc, report = watch_cli.run_build_script((), settings=settings, environ={"PATH": "/usr/bin:/bin", "SESSION_MEMORY_BUILD_SESSION_IDS": "stale"})
     assert rc == 0
+
+
+def test_startup_sweep_with_no_updates_runs_no_id_build_and_acks_nothing(tmp_path):
+    sub = FakeSub([[]])
+    js = FakeJs(sub)
+    settings, env = _settings(tmp_path, SESSION_MEMORY_WATCH_STARTUP_SWEEP="1")
+    builds = []
+
+    def run_build(ids):
+        builds.append(ids)
+        return 0, {"sessions": [], "selected": 0}
+
+    counters = _run(settings, env, js, run_build, max_cycles=1)
+
+    assert builds == [()]
+    assert counters["acked"] == 0 and counters["naked"] == 0
+    heartbeat = json.loads(Path(env["SESSION_MEMORY_WATCH_HEARTBEAT"]).read_text())
+    assert heartbeat["phase"] == "stopped" and heartbeat["last_reason"] == "startup_sweep"
+
+
+def test_run_build_script_streams_stdout_before_completion(tmp_path):
+    script = tmp_path / "build.sh"
+    script.write_text(
+        "#!/bin/sh\n"
+        "echo '{\"done\":1,\"schema_version\":\"pipeline_progress.v1\",\"stage\":\"materialization\",\"total\":2}'\n"
+        "if [ -n \"$SESSION_MEMORY_BUILD_OUTCOMES_FILE\" ]; then\n"
+        "  printf '%s' '{\"schema_version\":\"build_outcomes.v1\",\"sessions\":[{\"session_id_hash\":\""
+        + H1
+        + "\",\"status\":\"projected\",\"error_class\":\"\"}]}' > \"$SESSION_MEMORY_BUILD_OUTCOMES_FILE\"\n"
+        "fi\n"
+        "sleep 1.2\n"
+        "echo '{\"selected\":1,\"projected\":1,\"failed\":0,\"skipped\":0}'\n"
+        "exit 0\n"
+    )
+    script.chmod(0o755)
+    helper = tmp_path / "helper.py"
+    helper.write_text(
+        "import json, sys\n"
+        "sys.path.insert(0, "
+        + repr(str(Path(__file__).resolve().parents[1] / "lib"))
+        + ")\n"
+        "from agent_knowledge.couchdb_source import watch_cli\n"
+        "settings = watch_cli.WatchSettings({'SESSION_MEMORY_BUILD_SCRIPT': "
+        + repr(str(script))
+        + "})\n"
+        "rc, report = watch_cli.run_build_script((), settings=settings, environ={'PATH': '/usr/bin:/bin'})\n"
+        "print('RESULT', json.dumps({'rc': rc, 'report': report}), flush=True)\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, str(helper)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert proc.stdout is not None
+    ready, _, _ = select.select([proc.stdout], [], [], 0.8)
+    first_line = proc.stdout.readline() if ready else ""
+    rest = proc.stdout.read()
+    stderr = proc.stderr.read() if proc.stderr else ""
+    assert proc.wait(timeout=15) == 0, stderr
+    assert "pipeline_progress.v1" in first_line, (first_line, stderr)
+    result_line = [line for line in rest.splitlines() if line.startswith("RESULT ")][-1]
+    result = json.loads(result_line.split(" ", 1)[1])
+    assert result["rc"] == 0
+    assert result["report"]["sessions"][0]["status"] == "projected"
+    assert result["report"]["projected"] == 1
+
+
+def test_run_build_script_keeps_report_when_outcomes_file_is_absent(tmp_path):
+    script = tmp_path / "build.sh"
+    script.write_text(
+        "#!/bin/sh\n"
+        "echo '{\"done\":1,\"schema_version\":\"pipeline_progress.v1\",\"stage\":\"projection\",\"total\":1}'\n"
+        "echo '{\"selected\":1,\"projected\":1,\"failed\":0,\"skipped\":0}'\n"
+        "exit 0\n"
+    )
+    script.chmod(0o755)
+    settings = watch_cli.WatchSettings({"SESSION_MEMORY_BUILD_SCRIPT": str(script)})
+    rc, report = watch_cli.run_build_script((), settings=settings, environ={"PATH": "/usr/bin:/bin"})
+    assert rc == 0
+    assert report == {"selected": 1, "projected": 1, "failed": 0, "skipped": 0}
 
 
 def test_cli_registry_exposes_watch_command():

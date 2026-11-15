@@ -59,36 +59,48 @@ with open(path, "w", encoding="utf-8") as f:
     json.dump(payload, f, sort_keys=True)
 PY
 
-# A run that does no work must be visible as a failure, not a silent success.
-set +e
-output="$(timeout "${SESSION_MEMORY_BUILD_TIMEOUT_SECONDS:-300}" \
-  python -m agent_knowledge.cli couchdb-session-memory-build "${argv[@]}" 2>&1)"
-rc=$?
-set -e
-printf '%s\n' "$output"
-if [ "$rc" -ne 0 ]; then
-  echo "[build-guard] cli exit=${rc}" >&2
-  exit "$rc"
+# Overall build limit policy (approved 2026-11-15):
+# - unset/empty or 0 => unlimited; no `timeout` wrapper is used.
+# - positive integer => legacy opt-in limit for backward compatibility.
+# - anything else => explicit configuration error (fail closed).
+# Individual HTTP request timeouts remain inside the CLI and are not changed.
+timeout_setting="${SESSION_MEMORY_BUILD_TIMEOUT_SECONDS:-}"
+timeout_mode="unlimited"
+timeout_seconds=""
+if [ -z "$timeout_setting" ]; then
+  timeout_mode="unlimited"
+elif [[ "$timeout_setting" =~ ^[0-9]+$ ]]; then
+  if [ "$timeout_setting" -eq 0 ]; then
+    timeout_mode="unlimited"
+  else
+    timeout_mode="limited"
+    timeout_seconds="$timeout_setting"
+  fi
+else
+  echo "[build-guard] invalid SESSION_MEMORY_BUILD_TIMEOUT_SECONDS='$timeout_setting' (unset/0=unlimited, positive integer=limit)" >&2
+  exit 2
 fi
 
-python - "$output" <<'PY'
-import json
-import sys
+# Stream child bytes through a byte-bounded, fixed-allowlist filter. Raw
+# stdout/stderr is never echoed or stored; only the last JSON report line
+# (<=1 MiB) is parsed, and the output is a fixed summary. The approval
+# timeout_seconds field above is metadata only.
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+report_filter="$script_dir/stream_report.py"
 
-lines = [line for line in sys.argv[1].splitlines() if line.strip().startswith("{")]
-if not lines:
-    sys.exit(0)
-try:
-    report = json.loads(lines[-1])
-except json.JSONDecodeError:
-    sys.exit(0)
-selected = int(report.get("selected") or 0)
-projected = int(report.get("projected") or 0)
-failed = int(report.get("failed") or 0)
-if failed > 0:
-    print(f"[build-guard] {failed} projection failures", file=sys.stderr)
-    sys.exit(1)
-if selected > 0 and projected == 0:
-    print(f"[build-guard] selected {selected} but projected 0: no progress", file=sys.stderr)
-    sys.exit(1)
-PY
+set +e
+if [ "$timeout_mode" = "limited" ]; then
+  timeout "$timeout_seconds" \
+    python -m agent_knowledge.cli couchdb-session-memory-build "${argv[@]}" 2>&1 | python "$report_filter"
+else
+  python -m agent_knowledge.cli couchdb-session-memory-build "${argv[@]}" 2>&1 | python "$report_filter"
+fi
+pipe_status=("${PIPESTATUS[@]}")
+child_rc="${pipe_status[0]}"
+filter_rc="${pipe_status[1]:-0}"
+set -e
+if [ "$child_rc" -ne 0 ]; then
+  printf '{"schema_version":"build_guard_summary.v1","error":"child_exit","exit_code":%s}\n' "$child_rc"
+  exit "$child_rc"
+fi
+exit "$filter_rc"

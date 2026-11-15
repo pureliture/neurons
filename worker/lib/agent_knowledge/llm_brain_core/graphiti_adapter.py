@@ -17,7 +17,11 @@ from graphiti_core.local_profile import is_local_embedding_mode
 from ._util import (
     PRIVATE_OUTPUT_RE,
     SECRET_ASSIGNMENT_RE,
+    SafeErrorStep,
+    SafeReasonCode,
+    classify_safe_error_step,
     ensure_public_safe,
+    format_safe_reason_code,
     public_safe_text,
     short_hash,
 )
@@ -436,20 +440,30 @@ class GraphitiNeo4jGraphMemoryAdapter:
         group_id = graph_group_id_for_episode(episode, self._default_group_id)
 
         async def _call() -> UpsertEpisodeResult:
-            await self._ensure_graph_indices()
+            try:
+                await self._ensure_graph_indices()
+            except Exception as exc:
+                _attach_safe_error_step(exc, SafeErrorStep.ENSURE_GRAPH_INDICES.value)
+                raise
             if not self._extract_entities:
                 # episode_id MERGE idempotency: an episode_id already encodes the
                 # content_hash (see OntologyEpisode.from_payload), so a node with
                 # the same uuid is the same content. Treat a re-upsert as a
                 # `duplicate` to stay symmetric with FakeGraphMemoryAdapter, not a
                 # second projected row.
-                if await self._episode_exists(self._graphiti.driver, episode.episode_id):
+                try:
+                    exists = await self._episode_exists(self._graphiti.driver, episode.episode_id)
+                except Exception as exc:
+                    _attach_safe_error_step(exc, SafeErrorStep.EPISODE_EXISTS_CHECK.value)
+                    raise
+                if exists:
                     self._last_write_details = ("graphiti_neo4j", "duplicate")
                     return "duplicate"
                 graphiti_episode = self._build_episodic_node(episode, body, group_id)
                 try:
                     await graphiti_episode.save(self._graphiti.driver)
                 except Exception as exc:
+                    _attach_safe_error_step(exc, SafeErrorStep.EPISODIC_DIRECT_SAVE.value)
                     self._last_write_details = (
                         "graphiti_neo4j",
                         f"direct_write_error:{type(exc).__name__}",
@@ -463,11 +477,16 @@ class GraphitiNeo4jGraphMemoryAdapter:
             # probe specifically for already-extracted Entity/RELATES_TO and treat
             # a hit as `duplicate`, so the entity pass is not re-run (and the LLM
             # not re-billed) for an episode already extracted.
-            if (
-                not self._force_reextract_entities
-                and await self._entity_extracted(self._graphiti.driver, episode.episode_id)
-            ):
-                return "duplicate"
+            if not self._force_reextract_entities:
+                try:
+                    already_extracted = await self._entity_extracted(
+                        self._graphiti.driver, episode.episode_id
+                    )
+                except Exception as exc:
+                    _attach_safe_error_step(exc, SafeErrorStep.ENTITY_EXTRACTED_CHECK.value)
+                    raise
+                if already_extracted:
+                    return "duplicate"
             extraction_body = _extraction_body_for(episode, body)
             # Ensure the episode_id-keyed EpisodicNode exists BEFORE add_episode.
             # Graphiti's add_episode(uuid=episode_id) does get_by_uuid(uuid) first
@@ -477,9 +496,13 @@ class GraphitiNeo4jGraphMemoryAdapter:
             # calling add_episode; otherwise Graphiti re-reads the canonical JSON
             # body and extracts only generic metadata entities. The `finally`
             # restore below puts recall-safe canonical JSON back on the node.
-            await self._build_episodic_node(episode, extraction_body, group_id).save(
-                self._graphiti.driver
-            )
+            try:
+                await self._build_episodic_node(episode, extraction_body, group_id).save(
+                    self._graphiti.driver
+                )
+            except Exception as exc:
+                _attach_safe_error_step(exc, SafeErrorStep.EPISODIC_PRE_SAVE.value)
+                raise
             # Pass uuid=episode_id so Graphiti reuses the existing EpisodicNode
             # (get_by_uuid, now guaranteed present) instead of minting a fresh
             # random uuid. episode_id encodes the content_hash, so the same
@@ -502,9 +525,13 @@ class GraphitiNeo4jGraphMemoryAdapter:
                     uuid=episode.episode_id,
                 )
             finally:
-                await self._build_episodic_node(episode, body, group_id).save(
-                    self._graphiti.driver
-                )
+                try:
+                    await self._build_episodic_node(episode, body, group_id).save(
+                        self._graphiti.driver
+                    )
+                except Exception as restore_exc:
+                    _attach_safe_error_step(restore_exc, SafeErrorStep.EPISODIC_RESTORE.value)
+                    raise
             # Write-time redaction hard gate. Inputs are already public-safe
             # (OntologyEpisode.__post_init__ -> ensure_public_safe), but the LLM
             # entity extractor synthesizes NEW text (EntityNode.name/summary,
@@ -519,7 +546,8 @@ class GraphitiNeo4jGraphMemoryAdapter:
             # never survives in the graph.
             try:
                 _reject_unsafe_extraction(results)
-            except Exception:
+            except Exception as postcheck_exc:
+                _attach_safe_error_step(postcheck_exc, SafeErrorStep.POSTCHECK_REDACTION.value)
                 await _delete_extracted_graph_elements(self._graphiti.driver, results)
                 raise
             return "inserted"
@@ -1448,6 +1476,35 @@ class _ReasoningOpenAIGenericClient(OpenAIGenericClient):
         if callable(with_options):
             self.client = with_options(default_headers=dict(_GRAPHITI_DEFAULT_HEADERS))
 
+    async def generate_response(
+        self,
+        messages: list[Any],
+        response_model: Any = None,
+        max_tokens: int | None = None,
+        model_size: Any = None,
+        group_id: str | None = None,
+        prompt_name: str | None = None,
+        *,
+        attribute_extraction: bool = False,
+    ) -> dict[str, Any]:
+        from graphiti_core.llm_client.config import ModelSize
+
+        resolved_size = ModelSize.medium if model_size is None else model_size
+        try:
+            return await super().generate_response(
+                messages,
+                response_model=response_model,
+                max_tokens=max_tokens,
+                model_size=resolved_size,
+                group_id=group_id,
+                prompt_name=prompt_name,
+                attribute_extraction=attribute_extraction,
+            )
+        except Exception as exc:
+            if prompt_name is not None:
+                _attach_safe_error_step(exc, str(prompt_name))
+            raise
+
     async def _generate_response(self, messages, response_model=None, max_tokens=None, model_size=None):
         import json as _json
 
@@ -1491,7 +1548,7 @@ class _ReasoningOpenAIGenericClient(OpenAIGenericClient):
         except openai.RateLimitError as exc:
             raise RateLimitError from exc
         except Exception as exc:
-            _LOG.error("Error in generating LLM response: %s", exc)
+            _LOG.error("Error in generating LLM response: %s", format_safe_reason_code(exc))
             raise
 
 
@@ -1927,3 +1984,16 @@ def _non_negative_float_env(value: str, *, default: float) -> float:
     except (TypeError, ValueError):
         return default
     return parsed if parsed >= 0 else default
+
+
+def _attach_safe_error_step(exc: BaseException, raw_step: str) -> None:
+    safe_step = classify_safe_error_step(raw_step)
+    if not safe_step:
+        return
+    existing = getattr(exc, "error_step", None)
+    if isinstance(existing, str) and existing.strip():
+        return
+    try:
+        setattr(exc, "error_step", safe_step)
+    except Exception:
+        pass

@@ -24,13 +24,21 @@ import os
 import sys
 from types import SimpleNamespace
 
+from agent_knowledge.pipeline_progress import emit_progress
 from agent_knowledge.rag_ingress.pg_embedding_chunks import (
     INCONSISTENT_HERMES_PROJECT_SCOPE,
+    LOCAL_EMBEDDING_DEAD_LETTER,
     PG_INPUT_POLICY_VERSION,
     TERMINAL_INPUT_REASONS,
 )
 
 BUILD_CLI_SCHEMA_VERSION = "couchdb_session_memory_build.v1"
+
+
+class ProjectionDeadLetterLookupError(RuntimeError):
+    """The local dead-letter state needed for terminal suppression is unavailable."""
+
+
 BUILD_CLI_OPERATION = "couchdb_session_memory_build"
 # Pending debt must not monopolise every cycle: a session that stays pending
 # across this many selections is dropped from the pending set so fresh work can
@@ -81,6 +89,7 @@ def _blocked_source_hash_from_state(
     *,
     embedding_profile: str = "",
     representation: str = "session_v1",
+    dead_letter_lookup=None,
 ) -> str:
     """Return the terminal-failure source hash for a top-level state document.
 
@@ -91,14 +100,47 @@ def _blocked_source_hash_from_state(
     """
     if backend != "postgres_pgvector":
         return ""
-    if _pg_receipt_representation(
-        state, embedding_profile=embedding_profile
-    ) != representation:
-        return ""
     from .document_model import ProjectionStatus
 
     lane = _pg_receipt_lane(embedding_profile)
     attempt = (state.get("projection_attempt") or {}).get(lane) or {}
+    if (
+        lane == "postgres_pgvector_local"
+        and str(attempt.get("status") or "") == ProjectionStatus.FAILED
+        and str(attempt.get("reason") or "") == LOCAL_EMBEDDING_DEAD_LETTER
+        and str(attempt.get("source_hash") or "")
+    ):
+        # A dead letter is terminal only while it still exists for a current
+        # chunk. Requeue/completion must release the block for the same source.
+        from ..model_connectors import LOCAL_EMBEDDING_PROFILE_ID
+
+        session_id_hash = str(state.get("session_id_hash") or "")
+        if not session_id_hash:
+            raise ProjectionDeadLetterLookupError(
+                "local dead-letter state is missing session_id_hash"
+            )
+        if dead_letter_lookup is None:
+            raise ProjectionDeadLetterLookupError(
+                "local dead-letter lookup unavailable"
+            )
+        try:
+            still_blocked = bool(
+                dead_letter_lookup.has_dead_letter_local_outbox_for_session(
+                    session_id_hash=session_id_hash,
+                    profile_id=embedding_profile or LOCAL_EMBEDDING_PROFILE_ID,
+                )
+            )
+        except ProjectionDeadLetterLookupError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - fail closed, but surface explicitly
+            raise ProjectionDeadLetterLookupError(
+                "local dead-letter lookup failed"
+            ) from exc
+        return str(attempt["source_hash"]) if still_blocked else ""
+    if _pg_receipt_representation(
+        state, embedding_profile=embedding_profile
+    ) != representation:
+        return ""
     if (
         attempt.get("policy_version") == PG_INPUT_POLICY_VERSION
         and str(attempt.get("status") or "") == ProjectionStatus.FAILED
@@ -126,6 +168,7 @@ def _select_sessions_needing_projection(
     backend: str = "postgres_pgvector",
     embedding_profile: str = "",
     representation: str = "session_v1",
+    dead_letter_lookup=None,
 ) -> list[dict]:
     """Return sessions whose projected revision is not the current source revision.
 
@@ -176,6 +219,7 @@ def _select_sessions_needing_projection(
                     backend,
                     embedding_profile=embedding_profile,
                     representation=representation,
+                    dead_letter_lookup=dead_letter_lookup,
                 )
                 if blocked:
                     blocked_source_hashes[session_id_hash] = blocked
@@ -398,6 +442,7 @@ def _evaluate_session_change(
     provider: str,
     embedding_profile: str = "",
     representation: str = "session_v1",
+    dead_letter_lookup=None,
 ) -> tuple[bool, dict | None]:
     """Single-session mirror of ``_select_sessions_needing_projection`` (pg backend).
 
@@ -428,6 +473,7 @@ def _evaluate_session_change(
             "postgres_pgvector",
             embedding_profile=embedding_profile,
             representation=representation,
+            dead_letter_lookup=dead_letter_lookup,
         )
         merged = {
             **state,
@@ -505,6 +551,7 @@ def _select_sessions_incremental(
     backend: str = "postgres_pgvector",
     embedding_profile: str = "",
     representation: str = "session_v1",
+    dead_letter_lookup=None,
 ) -> tuple[list[dict], dict, int]:
     """Change-feed driven selection.
 
@@ -561,6 +608,7 @@ def _select_sessions_incremental(
             provider=provider,
             embedding_profile=embedding_profile,
             representation=representation,
+            dead_letter_lookup=dead_letter_lookup,
         )
         if needs and session is not None:
             selected.append(session)
@@ -625,6 +673,7 @@ def _resolve_pending_sessions(
     provider: str,
     embedding_profile: str = "",
     representation: str = "session_v1",
+    dead_letter_lookup=None,
 ) -> list[dict]:
     """Re-select previously chosen sessions whose projection is still unfinished.
 
@@ -646,7 +695,10 @@ def _resolve_pending_sessions(
                 provider=provider,
                 embedding_profile=embedding_profile,
                 representation=representation,
+                dead_letter_lookup=dead_letter_lookup,
             )
+        except ProjectionDeadLetterLookupError:
+            raise
         except Exception:  # noqa: BLE001 - a read failure must not discard pending work
             still_pending.append({"session_id_hash": session_id_hash})
             continue
@@ -665,6 +717,7 @@ def _select_sessions_for_cycle(
     mode: str,
     embedding_profile: str = "",
     representation: str = "session_v1",
+    dead_letter_lookup=None,
     persist: bool = True,
 ) -> list[dict]:
     """Checkpoint-aware selection: incremental when possible, full walk otherwise.
@@ -733,6 +786,7 @@ def _select_sessions_for_cycle(
         provider=provider,
         embedding_profile=embedding_profile,
         representation=representation,
+        dead_letter_lookup=dead_letter_lookup,
     )
     pending_attempts = dict(checkpoint.get("pending_session_attempts") or {})
     pending_sessions, pending_attempts, dropped_pending = _apply_pending_attempt_cap(
@@ -766,7 +820,10 @@ def _select_sessions_for_cycle(
                 backend=backend,
                 embedding_profile=embedding_profile,
                 representation=representation,
+                dead_letter_lookup=dead_letter_lookup,
             )
+        except ProjectionDeadLetterLookupError:
+            raise
         except Exception as exc:  # noqa: BLE001 - fail-safe fallback to the full walk
             print(
                 f"[selection] incremental fallback ({type(exc).__name__})",
@@ -806,6 +863,7 @@ def _select_sessions_for_cycle(
             backend=backend,
             embedding_profile=embedding_profile,
             representation=representation,
+            dead_letter_lookup=dead_letter_lookup,
         )
         sessions = _dedupe_sessions(processed_pending + fresh)
         capped = fresh_limit is not None and fresh_limit > 0 and len(fresh) >= fresh_limit
@@ -977,7 +1035,32 @@ def main(argv: list[str] | None = None) -> int:
         except (ValueError, KeyError, TypeError):
             embedding_profile = ""
 
+    dead_letter_lookup = None
+    if backend == "postgres_pgvector":
+        try:
+            dead_letter_lookup = _build_pg_dead_letter_lookup(os.environ)
+        except Exception:
+            print(
+                json.dumps(
+                    {
+                        "schema_version": BUILD_CLI_SCHEMA_VERSION,
+                        "error": "dead_letter_lookup_unavailable",
+                        "reason": "local dead-letter lookup could not be constructed",
+                        "dry_run": bool(args.dry_run),
+                        "selected": 0,
+                        "projected": 0,
+                        "failed": 0,
+                        "skipped": 0,
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 2
+
     # --- Session selection --------------------------------------------------
+    # A single start marker lets the checker distinguish an instrumented image
+    # from one that predates progress events; it is not a repeated heartbeat.
+    emit_progress("selection", 0, 0)
     explicit_session_ids = _explicit_session_ids(args.session_id_hashes)
     if explicit_session_ids is None:
         print(
@@ -997,24 +1080,47 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 2
-    if explicit_session_ids:
-        # Event-driven path: the caller already knows which sessions changed.
-        # The selection checkpoint is neither read nor written here; the
-        # regular cycle stays its single writer.
-        sessions = [{"session_id_hash": value} for value in explicit_session_ids]
-    else:
-        sessions = _select_sessions_for_cycle(
-            store,
-            limit=args.limit,
-            project=str(args.project or ""),
-            provider=str(args.provider or ""),
-            backend=backend,
-            mode=os.environ.get("SESSION_MEMORY_SELECTION_MODE", "auto"),
-            embedding_profile=embedding_profile,
-            representation=representation,
-            persist=not args.dry_run,
+    try:
+        if explicit_session_ids:
+            # Event-driven path: the caller already knows which sessions changed.
+            # The selection checkpoint is neither read nor written here; the
+            # regular cycle stays its single writer.
+            sessions = [{"session_id_hash": value} for value in explicit_session_ids]
+        else:
+            sessions = _select_sessions_for_cycle(
+                store,
+                limit=args.limit,
+                project=str(args.project or ""),
+                provider=str(args.provider or ""),
+                backend=backend,
+                mode=os.environ.get("SESSION_MEMORY_SELECTION_MODE", "auto"),
+                embedding_profile=embedding_profile,
+                representation=representation,
+                dead_letter_lookup=dead_letter_lookup,
+                persist=not args.dry_run,
+            )
+    except ProjectionDeadLetterLookupError as exc:
+        print(
+            json.dumps(
+                {
+                    "schema_version": BUILD_CLI_SCHEMA_VERSION,
+                    "error": "dead_letter_lookup_unavailable",
+                    "reason": str(exc),
+                    "dry_run": bool(args.dry_run),
+                    "selected": 0,
+                    "projected": 0,
+                    "failed": 0,
+                    "skipped": 0,
+                },
+                sort_keys=True,
+            )
         )
+        return 2
+    finally:
+        _close_if_supported(dead_letter_lookup)
     selected_count = len(sessions)
+    if not args.dry_run:
+        emit_progress("selection", selected_count, selected_count)
 
     if args.dry_run:
         print(
@@ -1113,7 +1219,7 @@ def main(argv: list[str] | None = None) -> int:
     session_reports: list[dict] = []
 
     try:
-        for session in sessions:
+        for index, session in enumerate(sessions):
             session_id_hash = str(session.get("session_id_hash") or "")
             if not session_id_hash:
                 skipped += 1
@@ -1127,6 +1233,7 @@ def main(argv: list[str] | None = None) -> int:
                     store=store,
                     projector=projector,
                     backend=backend,
+                    progress_callback=emit_progress,
                 )
                 projection = result.get("projection") or {}
                 status = str(projection.get("status") or "")
@@ -1161,6 +1268,7 @@ def main(argv: list[str] | None = None) -> int:
             segments_total += int(getattr(projector, "last_segments_total", 0) or 0)
             segments_reused += int(getattr(projector, "last_segments_reused", 0) or 0)
             segments_embedded += int(getattr(projector, "last_segments_embedded", 0) or 0)
+            emit_progress("projection", index + 1, selected_count)
     finally:
         _close_if_supported(projector)
 
@@ -1214,6 +1322,22 @@ def _close_if_supported(resource) -> None:
         return
 
 
+def _build_pg_dead_letter_lookup(environ):
+    dsn = (
+        environ.get("NEURON_LBRAIN_PGVECTOR_DSN", "")
+        or environ.get("LLM_BRAIN_PGVECTOR_DSN", "")
+        or environ.get("NEURON_LEDGER_PG_DSN", "")
+    )
+    if not dsn:
+        return None
+    from ..postgres_store.pgvector_store import PgVectorStore
+
+    return PgVectorStore(
+        dsn=dsn,
+        pgvector_version=environ.get("LLM_BRAIN_PGVECTOR_VERSION", "0.8.0"),
+    )
+
+
 def _build_pg_projector(environ):
     dsn = (
         environ.get("NEURON_LBRAIN_PGVECTOR_DSN", "")
@@ -1228,7 +1352,7 @@ def _build_pg_projector(environ):
     from ..rag_ingress.pg_embedding_chunks import BoundedPgEmbedding
 
     store = PgVectorStore(dsn=dsn, pgvector_version=environ.get("LLM_BRAIN_PGVECTOR_VERSION", "0.8.0"))
-    provider = build_openai_embedding_provider(environ=environ)
+    provider = build_openai_embedding_provider(environ=environ, progress_callback=emit_progress)
     try:
         chunks = BoundedPgEmbedding(
             provider,

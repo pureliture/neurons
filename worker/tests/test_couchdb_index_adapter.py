@@ -604,7 +604,7 @@ class TestErrorPropagation:
             def get(self, doc_id):
                 return None
 
-            def find_by_session(self, *, session_id_hash, doc_type=""):
+            def find_by_session(self, *, session_id_hash, doc_type="", progress_callback=None):
                 return []
 
             def delete(self, doc_id):

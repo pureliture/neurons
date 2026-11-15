@@ -2243,3 +2243,90 @@ def test_edge_to_ontology_maps_legacy_memory_card_authority_sources():
     assert len(auth_sources) == 1
     assert auth_sources[0]["authority_memory_id"] == "mem_steward_legacy_123"
     assert auth_sources[0]["content_hash"] == legacy_card_ep.content_hash
+
+
+def test_reasoning_openai_generic_client_attaches_closed_error_step_on_http400(caplog):
+    import httpx
+    import openai
+    from graphiti_core.llm_client.config import LLMConfig
+    from graphiti_core.prompts.extract_edges import ExtractedEdges
+    from graphiti_core.prompts.models import Message
+    from agent_knowledge.public_safe_util import ensure_public_safe, extract_safe_error_diagnostics
+
+    def _failing_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            request=request,
+            json={
+                "error": {
+                    "message": "Rejected at /Users/alice/secret Bearer sk-topsecret999",
+                    "type": "invalid_request_error",
+                    "param": "response_format.json_schema.schema",
+                    "code": None,
+                }
+            },
+        )
+
+    async def _run() -> tuple[dict, dict, str]:
+        http_client = httpx.AsyncClient(transport=httpx.MockTransport(_failing_handler))
+        try:
+            oa_client = openai.AsyncOpenAI(
+                api_key="synth-placeholder",
+                base_url="https://llm.example.invalid/v1",
+                http_client=http_client,
+            )
+            llm = _ReasoningOpenAIGenericClient(
+                config=LLMConfig(
+                    api_key="synth-placeholder",
+                    model="deepseek-v4.1-flash",
+                    base_url="https://llm.example.invalid/v1",
+                ),
+                client=oa_client,
+            )
+            mode_preserved = llm.structured_output_mode
+            with pytest.raises(openai.BadRequestError) as exc_known:
+                await llm.generate_response(
+                    [
+                        Message(role="system", content="Extract edges."),
+                        Message(role="user", content="Synthetic entity relationship."),
+                    ],
+                    response_model=ExtractedEdges,
+                    group_id="brain_neurons",
+                    prompt_name="extract_edges.edge",
+                )
+            with pytest.raises(openai.BadRequestError) as exc_poisoned:
+                await llm.generate_response(
+                    [
+                        Message(role="system", content="Extract edges."),
+                        Message(role="user", content="Synthetic entity relationship."),
+                    ],
+                    response_model=ExtractedEdges,
+                    group_id="brain_neurons",
+                    prompt_name="custom_step:/Users/alice/secret",
+                )
+            return (
+                extract_safe_error_diagnostics(exc_known.value),
+                extract_safe_error_diagnostics(exc_poisoned.value),
+                mode_preserved,
+            )
+        finally:
+            await http_client.aclose()
+
+    with caplog.at_level("ERROR"):
+        diag_known, diag_poisoned, mode_preserved = asyncio.run(_run())
+    ensure_public_safe(diag_known, field="diag_known")
+    ensure_public_safe(diag_poisoned, field="diag_poisoned")
+    for rec in caplog.records:
+        assert "/Users/alice" not in rec.getMessage()
+        assert "sk-topsecret999" not in rec.getMessage()
+    assert mode_preserved == "json_schema"
+    assert diag_known == {
+        "error_class": "BadRequestError",
+        "http_status": 400,
+        "error_type": "invalid_request_error",
+        "error_param": "response_format.json_schema.schema",
+        "error_step": "extract_edges.edge",
+        "reason_code": "BadRequestError:http_400:invalid_request_error",
+    }
+    assert diag_poisoned["error_step"] == "unknown_error_step"
+    assert diag_poisoned["error_param"] == "response_format.json_schema.schema"

@@ -471,7 +471,6 @@ class PgSessionMemoryProjector:
         from ..postgres_store.pgvector_store import SessionChunk
         from ..session_memory.segments import build_segments
         from ..couchdb_source.document_model import sha256_hash
-        from .pg_embedding_chunks import EmbeddingChunksPending
         from .pg_representation import build_local_segment_receipt_v4
 
         if getattr(self._embed, "size", 0) != LOCAL_EMBEDDING_DIM:
@@ -575,7 +574,11 @@ class PgSessionMemoryProjector:
                 or local_row.get("vector") is None
                 or len(local_row["vector"]) != LOCAL_EMBEDDING_DIM
             ):
-                raise EmbeddingChunksPending()
+                self._raise_local_pending_or_terminal(
+                    target_id=segment.segment_id,
+                    content_hash=segment.content_hash,
+                    input_hash=compute_input_hash(segment.text),
+                )
 
         self.last_segments_embedded = len(pending_ids)
         digest = sha256_hash(json.dumps(segment_ids, ensure_ascii=False, separators=(",", ":")))
@@ -593,6 +596,41 @@ class PgSessionMemoryProjector:
             segment_set_digest=digest,
         )
         return segment_ids[0]
+
+    def _raise_local_pending_or_terminal(
+        self,
+        *,
+        target_id: str,
+        content_hash: str,
+        input_hash: str,
+    ) -> None:
+        """Classify a non-ready local row without turning a dead letter into pending.
+
+        A dead-lettered job is terminal for the current source until an operator
+        requeues it. A missing lookup is a programming/config error and is
+        surfaced instead of being silently downgraded to pending.
+        """
+        from .pg_embedding_chunks import (
+            EmbeddingChunksPending,
+            LocalEmbeddingTerminalFailure,
+        )
+
+        checker = getattr(self._store, "has_dead_letter_local_outbox", None)
+        if checker is None:
+            raise RuntimeError("local dead-letter lookup unavailable")
+        terminal = bool(
+            checker(
+                target_type="session_chunk",
+                target_id=target_id,
+                profile_id=LOCAL_EMBEDDING_PROFILE_ID,
+                source_content_hash=content_hash,
+                input_hash=input_hash,
+            )
+        )
+        self.last_local_representation_receipt = None
+        if terminal:
+            raise LocalEmbeddingTerminalFailure()
+        raise EmbeddingChunksPending()
 
     def _project_local_profile(
         self,
@@ -815,10 +853,11 @@ class PgSessionMemoryProjector:
             or local_row.get("source_content_hash") != content_hash
             or local_row.get("input_hash") != input_hash
         ):
-            from .pg_embedding_chunks import EmbeddingChunksPending
-
-            self.last_local_representation_receipt = None
-            raise EmbeddingChunksPending()
+            self._raise_local_pending_or_terminal(
+                target_id=chosen_id,
+                content_hash=content_hash,
+                input_hash=input_hash,
+            )
 
         self.last_local_identity_scheme = identity_scheme
         if source_hash:

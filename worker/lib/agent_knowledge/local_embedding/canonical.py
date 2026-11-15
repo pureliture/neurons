@@ -7,7 +7,8 @@ import hashlib
 import json
 import math
 import struct
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from itertools import chain
 from dataclasses import dataclass
 from typing import Any
 
@@ -64,6 +65,68 @@ def compute_input_hash(text: str) -> str:
     return "sha256:" + hashlib.sha256(raw_bytes).hexdigest()
 
 
+def iter_utf8_chunks_v1(
+    text: str,
+    *,
+    max_chunk_bytes: int = LOCAL_MODEL2VEC_MAX_CHUNK_BYTES,
+) -> Iterator[str]:
+    """Yield the exact `split_utf8_chunks_v1` chunks without materializing all bytes.
+
+    Window size is `max_chunk_bytes + 1` characters (at most
+    ``4 * max_chunk_bytes`` UTF-8 bytes), so peak extra memory stays bounded by
+    one window plus the carried remainder. The byte-prefix boundaries, UTF-8
+    back-off, and error codes are identical to the list-building version.
+    """
+
+    if not isinstance(text, str):
+        raise CanonicalEmbeddingInputError("invalid_type", "embedding input must be a string")
+    if text == "":
+        raise CanonicalEmbeddingInputError("empty_input", "embedding input must not be empty")
+    if max_chunk_bytes < 4:
+        raise CanonicalEmbeddingInputError("invalid_chunk_limit", "max_chunk_bytes must be >= 4")
+
+    total_chars = len(text)
+    char_offset = 0
+    carry = b""
+    while True:
+        more_source = char_offset < total_chars
+        if more_source:
+            # One extra character provides the look-ahead byte needed to detect
+            # a UTF-8 continuation at the cut, matching the byte-slice version.
+            window = text[char_offset:char_offset + max_chunk_bytes + 1]
+            char_offset += len(window)
+            try:
+                data = carry + window.encode("utf-8", errors="strict")
+            except UnicodeEncodeError as exc:
+                raise CanonicalEmbeddingInputError(
+                    "invalid_utf8", "embedding input is not valid UTF-8"
+                ) from exc
+            more_source = char_offset < total_chars
+        else:
+            data = carry
+
+        # Drain every complete chunk from this window so the carry cannot grow
+        # across iterations (bounded by one window plus one partial chunk).
+        while len(data) > max_chunk_bytes:
+            end = max_chunk_bytes
+            # Back up if the cut lands on a UTF-8 continuation byte (0b10xxxxxx).
+            while end > 0 and (data[end] & 0xC0) == 0x80:
+                end -= 1
+            if end <= 0:
+                raise CanonicalEmbeddingInputError(
+                    "utf8_boundary_error",
+                    "unable to advance UTF-8 chunk boundary",
+                )
+            yield data[:end].decode("utf-8", errors="strict")
+            data = data[end:]
+
+        if not more_source:
+            if data:
+                yield data.decode("utf-8", errors="strict")
+            return
+        carry = data
+
+
 def split_utf8_chunks_v1(
     text: str,
     *,
@@ -75,36 +138,7 @@ def split_utf8_chunks_v1(
     Multi-byte UTF-8 codepoint boundaries are strictly preserved.
     """
 
-    if not isinstance(text, str):
-        raise CanonicalEmbeddingInputError("invalid_type", "embedding input must be a string")
-    if text == "":
-        raise CanonicalEmbeddingInputError("empty_input", "embedding input must not be empty")
-    if max_chunk_bytes < 4:
-        raise CanonicalEmbeddingInputError("invalid_chunk_limit", "max_chunk_bytes must be >= 4")
-    try:
-        raw = text.encode("utf-8", errors="strict")
-    except UnicodeEncodeError as exc:
-        raise CanonicalEmbeddingInputError("invalid_utf8", "embedding input is not valid UTF-8") from exc
-
-    total = len(raw)
-    chunks: list[str] = []
-    offset = 0
-    while offset < total:
-        end = min(offset + max_chunk_bytes, total)
-        if end < total:
-            # Back up if `end` lands on a UTF-8 continuation byte (0b10xxxxxx).
-            while end > offset and (raw[end] & 0xC0) == 0x80:
-                end -= 1
-        if end <= offset:
-            raise CanonicalEmbeddingInputError(
-                "utf8_boundary_error",
-                "unable to advance UTF-8 chunk boundary",
-            )
-        chunk_str = raw[offset:end].decode("utf-8", errors="strict")
-        chunks.append(chunk_str)
-        offset = end
-
-    return tuple(chunks)
+    return tuple(iter_utf8_chunks_v1(text, max_chunk_bytes=max_chunk_bytes))
 
 
 def prepare_canonical_input_v1(
@@ -216,8 +250,8 @@ def serialize_embedding_request_body(
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
 
 
-def plan_request_batches_v1(
-    chunks: Sequence[str],
+def iter_request_batches_v1(
+    chunks: Iterable[str],
     *,
     model: str = LOCAL_MODEL2VEC_MODEL_ALIAS,
     encoding_format: str | None = "float",
@@ -226,17 +260,19 @@ def plan_request_batches_v1(
     max_batch_items: int = LOCAL_MODEL2VEC_MAX_BATCH_ITEMS,
     max_batch_utf8_bytes: int = LOCAL_MODEL2VEC_MAX_BATCH_UTF8_BYTES,
     max_request_body_bytes: int = LOCAL_MODEL2VEC_MAX_REQUEST_BODY_BYTES,
-) -> list[list[str]]:
-    """Split ``chunks`` in order into request batches respecting item, UTF-8, and JSON body limits."""
+) -> Iterator[list[str]]:
+    """Yield ``plan_request_batches_v1`` batches in order from a chunk stream."""
 
-    if not chunks:
-        raise CanonicalEmbeddingInputError("empty_chunks", "at least one chunk is required")
+    iterator = iter(chunks)
+    try:
+        first = next(iterator)
+    except StopIteration:
+        raise CanonicalEmbeddingInputError("empty_chunks", "at least one chunk is required") from None
 
-    batches: list[list[str]] = []
     current_batch: list[str] = []
     current_utf8_bytes = 0
 
-    for chunk in chunks:
+    for chunk in chain((first,), iterator):
         if not isinstance(chunk, str) or chunk == "":
             raise CanonicalEmbeddingInputError("invalid_chunk", "chunk must be a non-empty string")
         chunk_bytes = len(chunk.encode("utf-8", errors="strict"))
@@ -280,13 +316,39 @@ def plan_request_batches_v1(
             current_batch = candidate_batch
             current_utf8_bytes = candidate_utf8_bytes
         else:
-            batches.append(current_batch)
+            yield current_batch
             current_batch = [chunk]
             current_utf8_bytes = chunk_bytes
 
     if current_batch:
-        batches.append(current_batch)
-    return batches
+        yield current_batch
+
+
+def plan_request_batches_v1(
+    chunks: Sequence[str],
+    *,
+    model: str = LOCAL_MODEL2VEC_MODEL_ALIAS,
+    encoding_format: str | None = "float",
+    dimensions: int | None = LOCAL_MODEL2VEC_DIMENSIONS,
+    max_chunk_bytes: int = LOCAL_MODEL2VEC_MAX_CHUNK_BYTES,
+    max_batch_items: int = LOCAL_MODEL2VEC_MAX_BATCH_ITEMS,
+    max_batch_utf8_bytes: int = LOCAL_MODEL2VEC_MAX_BATCH_UTF8_BYTES,
+    max_request_body_bytes: int = LOCAL_MODEL2VEC_MAX_REQUEST_BODY_BYTES,
+) -> list[list[str]]:
+    """Split ``chunks`` in order into request batches respecting item, UTF-8, and JSON body limits."""
+
+    return list(
+        iter_request_batches_v1(
+            chunks,
+            model=model,
+            encoding_format=encoding_format,
+            dimensions=dimensions,
+            max_chunk_bytes=max_chunk_bytes,
+            max_batch_items=max_batch_items,
+            max_batch_utf8_bytes=max_batch_utf8_bytes,
+            max_request_body_bytes=max_request_body_bytes,
+        )
+    )
 
 
 def card_input_v1(
