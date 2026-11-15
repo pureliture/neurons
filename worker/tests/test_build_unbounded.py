@@ -8,7 +8,9 @@ from __future__ import annotations
 import json
 import os
 import select
+import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -17,6 +19,25 @@ import pytest
 
 WORKER = Path(__file__).resolve().parents[1]
 SCRIPT = WORKER / "deploy/session-memory/build-once.sh"
+
+
+def _resolve_real_py(
+    *,
+    executable: str | None = None,
+    which_python3=shutil.which,
+    env_python: str | None = None,
+) -> str:
+    """Resolve a portable Python 3 interpreter (`sys.executable` -> `which('python3')` -> hard fail)."""
+    candidates = [
+        env_python if env_python is not None else os.environ.get("PYTHON", ""),
+        sys.executable if executable is None else executable,
+        which_python3("python3") or "",
+    ]
+    for cand in candidates:
+        token = str(cand or "").strip()
+        if token and Path(token).is_file() and os.access(token, os.X_OK):
+            return token
+    pytest.fail("No executable python3 interpreter available for REAL_PY (sys.executable and python3 missing)")
 
 
 def _fake_bin(tmp_path: Path) -> Path:
@@ -52,7 +73,11 @@ if [ "${1:-}" = "-m" ] && [ "${2:-}" = "agent_knowledge.cli" ]; then
        exit "${FAKE_RC:-0}" ;;
   esac
 fi
-exec "${REAL_PY:-/usr/bin/python3}" "$@"
+if [ -z "${REAL_PY:-}" ] || [ ! -x "${REAL_PY}" ]; then
+  echo "REAL_PY missing or not executable: ${REAL_PY:-<unset>}" >&2
+  exit 127
+fi
+exec "${REAL_PY}" "$@"
 """,
         encoding="utf-8",
     )
@@ -73,13 +98,14 @@ exec "$@"
 def _env(tmp_path: Path, **overrides: str) -> dict[str, str]:
     app = tmp_path / "app"
     app.mkdir(exist_ok=True)
+    real_py = _resolve_real_py()
     env = {
         "PATH": f"{_fake_bin(tmp_path)}:{os.environ.get('PATH','')}",
         "SESSION_MEMORY_APP_DIR": str(app),
         "PY_LOG": str(tmp_path / "py.log"),
         "TIMEOUT_LOG": str(tmp_path / "timeout.log"),
         "TMPDIR": str(tmp_path),
-        "REAL_PY": os.environ.get("PYTHON", "/usr/bin/python3"),
+        "REAL_PY": real_py,
     }
     env.update({key: str(value) for key, value in overrides.items()})
     return env
@@ -401,3 +427,22 @@ def test_entrypoint_no_updates_emits_no_progress_and_exits_zero(tmp_path):
     assert summary["status"] == "ok"
     assert summary["selected"] == 0 and summary["projected"] == 0
     assert not list(tmp_path.glob("session-memory-*"))
+
+
+def test_real_py_portability_without_system_usr_bin_python3(tmp_path):
+    """Ensure REAL_PY works in uv-only agent containers lacking /usr/bin/python3 and hard-fails if none exist."""
+    symlink_py = tmp_path / "uv-only-python"
+    symlink_py.symlink_to(Path(sys.executable))
+    # Minimal PATH without /usr/bin/python3 still succeeds via sys.executable / symlink
+    resolved = _resolve_real_py(executable=str(symlink_py), which_python3=lambda _name: None, env_python="")
+    assert resolved == str(symlink_py)
+
+    fallback = _resolve_real_py(executable="", which_python3=lambda _name: str(symlink_py), env_python="")
+    assert fallback == str(symlink_py)
+
+    with pytest.raises(pytest.fail.Exception):
+        _resolve_real_py(executable="/nonexistent/python", which_python3=lambda _name: None, env_python="")
+
+    env = _env(tmp_path, REAL_PY=str(symlink_py))
+    result = _run(env)
+    assert result.returncode == 0, result.stderr
