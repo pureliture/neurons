@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import inspect
 import logging
 import os
 import threading
+import urllib.parse
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Callable
 
 from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
@@ -17,10 +20,13 @@ from graphiti_core.local_profile import is_local_embedding_mode
 from ._util import (
     PRIVATE_OUTPUT_RE,
     SECRET_ASSIGNMENT_RE,
+    SafeErrorCode,
+    SafeErrorParam,
     SafeErrorStep,
     SafeReasonCode,
     classify_safe_error_step,
     ensure_public_safe,
+    extract_safe_error_diagnostics,
     format_safe_reason_code,
     public_safe_text,
     short_hash,
@@ -54,6 +60,12 @@ from ..model_connectors.embedding_cache import (
 )
 from ..model_connectors.env import DEFAULT_EMBEDDING_DIM, DEFAULT_EMBEDDING_MODEL
 from ..model_connectors.policy import validate_local_embedding_write_or_query_policy
+from ..model_connectors.session_headers import (
+    OPENCODE_CANONICAL_OPENAI_PATH,
+    is_opencode_base_url,
+    normalize_opencode_openai_base_url,
+    opencode_session_headers,
+)
 from .local_graph_safety import record_embedding_deletion_tombstone
 
 _SYNTHETIC_CANARY_PROVIDER = "lbrain-temporal-canary"
@@ -67,7 +79,20 @@ _MAX_EDGE_PROVENANCE_LOOKUPS_IN_FLIGHT = 8
 DEFAULT_GRAPH_READ_TIMEOUT_SECONDS = 30.0
 DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS = 300.0
 DEFAULT_GRAPH_INDEX_ONLINE_TIMEOUT_SECONDS = 60.0
+DEFAULT_PREVIOUS_EPISODE_MAX_BYTES = 4096
+DEFAULT_PREVIOUS_EPISODES_TOTAL_MAX_BYTES = 32768
+DEFAULT_SEARCH_MAX_EPISODES = 100
+DEFAULT_SEARCH_MAX_EPISODE_BYTES = 1024 * 1024
+DEFAULT_SEARCH_SESSION_EPISODE_LIMIT = 20
+_OVERSIZED_SESSION_CONTENT_CHARS = 65536
 _ALLOWED_LLM_REASONING_EFFORTS = frozenset({"high", "medium", "low", "none"})
+_ALLOWED_STRUCTURED_OUTPUT_MODES = frozenset({"auto", "json_schema", "json_object"})
+_ACTIVE_EXTRACTION_PREVIOUS_EPISODES: contextvars.ContextVar[list[Any] | None] = (
+    contextvars.ContextVar("_ACTIVE_EXTRACTION_PREVIOUS_EPISODES", default=None)
+)
+_ACTIVE_PROMPT_NAME: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "_ACTIVE_PROMPT_NAME", default=""
+)
 _GEMINI_LLM_FORBIDDEN_MESSAGE = (
     "Gemini LLM models are forbidden for Graphiti semantic extraction; "
     "use Gemma-4 MaaS or an Ollama model instead. Gemini embeddings remain allowed."
@@ -147,7 +172,11 @@ class GraphitiNeo4jConfig:
     fallback_attempt_timeout_seconds: float = 0.0
     read_timeout_seconds: float = DEFAULT_GRAPH_READ_TIMEOUT_SECONDS
     write_timeout_seconds: float = DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS
-
+    structured_output_mode: str = "auto"
+    previous_episode_max_bytes: int = DEFAULT_PREVIOUS_EPISODE_MAX_BYTES
+    previous_episodes_total_max_bytes: int = DEFAULT_PREVIOUS_EPISODES_TOTAL_MAX_BYTES
+    search_max_episodes: int = DEFAULT_SEARCH_MAX_EPISODES
+    search_max_episode_bytes: int = DEFAULT_SEARCH_MAX_EPISODE_BYTES
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> "GraphitiNeo4jConfig":
         env = environ or os.environ
@@ -234,7 +263,9 @@ class GraphitiNeo4jConfig:
             llm_reasoning_effort=_llm_reasoning_effort_env(
                 env.get("LLM_BRAIN_LLM_REASONING_EFFORT", "")
             ),
-            llm_base_url=env.get("LLM_BRAIN_LLM_BASE_URL", env.get("OPENAI_BASE_URL", "")),
+            llm_base_url=normalize_opencode_openai_base_url(
+                env.get("LLM_BRAIN_LLM_BASE_URL", env.get("OPENAI_BASE_URL", ""))
+            ),
             llm_api_key=env.get("LLM_BRAIN_LLM_API_KEY", env.get("OPENAI_API_KEY", "")),
             embedding_provider=embedding_provider,
             embedding_model=embedding_model,
@@ -273,7 +304,43 @@ class GraphitiNeo4jConfig:
                 env.get("LLM_BRAIN_GRAPH_WRITE_TIMEOUT_SECONDS", ""),
                 default=DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS,
             ),
+            structured_output_mode=_structured_output_mode_env(
+                env.get("LLM_BRAIN_LLM_STRUCTURED_OUTPUT_MODE", "auto")
+            ),
+            previous_episode_max_bytes=_positive_int_env(
+                env.get("LLM_BRAIN_GRAPH_PREVIOUS_EPISODE_MAX_BYTES", ""),
+                default=DEFAULT_PREVIOUS_EPISODE_MAX_BYTES,
+            ),
+            previous_episodes_total_max_bytes=_positive_int_env(
+                env.get("LLM_BRAIN_GRAPH_PREVIOUS_EPISODES_TOTAL_MAX_BYTES", ""),
+                default=DEFAULT_PREVIOUS_EPISODES_TOTAL_MAX_BYTES,
+            ),
+            search_max_episodes=_positive_int_env(
+                env.get("LLM_BRAIN_GRAPH_SEARCH_MAX_EPISODES", ""),
+                default=DEFAULT_SEARCH_MAX_EPISODES,
+            ),
+            search_max_episode_bytes=_positive_int_env(
+                env.get("LLM_BRAIN_GRAPH_SEARCH_MAX_EPISODE_BYTES", ""),
+                default=DEFAULT_SEARCH_MAX_EPISODE_BYTES,
+            ),
         )
+
+    def safe_llm_endpoint_posture(self) -> dict[str, bool]:
+        """Return closed boolean posture flags without exposing raw URLs or secrets."""
+
+        normalized = normalize_opencode_openai_base_url(self.llm_base_url)
+        opencode_host = is_opencode_base_url(normalized)
+        parsed_path = (urllib.parse.urlparse(normalized).path or "").rstrip("/") if normalized else ""
+        return {
+            "base_url_configured": bool(str(self.llm_base_url or "").strip()),
+            "is_opencode_host": opencode_host,
+            "uses_canonical_opencode_inference_path": bool(
+                opencode_host and parsed_path == OPENCODE_CANONICAL_OPENAI_PATH
+            ),
+            "opencode_session_header_enabled": bool(
+                opencode_session_headers(normalized, session_id="neurons-graphiti")
+            ),
+        }
 
 
 class GraphitiNeo4jGraphMemoryAdapter:
@@ -302,10 +369,23 @@ class GraphitiNeo4jGraphMemoryAdapter:
         write_timeout_seconds: float = DEFAULT_GRAPH_WRITE_TIMEOUT_SECONDS,
         runner: "_AsyncLoopRunner | None" = None,
         index_online_timeout_seconds: float = DEFAULT_GRAPH_INDEX_ONLINE_TIMEOUT_SECONDS,
+        previous_episode_max_bytes: int = DEFAULT_PREVIOUS_EPISODE_MAX_BYTES,
+        previous_episodes_total_max_bytes: int = DEFAULT_PREVIOUS_EPISODES_TOTAL_MAX_BYTES,
+        search_max_episodes: int = DEFAULT_SEARCH_MAX_EPISODES,
+        search_max_episode_bytes: int = DEFAULT_SEARCH_MAX_EPISODE_BYTES,
     ) -> None:
         self._graphiti = graphiti
         self._fallback_graphiti = fallback_graphiti
         self._default_group_id = default_group_id
+        self._previous_episode_max_bytes = max(256, int(previous_episode_max_bytes))
+        self._previous_episodes_total_max_bytes = max(
+            self._previous_episode_max_bytes, int(previous_episodes_total_max_bytes)
+        )
+        self._search_max_episodes = max(1, int(search_max_episodes))
+        self._search_max_episode_bytes = max(16384, int(search_max_episode_bytes))
+        _install_extraction_retrieve_episodes_hook(self._graphiti)
+        if self._fallback_graphiti is not None:
+            _install_extraction_retrieve_episodes_hook(self._fallback_graphiti)
         self._extract_entities = extract_entities
         self._force_reextract_entities = force_reextract_entities
         self._primary_attempts = max(1, int(primary_attempts))
@@ -358,6 +438,10 @@ class GraphitiNeo4jGraphMemoryAdapter:
             fallback_attempt_timeout_seconds=config.fallback_attempt_timeout_seconds,
             read_timeout_seconds=config.read_timeout_seconds,
             write_timeout_seconds=config.write_timeout_seconds,
+            previous_episode_max_bytes=config.previous_episode_max_bytes,
+            previous_episodes_total_max_bytes=config.previous_episodes_total_max_bytes,
+            search_max_episodes=config.search_max_episodes,
+            search_max_episode_bytes=config.search_max_episode_bytes,
         )
 
     @classmethod
@@ -514,17 +598,39 @@ class GraphitiNeo4jGraphMemoryAdapter:
             # that node (uuid=episode_id) and only runs the entity pass over
             # episode_body, so the stored content stays JSON while extraction sees
             # prose. `source` stays json: the ensure-saved content is JSON.
+            ref_dt = _parse_datetime(episode.reference_time)
+            bounded_prev_episodes: list[Any] | None = None
+            retrieve_fn = getattr(self._graphiti, "retrieve_episodes", None)
+            if callable(retrieve_fn):
+                try:
+                    raw_prev = await retrieve_fn(
+                        reference_time=ref_dt,
+                        last_n=11,
+                        group_ids=[group_id] if group_id else None,
+                        source=_episode_type_json(),
+                    )
+                except TypeError:
+                    raw_prev = None
+                if raw_prev is not None:
+                    bounded_prev_episodes, _ = build_bounded_previous_episodes_prompt_view(
+                        list(raw_prev),
+                        current_episode_uuid=episode.episode_id,
+                        per_episode_max_bytes=self._previous_episode_max_bytes,
+                        total_max_bytes=self._previous_episodes_total_max_bytes,
+                    )
+            prev_token = _ACTIVE_EXTRACTION_PREVIOUS_EPISODES.set(bounded_prev_episodes)
             try:
                 results = await self._add_episode_with_fallback(
                     name=episode.episode_id,
                     episode_body=extraction_body,
                     source_description=f"llm_brain_core:{episode.entity_type}:{episode.natural_id}",
-                    reference_time=_parse_datetime(episode.reference_time),
+                    reference_time=ref_dt,
                     source=_episode_type_json(),
                     group_id=group_id or None,
                     uuid=episode.episode_id,
                 )
             finally:
+                _ACTIVE_EXTRACTION_PREVIOUS_EPISODES.reset(prev_token)
                 try:
                     await self._build_episodic_node(episode, body, group_id).save(
                         self._graphiti.driver
@@ -648,12 +754,24 @@ class GraphitiNeo4jGraphMemoryAdapter:
         has_query = bool(str(query or "").strip())
         terms = _query_terms(query)
 
+        parsed_cache: dict[int, OntologyEpisode | None] = {}
+
+        def _parse_cached(node: Any) -> OntologyEpisode | None:
+            key = id(node)
+            if key not in parsed_cache:
+                parsed_cache[key] = _episode_node_to_ontology_bounded_for_read(node)
+            return parsed_cache[key]
+
         async def _call() -> tuple[list[Any], list[Any], list[Any], list[str], bool]:
             loop = asyncio.get_running_loop()
             # Leave a small margin before the outer runner deadline so a slow
             # provenance hydration degrades this read instead of starting a
             # second full timeout window after search/retrieve has completed.
             provenance_deadline = loop.time() + (self._read_timeout_seconds * 0.9)
+            episode_deadline = loop.time() + min(
+                self._read_timeout_seconds * 0.65,
+                max(0.5, self._read_timeout_seconds - 0.4),
+            )
             details: list[str] = ["graphiti_neo4j"]
             edge_degraded = False
             try:
@@ -667,45 +785,71 @@ class GraphitiNeo4jGraphMemoryAdapter:
                 edges = []
                 edge_degraded = True
                 details.append(f"edge_search:{type(exc).__name__}")
-            fanout = _episode_fanout(bounded)
-            episodes = list(
-                await self._graphiti.retrieve_episodes(
+            fanout = min(_episode_fanout(bounded), self._search_max_episodes)
+            from graphiti_core.driver.neo4j_driver import Neo4jDriver
+
+            neo4j_driver = getattr(self._graphiti, "driver", None)
+            if isinstance(neo4j_driver, Neo4jDriver) and callable(
+                getattr(neo4j_driver, "execute_query", None)
+            ):
+                episodes, read_bounded = await self._retrieve_episodes_neo4j_bounded(
+                    driver=neo4j_driver,
                     reference_time=reference_time,
-                    last_n=fanout,
                     group_ids=group_ids,
+                    wanted_types=wanted,
+                    limit=max(fanout, min(100, self._search_max_episodes)),
+                    deadline=episode_deadline,
                 )
-                or []
-            )
-            if len(episodes) >= fanout and (has_query or wanted):
-                initial_matches = sum(
-                    1
-                    for episode_node in episodes
-                    if (episode := _episode_node_to_ontology(episode_node)) is not None
-                    and episode_matches_graph_group(
-                        episode,
-                        expected_group_id=group_id,
-                        default_scope=self._default_group_id,
+            else:
+                raw_episodes = list(
+                    await self._graphiti.retrieve_episodes(
+                        reference_time=reference_time,
+                        last_n=fanout,
+                        group_ids=group_ids,
                     )
-                    and (not wanted or episode.entity_type in wanted)
-                    and (not has_query or (bool(terms) and _matches(episode.search_text(), terms)))
+                    or []
                 )
-                expanded_fanout = max(fanout * 5, 100)
-                if initial_matches < bounded and expanded_fanout > fanout:
-                    episodes = list(
-                        await self._graphiti.retrieve_episodes(
-                            reference_time=reference_time,
-                            last_n=expanded_fanout,
-                            group_ids=group_ids,
+                episodes, read_bounded = _bound_retrieved_episode_nodes(
+                    raw_episodes,
+                    max_bytes=self._search_max_episode_bytes,
+                )
+                if len(raw_episodes) >= fanout and (has_query or wanted) and loop.time() < episode_deadline:
+                    initial_matches = sum(
+                        1
+                        for episode_node in episodes
+                        if (episode := _parse_cached(episode_node)) is not None
+                        and episode_matches_graph_group(
+                            episode,
+                            expected_group_id=group_id,
+                            default_scope=self._default_group_id,
                         )
-                        or episodes
+                        and (not wanted or episode.entity_type in wanted)
+                        and (not has_query or (bool(terms) and _matches(episode.search_text(), terms)))
                     )
+                    expanded_fanout = min(max(fanout * 5, 100), self._search_max_episodes)
+                    if initial_matches < bounded and expanded_fanout > fanout:
+                        expanded_raw = list(
+                            await self._graphiti.retrieve_episodes(
+                                reference_time=reference_time,
+                                last_n=expanded_fanout,
+                                group_ids=group_ids,
+                            )
+                            or raw_episodes
+                        )
+                        episodes, extra_bounded = _bound_retrieved_episode_nodes(
+                            expanded_raw,
+                            max_bytes=self._search_max_episode_bytes,
+                        )
+                        read_bounded = read_bounded or extra_bounded
+            if read_bounded:
+                details.append(SafeReasonCode.EPISODE_READ_BOUNDED.value)
             hydrated_source_nodes: list[Any] = []
             edge_source_ids = _edge_source_episode_ids(list(edges or []))
             if len(edge_source_ids) <= _MAX_EDGE_PROVENANCE_IDS:
                 known_source_ids = {
                     episode.episode_id
                     for episode_node in episodes
-                    if (episode := _episode_node_to_ontology(episode_node)) is not None
+                    if (episode := _parse_cached(episode_node)) is not None
                     and episode_matches_graph_group(
                         episode,
                         expected_group_id=group_id,
@@ -722,7 +866,6 @@ class GraphitiNeo4jGraphMemoryAdapter:
 
                     async def _hydrate_source(episode_id: str) -> Any:
                         return await EpisodicNode.get_by_uuid(self._graphiti.driver, episode_id)
-
                     remaining_source_ids = iter(missing_source_ids)
                     lookup_tasks: set[asyncio.Task[Any]] = set()
 
@@ -787,7 +930,7 @@ class GraphitiNeo4jGraphMemoryAdapter:
         canonical_episodes = [
             episode
             for episode_node in episodes
-            if (episode := _episode_node_to_ontology(episode_node)) is not None
+            if (episode := _parse_cached(episode_node)) is not None
             and episode_matches_graph_group(
                 episode,
                 expected_group_id=group_id,
@@ -797,11 +940,9 @@ class GraphitiNeo4jGraphMemoryAdapter:
         source_episodes_by_id = {episode.episode_id: episode for episode in canonical_episodes}
         for source_node in hydrated_source_nodes:
             source_group_id = graph_group_id(str(getattr(source_node, "group_id", "") or ""))
-            if group_id and source_group_id not in allowed_group_ids:
+            if allowed_group_ids and source_group_id and source_group_id not in allowed_group_ids:
                 continue
-            if not group_id and source_group_id:
-                continue
-            episode = _episode_node_to_ontology(source_node)
+            episode = _episode_node_to_ontology_bounded_for_read(source_node)
             if episode is None:
                 continue
             if not episode_matches_graph_group(
@@ -915,6 +1056,114 @@ class GraphitiNeo4jGraphMemoryAdapter:
             return episodes
 
         return tuple(self._runner.run(_call, timeout=self._read_timeout_seconds))
+
+    async def _retrieve_episodes_neo4j_bounded(
+        self,
+        *,
+        driver: Any,
+        reference_time: datetime,
+        group_ids: list[str] | None,
+        wanted_types: set[str],
+        limit: int,
+        deadline: float,
+    ) -> tuple[list[Any], bool]:
+        """Read Neo4j Episodic nodes with card-priority and strict UTF-8 byte bounds."""
+
+        loop = asyncio.get_running_loop()
+        gids = list(group_ids or [])
+        bounded_limit = max(1, min(int(limit), self._search_max_episodes))
+        nodes: list[Any] = []
+        used_bytes = 0
+        read_bounded = False
+        non_session_wanted = sorted(t for t in wanted_types if t != "Session")
+        if not wanted_types or non_session_wanted:
+            type_clause = (
+                "AND split(coalesce(e.source_description, ''), ':')[1] IN $etypes "
+                if non_session_wanted
+                else ""
+            )
+            card_query = (
+                "MATCH (e:Episodic) "
+                "WHERE ($has_gids = false OR e.group_id IN $gids) "
+                "AND e.valid_at <= $reference_time "
+                "AND NOT coalesce(e.source_description, '') STARTS WITH 'llm_brain_core:Session:' "
+                f"{type_clause}"
+                "RETURN e.uuid AS uuid, e.name AS name, e.group_id AS group_id, "
+                "e.source AS source, e.source_description AS source_description, "
+                "e.content AS content "
+                "ORDER BY e.valid_at DESC LIMIT $limit"
+            )
+            records, _, _ = await driver.execute_query(
+                card_query,
+                has_gids=bool(gids),
+                gids=gids,
+                reference_time=reference_time,
+                etypes=non_session_wanted,
+                limit=bounded_limit,
+            )
+            for rec in records or ():
+                content = str(rec.get("content") or "")
+                c_bytes = len(content.encode("utf-8"))
+                if used_bytes + c_bytes > self._search_max_episode_bytes and nodes:
+                    read_bounded = True
+                    break
+                used_bytes += c_bytes
+                nodes.append(
+                    SimpleNamespace(
+                        uuid=rec.get("uuid"),
+                        name=rec.get("name"),
+                        group_id=rec.get("group_id"),
+                        source=rec.get("source"),
+                        source_description=rec.get("source_description"),
+                        content=content,
+                    )
+                )
+        if (not wanted_types or "Session" in wanted_types) and loop.time() < deadline:
+            session_limit = min(bounded_limit, DEFAULT_SEARCH_SESSION_EPISODE_LIMIT)
+            sess_query = (
+                "MATCH (e:Episodic) "
+                "WHERE ($has_gids = false OR e.group_id IN $gids) "
+                "AND e.valid_at <= $reference_time "
+                "AND coalesce(e.source_description, '') STARTS WITH 'llm_brain_core:Session:' "
+                "RETURN e.uuid AS uuid, e.name AS name, e.group_id AS group_id, "
+                "e.source AS source, e.source_description AS source_description, "
+                "e.content AS content "
+                "ORDER BY e.valid_at DESC LIMIT $limit"
+            )
+            sess_records, _, _ = await driver.execute_query(
+                sess_query,
+                has_gids=bool(gids),
+                gids=gids,
+                reference_time=reference_time,
+                limit=session_limit,
+            )
+            sess_list = list(sess_records or ())
+            if len(sess_list) >= session_limit and session_limit < bounded_limit:
+                read_bounded = True
+            for rec in sess_list:
+                if loop.time() >= deadline:
+                    read_bounded = True
+                    break
+                raw_content = str(rec.get("content") or "")
+                compact_content, was_stripped = _strip_oversized_session_hashes_for_read(raw_content)
+                if was_stripped:
+                    read_bounded = True
+                c_bytes = len(compact_content.encode("utf-8"))
+                if used_bytes + c_bytes > self._search_max_episode_bytes and nodes:
+                    read_bounded = True
+                    break
+                used_bytes += c_bytes
+                nodes.append(
+                    SimpleNamespace(
+                        uuid=rec.get("uuid"),
+                        name=rec.get("name"),
+                        group_id=rec.get("group_id"),
+                        source=rec.get("source"),
+                        source_description=rec.get("source_description"),
+                        content=compact_content,
+                    )
+                )
+        return nodes, read_bounded
 
 
 async def _default_episode_exists(driver: Any, episode_id: str) -> bool:
@@ -1250,7 +1499,9 @@ def _build_graphiti(config: GraphitiNeo4jConfig):
         from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
         from graphiti_core.llm_client.config import LLMConfig
 
-        base_url = config.llm_base_url or ("http://localhost:11434/v1" if config.llm_provider == "ollama" else "")
+        base_url = normalize_opencode_openai_base_url(
+            config.llm_base_url or ("http://localhost:11434/v1" if config.llm_provider == "ollama" else "")
+        )
         api_key = config.llm_api_key or _placeholder_api_key(config.llm_provider)
         llm_config = LLMConfig(
             api_key=api_key,
@@ -1261,6 +1512,7 @@ def _build_graphiti(config: GraphitiNeo4jConfig):
         llm_client = _ReasoningOpenAIGenericClient(
             config=llm_config,
             reasoning_effort=config.llm_reasoning_effort,
+            structured_output_policy=config.structured_output_mode,
         )
         embedding_model = config.embedding_model or (
             LOCAL_EMBEDDING_MODEL_ALIAS
@@ -1460,21 +1712,343 @@ def _build_graphiti(config: GraphitiNeo4jConfig):
 _OPENAI_CHAT_ROLES = frozenset({"system", "user", "assistant", "tool", "developer", "function"})
 
 
-_GRAPHITI_DEFAULT_HEADERS = {
+_GRAPHITI_USER_AGENT_HEADER = {
     "User-Agent": "neurons-graphiti/1.0",
-    "x-opencode-session": "neurons-graphiti",
 }
+_SCHEMA_ERROR_CODES = frozenset(
+    {
+        SafeErrorCode.INVALID_JSON_SCHEMA.value,
+        SafeErrorCode.INVALID_RESPONSE_FORMAT.value,
+        SafeErrorCode.RESPONSE_FORMAT_UNSUPPORTED.value,
+        SafeErrorCode.JSON_VALIDATE_FAILED.value,
+        SafeErrorCode.UNSUPPORTED_PARAMETER.value,
+    }
+)
+_SCHEMA_ERROR_PARAMS = frozenset(
+    {
+        SafeErrorParam.RESPONSE_FORMAT.value,
+        SafeErrorParam.RESPONSE_FORMAT_TYPE.value,
+        SafeErrorParam.RESPONSE_FORMAT_JSON_SCHEMA.value,
+        SafeErrorParam.RESPONSE_FORMAT_JSON_SCHEMA_NAME.value,
+        SafeErrorParam.RESPONSE_FORMAT_JSON_SCHEMA_SCHEMA.value,
+        SafeErrorParam.RESPONSE_FORMAT_JSON_SCHEMA_STRICT.value,
+        SafeErrorParam.JSON_SCHEMA.value,
+        SafeErrorParam.SCHEMA.value,
+    }
+)
+
+
+def _structured_output_mode_env(value: str) -> str:
+    cleaned = str(value or "").strip().lower()
+    if not cleaned:
+        return "auto"
+    if cleaned in _ALLOWED_STRUCTURED_OUTPUT_MODES:
+        return cleaned
+    raise ValueError("LLM_BRAIN_LLM_STRUCTURED_OUTPUT_MODE must be auto, json_schema, or json_object")
+
+
+def _is_schema_related_bad_request(exc: Exception) -> bool:
+    """Boolean-only classifier for schema-related HTTP 400s (never emits raw message)."""
+
+    diag = extract_safe_error_diagnostics(exc)
+    if diag.get("http_status") != 400:
+        return False
+    err_code = str(diag.get("error_code") or "")
+    err_param = str(diag.get("error_param") or "")
+    if err_code in (
+        SafeErrorCode.CONTEXT_LENGTH_EXCEEDED.value,
+        SafeErrorCode.CONTEXT_WINDOW_EXCEEDED.value,
+        SafeErrorCode.MAX_TOKENS_EXCEEDED.value,
+        SafeErrorCode.PAYLOAD_TOO_LARGE.value,
+        SafeErrorCode.MODEL_NOT_FOUND.value,
+        SafeErrorCode.INVALID_API_KEY.value,
+        SafeErrorCode.MISSING_SESSION_ID.value,
+    ):
+        return False
+    if err_param and err_param not in _SCHEMA_ERROR_PARAMS and err_param != SafeErrorParam.UNKNOWN_ERROR_PARAM.value:
+        return False
+    if err_code in _SCHEMA_ERROR_CODES or err_param in _SCHEMA_ERROR_PARAMS:
+        return True
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        err_obj = body.get("error") if isinstance(body.get("error"), dict) else body
+        msg = str(err_obj.get("message") or "").lower()
+        if msg and not any(
+            tok in msg for tok in ("context_length", "maximum context", "too many tokens", "entity too large")
+        ):
+            if any(tok in msg for tok in ("response_format", "json_schema", "anyof", "additionalproperties")):
+                return True
+    return False
+
+
+def _install_extraction_retrieve_episodes_hook(graphiti: Any) -> None:
+    orig = getattr(graphiti, "retrieve_episodes", None)
+    if not callable(orig) or getattr(orig, "_neurons_extraction_hooked", False):
+        return
+
+    async def _wrapped_retrieve_episodes(*args: Any, **kwargs: Any) -> Any:
+        override = _ACTIVE_EXTRACTION_PREVIOUS_EPISODES.get()
+        if override is not None:
+            return list(override)
+        return await orig(*args, **kwargs)
+
+    setattr(_wrapped_retrieve_episodes, "_neurons_extraction_hooked", True)
+    try:
+        setattr(graphiti, "retrieve_episodes", _wrapped_retrieve_episodes)
+    except Exception:
+        pass
+
+
+def _clone_episode_node_with_content(node: Any, content: str) -> Any:
+    model_copy = getattr(node, "model_copy", None)
+    if callable(model_copy):
+        return model_copy(update={"content": content})
+    return SimpleNamespace(
+        uuid=getattr(node, "uuid", ""),
+        name=getattr(node, "name", getattr(node, "uuid", "")),
+        group_id=getattr(node, "group_id", ""),
+        source=getattr(node, "source", None),
+        source_description=getattr(node, "source_description", ""),
+        content=content,
+    )
+
+
+def _format_single_previous_episode_prompt_view(
+    raw_content: str,
+    *,
+    max_bytes: int,
+) -> tuple[str | None, bool]:
+    """Build deterministic valid-JSON prompt view without mutating Neo4j data or mid-field slicing."""
+
+    text = str(raw_content or "").strip()
+    if not text:
+        return None, False
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        encoded = text.encode("utf-8")
+        if len(encoded) <= max_bytes:
+            return text, False
+        stub = json.dumps(
+            {"_omitted": ["raw_text_exceeds_per_episode_budget"]},
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return (stub if len(stub.encode("utf-8")) <= max_bytes else None), True
+
+    if not isinstance(parsed, dict):
+        compact = json.dumps(parsed, ensure_ascii=True, separators=(",", ":"))
+        if len(compact.encode("utf-8")) <= max_bytes:
+            return compact, False
+        return None, True
+
+    view = dict(parsed)
+    view.pop("source_event_ids", None)
+    view.pop("source_ref_ids", None)
+    compact = json.dumps(view, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    if len(compact.encode("utf-8")) <= max_bytes:
+        return compact, False
+
+    # Deterministic Tier 1: omit heavy structured detail keys while keeping core summary & timestamps.
+    omitted: list[str] = []
+    if "relations" in view and view["relations"]:
+        view.pop("relations", None)
+        omitted.append("relations")
+    for top_hash_key in ("content_hash", "idempotency_key", "event_id"):
+        if top_hash_key in view:
+            view.pop(top_hash_key, None)
+            omitted.append(top_hash_key)
+    payload = view.get("payload")
+    if isinstance(payload, dict):
+        slim_payload = dict(payload)
+        for detail_key in (
+            "typed_payload",
+            "source_hash",
+            "source_revision",
+            "materialization_revision",
+            "session_id_hash",
+            "artifact_id",
+        ):
+            if detail_key in slim_payload:
+                slim_payload.pop(detail_key, None)
+                omitted.append(f"payload.{detail_key}")
+        view["payload"] = slim_payload
+    if omitted:
+        view["_omitted"] = omitted
+    compact_tier1 = json.dumps(view, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    if len(compact_tier1.encode("utf-8")) <= max_bytes:
+        return compact_tier1, True
+
+    # Deterministic Tier 2: emit minimal valid-JSON metadata envelope with explicit omission marker.
+    minimal_payload: dict[str, Any] = {}
+    if isinstance(parsed.get("payload"), dict):
+        src_p = parsed["payload"]
+        for keep_k in ("brain_id", "project", "provider", "authority_memory_id", "title"):
+            if keep_k in src_p and isinstance(src_p[keep_k], (str, int, float, bool)):
+                val = str(src_p[keep_k])
+                if len(val.encode("utf-8")) <= 256:
+                    minimal_payload[keep_k] = src_p[keep_k]
+    minimal = {
+        "_omitted": sorted(set([*omitted, "payload.summary", "content_exceeds_per_episode_budget"])),
+        "entity_type": str(parsed.get("entity_type") or ""),
+        "episode_id": str(parsed.get("episode_id") or ""),
+        "natural_id": str(parsed.get("natural_id") or "")[:128],
+        "observed_at": str(parsed.get("observed_at") or ""),
+        "reference_time": str(parsed.get("reference_time") or ""),
+        "payload": minimal_payload,
+    }
+    compact_tier2 = json.dumps(minimal, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    if len(compact_tier2.encode("utf-8")) <= max_bytes:
+        return compact_tier2, True
+    return None, True
+
+
+def build_bounded_previous_episodes_prompt_view(
+    nodes: list[Any],
+    *,
+    current_episode_uuid: str,
+    per_episode_max_bytes: int = DEFAULT_PREVIOUS_EPISODE_MAX_BYTES,
+    total_max_bytes: int = DEFAULT_PREVIOUS_EPISODES_TOTAL_MAX_BYTES,
+) -> tuple[list[Any], dict[str, int]]:
+    """Return bounded in-memory EpisodicNode copies for Step 2/3/4 prompts; Neo4j storage stays untouched."""
+
+    per_cap = max(256, int(per_episode_max_bytes))
+    total_cap = max(per_cap, int(total_max_bytes))
+    self_echo_removed = 0
+    detail_omitted = 0
+    per_episode_dropped = 0
+    prepared: list[tuple[Any, str]] = []
+    for node in nodes or ():
+        node_uuid = str(getattr(node, "uuid", "") or "")
+        if current_episode_uuid and node_uuid == current_episode_uuid:
+            self_echo_removed += 1
+            continue
+        view_content, used_omission = _format_single_previous_episode_prompt_view(
+            str(getattr(node, "content", "") or ""),
+            max_bytes=per_cap,
+        )
+        if used_omission:
+            detail_omitted += 1
+        if view_content is None:
+            per_episode_dropped += 1
+            continue
+        prepared.append((node, view_content))
+
+    # Newest-first selection within total_cap (accounting for Graphiti's JSON array framing),
+    # then restore chronological order.
+    kept_reversed: list[tuple[Any, str]] = []
+    omitted_for_total = 0
+    for node, content in reversed(prepared):
+        trial_contents = [content, *(c for _, c in kept_reversed)]
+        framed_bytes = len(json.dumps(trial_contents, ensure_ascii=False).encode("utf-8"))
+        raw_sum = sum(len(c.encode("utf-8")) for c in trial_contents)
+        if max(framed_bytes, raw_sum) <= total_cap:
+            kept_reversed.append((node, content))
+        else:
+            omitted_for_total += 1
+
+    kept = list(reversed(kept_reversed))
+    final_contents = [c for _, c in kept]
+    total_utf8_bytes = (
+        max(
+            len(json.dumps(final_contents, ensure_ascii=False).encode("utf-8")),
+            sum(len(c.encode("utf-8")) for c in final_contents),
+        )
+        if final_contents
+        else 0
+    )
+    bounded_nodes = [_clone_episode_node_with_content(node, content) for node, content in kept]
+    stats = {
+        "self_echo_removed": self_echo_removed,
+        "detail_omitted_episodes": detail_omitted,
+        "episodes_dropped_over_per_cap": per_episode_dropped,
+        "episodes_omitted_for_total_budget": omitted_for_total,
+        "total_utf8_bytes": total_utf8_bytes,
+    }
+    return bounded_nodes, stats
+
+
+def _strip_oversized_session_hashes_for_read(raw_content: str) -> tuple[str, bool]:
+    if len(raw_content) <= _OVERSIZED_SESSION_CONTENT_CHARS:
+        return raw_content, False
+    try:
+        parsed = json.loads(raw_content)
+    except json.JSONDecodeError:
+        return raw_content, False
+    if not isinstance(parsed, dict) or parsed.get("entity_type") != "Session":
+        return raw_content, False
+    if not parsed.get("source_event_ids") and not parsed.get("source_ref_ids"):
+        return raw_content, False
+    slim = dict(parsed)
+    slim.pop("source_event_ids", None)
+    slim.pop("source_ref_ids", None)
+    return json.dumps(slim, ensure_ascii=True, sort_keys=True, separators=(",", ":")), True
+
+
+def _bound_retrieved_episode_nodes(
+    nodes: list[Any],
+    *,
+    max_bytes: int,
+) -> tuple[list[Any], bool]:
+    bounded: list[Any] = []
+    used_bytes = 0
+    was_bounded = False
+    for node in nodes:
+        raw = str(getattr(node, "content", "") or "")
+        compact, stripped = _strip_oversized_session_hashes_for_read(raw)
+        if stripped:
+            was_bounded = True
+            node = _clone_episode_node_with_content(node, compact)
+        c_bytes = len(compact.encode("utf-8"))
+        if used_bytes + c_bytes > max_bytes and bounded:
+            was_bounded = True
+            break
+        used_bytes += c_bytes
+        bounded.append(node)
+    return bounded, was_bounded
+
+
+def _episode_node_to_ontology_bounded_for_read(node: Any) -> OntologyEpisode | None:
+    raw = getattr(node, "content", "")
+    if isinstance(raw, str) and len(raw) > _OVERSIZED_SESSION_CONTENT_CHARS:
+        compact, stripped = _strip_oversized_session_hashes_for_read(raw)
+        if stripped:
+            node = _clone_episode_node_with_content(node, compact)
+    return _episode_node_to_ontology(node)
 
 
 class _ReasoningOpenAIGenericClient(OpenAIGenericClient):
-    """OpenAI-compatible Graphiti client with optional per-request reasoning."""
+    """OpenAI-compatible Graphiti client with conditional session headers and stateless schema fallback."""
 
-    def __init__(self, *args: Any, reasoning_effort: str = "", **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        reasoning_effort: str = "",
+        structured_output_policy: str = "auto",
+        **kwargs: Any,
+    ) -> None:
+        policy = _structured_output_mode_env(structured_output_policy)
+        if "structured_output_mode" not in kwargs:
+            kwargs["structured_output_mode"] = "json_object" if policy == "json_object" else "json_schema"
+        cfg = kwargs.get("config") if "config" in kwargs else (args[0] if args else None)
+        if cfg is not None and getattr(cfg, "base_url", None):
+            cfg.base_url = normalize_opencode_openai_base_url(str(cfg.base_url))
         super().__init__(*args, **kwargs)
         self._reasoning_effort = reasoning_effort
+        self._allow_schema_fallback = policy == "auto" and self.structured_output_mode == "json_schema"
+        self._safe_fallback_counts: dict[str, int] = {}
+        base_url = str(getattr(self.config, "base_url", "") or "")
+        headers = {
+            **_GRAPHITI_USER_AGENT_HEADER,
+            **opencode_session_headers(base_url, session_id="neurons-graphiti"),
+        }
         with_options = getattr(self.client, "with_options", None)
         if callable(with_options):
-            self.client = with_options(default_headers=dict(_GRAPHITI_DEFAULT_HEADERS))
+            self.client = with_options(default_headers=headers)
+
+    def safe_fallback_counts(self) -> dict[str, int]:
+        return dict(self._safe_fallback_counts)
 
     async def generate_response(
         self,
@@ -1490,6 +2064,7 @@ class _ReasoningOpenAIGenericClient(OpenAIGenericClient):
         from graphiti_core.llm_client.config import ModelSize
 
         resolved_size = ModelSize.medium if model_size is None else model_size
+        prompt_token = _ACTIVE_PROMPT_NAME.set(str(prompt_name or ""))
         try:
             return await super().generate_response(
                 messages,
@@ -1504,6 +2079,8 @@ class _ReasoningOpenAIGenericClient(OpenAIGenericClient):
             if prompt_name is not None:
                 _attach_safe_error_step(exc, str(prompt_name))
             raise
+        finally:
+            _ACTIVE_PROMPT_NAME.reset(prompt_token)
 
     async def _generate_response(self, messages, response_model=None, max_tokens=None, model_size=None):
         import json as _json
@@ -1525,17 +2102,39 @@ class _ReasoningOpenAIGenericClient(OpenAIGenericClient):
             role = message.role if message.role in _OPENAI_CHAT_ROLES else "user"
             openai_messages.append({"role": role, "content": message.content})
         valid_duplicate_fact_idxs = _existing_fact_idx_values_from_messages(openai_messages)
+        response_format = self._build_response_format(response_model)
         request = {
             "model": self.model or DEFAULT_MODEL,
             "messages": openai_messages,
             "temperature": self.temperature,
             "max_tokens": max_tokens_value,
-            "response_format": self._build_response_format(response_model),
+            "response_format": response_format,
         }
         if self._reasoning_effort:
             request["reasoning_effort"] = self._reasoning_effort
         try:
-            response = await self.client.chat.completions.create(**request)
+            try:
+                response = await self.client.chat.completions.create(**request)
+            except openai.BadRequestError as schema_exc:
+                if (
+                    response_model is not None
+                    and self._allow_schema_fallback
+                    and isinstance(response_format, dict)
+                    and response_format.get("type") == "json_schema"
+                    and _is_schema_related_bad_request(schema_exc)
+                ):
+                    safe_step = classify_safe_error_step(_ACTIVE_PROMPT_NAME.get() or "unknown_error_step")
+                    metric_key = f"{SafeReasonCode.STRUCTURED_OUTPUT_JSON_OBJECT_FALLBACK.value}:{safe_step}"
+                    self._safe_fallback_counts[metric_key] = self._safe_fallback_counts.get(metric_key, 0) + 1
+                    _LOG.warning(
+                        "Structured output fallback: reason=%s step=%s",
+                        SafeReasonCode.STRUCTURED_OUTPUT_JSON_OBJECT_FALLBACK.value,
+                        safe_step,
+                    )
+                    fallback_request = {**request, "response_format": {"type": "json_object"}}
+                    response = await self.client.chat.completions.create(**fallback_request)
+                else:
+                    raise
             result = response.choices[0].message.content or ""
             if not result:
                 raise EmptyResponseError("LLM returned an empty response")
@@ -1550,7 +2149,6 @@ class _ReasoningOpenAIGenericClient(OpenAIGenericClient):
         except Exception as exc:
             _LOG.error("Error in generating LLM response: %s", format_safe_reason_code(exc))
             raise
-
 
 class _AsyncLoopRunner:
     _instance: _AsyncLoopRunner | None = None

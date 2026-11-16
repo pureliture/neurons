@@ -35,7 +35,11 @@ def build_openai_compatible_graphiti_components(
     from graphiti_core.llm_client.config import LLMConfig
     from graphiti_core.llm_client.openai_generic_client import OpenAIGenericClient
 
-    llm_base_url = config.llm.base_url or ("http://localhost:11434/v1" if llm_provider == "ollama" else "")
+    from .session_headers import normalize_opencode_openai_base_url
+
+    llm_base_url = normalize_opencode_openai_base_url(
+        config.llm.base_url or ("http://localhost:11434/v1" if llm_provider == "ollama" else "")
+    )
     embedding_base_url = config.embedding.base_url or (
         "http://localhost:11434/v1" if embedding_provider == "ollama" else ""
     )
