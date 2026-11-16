@@ -820,7 +820,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps({"error_code": "checkpoint_unavailable", "status": "failed"}, sort_keys=True))
         return 3
     print(json.dumps(report.to_dict(), sort_keys=True))
-    return 0 if report.status == "completed" else 1
+    # ``no_source`` is a normal terminal outcome (project has nothing to intake),
+    # matching the multi-project path above; only real failures are non-zero so a
+    # scheduled run does not fail forever on an empty project.
+    return _single_project_exit_code(report.status)
+
+
+def _single_project_exit_code(status: str) -> int:
+    """Exit 0 for normal terminal outcomes, non-zero only for real failures."""
+
+    return 0 if status in ("completed", "no_source") else 1
 
 
 def _build_store_from_env() -> Any:
