@@ -2330,3 +2330,448 @@ def test_reasoning_openai_generic_client_attaches_closed_error_step_on_http400(c
     }
     assert diag_poisoned["error_step"] == "unknown_error_step"
     assert diag_poisoned["error_param"] == "response_format.json_schema.schema"
+
+
+def test_previous_episodes_prompt_view_strips_self_echo_and_hashes_without_mutating_stored_nodes():
+    from agent_knowledge.llm_brain_core.graphiti_adapter import (
+        DEFAULT_PREVIOUS_EPISODE_MAX_BYTES,
+        DEFAULT_PREVIOUS_EPISODES_TOTAL_MAX_BYTES,
+        build_bounded_previous_episodes_prompt_view,
+    )
+
+    current_ep = OntologyEpisode.from_payload(
+        event_id="evt:current",
+        entity_type="Session",
+        natural_id="session_current",
+        payload={"brain_id": "/project/neurons", "project": "neurons", "summary": "current session"},
+        source_event_ids=[f"sha256:{i:064x}" for i in range(400)],
+        source_ref_ids=[f"sha256:{(i + 5000):064x}" for i in range(400)],
+        observed_at="2026-11-16T00:05:00+00:00",
+        reference_time="2026-11-16T00:05:00+00:00",
+    )
+    hist_session = OntologyEpisode.from_payload(
+        event_id="evt:hist_session",
+        entity_type="Session",
+        natural_id="session_hist_1",
+        payload={
+            "brain_id": "/project/neurons",
+            "project": "neurons",
+            "provider": "codex",
+            "summary": "conversation_chunks=1500 tool_evidence_bundles=1500",
+        },
+        source_event_ids=[f"sha256:{i:064x}" for i in range(1500)],
+        source_ref_ids=[f"sha256:{(i + 9000):064x}" for i in range(1500)],
+        observed_at="2026-11-15T00:00:00+00:00",
+        reference_time="2026-11-15T00:05:00+00:00",
+    )
+    hist_card = OntologyEpisode.from_payload(
+        event_id="evt:hist_card",
+        entity_type="Decision",
+        natural_id="decision:mem_keep",
+        payload={
+            "brain_id": "/project/neurons",
+            "authority_memory_id": "mem_keep",
+            "project": "neurons",
+            "title": "Keep Neo4j raw content lossless",
+            "summary": "Prompt views bound size while Neo4j stores full episode JSON.",
+        },
+        source_event_ids=[f"sha256:{i:064x}" for i in range(600)],
+        source_ref_ids=[f"sha256:{(i + 20000):064x}" for i in range(600)],
+        observed_at="2026-11-15T01:00:00+00:00",
+        reference_time="2026-11-15T01:00:00+00:00",
+    )
+    stored_session_raw = json.dumps(hist_session.to_dict(), sort_keys=True)
+    stored_card_raw = json.dumps(hist_card.to_dict(), sort_keys=True)
+    stored_self_raw = json.dumps(current_ep.to_dict(), sort_keys=True)
+    assert len(stored_session_raw.encode("utf-8")) > 200_000
+
+    nodes = [
+        SimpleNamespace(uuid=hist_session.episode_id, content=stored_session_raw),
+        SimpleNamespace(uuid=hist_card.episode_id, content=stored_card_raw),
+        SimpleNamespace(uuid=current_ep.episode_id, content=stored_self_raw),
+    ]
+    bounded_nodes, stats = build_bounded_previous_episodes_prompt_view(
+        nodes,
+        current_episode_uuid=current_ep.episode_id,
+        per_episode_max_bytes=DEFAULT_PREVIOUS_EPISODE_MAX_BYTES,
+        total_max_bytes=DEFAULT_PREVIOUS_EPISODES_TOTAL_MAX_BYTES,
+    )
+    # Stored nodes remain completely untouched
+    assert nodes[0].content == stored_session_raw
+    assert nodes[1].content == stored_card_raw
+    assert nodes[2].content == stored_self_raw
+
+    # Self-echo removed; both historical episodes preserved in chronological order
+    assert [n.uuid for n in bounded_nodes] == [hist_session.episode_id, hist_card.episode_id]
+    assert stats["self_echo_removed"] == 1
+    for n in bounded_nodes:
+        raw_bytes = n.content.encode("utf-8")
+        assert len(raw_bytes) <= 4096
+        parsed = json.loads(n.content)
+        assert "source_event_ids" not in parsed
+        assert "source_ref_ids" not in parsed
+    parsed_card = json.loads(bounded_nodes[1].content)
+    assert parsed_card["entity_type"] == "Decision"
+    assert parsed_card["natural_id"] == "decision:mem_keep"
+    assert parsed_card["payload"]["title"] == "Keep Neo4j raw content lossless"
+    assert parsed_card["payload"]["summary"] == "Prompt views bound size while Neo4j stores full episode JSON."
+    assert parsed_card["reference_time"] == "2026-11-15T01:00:00+00:00"
+
+
+def test_previous_episodes_prompt_view_enforces_4kib_and_32kib_deterministic_policy_in_step2_and_step3():
+    from agent_knowledge.llm_brain_core.graphiti_adapter import build_bounded_previous_episodes_prompt_view
+    from graphiti_core.prompts import prompt_library
+
+    # 12 historical episodes: 1 with >4KiB typed_payload, 11 with ~3.5KiB summaries (total > 32KiB)
+    raw_nodes = []
+    oversized_detail = OntologyEpisode.from_payload(
+        event_id="evt:detail_heavy",
+        entity_type="Decision",
+        natural_id="decision:detail_heavy",
+        payload={
+            "brain_id": "/project/neurons",
+            "project": "neurons",
+            "title": "Oversized typed payload card",
+            "summary": "Core summary preserved deterministically.",
+            "typed_payload": {"blob": "x" * 9000},
+        },
+        observed_at="2026-11-15T00:00:00+00:00",
+        reference_time="2026-11-15T00:00:00+00:00",
+    )
+    raw_nodes.append(
+        SimpleNamespace(
+            uuid=oversized_detail.episode_id,
+            content=json.dumps(oversized_detail.to_dict(), sort_keys=True),
+        )
+    )
+    for idx in range(11):
+        ep = OntologyEpisode.from_payload(
+            event_id=f"evt:ep_{idx}",
+            entity_type="Decision",
+            natural_id=f"decision:ep_{idx:02d}",
+            payload={
+                "brain_id": "/project/neurons",
+                "project": "neurons",
+                "title": f"Episode {idx:02d}",
+                "summary": f"item-{idx:02d}-" + ("s" * 3300),
+            },
+            source_event_ids=[f"sha256:{(idx * 1000 + j):064x}" for j in range(500)],
+            observed_at=f"2026-11-15T01:{idx:02d}:00+00:00",
+            reference_time=f"2026-11-15T01:{idx:02d}:00+00:00",
+        )
+        raw_nodes.append(
+            SimpleNamespace(uuid=ep.episode_id, content=json.dumps(ep.to_dict(), sort_keys=True))
+        )
+
+    # Also verify oversize single summary >4KiB uses deterministic omission marker, NEVER arbitrary mid-JSON cut
+    huge_summary_ep = OntologyEpisode.from_payload(
+        event_id="evt:huge_summary",
+        entity_type="Decision",
+        natural_id="decision:huge_summary",
+        payload={
+            "brain_id": "/project/neurons",
+            "project": "neurons",
+            "title": "Huge summary card",
+            "summary": "y" * 7500,
+        },
+        observed_at="2026-11-15T02:00:00+00:00",
+        reference_time="2026-11-15T02:00:00+00:00",
+    )
+    raw_nodes.append(
+        SimpleNamespace(
+            uuid=huge_summary_ep.episode_id,
+            content=json.dumps(huge_summary_ep.to_dict(), sort_keys=True),
+        )
+    )
+
+    bounded_nodes, stats = build_bounded_previous_episodes_prompt_view(
+        raw_nodes,
+        current_episode_uuid="episode:nonexistent",
+        per_episode_max_bytes=4096,
+        total_max_bytes=32768,
+    )
+    assert stats["total_utf8_bytes"] <= 32768
+    assert stats["episodes_omitted_for_total_budget"] > 0
+    # Newest episode (huge_summary_ep) is kept deterministically with _omitted marker and valid JSON
+    assert bounded_nodes[-1].uuid == huge_summary_ep.episode_id
+    parsed_last = json.loads(bounded_nodes[-1].content)
+    assert "_omitted" in parsed_last
+    for n in bounded_nodes:
+        assert len(n.content.encode("utf-8")) <= 4096
+        json.loads(n.content)  # Every single entry is valid JSON, zero mid-field truncation
+
+    # Render actual Graphiti Step 2 (dedupe_nodes.nodes) and Step 3 (extract_edges.edge) prompt templates
+    prev_contents = [n.content for n in bounded_nodes]
+    step2_msgs = prompt_library.dedupe_nodes.nodes(
+        {
+            "extracted_nodes": [{"id": 0, "name": "Graphiti", "entity_type": ["Entity"]}],
+            "existing_nodes": [{"candidate_id": 0, "name": "Graphiti", "entity_types": ["Entity"], "summary": "s"}],
+            "episode_content": "Current bounded text.",
+            "previous_episodes": prev_contents,
+        }
+    )
+    step3_msgs = prompt_library.extract_edges.edge(
+        {
+            "episode_content": "Current bounded text.",
+            "nodes": [{"name": "Graphiti", "entity_type": ["Entity"]}],
+            "previous_episodes": prev_contents,
+            "reference_time": "2026-11-16T00:00:00+00:00",
+            "edge_types": [],
+            "custom_extraction_instructions": "",
+        }
+    )
+    assert sum(len(m.content.encode("utf-8")) for m in step2_msgs) < 42_000
+    assert sum(len(m.content.encode("utf-8")) for m in step3_msgs) < 42_000
+
+
+def test_reasoning_client_stateless_single_json_object_fallback_on_schema_http400():
+    import httpx
+    import openai
+    from graphiti_core.llm_client.config import LLMConfig
+    from graphiti_core.prompts.extract_edges import ExtractedEdges
+    from graphiti_core.prompts.models import Message
+    from agent_knowledge.public_safe_util import ensure_public_safe
+
+    seen_formats: list[str] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        rf_type = (body.get("response_format") or {}).get("type", "none")
+        seen_formats.append(rf_type)
+        user_text = body["messages"][-1]["content"]
+        if "TRIGGER_CONTEXT_400" in user_text:
+            return httpx.Response(
+                400,
+                request=request,
+                json={
+                    "error": {
+                        "message": "maximum context length exceeded",
+                        "type": "invalid_request_error",
+                        "param": "messages",
+                        "code": "context_length_exceeded",
+                    }
+                },
+            )
+        if rf_type == "json_schema" and "TRIGGER_SCHEMA_400" in user_text:
+            return httpx.Response(
+                400,
+                request=request,
+                json={
+                    "error": {
+                        "message": "json_schema anyOf unsupported by backend",
+                        "type": "invalid_request_error",
+                        "param": "response_format.json_schema.schema",
+                        "code": None,
+                    }
+                },
+            )
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "chatcmpl-synth",
+                "object": "chat.completion",
+                "created": 1700000000,
+                "model": "deepseek-v4.1-flash",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": '{"edges": []}'},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 50, "completion_tokens": 5, "total_tokens": 55},
+            },
+        )
+
+    async def _run():
+        http_client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+        try:
+            oa = openai.AsyncOpenAI(
+                api_key="synth-placeholder",
+                base_url="https://llm.example.invalid/v1",
+                http_client=http_client,
+            )
+            llm = _ReasoningOpenAIGenericClient(
+                config=LLMConfig(
+                    api_key="synth-placeholder",
+                    model="deepseek-v4.1-flash",
+                    base_url="https://llm.example.invalid/v1",
+                ),
+                client=oa,
+            )
+            # Call 1: schema 400 -> 1x stateless fallback to json_object -> succeeds
+            res1 = await llm.generate_response(
+                [Message(role="system", content="s"), Message(role="user", content="TRIGGER_SCHEMA_400")],
+                response_model=ExtractedEdges,
+                prompt_name="extract_edges.edge",
+            )
+            assert res1 == {"edges": []}
+            assert llm.structured_output_mode == "json_schema"
+            # Call 2: next call starts statelessly with json_schema again!
+            res2 = await llm.generate_response(
+                [Message(role="system", content="s"), Message(role="user", content="NORMAL_CALL")],
+                response_model=ExtractedEdges,
+                prompt_name="extract_edges.edge",
+            )
+            assert res2 == {"edges": []}
+            # Call 3: non-schema 400 (context_length_exceeded) must NOT fallback to json_object
+            with pytest.raises(openai.BadRequestError):
+                await llm.generate_response(
+                    [Message(role="system", content="s"), Message(role="user", content="TRIGGER_CONTEXT_400")],
+                    response_model=ExtractedEdges,
+                    prompt_name="dedupe_nodes.nodes",
+                )
+            return llm.safe_fallback_counts()
+        finally:
+            await http_client.aclose()
+
+    fallback_counts = asyncio.run(_run())
+    ensure_public_safe(fallback_counts, field="fallback_counts")
+    assert seen_formats == [
+        "json_schema",
+        "json_object",  # Call 1 fallback (exactly 1x)
+        "json_schema",  # Call 2 stateless reset to json_schema
+        "json_schema",  # Call 3 context 400 does NOT fallback
+    ]
+    assert fallback_counts == {
+        "structured_output_json_object_fallback:extract_edges.edge": 1,
+    }
+
+
+def test_reasoning_client_conditional_session_header_and_safe_endpoint_posture():
+    from graphiti_core.llm_client.config import LLMConfig
+    from agent_knowledge.public_safe_util import ensure_public_safe
+
+    non_opencode = _ReasoningOpenAIGenericClient(
+        config=LLMConfig(
+            api_key="synth-placeholder",
+            model="deepseek-v4.1-flash",
+            base_url="http://model-gateway-proxy:8930/v1",
+        )
+    )
+    assert "x-opencode-session" not in non_opencode.client.default_headers
+    assert non_opencode.client.default_headers.get("User-Agent") == "neurons-graphiti/1.0"
+
+    cfg = GraphitiNeo4jConfig.from_env(
+        {
+            "LLM_BRAIN_LLM_PROVIDER": "openai",
+            "LLM_BRAIN_LLM_MODEL": "deepseek-v4.1-flash",
+            "LLM_BRAIN_LLM_BASE_URL": "https://opencode.ai/zen/go/v1",
+            "LLM_BRAIN_LLM_API_KEY": "synth-placeholder",
+        }
+    )
+    posture = cfg.safe_llm_endpoint_posture()
+    ensure_public_safe(posture, field="safe_llm_endpoint_posture")
+    assert posture == {
+        "base_url_configured": True,
+        "is_opencode_host": True,
+        "uses_canonical_opencode_inference_path": True,
+        "opencode_session_header_enabled": True,
+    }
+
+
+def test_search_context_bounds_massive_session_episodes_and_recovers_card_hits():
+    # Simulate 250 oversized Session episodes (~120KB each = ~30MB) burying 1 Decision card episode
+    heavy_hashes = [f"sha256:{i:064x}" for i in range(800)]
+    session_nodes = []
+    for idx in range(250):
+        ep = OntologyEpisode.from_payload(
+            event_id=f"evt:sess_{idx}",
+            entity_type="Session",
+            natural_id=f"sess_{idx}",
+            payload={"brain_id": "/project/neurons", "provider": "codex", "summary": f"chunks={idx}"},
+            source_event_ids=heavy_hashes,
+            source_ref_ids=heavy_hashes,
+            observed_at="2026-11-16T00:00:00+00:00",
+            reference_time="2026-11-16T00:00:00+00:00",
+        )
+        session_nodes.append(
+            SimpleNamespace(
+                uuid=ep.episode_id,
+                group_id="brain_neurons",
+                source_description=f"llm_brain_core:Session:{ep.natural_id}",
+                content=json.dumps(ep.to_dict()),
+            )
+        )
+    card_ep = OntologyEpisode.from_payload(
+        event_id="evt:card_target",
+        entity_type="Decision",
+        natural_id="decision:mem_compaction",
+        payload={
+            "brain_id": "/project/neurons",
+            "authority_memory_id": "mem_compaction",
+            "content_hash": "sha256:" + "d" * 64,
+            "summary": "context-hide compaction policy card",
+        },
+        observed_at="2026-11-01T00:00:00+00:00",
+        reference_time="2026-11-01T00:00:00+00:00",
+    )
+    card_node = SimpleNamespace(
+        uuid=card_ep.episode_id,
+        group_id="brain_neurons",
+        source_description=f"llm_brain_core:Decision:{card_ep.natural_id}",
+        content=json.dumps(card_ep.to_dict()),
+    )
+    retrieve_calls: list[int] = []
+
+    async def _search(query, **kwargs):
+        _ = (query, kwargs)
+        return []
+
+    async def _retrieve(**kwargs):
+        limit = kwargs["last_n"]
+        retrieve_calls.append(limit)
+        return [*session_nodes, card_node][:limit]
+
+    from graphiti_core.driver.neo4j_driver import Neo4jDriver
+
+    class _FakeNeo4jDriver(Neo4jDriver):
+        def __init__(self) -> None:
+            pass
+
+        async def execute_query(self, query: str, **params):
+            if "NOT coalesce(e.source_description, '') STARTS WITH 'llm_brain_core:Session:'" in query:
+                return [
+                    {
+                        "uuid": card_node.uuid,
+                        "name": card_node.uuid,
+                        "group_id": card_node.group_id,
+                        "source": "json",
+                        "source_description": card_node.source_description,
+                        "content": card_node.content,
+                    }
+                ], None, None
+            limit = int(params.get("limit", 20))
+            return [
+                {
+                    "uuid": n.uuid,
+                    "name": n.uuid,
+                    "group_id": n.group_id,
+                    "source": "json",
+                    "source_description": n.source_description,
+                    "content": n.content,
+                }
+                for n in session_nodes[:limit]
+            ], None, None
+
+    runner = _AsyncLoopRunner()
+    try:
+        adapter = GraphitiNeo4jGraphMemoryAdapter(
+            SimpleNamespace(search=_search, retrieve_episodes=_retrieve, driver=_FakeNeo4jDriver()),
+            default_group_id="/project/neurons",
+            runner=runner,
+            read_timeout_seconds=2.0,
+        )
+        result = adapter.search_context(
+            brain_id="/project/neurons",
+            query="context-hide compaction",
+            entity_types=None,
+            limit=100,
+        )
+        assert result.status == "available"
+        assert "episode_read_bounded" in result.details
+        assert [ep.payload.get("authority_memory_id") for ep in result.episodes] == ["mem_compaction"]
+        assert retrieve_calls == []  # Used bounded Neo4j Cypher reader instead of 500/2500 full scan
+    finally:
+        runner.shutdown()

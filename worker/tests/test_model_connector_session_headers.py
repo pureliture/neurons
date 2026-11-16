@@ -131,3 +131,28 @@ def test_reranker_clients_omit_session_header_for_other_providers():
 
     assert OPENCODE_SESSION_HEADER not in client._async_client.default_headers
     assert OPENCODE_SESSION_HEADER not in client._sync_client.default_headers
+
+
+def test_normalize_opencode_openai_base_url_upgrades_legacy_zen_path_only():
+    from agent_knowledge.model_connectors import normalize_opencode_openai_base_url
+
+    assert (
+        normalize_opencode_openai_base_url("https://opencode.ai/zen/go/v1")
+        == "https://opencode.ai/inference/go/openai/v1"
+    )
+    assert (
+        normalize_opencode_openai_base_url("https://opencode.ai/zen/go/v1/")
+        == "https://opencode.ai/inference/go/openai/v1"
+    )
+    assert (
+        normalize_opencode_openai_base_url("https://opencode.ai/inference/go/openai/v1")
+        == "https://opencode.ai/inference/go/openai/v1"
+    )
+    assert (
+        normalize_opencode_openai_base_url("http://model-gateway-proxy:8930/v1")
+        == "http://model-gateway-proxy:8930/v1"
+    )
+    assert (
+        normalize_opencode_openai_base_url("https://opencode.ai.evil.test/zen/go/v1")
+        == "https://opencode.ai.evil.test/zen/go/v1"
+    )

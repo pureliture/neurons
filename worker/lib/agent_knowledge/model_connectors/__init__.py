@@ -32,8 +32,10 @@ from .reranker import (
 )
 from .session_headers import (
     GRAPH_WORKER_SESSION_ID,
+    OPENCODE_CANONICAL_OPENAI_PATH,
     OPENCODE_SESSION_HEADER,
     is_opencode_base_url,
+    normalize_opencode_openai_base_url,
     opencode_session_headers,
     opencode_session_id,
 )
@@ -55,6 +57,7 @@ __all__ = [
     "ModelEndpointSpec",
     "ModelConnectorConfigError",
     "ModelPolicy",
+    "OPENCODE_CANONICAL_OPENAI_PATH",
     "OPENCODE_SESSION_HEADER",
     "OpenAICompatibleRerankerClient",
     "PolicyViolation",
@@ -64,6 +67,7 @@ __all__ = [
     "build_candidate_reranker",
     "build_reranker_client",
     "is_opencode_base_url",
+    "normalize_opencode_openai_base_url",
     "opencode_session_headers",
     "opencode_session_id",
     "resolve_embedding_profile_id",

@@ -273,6 +273,8 @@ class SafeReasonCode(StrEnum):
     DELETED_TOMBSTONE = "deleted_tombstone"
     TARGET_MISSING = "target_missing"
     FENCE_MISSING = "fence_missing"
+    STRUCTURED_OUTPUT_JSON_OBJECT_FALLBACK = "structured_output_json_object_fallback"
+    EPISODE_READ_BOUNDED = "episode_read_bounded"
     UNKNOWN_REASON_CODE = "unknown_reason_code"
 
 

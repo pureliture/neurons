@@ -16,6 +16,8 @@ import uuid
 OPENCODE_SESSION_HEADER = "x-opencode-session"
 OPENCODE_SESSION_DOMAIN = "opencode.ai"
 
+OPENCODE_LEGACY_OPENAI_PATH = "/zen/go/v1"
+OPENCODE_CANONICAL_OPENAI_PATH = "/inference/go/openai/v1"
 # Lane-scoped session id for the Graphiti worker path. Stable for the process
 # lifetime so OpenCode keeps routing one worker lane to one upstream backend.
 GRAPH_WORKER_SESSION_ID = "neurons-graph-worker"
@@ -53,6 +55,19 @@ def opencode_session_headers(base_url: str, *, session_id: str = "") -> dict[str
     value = str(session_id or "").strip() or _PROCESS_SESSION_ID
     return {OPENCODE_SESSION_HEADER: value}
 
+
+
+def normalize_opencode_openai_base_url(base_url: str) -> str:
+    """Upgrade legacy OpenCode ``/zen/go/v1`` relay path to canonical ``/inference/go/openai/v1``."""
+
+    raw = str(base_url or "").strip()
+    if not raw or not is_opencode_base_url(raw):
+        return raw
+    parsed = urllib.parse.urlparse(raw)
+    normalized_path = (parsed.path or "").rstrip("/")
+    if normalized_path == OPENCODE_LEGACY_OPENAI_PATH:
+        return urllib.parse.urlunparse(parsed._replace(path=OPENCODE_CANONICAL_OPENAI_PATH))
+    return raw
 
 def _hostname(base_url: str) -> str:
     raw = str(base_url or "").strip()
