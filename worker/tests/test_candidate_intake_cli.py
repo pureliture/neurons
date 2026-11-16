@@ -10,6 +10,7 @@ from agent_knowledge.session_memory.candidate_intake_cli import (
     CandidateIntakeConfigError,
     CandidateIntakeReport,
     CandidateIntakeSettings,
+    _single_project_exit_code,
     already_processed,
 
     checkpoint_source_hash,
@@ -294,6 +295,16 @@ def test_empty_source_is_reported_not_completed():
     )
     assert report.status == "no_source"
     assert steward.calls == []
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [("completed", 0), ("no_source", 0), ("failed", 1), ("partial_failure", 1)],
+)
+def test_single_project_exit_code_treats_no_source_as_success(status, expected):
+    """A scheduled run must not fail forever on a project with no source."""
+
+    assert _single_project_exit_code(status) == expected
 
 
 # ------------------------------------------------------------------- CLI boundary
