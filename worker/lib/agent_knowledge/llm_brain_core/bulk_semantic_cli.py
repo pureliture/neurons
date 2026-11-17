@@ -221,18 +221,28 @@ def run_couchdb_bulk_semantic_projection(
         else DEFAULT_SESSION_DEADLINE_SECONDS
     )
     deferred_path = deferred_jsonl
-    if deferred_path is None and runtime_dir is not None:
-        deferred_path = Path(runtime_dir) / "bulk-semantic-deferred.jsonl"
+    if deferred_path is None:
+        # Deferral state must survive even for callers that pass no runtime dir;
+        # the ledger directory is always explicit and per-brain.
+        deferred_path = Path(ledger_path).parent / "bulk-semantic-deferred.jsonl"
     deferred_records = _load_deferred_records(deferred_path)
     deferred_updates: dict[str, dict[str, Any]] = {}
     retried_hashes: set[str] = set()
     priority_sessions: list[dict[str, Any]] = []
+    project_filter = str(project or "")
+    provider_filter = str(provider or "")
     for session_id_hash, record in deferred_records.items():
+        record_project = str(record.get("project") or "")
+        record_provider = str(record.get("provider") or "")
+        if project_filter and record_project != project_filter:
+            continue
+        if provider_filter and record_provider != provider_filter:
+            continue
         priority_sessions.append(
             {
                 "session_id_hash": session_id_hash,
-                "project": str(record.get("project") or ""),
-                "provider": str(record.get("provider") or ""),
+                "project": record_project,
+                "provider": record_provider,
                 "_deferred_attempts": int(record.get("attempts") or 0),
             }
         )
@@ -243,6 +253,9 @@ def run_couchdb_bulk_semantic_projection(
             session for session in selected
             if str(session.get("session_id_hash") or "") not in deferred_hashes
         ]
+        if int(limit) > 0:
+            # Priority retries must not widen the operator-requested window.
+            selected = selected[: int(limit)]
 
     # Only touched sessions from this bounded selection are cached; historical
     # projection state is checked with an indexed exact-identity query above.
@@ -454,14 +467,16 @@ def run_couchdb_bulk_semantic_projection(
             entities_written += int(report["entities_written"])
             relations_written += int(report["relations_written"])
     finally:
-        if lock_handle is not None:
-            _release_runtime_lock(lock_handle)
+        # Persist inside the runtime lock so a successor cannot read a stale
+        # snapshot or race the same temporary file.
         _persist_deferred_records(
             deferred_path,
             deferred_records,
             deferred_updates,
             retried_hashes,
         )
+        if lock_handle is not None:
+            _release_runtime_lock(lock_handle)
 
     elapsed_total_ms = int((time.monotonic() - started) * 1000)
     attempted = processed

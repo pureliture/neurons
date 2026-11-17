@@ -333,3 +333,135 @@ def test_bulk_lane_exhausts_deferred_session_explicitly(
     assert len(dead_letters) == 1
     assert dead_letters[0]["reason_code"] == "session_budget_exhausted"
     assert dead_letters[0]["error_param"] == "session_member_budget_exceeded"
+
+
+def _run_cycle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **kwargs) -> dict:
+    return cli.run_couchdb_bulk_semantic_projection(
+        ledger_path=tmp_path / "ledger.sqlite",
+        source_store=object(),  # type: ignore[arg-type]
+        progress_jsonl=tmp_path / "progress.jsonl",
+        dead_letter_jsonl=tmp_path / "dead.jsonl",
+        extractor=graph_helpers._BatchJsonThenSingleExtractor(),
+        writer=graph_helpers._FakeBulkWriter(),
+        max_sessions_per_call=2,
+        **kwargs,
+    )
+
+
+def test_deferred_retry_respects_project_filter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    deferred_path = tmp_path / "bulk-semantic-deferred.jsonl"
+    record = {
+        "session_id_hash": "sha256:" + "4" * 64,
+        "project": "project-a",
+        "provider": "codex",
+        "attempts": 1,
+        "reason_code": "session_member_budget_exceeded",
+        "members_total": 5,
+        "members_read": 0,
+    }
+    deferred_path.write_text(json.dumps(record) + "\n")
+    _patch_selection_and_episode(monkeypatch, [])
+    calls: list[str] = []
+
+    def _episode(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append(str(kwargs["session_id_hash"]))
+        return SimpleNamespace(natural_id=str(kwargs["session_id_hash"]))
+
+    monkeypatch.setattr(cli, "session_episode_from_couchdb_source", _episode)
+
+    _run_cycle(
+        tmp_path,
+        monkeypatch,
+        limit=10,
+        project="project-b",
+        deferred_jsonl=deferred_path,
+        max_session_member_docs=10,
+    )
+    assert calls == []
+    assert json.loads(deferred_path.read_text().splitlines()[0])["attempts"] == 1
+
+    _run_cycle(
+        tmp_path,
+        monkeypatch,
+        limit=10,
+        project="project-a",
+        deferred_jsonl=deferred_path,
+        max_session_member_docs=10,
+    )
+    assert calls == ["sha256:" + "4" * 64]
+    assert deferred_path.read_text() == ""
+
+
+def test_deferred_priority_retries_still_respect_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    deferred_path = tmp_path / "bulk-semantic-deferred.jsonl"
+    records = [
+        {
+            "session_id_hash": "sha256:" + digit * 64,
+            "project": "neurons",
+            "provider": "codex",
+            "attempts": 1,
+        }
+        for digit in ("5", "6")
+    ]
+    deferred_path.write_text("".join(json.dumps(item) + "\n" for item in records))
+    _patch_selection_and_episode(monkeypatch, [])
+    calls: list[str] = []
+
+    def _episode(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append(str(kwargs["session_id_hash"]))
+        return SimpleNamespace(natural_id=str(kwargs["session_id_hash"]))
+
+    monkeypatch.setattr(cli, "session_episode_from_couchdb_source", _episode)
+
+    _run_cycle(
+        tmp_path,
+        monkeypatch,
+        limit=1,
+        project="neurons",
+        deferred_jsonl=deferred_path,
+        max_session_member_docs=10,
+    )
+
+    assert len(calls) == 1
+    remaining = [json.loads(line) for line in deferred_path.read_text().splitlines() if line]
+    assert len(remaining) == 1
+
+
+def test_deferral_state_is_persisted_without_runtime_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_selection_and_episode(
+        monkeypatch, [_session_descriptor("sha256:" + "7" * 64)]
+    )
+
+    def _defer(**kwargs):  # type: ignore[no-untyped-def]
+        raise SourceRevisionDeferredBudget(
+            "budget",
+            reason_code="session_member_budget_exceeded",
+            session_id_hash=str(kwargs["session_id_hash"]),
+            members_total=5,
+            members_read=0,
+        )
+
+    monkeypatch.setattr(cli, "session_episode_from_couchdb_source", _defer)
+
+    report = cli.run_couchdb_bulk_semantic_projection(
+        ledger_path=tmp_path / "ledger.sqlite",
+        source_store=object(),  # type: ignore[arg-type]
+        limit=10,
+        progress_jsonl=tmp_path / "progress.jsonl",
+        dead_letter_jsonl=tmp_path / "dead.jsonl",
+        max_session_member_docs=10,
+        extractor=graph_helpers._BatchJsonThenSingleExtractor(),
+        writer=graph_helpers._FakeBulkWriter(),
+    )
+
+    assert report["projection"]["deferred"] == 1
+    persisted = tmp_path / "bulk-semantic-deferred.jsonl"
+    assert persisted.exists()
+    record = json.loads(persisted.read_text().splitlines()[0])
+    assert record["attempts"] == 1
