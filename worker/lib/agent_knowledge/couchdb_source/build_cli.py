@@ -22,6 +22,7 @@ import base64
 import json
 import os
 import sys
+import re
 from types import SimpleNamespace
 
 from agent_knowledge.pipeline_progress import emit_progress
@@ -34,6 +35,11 @@ from agent_knowledge.rag_ingress.pg_embedding_chunks import (
 
 BUILD_CLI_SCHEMA_VERSION = "couchdb_session_memory_build.v1"
 
+
+def _safe_reason_code(value: object) -> str:
+    """Closed identifier for log evidence; never carries text or session ids."""
+    code = re.sub(r"[^a-z0-9_]+", "_", str(value or "").lower()).strip("_")[:48]
+    return code or "unspecified"
 
 class ProjectionDeadLetterLookupError(RuntimeError):
     """The local dead-letter state needed for terminal suppression is unavailable."""
@@ -183,7 +189,12 @@ def _select_sessions_needing_projection(
         projection_state_doc_id,
         session_doc_id,
     )
-    from .source_revision import resolve_active_source_revision_from_snapshot
+    from .source_revision import (
+        iter_active_source_hashes,
+        iter_legacy_source_hashes,
+        resolve_active_source_revision_from_snapshot,
+        resolve_source_hash_for_currentness,
+    )
 
     scope_selector = _scope_selector(project=project, provider=provider)
     hash_field = "backend_receipts" if backend == "postgres_pgvector" else "projected_source_hash"
@@ -245,6 +256,30 @@ def _select_sessions_needing_projection(
         and str(state.get("_id") or "") == projection_state_doc_id(session_id_hash)
         and str(state.get("projection_status") or "") == ProjectionStatus.PROJECTED
     }
+    use_bulk_hashes = bool(getattr(store, "base_url", ""))
+    active_hashes: dict[str, str] = {}
+    legacy_hashes: dict[str, str] = {}
+    invalid_active: set[str] = set()
+    active_scope: dict[str, dict[str, str]] = {}
+    probe_session = None
+    if use_bulk_hashes:
+        # Paged control scans replace a find_by_session query per session.
+        active_hashes, invalid_active = iter_active_source_hashes(store)
+        legacy_hashes = iter_legacy_source_hashes(store)
+        for pointer in store.iter_by_type(
+            SourceDocType.ACTIVE_SOURCE_REVISION,
+            fields=["session_id_hash", "project", "provider"],
+            page_size=256,
+        ):
+            sid = str(pointer.get("session_id_hash") or "")
+            if sid:
+                active_scope[sid] = {
+                    "project": str(pointer.get("project") or ""),
+                    "provider": str(pointer.get("provider") or ""),
+                }
+        probe_session = next(iter(active_hashes), None)
+    probe_done = False
+
     selected: list[dict] = []
     canonical_session_ids: set[str] = set()
     current_only_session_ids: list[str] = []
@@ -273,20 +308,37 @@ def _select_sessions_needing_projection(
             continue
         canonical_session_ids.add(session_id_hash)
         projected_source_hash = projected_source_hashes.get(session_id_hash, "")
-        resolved = resolve_active_source_revision_from_snapshot(
-            session_id_hash=session_id_hash,
-            documents=store.find_by_session(session_id_hash=session_id_hash),
-        )
-        if not resolved.is_legacy_unpinned:
-            if len(resolved.sessions) != 1:
-                continue
-            active_session = resolved.sessions[0]
-            if (
-                (project and str(active_session.get("project") or "") != project)
-                or (provider and str(active_session.get("provider") or "") != provider)
+        if use_bulk_hashes:
+            current_source_hash = active_hashes.get(session_id_hash) or legacy_hashes.get(session_id_hash, "")
+            if session_id_hash in invalid_active or (
+                not probe_done and (session_id_hash == probe_session or probe_session is None)
             ):
-                continue
-        current_source_hash = resolved.source_hash
+                probe_done = True
+                current_source_hash = resolve_source_hash_for_currentness(
+                    session_id_hash=session_id_hash, store=store
+                )
+            if session_id_hash in active_hashes:
+                scope = active_scope.get(session_id_hash, {})
+                if (
+                    (project and scope.get("project", "") != project)
+                    or (provider and scope.get("provider", "") != provider)
+                ):
+                    continue
+        else:
+            resolved = resolve_active_source_revision_from_snapshot(
+                session_id_hash=session_id_hash,
+                documents=store.find_by_session(session_id_hash=session_id_hash),
+            )
+            if not resolved.is_legacy_unpinned:
+                if len(resolved.sessions) != 1:
+                    continue
+                active_session = resolved.sessions[0]
+                if (
+                    (project and str(active_session.get("project") or "") != project)
+                    or (provider and str(active_session.get("provider") or "") != provider)
+                ):
+                    continue
+            current_source_hash = resolved.source_hash
         if (
             not projected_source_hash
             or not current_source_hash
@@ -1224,6 +1276,7 @@ def main(argv: list[str] | None = None) -> int:
             if not session_id_hash:
                 skipped += 1
                 continue
+            failure_reason = ""
             try:
                 if hasattr(projector, "last_local_identity_resolution"):
                     projector.last_local_identity_resolution = ""
@@ -1248,11 +1301,13 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     failed += 1
                     outcome = "failed"
+                    failure_reason = _safe_reason_code(projection.get("reason"))
                 session_reports.append(
                     {"session_id_hash": session_id_hash, "status": outcome, "error_class": ""}
                 )
             except Exception as exc:
                 failed += 1
+                failure_reason = _safe_reason_code(type(exc).__name__)
                 session_reports.append(
                     {
                         "session_id_hash": session_id_hash,
@@ -1268,7 +1323,7 @@ def main(argv: list[str] | None = None) -> int:
             segments_total += int(getattr(projector, "last_segments_total", 0) or 0)
             segments_reused += int(getattr(projector, "last_segments_reused", 0) or 0)
             segments_embedded += int(getattr(projector, "last_segments_embedded", 0) or 0)
-            emit_progress("projection", index + 1, selected_count)
+            emit_progress("projection", index + 1, selected_count, reason_code=failure_reason)
     finally:
         _close_if_supported(projector)
 

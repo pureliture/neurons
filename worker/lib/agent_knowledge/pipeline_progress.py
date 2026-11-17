@@ -46,6 +46,7 @@ def emit_progress(
     total: int,
     *,
     stream: IO[str] | None = None,
+    reason_code: str = "",
 ) -> None:
     """Write one fixed-schema progress event to ``stream`` (default stderr).
 
@@ -65,6 +66,13 @@ def emit_progress(
         "done": done_count,
         "total": total_count,
     }
+    if reason_code:
+        import re
+
+        code = str(reason_code).strip()
+        if not re.fullmatch(r"[a-z0-9_]{1,48}", code):
+            raise ValueError("progress reason_code must be a closed identifier")
+        event["reason_code"] = code
     target = stream if stream is not None else sys.stderr
     target.write(json.dumps(event, sort_keys=True, separators=(",", ":")))
     target.write("\n")
