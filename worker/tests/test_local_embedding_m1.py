@@ -521,3 +521,114 @@ def test_concurrency_queue_limit_and_timeout_429() -> None:
     t3.join(timeout=2.0)
 
     assert sorted(results) == [200, 429, 429]
+
+
+def test_client_skips_trailing_whitespace_and_isolates_zero_norm_chunks(monkeypatch) -> None:
+    # Reproduce the 122,881-byte (15 * 8192 + 1 byte '\n') boundary case from production.
+    valid_prefix = (b"valid session memory content token " * 4500)[: 15 * 8192].decode("utf-8")
+    doc_trailing_ws = valid_prefix + "\n"
+    assert len(doc_trailing_ws.encode("utf-8")) == 122_881
+
+    sent_batches: list[list[str]] = []
+    fail_on_token = "---ZERO_NORM_TRIGGER---"
+
+    class _FakeResp:
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+
+        def read(self) -> bytes:
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _fake_urlopen(req, timeout=15.0):
+        payload = json.loads(req.data.decode("utf-8"))
+        inputs = list(payload["input"])
+        sent_batches.append(inputs)
+        for chunk in inputs:
+            if not chunk.strip() or fail_on_token in chunk:
+                import io
+                err_bytes = json.dumps(
+                    {
+                        "error": {
+                            "message": "internal embedding inference error",
+                            "type": "server_error",
+                            "param": None,
+                            "code": "internal_error",
+                        }
+                    }
+                ).encode("utf-8")
+                raise urllib.error.HTTPError(
+                    req.full_url, 500, "Internal Server Error", hdrs={}, fp=io.BytesIO(err_bytes)
+                )
+        norm_val = 1.0 / math.sqrt(256.0)
+        resp_bytes = json.dumps(
+            {
+                "object": "list",
+                "model": LOCAL_MODEL2VEC_MODEL_ALIAS,
+                "data": [
+                    {"object": "embedding", "index": i, "embedding": [norm_val] * 256}
+                    for i in range(len(inputs))
+                ],
+                "usage": {"prompt_tokens": len(inputs), "total_tokens": len(inputs)},
+            }
+        ).encode("utf-8")
+        return _FakeResp(resp_bytes)
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+
+    client = CanonicalLocalEmbeddingClient(
+        base_url="http://127.0.0.1:18120/v1",
+        max_retries=0,
+    )
+    res_ws = client.embed_document(doc_trailing_ws)
+    assert res_ws.chunk_count == 16
+    assert len(res_ws.vector) == 256
+    assert all(all(c.strip() != "" for c in batch) for batch in sent_batches)
+
+    # Now test non-whitespace chunk triggering internal_error/zero_norm -> bisects and still succeeds
+    sent_batches.clear()
+    valid_one_chunk = "first substantive session body text"
+    zero_norm_chunk = ("x" * 8192)[: 8192 - len(fail_on_token)] + fail_on_token
+    doc_with_oov_chunk = valid_one_chunk.ljust(8192, "a") + zero_norm_chunk + "third valid chunk"
+    res_oov = client.embed_document(doc_with_oov_chunk)
+    assert len(res_oov.vector) == 256
+    assert math.isclose(math.sqrt(sum(v * v for v in res_oov.vector)), 1.0, rel_tol=1e-4)
+
+    # Pure non-whitespace zero-norm document (no valid chunk at all) MUST still fail closed with stage set
+    doc_all_oov = fail_on_token
+    with pytest.raises(LocalEmbeddingClientError) as excinfo:
+        client.embed_document(doc_all_oov)
+    assert excinfo.value.retryable is False
+    assert excinfo.value.stage is not None
+
+    # Pure whitespace document MUST still fail closed with empty_input
+    with pytest.raises(LocalEmbeddingClientError) as empty_exc:
+        client.embed_document("   \n\t  ")
+    assert empty_exc.value.code == "empty_input"
+    assert empty_exc.value.retryable is False
+
+
+def test_service_returns_422_on_zero_norm_vector_error() -> None:
+    from agent_knowledge.local_embedding.canonical import CanonicalEmbeddingAggregationError
+    from agent_knowledge.local_embedding.service import LocalEmbeddingApiError
+
+    class _ZeroNormEngine:
+        def check_ready(self) -> dict[str, Any]:
+            return {"ready": True}
+
+        def encode_batch(self, items: list[str]):
+            raise CanonicalEmbeddingAggregationError("zero_norm_vector", "embedding vector norm must be > 0")
+
+    app = LocalEmbeddingServiceApplication(engine=_ZeroNormEngine())  # type: ignore[arg-type]
+    req_body = json.dumps({"model": LOCAL_MODEL2VEC_MODEL_ALIAS, "input": "\n"}).encode("utf-8")
+    resp = app.handle_embeddings(req_body)
+    assert resp.status_code == 422
+    payload = json.loads(resp.body.decode("utf-8"))
+    assert payload["error"]["type"] == "invalid_request_error"
+    assert payload["error"]["code"] == "zero_norm_vector"
+

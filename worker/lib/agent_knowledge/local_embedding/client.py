@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Sequence
@@ -34,6 +35,15 @@ from .profile import (
 )
 
 
+_ZERO_NORM_RECOVERY_CODES = frozenset({"internal_error", "zero_norm_vector"})
+
+
+def _is_embeddable_chunk(chunk: str) -> bool:
+    """Return True if chunk contains at least one graphic/non-control/non-separator char."""
+
+    return any(unicodedata.category(ch)[0] not in {"C", "Z"} for ch in chunk)
+
+
 class LocalEmbeddingClientError(RuntimeError):
     """Sanitized client error with explicit retryability classification."""
 
@@ -45,6 +55,7 @@ class LocalEmbeddingClientError(RuntimeError):
         status_code: int | None = None,
         retryable: bool = False,
         retry_after_seconds: float | None = None,
+        stage: str | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
@@ -52,6 +63,7 @@ class LocalEmbeddingClientError(RuntimeError):
         self.status_code = status_code
         self.retryable = retryable
         self.retry_after_seconds = retry_after_seconds
+        self.stage = stage
 
 
 @dataclass(frozen=True)
@@ -73,9 +85,13 @@ class _StreamedDocument:
     input_hash: str
     expected_chunks: int
     chunk_count: int = 0
+    skipped_chunks: int = 0
     single_vector: list[float] | None = None
     first_weight: float = 0.0
     accum: list[float] | None = None
+
+    def add_skipped(self) -> None:
+        self.skipped_chunks += 1
 
     def add(self, vector: list[float], weight: float, dim: int) -> None:
         validated = validate_finite_nonzero_vector(vector, expected_dim=dim)
@@ -98,14 +114,19 @@ class _StreamedDocument:
         self.chunk_count += 1
 
     def finish(self, dim: int) -> list[float]:
-        if self.chunk_count == 0:
-            raise CanonicalEmbeddingAggregationError(
-                "empty_chunks", "at least one chunk is required"
-            )
-        if self.chunk_count != self.expected_chunks:
+        if (self.chunk_count + self.skipped_chunks) != self.expected_chunks:
             raise CanonicalEmbeddingAggregationError(
                 "stream_chunk_count_mismatch",
                 "streamed chunk count changed between passes",
+            )
+        if self.chunk_count == 0:
+            if self.skipped_chunks > 0:
+                raise CanonicalEmbeddingAggregationError(
+                    "zero_norm_document",
+                    "all document chunks produced zero-norm vectors",
+                )
+            raise CanonicalEmbeddingAggregationError(
+                "empty_chunks", "at least one chunk is required"
             )
         if self.chunk_count == 1:
             assert self.single_vector is not None
@@ -338,32 +359,49 @@ class CanonicalLocalEmbeddingClient:
         results = self.embed_documents([text])
         return results[0]
 
-    def _prepare_documents(self, texts: Sequence[str]) -> tuple[list[str], list[int]]:
+    def _prepare_documents(
+        self, texts: Sequence[str]
+    ) -> tuple[list[str], list[int], list[int]]:
         """Validate UTF-8 and hash every document before any egress (bounded memory)."""
 
         hashes: list[str] = []
-        counts: list[int] = []
+        raw_counts: list[int] = []
+        embeddable_counts: list[int] = []
         try:
             for text in texts:
                 hasher = hashlib.sha256()
-                chunk_count = 0
+                raw_count = 0
+                embeddable_count = 0
                 for chunk in iter_utf8_chunks_v1(
                     text, max_chunk_bytes=LOCAL_MODEL2VEC_MAX_CHUNK_BYTES
                 ):
                     hasher.update(chunk.encode("utf-8", errors="strict"))
-                    chunk_count += 1
+                    raw_count += 1
+                    if _is_embeddable_chunk(chunk):
+                        embeddable_count += 1
+                if embeddable_count == 0:
+                    raise CanonicalEmbeddingInputError(
+                        "empty_input", "embedding input must contain non-whitespace text"
+                    )
                 hashes.append("sha256:" + hasher.hexdigest())
-                counts.append(chunk_count)
+                raw_counts.append(raw_count)
+                embeddable_counts.append(embeddable_count)
         except CanonicalEmbeddingInputError as exc:
             raise LocalEmbeddingClientError(
-                exc.code, exc.public_message, retryable=False
+                exc.code, exc.public_message, retryable=False, stage="prepare"
             ) from exc
-        return hashes, counts
+        return hashes, raw_counts, embeddable_counts
 
     def _stream_batches(self, texts: Sequence[str]):
         return iter_request_batches_v1(
             chain.from_iterable(
-                iter_utf8_chunks_v1(text, max_chunk_bytes=LOCAL_MODEL2VEC_MAX_CHUNK_BYTES)
+                (
+                    chunk
+                    for chunk in iter_utf8_chunks_v1(
+                        text, max_chunk_bytes=LOCAL_MODEL2VEC_MAX_CHUNK_BYTES
+                    )
+                    if _is_embeddable_chunk(chunk)
+                )
                 for text in texts
             ),
             model=self._model,
@@ -379,30 +417,33 @@ class CanonicalLocalEmbeddingClient:
         self,
         texts: Sequence[str],
         hashes: Sequence[str],
-        counts: Sequence[int],
+        raw_counts: Sequence[int],
+        embeddable_counts: Sequence[int],
         states: Sequence[_StreamedDocument],
         total_tokens: int,
     ) -> list[CanonicalEmbeddingResult]:
-        consumed = sum(state.chunk_count for state in states)
-        if consumed != sum(counts):
+        consumed = sum(state.chunk_count + state.skipped_chunks for state in states)
+        if consumed != sum(embeddable_counts):
             raise LocalEmbeddingClientError(
                 "total_chunk_vector_mismatch",
                 "streamed chunk count changed between passes",
                 retryable=False,
+                stage="aggregate",
             )
         results: list[CanonicalEmbeddingResult] = []
-        for state, input_hash in zip(states, hashes):
+        for state, input_hash, raw_count in zip(states, hashes, raw_counts):
             try:
                 vector = state.finish(self._dimensions)
             except CanonicalEmbeddingAggregationError as exc:
+                stage = "batch_http" if exc.code == "zero_norm_document" else "aggregate"
                 raise LocalEmbeddingClientError(
-                    exc.code, exc.public_message, retryable=False
+                    exc.code, exc.public_message, retryable=False, stage=stage
                 ) from exc
             results.append(
                 CanonicalEmbeddingResult(
                     vector=vector,
                     input_hash=input_hash,
-                    chunk_count=state.chunk_count,
+                    chunk_count=int(raw_count),
                     prompt_tokens=total_tokens if len(texts) == 1 else 0,
                     profile_id=self._profile_id,
                     model_alias=self._model,
@@ -410,58 +451,77 @@ class CanonicalLocalEmbeddingClient:
             )
         return results
 
+    def _consume_batch_vectors(
+        self,
+        *,
+        batch: list[str],
+        vectors: Sequence[list[float] | None],
+        embeddable_counts: Sequence[int],
+        states: Sequence[_StreamedDocument],
+        cursor_state: list[int],
+    ) -> None:
+        if len(vectors) != len(batch):
+            raise LocalEmbeddingClientError(
+                "total_chunk_vector_mismatch",
+                "received vector count does not match total chunks",
+                retryable=False,
+                stage="aggregate",
+            )
+        chunk_bytes = [chunk.encode("utf-8", errors="strict") for chunk in batch]
+        for vector, raw in zip(vectors, chunk_bytes):
+            while cursor_state[1] == 0:
+                cursor_state[0] += 1
+                if cursor_state[0] >= len(embeddable_counts):
+                    raise LocalEmbeddingClientError(
+                        "total_chunk_vector_mismatch",
+                        "received more chunks than planned",
+                        retryable=False,
+                        stage="aggregate",
+                    )
+                cursor_state[1] = embeddable_counts[cursor_state[0]]
+            doc_state = states[cursor_state[0]]
+            if vector is None:
+                doc_state.add_skipped()
+            else:
+                doc_state.add(vector, float(len(raw)), self._dimensions)
+            cursor_state[1] -= 1
+
     def _embed_documents_streaming(
         self, texts: Sequence[str]
     ) -> list[CanonicalEmbeddingResult]:
-        hashes, counts = self._prepare_documents(texts)
+        hashes, raw_counts, embeddable_counts = self._prepare_documents(texts)
         states = [
             _StreamedDocument(input_hash=hash_value, expected_chunks=count)
-            for hash_value, count in zip(hashes, counts)
+            for hash_value, count in zip(hashes, embeddable_counts)
         ]
-        doc_index = 0
-        remaining = counts[0]
+        cursor_state = [0, embeddable_counts[0]]
         total_tokens = 0
         done_chunks = 0
-        total_chunks = sum(counts)
+        total_chunks = sum(embeddable_counts)
         try:
             for batch in self._stream_batches(texts):
-                chunk_bytes = [chunk.encode("utf-8", errors="strict") for chunk in batch]
-                vectors, tokens = self._send_chunk_batch_sync(batch)
-                if len(vectors) != len(batch):
-                    raise LocalEmbeddingClientError(
-                        "total_chunk_vector_mismatch",
-                        "received vector count does not match total chunks",
-                        retryable=False,
-                    )
+                vectors, tokens = self._send_batch_tolerating_zero_norm_sync(batch)
                 done_chunks += len(batch)
                 self._report_batch_progress(done_chunks, total_chunks)
                 total_tokens += int(tokens)
-                for vector, raw in zip(vectors, chunk_bytes):
-                    while remaining == 0:
-                        doc_index += 1
-                        if doc_index >= len(counts):
-                            raise LocalEmbeddingClientError(
-                                "total_chunk_vector_mismatch",
-                                "received more chunks than planned",
-                                retryable=False,
-                            )
-                        remaining = counts[doc_index]
-                    try:
-                        states[doc_index].add(vector, float(len(raw)), self._dimensions)
-                    except CanonicalEmbeddingAggregationError as exc:
-                        raise LocalEmbeddingClientError(
-                            exc.code, exc.public_message, retryable=False
-                        ) from exc
-                    remaining -= 1
+                self._consume_batch_vectors(
+                    batch=batch,
+                    vectors=vectors,
+                    embeddable_counts=embeddable_counts,
+                    states=states,
+                    cursor_state=cursor_state,
+                )
         except CanonicalEmbeddingInputError as exc:
             raise LocalEmbeddingClientError(
-                exc.code, exc.public_message, retryable=False
+                exc.code, exc.public_message, retryable=False, stage="prepare"
             ) from exc
         except CanonicalEmbeddingAggregationError as exc:
             raise LocalEmbeddingClientError(
-                exc.code, exc.public_message, retryable=False
+                exc.code, exc.public_message, retryable=False, stage="aggregate"
             ) from exc
-        return self._finalize_streamed(texts, hashes, counts, states, total_tokens)
+        return self._finalize_streamed(
+            texts, hashes, raw_counts, embeddable_counts, states, total_tokens
+        )
 
     def embed_documents(self, texts: Sequence[str]) -> list[CanonicalEmbeddingResult]:
         if not texts:
@@ -475,55 +535,85 @@ class CanonicalLocalEmbeddingClient:
     async def aembed_documents(self, texts: Sequence[str]) -> list[CanonicalEmbeddingResult]:
         if not texts:
             return []
-        hashes, counts = self._prepare_documents(texts)
+        hashes, raw_counts, embeddable_counts = self._prepare_documents(texts)
         states = [
             _StreamedDocument(input_hash=hash_value, expected_chunks=count)
-            for hash_value, count in zip(hashes, counts)
+            for hash_value, count in zip(hashes, embeddable_counts)
         ]
-        doc_index = 0
-        remaining = counts[0]
+        cursor_state = [0, embeddable_counts[0]]
         total_tokens = 0
         done_chunks = 0
-        total_chunks = sum(counts)
+        total_chunks = sum(embeddable_counts)
         try:
             for batch in self._stream_batches(texts):
-                chunk_bytes = [chunk.encode("utf-8", errors="strict") for chunk in batch]
-                vectors, tokens = await self._send_chunk_batch_async(batch)
-                if len(vectors) != len(batch):
-                    raise LocalEmbeddingClientError(
-                        "total_chunk_vector_mismatch",
-                        "received vector count does not match total chunks",
-                        retryable=False,
-                    )
+                vectors, tokens = await self._send_batch_tolerating_zero_norm_async(batch)
                 done_chunks += len(batch)
                 self._report_batch_progress(done_chunks, total_chunks)
                 total_tokens += int(tokens)
-                for vector, raw in zip(vectors, chunk_bytes):
-                    while remaining == 0:
-                        doc_index += 1
-                        if doc_index >= len(counts):
-                            raise LocalEmbeddingClientError(
-                                "total_chunk_vector_mismatch",
-                                "received more chunks than planned",
-                                retryable=False,
-                            )
-                        remaining = counts[doc_index]
-                    try:
-                        states[doc_index].add(vector, float(len(raw)), self._dimensions)
-                    except CanonicalEmbeddingAggregationError as exc:
-                        raise LocalEmbeddingClientError(
-                            exc.code, exc.public_message, retryable=False
-                        ) from exc
-                    remaining -= 1
+                self._consume_batch_vectors(
+                    batch=batch,
+                    vectors=vectors,
+                    embeddable_counts=embeddable_counts,
+                    states=states,
+                    cursor_state=cursor_state,
+                )
         except CanonicalEmbeddingInputError as exc:
             raise LocalEmbeddingClientError(
-                exc.code, exc.public_message, retryable=False
+                exc.code, exc.public_message, retryable=False, stage="prepare"
             ) from exc
         except CanonicalEmbeddingAggregationError as exc:
             raise LocalEmbeddingClientError(
-                exc.code, exc.public_message, retryable=False
+                exc.code, exc.public_message, retryable=False, stage="aggregate"
             ) from exc
-        return self._finalize_streamed(texts, hashes, counts, states, total_tokens)
+        return self._finalize_streamed(
+            texts, hashes, raw_counts, embeddable_counts, states, total_tokens
+        )
+
+    def _send_batch_tolerating_zero_norm_sync(
+        self, batch: list[str]
+    ) -> tuple[list[list[float] | None], int]:
+        try:
+            vectors, tokens = self._send_chunk_batch_sync(batch)
+            return list(vectors), int(tokens)
+        except LocalEmbeddingClientError as exc:
+            if exc.code not in _ZERO_NORM_RECOVERY_CODES:
+                raise LocalEmbeddingClientError(
+                    exc.code,
+                    exc.public_message,
+                    status_code=exc.status_code,
+                    retryable=exc.retryable,
+                    retry_after_seconds=exc.retry_after_seconds,
+                    stage=exc.stage or "batch_http",
+                ) from exc
+            if len(batch) <= 1:
+                return ([None] if batch else []), 0
+            mid = len(batch) // 2
+            left_vecs, left_tokens = self._send_batch_tolerating_zero_norm_sync(batch[:mid])
+            right_vecs, right_tokens = self._send_batch_tolerating_zero_norm_sync(batch[mid:])
+            return [*left_vecs, *right_vecs], left_tokens + right_tokens
+
+    async def _send_batch_tolerating_zero_norm_async(
+        self, batch: list[str]
+    ) -> tuple[list[list[float] | None], int]:
+        try:
+            vectors, tokens = await self._send_chunk_batch_async(batch)
+            return list(vectors), int(tokens)
+        except LocalEmbeddingClientError as exc:
+            if exc.code not in _ZERO_NORM_RECOVERY_CODES:
+                raise LocalEmbeddingClientError(
+                    exc.code,
+                    exc.public_message,
+                    status_code=exc.status_code,
+                    retryable=exc.retryable,
+                    retry_after_seconds=exc.retry_after_seconds,
+                    stage=exc.stage or "batch_http",
+                ) from exc
+            if len(batch) <= 1:
+                return ([None] if batch else []), 0
+            mid = len(batch) // 2
+            left_vecs, left_tokens = await self._send_batch_tolerating_zero_norm_async(batch[:mid])
+            right_vecs, right_tokens = await self._send_batch_tolerating_zero_norm_async(batch[mid:])
+            return [*left_vecs, *right_vecs], left_tokens + right_tokens
 
     def _send_chunk_batch_sync(self, batch: list[str]) -> tuple[list[list[float]], int]:
         attempt = 0
@@ -754,6 +844,7 @@ class CanonicalLocalEmbeddingClient:
             status_code=status,
             retryable=retryable,
             retry_after_seconds=retry_after,
+            stage="batch_http",
         )
 
     def _map_sdk_exception(self, exc: Exception) -> LocalEmbeddingClientError:

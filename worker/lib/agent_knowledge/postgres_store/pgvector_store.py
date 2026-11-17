@@ -3584,13 +3584,18 @@ class PgVectorStore:
             return 0
         requeued = 0
         with self._scope(write=True) as db:
-            params: list[Any] = [profile_id, allowed]
+            ids: list[str] | None = None
             target_clause = ""
             if target_ids is not None:
                 ids = [str(item) for item in target_ids if str(item)]
                 if not ids:
                     return 0
                 target_clause = " AND target_id = ANY(%s)"
+            requeued += self._retire_satisfied_local_dead_letters_on(
+                db, profile_id=profile_id, target_ids=ids
+            )
+            params: list[Any] = [profile_id, allowed]
+            if ids is not None:
                 params.append(ids)
             with db.cursor() as cur:
                 cur.execute(
@@ -3705,6 +3710,65 @@ class PgVectorStore:
                         )
                         requeued += 1
         return requeued
+
+    @staticmethod
+    def _retire_satisfied_local_dead_letters_on(
+        db: Any,
+        *,
+        profile_id: str,
+        target_ids: list[str] | None = None,
+    ) -> int:
+        """Retire dead_letter rows whose derived local embedding is already ready with matching hashes."""
+
+        params: list[Any] = [profile_id]
+        target_clause = ""
+        if target_ids is not None:
+            target_clause = " AND o.target_id = ANY(%s)"
+            params.append(target_ids)
+        with db.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE local_embedding_outbox AS o
+                   SET status = 'cas_skipped',
+                       last_error = 'CAS skip: already ready',
+                       lease_until = NULL,
+                       worker_id = NULL,
+                       claimed_at = NULL,
+                       next_attempt_at = NULL,
+                       updated_at = NOW()
+                 WHERE o.profile_id = %s
+                   AND o.status = 'dead_letter'
+                   {target_clause}
+                   AND (
+                       (
+                           o.target_type = 'session_chunk'
+                           AND EXISTS (
+                               SELECT 1
+                                 FROM session_local_embeddings s
+                                WHERE s.chunk_id = o.target_id
+                                  AND s.profile_id = o.profile_id
+                                  AND s.state = 'ready'
+                                  AND s.source_content_hash = o.source_content_hash
+                                  AND s.input_hash = o.input_hash
+                           )
+                       )
+                       OR (
+                           o.target_type = 'memory_card'
+                           AND EXISTS (
+                               SELECT 1
+                                 FROM card_local_embeddings c
+                                WHERE c.memory_id = o.target_id
+                                  AND c.profile_id = o.profile_id
+                                  AND c.state = 'ready'
+                                  AND c.source_content_hash = o.source_content_hash
+                                  AND c.input_hash = o.input_hash
+                           )
+                       )
+                   )
+                """,
+                params,
+            )
+            return int(cur.rowcount or 0)
 
     def _delete_local_target_on(
         self,

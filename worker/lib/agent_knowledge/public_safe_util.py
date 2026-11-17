@@ -83,8 +83,18 @@ def require_opaque_id(value: str, field: str) -> str:
     return text
 
 
+_PUBLIC_SAFE_REDACT_LOOKAHEAD_CHARS = 16384
+
+
 def public_safe_text(value: str, *, max_chars: int = 65536) -> str:
     normalized = " ".join(str(value or "").split())
+    if max_chars > 0 and len(normalized) > max_chars + _PUBLIC_SAFE_REDACT_LOOKAHEAD_CHARS:
+        cut = max_chars + _PUBLIC_SAFE_REDACT_LOOKAHEAD_CHARS
+        while cut < len(normalized) and not normalized[cut].isspace():
+            cut += 1
+        redacted_prefix = redact_public_ingress_text(normalized[:cut])
+        if len(redacted_prefix) >= max_chars:
+            return bound_text(redacted_prefix, max_chars)
     return bound_text(redact_public_ingress_text(normalized), max_chars)
 
 

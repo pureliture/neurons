@@ -19,6 +19,8 @@ from agent_knowledge.couchdb_source.document_model import SourceDocType
 from agent_knowledge.couchdb_source.source_revision import (
     SourceRevisionResolutionError,
     SourceRevisionSnapshotChangedError,
+    _is_current_source_copy,
+    _is_revision_snapshot_copy,
 )
 from agent_knowledge.couchdb_source.source_store import CouchDBSourceStore
 from agent_knowledge.ledger import Ledger
@@ -845,26 +847,75 @@ def _selection_value_error(message: str, *, reason_code: str) -> ValueError:
     return exc
 
 
+_SOURCE_SESSION_DISCOVERY_FIELDS = [
+    "_id",
+    "session_id_hash",
+    "project",
+    "provider",
+    "source_snapshot_schema_version",
+    "current_source_scope",
+    "supersedes_source_document_hash",
+]
+
+
+def _iter_authoritative_source_sessions(
+    sessions: Any,
+    *,
+    project: str,
+    provider: str,
+):
+    """Yield source session rows while filtering immutable snapshot copies.
+
+    - Generic revision snapshots (``source_snapshot_schema_version`` without
+      ``current_source_scope``) are staging copies and are skipped.
+    - Corrective ``current_source`` copies are yielded at most once per
+      ``session_id_hash`` and only when no canonical session row exists for
+      that session.
+    - Duplicate canonical session rows are preserved so the downstream
+      ``graph_selection_duplicate_session`` guard still trips on genuine
+      canonical duplication.
+    """
+    seen_canonical_sids: set[str] = set()
+    deferred_current_by_sid: dict[str, dict[str, Any]] = {}
+    for source_session in sessions:
+        session_id_hash = str(source_session.get("session_id_hash") or "")
+        if not session_id_hash:
+            continue
+        is_current_copy = _is_current_source_copy(source_session)
+        if _is_revision_snapshot_copy(source_session) and not is_current_copy:
+            continue
+        session_project = str(source_session.get("project") or "")
+        session_provider = str(source_session.get("provider") or "")
+        if project and session_project != project:
+            continue
+        if provider and session_provider != provider:
+            continue
+        if is_current_copy:
+            deferred_current_by_sid.setdefault(session_id_hash, dict(source_session))
+            continue
+        seen_canonical_sids.add(session_id_hash)
+        yield source_session
+    for session_id_hash, current_copy in deferred_current_by_sid.items():
+        if session_id_hash not in seen_canonical_sids:
+            yield current_copy
+
+
 def _iter_session_revisions(
     source_store: CouchDBSourceStore,
     *,
     project: str,
     provider: str,
 ):
-    for source_session in source_store.iter_by_type(
-        SourceDocType.TRANSCRIPT_SESSION,
-        fields=["_id", "session_id_hash", "project", "provider"],
-        page_size=GRAPH_SELECTION_PAGE_SIZE,
+    for source_session in _iter_authoritative_source_sessions(
+        source_store.iter_by_type(
+            SourceDocType.TRANSCRIPT_SESSION,
+            fields=_SOURCE_SESSION_DISCOVERY_FIELDS,
+            page_size=GRAPH_SELECTION_PAGE_SIZE,
+        ),
+        project=project,
+        provider=provider,
     ):
         session_id_hash = str(source_session.get("session_id_hash") or "")
-        session_project = str(source_session.get("project") or "")
-        session_provider = str(source_session.get("provider") or "")
-        if not session_id_hash:
-            continue
-        if project and session_project != project:
-            continue
-        if provider and session_provider != provider:
-            continue
         session = dict(source_session)
         try:
             session["source_hash"] = session_source_revision_from_couchdb_source(

@@ -180,3 +180,118 @@ def test_consumer_cli_persists_then_does_not_reembed_with_real_pg(isolated_pg_st
     second = json.loads(capsys.readouterr().out)
     assert second["attempted"] == 0
     assert len(embeds) == 1
+
+
+def test_local_outbox_worker_logs_non_sensitive_stage_without_leaking_text(caplog):
+    import logging
+    from agent_knowledge.local_embedding import LocalEmbeddingClientError
+    from agent_knowledge.postgres_store.outbox_worker import LocalEmbeddingOutboxWorker
+
+    failures = []
+    job = SimpleNamespace(
+        outbox_id=9,
+        target_type="session_chunk",
+        target_id="seg_fixture",
+        source_content_hash="sha256:" + "a" * 64,
+        input_hash="sha256:" + "b" * 64,
+        profile_id="lbrain-memory-model2vec-256-v1",
+        payload_text="sensitive transcript fixture text",
+        attempt_count=1,
+        fencing_token=1,
+    )
+    store = SimpleNamespace(
+        claim_local_outbox_leases=lambda **kwargs: [job],
+        mark_local_outbox_failed=lambda **kwargs: failures.append(kwargs),
+    )
+
+    def _boom(_text: str):
+        raise LocalEmbeddingClientError(
+            "internal_error",
+            "RAW_SECRET_PATH /Users/alice/leak",
+            retryable=False,
+            stage="batch_http",
+        )
+
+    worker = LocalEmbeddingOutboxWorker(store=store, embedding_fn=_boom, worker_id="test-w")
+    with caplog.at_level(logging.ERROR):
+        assert worker.run_once() == 1
+
+    assert len(failures) == 1
+    assert failures[0]["error_code"] == "terminal_error:internal_error"
+    assert failures[0]["retryable"] is False
+    assert "RAW_SECRET_PATH" not in caplog.text
+    assert "/Users/alice" not in caplog.text
+    assert "stage=batch_http" in caplog.text
+
+
+def test_requeue_local_dead_letters_retires_already_ready_rows_offline():
+    from agent_knowledge.postgres_store.pgvector_store import PgVectorStore
+
+    executed: list[tuple[str, tuple]] = []
+
+    class _FakeCursor:
+        def __init__(self, rowcount: int, rows=None) -> None:
+            self.rowcount = rowcount
+            self._rows = rows if rows is not None else []
+
+        def fetchall(self):
+            return list(self._rows)
+
+        def fetchone(self):
+            return self._rows[0] if self._rows else None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _FakeDb:
+        def cursor(self):
+            return _FakeCursor(rowcount=0, rows=[])
+
+        def execute(self, sql: str, params=()):
+            executed.append((sql, tuple(params)))
+            if "SET status = 'cas_skipped'" in sql:
+                return _FakeCursor(rowcount=1)
+            return _FakeCursor(rowcount=0, rows=[])
+
+    class _DispatchCursor(_FakeCursor):
+        def __init__(self, db):
+            super().__init__(rowcount=0, rows=[])
+            self._db = db
+
+        def execute(self, sql: str, params=()):
+            res = self._db.execute(sql, params)
+            self.rowcount = res.rowcount
+            self._rows = res._rows
+            return self
+
+    class _FakeConn:
+        def cursor(self):
+            return _DispatchCursor(self)
+
+        def execute(self, sql: str, params=()):
+            executed.append((sql, tuple(params)))
+            if "SET status = 'cas_skipped'" in sql:
+                return _FakeCursor(rowcount=1)
+            return _FakeCursor(rowcount=0, rows=[])
+
+    class _ScopeCtx:
+        def __init__(self) -> None:
+            self._db = _FakeConn()
+
+        def __enter__(self):
+            return self._db
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    store = object.__new__(PgVectorStore)
+    store._scope = lambda **_kw: _ScopeCtx()  # type: ignore[method-assign]
+
+    res = PgVectorStore.requeue_local_dead_letters(store, target_ids=["seg_ready"])
+    assert res == 1
+    assert any("SET status = 'cas_skipped'" in sql for sql, _ in executed)
+    assert any("state = 'ready'" in sql for sql, _ in executed)
+

@@ -25,6 +25,7 @@ from agent_knowledge.ledger_base import _table_exists
 from .couchdb_projection_cli import (
     _build_source_store,
     _filter_sessions,
+    _iter_authoritative_source_sessions,
     _project_ref,
     _selection_error_code,
 )
@@ -338,6 +339,7 @@ def _source_sessions(
     sessions = source_store.find_by_type(
         SourceDocType.TRANSCRIPT_SESSION,
         fields=[
+            "_id",
             "session_id_hash",
             "project",
             "provider",
@@ -345,12 +347,17 @@ def _source_sessions(
             "observed_at_start",
             "source_hash",
             "materialized_at",
+            "source_snapshot_schema_version",
+            "current_source_scope",
+            "supersedes_source_document_hash",
         ],
     )
     unresolved_reasons: Counter[str] = Counter()
     resolved: list[dict[str, Any]] = []
     unresolved: list[dict[str, Any]] = []
-    for session in _filter_sessions(sessions, project=project, provider=provider):
+    for session in _iter_authoritative_source_sessions(
+        sessions, project=project, provider=provider
+    ):
         session_id_hash = str(session.get("session_id_hash") or "")
         try:
             session["source_hash"] = session_source_revision_from_couchdb_source(

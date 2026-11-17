@@ -651,7 +651,10 @@ def _extraction_text_from_evidence(
     so this only extracts the evidence sections and bounds them.
     """
 
+    if max_chars <= 0:
+        return ""
     sections: list[str] = []
+    accum_chars = 0
     for doc in sorted(
         evidence_bundles,
         key=lambda item: (int(item.get("part_index") or 0), str(item.get("_id") or "")),
@@ -663,7 +666,12 @@ def _extraction_text_from_evidence(
             # "- tool:", "- command:", "- result:" lines. Keep exactly those;
             # the bundle's own Context header adds no extraction signal.
             if stripped.startswith("### ") or stripped.startswith("- tool:") or stripped.startswith("- command:") or stripped.startswith("- result:"):
+                accum_chars += len(stripped) + (1 if sections else 0)
                 sections.append(stripped)
+                if accum_chars >= max_chars:
+                    break
+        if accum_chars >= max_chars:
+            break
     if not sections:
         return ""
     return "\n".join(sections)[:max_chars]

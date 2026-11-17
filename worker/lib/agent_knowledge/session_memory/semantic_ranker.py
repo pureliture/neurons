@@ -9,8 +9,12 @@ the current eval run.
 from __future__ import annotations
 
 import math
+import threading
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from typing import Protocol
+
+_DEFAULT_SEMANTIC_RANKER_CACHE_SIZE = 512
 
 
 class EmbeddingProvider(Protocol):
@@ -23,9 +27,16 @@ class EmbeddingProvider(Protocol):
 class EmbeddingSemanticRanker:
     """Rank accepted MemoryCards by cosine similarity to the query embedding."""
 
-    def __init__(self, *, embedding_provider: EmbeddingProvider) -> None:
+    def __init__(
+        self,
+        *,
+        embedding_provider: EmbeddingProvider,
+        max_cache_size: int = _DEFAULT_SEMANTIC_RANKER_CACHE_SIZE,
+    ) -> None:
         self._provider = embedding_provider
-        self._cache: dict[str, list[float]] = {}
+        self._max_cache_size = max(1, int(max_cache_size))
+        self._cache: OrderedDict[str, list[float]] = OrderedDict()
+        self._cache_lock = threading.Lock()
 
     def __call__(
         self,
@@ -65,12 +76,20 @@ class EmbeddingSemanticRanker:
 
     def _embed(self, text: str) -> list[float]:
         key = str(text or "")
-        if key not in self._cache:
-            vector = [float(value) for value in self._provider.embed(key)]
-            if len(vector) != int(self._provider.size):
-                raise ValueError("embedding endpoint returned wrong vector size")
+        with self._cache_lock:
+            cached = self._cache.get(key)
+            if cached is not None:
+                self._cache.move_to_end(key)
+                return cached
+        vector = [float(value) for value in self._provider.embed(key)]
+        if len(vector) != int(self._provider.size):
+            raise ValueError("embedding endpoint returned wrong vector size")
+        with self._cache_lock:
             self._cache[key] = vector
-        return self._cache[key]
+            self._cache.move_to_end(key)
+            while len(self._cache) > self._max_cache_size:
+                self._cache.popitem(last=False)
+            return self._cache[key]
 
 
 def build_embedding_semantic_ranker(*, environ: Mapping[str, str] | None = None) -> EmbeddingSemanticRanker:

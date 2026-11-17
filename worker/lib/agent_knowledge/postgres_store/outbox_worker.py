@@ -469,7 +469,20 @@ class LocalEmbeddingOutboxWorker:
                             retryable = not isinstance(exc, (ValueError, TypeError))
                         reason_code = getattr(exc, "code", None) or type(exc).__name__
                         error_code = ("retryable_error:" if retryable else "terminal_error:") + str(reason_code)
-                        logger.error("Local embedding outbox processing failed (%s)", error_code)
+                        stage = getattr(exc, "stage", None)
+                        if (
+                            isinstance(stage, str)
+                            and stage
+                            and stage.isascii()
+                            and stage.replace("_", "").isalnum()
+                        ):
+                            logger.error(
+                                "Local embedding outbox processing failed (%s stage=%s)",
+                                error_code,
+                                stage,
+                            )
+                        else:
+                            logger.error("Local embedding outbox processing failed (%s)", error_code)
                         try:
                             self.store.mark_local_outbox_failed(
                                 outbox_id=job.outbox_id,
