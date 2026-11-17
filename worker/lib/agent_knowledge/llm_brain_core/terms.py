@@ -13,6 +13,9 @@ import re
 from typing import Any
 
 _TERM_SPLIT_RE = re.compile(r"[^a-zA-Z0-9_가-힣]+")
+_IDENTIFIER_TOKEN_RE = re.compile(r"[^a-z0-9_가-힣]+")
+_IDENTIFIER_NORMALIZE_RE = re.compile(r"[\s\-_]+")
+_SHORT_ASCII_IDENTIFIER_RE = re.compile(r"^[a-z0-9]{1,2}$")
 
 DEFAULT_MIN_TERM_LENGTH = 3
 
@@ -83,6 +86,35 @@ def query_terms(value: Any) -> list[str]:
         if fallback:
             return list(dict.fromkeys(fallback))
     return []
+
+
+DEFAULT_MAX_PROBE_TOKENS = 6
+
+
+def identifier_probe_tokens(value: Any, *, max_tokens: int = DEFAULT_MAX_PROBE_TOKENS) -> list[str]:
+    """식별자 후보 검색용 토큰. 2글자(예: ``M1``, ``AI``)를 보존하고 중복을 제거한다."""
+    tokens: list[str] = []
+    for segment in str(value or "").casefold().split():
+        joined = _IDENTIFIER_NORMALIZE_RE.sub("", segment)
+        if len(joined) >= 3:
+            # "go-cd" must match the joined spelling, not two boundary-checked
+            # fragments that no single word can satisfy.
+            tokens.append(joined)
+        else:
+            tokens.extend(
+                token for token in _IDENTIFIER_TOKEN_RE.split(segment) if len(token) >= 2
+            )
+    return list(dict.fromkeys(tokens))[: max(1, int(max_tokens))]
+
+
+def normalize_identifier_text(value: Any) -> str:
+    """공백/하이픈/언더스코어를 제거한 비교용 정규화 텍스트."""
+    return _IDENTIFIER_NORMALIZE_RE.sub("", str(value or "").casefold())
+
+
+def is_short_ascii_identifier(token: Any) -> bool:
+    """경계 검사가 필요한 1~2글자 ASCII/숫자 토큰인지 (``M1`` vs ``M10``)."""
+    return _SHORT_ASCII_IDENTIFIER_RE.fullmatch(str(token or "")) is not None
 
 
 def matches(value: Any, terms_: list[str]) -> bool:

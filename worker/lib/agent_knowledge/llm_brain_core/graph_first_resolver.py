@@ -44,6 +44,7 @@ _SEGMENT_SUMMARY_FLOOR_BYTES = 256
 # truncated; pages are packed by byte budget instead.
 _TITLE_MAX_CHARS = 200
 _CARD_LIMIT = 100
+_LEXICAL_CANDIDATE_LIMIT = 20
 _EVIDENCE_ROOT_LIMIT = 20
 _EVIDENCE_MAX_DEPTH = 5
 _EVIDENCE_EDGE_LIMIT = 100
@@ -430,7 +431,7 @@ class GraphFirstResolver:
             fallback_cards, error_code, fallback_used, fallback_join = self._fallback_cards(request)
             if fallback_cards is not None:
                 cards = _dedupe_cards([*graph_cards, *fallback_cards])
-                cards, merged = self._merge_session_memory(
+                cards, merged, lexical_count = self._merge_session_memory(
                     request, cards, prefetched_chunk_cards=prefetched_chunk_cards
                 )
                 retrieval_path = "graph_neo4j" if graph_cards else "pgvector_fallback"
@@ -444,11 +445,12 @@ class GraphFirstResolver:
                         fallback_used=fallback_used,
                         projection_lag_ms=lag,
                         session_memory_merged=merged,
+                        lexical_lane_cards=lexical_count,
                         freshness=freshness,
                     ),
                 )
             if graph_cards:
-                cards, merged = self._merge_session_memory(
+                cards, merged, lexical_count = self._merge_session_memory(
                     request, graph_cards, prefetched_chunk_cards=prefetched_chunk_cards
                 )
                 payload = self._serialize(
@@ -461,6 +463,7 @@ class GraphFirstResolver:
                         fallback_used=fallback_used,
                         projection_lag_ms=lag,
                         session_memory_merged=merged,
+                        lexical_lane_cards=lexical_count,
                         freshness=freshness,
                     ),
                     error_code=error_code,
@@ -485,7 +488,7 @@ class GraphFirstResolver:
                     graph_status="available",
                     lag=lag,
                 )
-            cards, merged = self._merge_session_memory(
+            cards, merged, lexical_count = self._merge_session_memory(
                 request, fallback_cards, prefetched_chunk_cards=prefetched_chunk_cards
             )
             return self._serialize(
@@ -498,12 +501,13 @@ class GraphFirstResolver:
                     fallback_used=fallback_used,
                     projection_lag_ms=lag,
                     session_memory_merged=merged,
+                    lexical_lane_cards=lexical_count,
                     freshness=freshness,
                 ),
             )
         # 공용 뇌 계약: 관련 card가 있어도 다른 에이전트의 session-memory를 항상
         # rank fusion으로 병합한다. card가 가려서 더 최신인 세션 지식이 사라지지 않는다.
-        cards, merged = self._merge_session_memory(
+        cards, merged, lexical_count = self._merge_session_memory(
             request, graph_cards, prefetched_chunk_cards=prefetched_chunk_cards
         )
         if not graph_cards and merged:
@@ -532,6 +536,7 @@ class GraphFirstResolver:
                 projection_lag_ms=lag,
                 authority_source=auth_src,
                 session_memory_merged=merged,
+                lexical_lane_cards=lexical_count,
                 freshness=freshness,
             ),
         )
@@ -693,7 +698,7 @@ class GraphFirstResolver:
         cards, error_code, fallback_used, join_status = self._fallback_cards(request)
         if cards is None:
             return self._error_payload(request, error_code=error_code or "authority_store_unavailable", graph_status=graph_status, lag=lag)
-        cards, merged = self._merge_session_memory(
+        cards, merged, lexical_count = self._merge_session_memory(
             request, cards, prefetched_chunk_cards=prefetched_chunk_cards
         )
         return self._serialize(
@@ -706,6 +711,7 @@ class GraphFirstResolver:
                 fallback_used=fallback_used,
                 projection_lag_ms=lag,
                 session_memory_merged=merged,
+                lexical_lane_cards=lexical_count,
                 freshness=freshness,
             ),
         )
@@ -733,8 +739,9 @@ class GraphFirstResolver:
         request: _ResolveRequest,
         cards: list[dict[str, Any]],
         *,
+        lexical_cards: list[dict[str, Any]] | None = None,
         prefetched_chunk_cards: list[dict[str, Any]] | None = None,
-    ) -> tuple[list[dict[str, Any]], bool]:
+    ) -> tuple[list[dict[str, Any]], bool, int | None]:
         """권위 card 목록에 session-memory 검색 결과를 rank fusion으로 병합한다.
 
         card는 PG 권위 검증을 이미 통과한 상태이며 `source=graph_card`로 표시한다.
@@ -742,16 +749,27 @@ class GraphFirstResolver:
         권위 card의 시점 조회이므로 세션 지식을 섞지 않는다.
         """
         tagged = [_tag_source(card, SOURCE_GRAPH_CARD) for card in cards]
+        if lexical_cards is None:
+            lexical_cards = self._lexical_cards(request)
+        lexical_tagged = [
+            _tag_source(card, SOURCE_GRAPH_CARD) for card in lexical_cards
+        ]
+        lexical_count = (
+            len(lexical_cards)
+            if callable(getattr(self._store, "search_cards_lexical", None))
+            else None
+        )
+        lanes = [tagged, lexical_tagged] if lexical_tagged else [tagged]
         if request.as_of or not callable(getattr(self._store, "search_session_chunks", None)):
-            return tagged, False
+            return _rank_fuse_lanes(lanes), False, lexical_count
         chunk_cards = (
             prefetched_chunk_cards
             if prefetched_chunk_cards is not None
             else self._session_chunk_cards(request)
         )
         if not chunk_cards:
-            return tagged, False
-        return _rank_fuse(tagged, chunk_cards), True
+            return _rank_fuse_lanes(lanes), False, lexical_count
+        return _rank_fuse_lanes([*lanes, chunk_cards]), True, lexical_count
 
     def _freshness(
         self, request: _ResolveRequest, *, lag: int | None, unprojected: bool
@@ -840,6 +858,51 @@ class GraphFirstResolver:
             if chunk_cards:
                 return chunk_cards, None, True, join_status
         return cards, None, True, join_status
+
+    def _lexical_cards(self, request: _ResolveRequest) -> list[dict[str, Any]]:
+        """Independent substring lane: candidates outside the vector top-k.
+
+        Candidates come from PG, then pass the same authority round trip and
+        content-hash recheck as vector hits, so project/authorization/
+        currentness scope cannot be widened by the lexical lane.
+        """
+        search = getattr(self._store, "search_cards_lexical", None)
+        if not callable(search):
+            return []
+        try:
+            ranked = search(
+                project=request.project,
+                text=request.query,
+                limit=_LEXICAL_CANDIDATE_LIMIT,
+                as_of=request.as_of or None,
+                steward_only=True,
+            )
+        except Exception:
+            return []
+        rank_keys = [
+            (str(card.get("memory_id") or ""), str(card.get("content_hash") or ""))
+            for card in ranked
+        ]
+        rank_keys = list(dict.fromkeys(key for key in rank_keys if key[0] and key[1]))
+        if not rank_keys:
+            return []
+        try:
+            authorized = self._store.list_authorized_cards(
+                project=request.project,
+                memory_ids=[memory_id for memory_id, _ in rank_keys],
+                as_of=request.as_of or None,
+                limit=_CARD_LIMIT,
+                steward_only=True,
+            )
+        except Exception:
+            return []
+        by_id = {str(card.get("memory_id") or ""): dict(card) for card in authorized}
+        return [
+            by_id[memory_id]
+            for memory_id, content_hash in rank_keys
+            if memory_id in by_id
+            and str(by_id[memory_id].get("content_hash") or "") == content_hash
+        ]
 
     def _session_chunk_cards(
         self, request: _ResolveRequest, vector: list[float] | None = None
@@ -1468,6 +1531,7 @@ class GraphFirstResolver:
         projection_lag_ms: int | None,
         authority_source: str | None = None,
         session_memory_merged: bool | None = None,
+        lexical_lane_cards: int | None = None,
         freshness: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         meta = {
@@ -1481,6 +1545,8 @@ class GraphFirstResolver:
             meta["authority_source"] = authority_source
         if session_memory_merged is not None:
             meta["session_memory_merged"] = bool(session_memory_merged)
+        if lexical_lane_cards is not None:
+            meta["lexical_lane_cards"] = int(lexical_lane_cards)
         if freshness is not None:
             meta["freshness"] = dict(freshness)
         return meta
@@ -2203,10 +2269,10 @@ def _dedupe_keys(card: Mapping[str, Any]) -> set[str]:
     return keys
 
 
-def _rank_fuse(primary: list[dict[str, Any]], secondary: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Reciprocal rank fusion of two ranked lanes with cross-lane dedupe.
+def _rank_fuse_lanes(lanes: Sequence[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Reciprocal rank fusion of N ranked lanes with cross-lane dedupe.
 
-    동점이면 primary(권위 card) lane이 먼저 온다. 권위 card는 `memory_id`가
+    동점이면 앞선 lane(권위 card)이 먼저 온다. 권위 card는 `memory_id`가
     식별자다. session chunk가 `_dedupe_keys` 기준으로 어떤 권위 card와 같은 내용이면
     card 1건만 남기고 chunk는 제거하되 RRF 점수는 합산한다. chunk끼리는 같은 키로
     1건만 남긴다(동일 본문이 legacy/local chunk_id로 이중 저장된 경우).
@@ -2216,7 +2282,7 @@ def _rank_fuse(primary: list[dict[str, Any]], secondary: list[dict[str, Any]]) -
     chosen: dict[str, dict[str, Any]] = {}
     alias: dict[str, str] = {}
     position = 0
-    for lane in (primary, secondary):
+    for lane in lanes:
         for rank, card in enumerate(lane, start=1):
             memory_id, _content_hash = _card_identity(card)
             if not memory_id:
@@ -2236,6 +2302,11 @@ def _rank_fuse(primary: list[dict[str, Any]], secondary: list[dict[str, Any]]) -
             scores[key] = scores.get(key, 0.0) + 1.0 / (_RRF_K + rank)
     ranked = sorted(chosen, key=lambda key: (-scores[key], order[key]))
     return [chosen[key] for key in ranked]
+
+
+def _rank_fuse(primary: list[dict[str, Any]], secondary: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Reciprocal rank fusion of two ranked lanes (compatibility wrapper)."""
+    return _rank_fuse_lanes([primary, secondary])
 
 
 def _iso_or_none(value: Any) -> str | None:

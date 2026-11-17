@@ -3994,6 +3994,80 @@ class PgVectorStore:
             )
         return results
 
+    def search_cards_lexical(
+        self,
+        *,
+        project: str,
+        text: str,
+        limit: int = 5,
+        as_of: Any = None,
+        steward_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Substring identifier lane over memory card title/summary.
+
+        Runs independently of the vector candidate set: a card that the embedding
+        lane misses (short identifier, alias-free exact token) is still a
+        candidate. Authority/currentness/project filters are the same SQL clauses
+        used by :meth:`list_authorized_cards`, so the lane can never widen scope.
+        """
+
+        from ..llm_brain_core.terms import (
+            identifier_probe_tokens,
+            is_short_ascii_identifier,
+        )
+
+        tokens = identifier_probe_tokens(text)
+        if not tokens:
+            return []
+        if int(limit) <= 0:
+            raise ValueError("limit must be positive")
+        norm_text = (
+            "regexp_replace(lower(coalesce(title, '') || ' ' || coalesce(summary, '')), "
+            "'[\\s\\-_]+', '', 'g')"
+        )
+        clauses, params = _authority_filter(project, as_of)
+        if steward_only:
+            clauses.extend(
+                (
+                    "steward_envelope IS NOT NULL",
+                    "steward_envelope->>'approval_state' IN ('approved', 'auto_accepted')",
+                    "coalesce(steward_envelope->>'steward_proposal_kind', '') <> 'stale'",
+                )
+            )
+        for token in tokens:
+            if is_short_ascii_identifier(token):
+                # Boundary-only match keeps ``M1`` from matching ``M10``; the
+                # normalized substring would reintroduce that false positive.
+                clauses.append(
+                    "lower(coalesce(title, '') || ' ' || coalesce(summary, '')) ~* %s"
+                )
+                params.append(rf"\m{token}\M")
+            else:
+                clauses.append(f"{norm_text} LIKE %s")
+                params.append(f"%{token}%")
+        with self._scope() as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    f"""SELECT memory_id, project, card_type, title, summary,
+                               typed_payload, currentness, content_hash, source_ref,
+                               lifecycle_state, authorization_status, created_at,
+                               valid_from, valid_to,
+                               freshness_state, freshness_checked_at, freshness_next_check_after, source_hash,
+                               (SELECT count(*) FROM unnest(%s::text[]) AS probe(tok)
+                                 WHERE regexp_replace(lower(coalesce(memory_cards.title, '')),
+                                                      '[\\s\\-_]+', '', 'g')
+                                       LIKE ('%%' || probe.tok || '%%')) AS title_hits
+                          FROM memory_cards WHERE {' AND '.join(clauses)}
+                         ORDER BY title_hits DESC, memory_id ASC
+                         LIMIT %s""",
+                    [tokens, *params, int(limit)],
+                )
+                names = [column.name for column in cur.description]
+                return [
+                    dict(row) if isinstance(row, Mapping) else dict(zip(names, row))
+                    for row in cur.fetchall()
+                ]
+
     def search_session_chunks_local(
         self,
         query_vector: list[float],
