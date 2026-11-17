@@ -300,6 +300,61 @@ def test_dead_letter_requeue_is_bounded_to_transient_errors(isolated_pg_store, l
     assert store.get_local_embedding_row(target_type="memory_card", target_id="pg-dl-transient")["state"] == "ready"
 
 
+def test_dead_letter_requeue_matches_suffixed_error_codes(isolated_pg_store):
+    """Structured `code|stage=...|error_class=...|error_param=...` suffixes keep bounded requeue working."""
+
+    store = _local(isolated_pg_store)
+    codes = {
+        "pg-dl-suf-transient": (
+            "retryable_error:transport_unavailable"
+            "|stage=batch_http|error_class=client_error|error_param=transport_unavailable"
+        ),
+        "pg-dl-legacy-transient": "retryable_error:model_unavailable",
+        "pg-dl-suf-terminal": (
+            "terminal_error:internal_error"
+            "|stage=batch_http|error_class=client_error|error_param=internal_error"
+        ),
+        "pg-dl-suf-unclassified": (
+            "terminal_error:unclassified|stage=unknown|error_class=other|error_param=unclassified"
+        ),
+    }
+    for target_id in codes:
+        store.upsert_card(_card(target_id, f"dead letter suffix fixture {target_id}"))
+    jobs = {
+        j.target_id: j
+        for j in store.claim_local_outbox_leases("w-suf", batch_size=8, lease_seconds=30)
+    }
+    assert set(jobs) == set(codes)
+    for target_id, code in codes.items():
+        job = jobs[target_id]
+        assert (
+            store.mark_local_outbox_failed(
+                outbox_id=job.outbox_id,
+                worker_id="w-suf",
+                fencing_token=job.fencing_token,
+                error_code=code,
+                retryable=False,
+                max_retries=1,
+            )
+            == "dead_letter"
+        )
+
+    assert store.requeue_local_dead_letters() == 2
+
+    dead = {j.target_id: j for j in store.list_local_outbox_jobs(status="dead_letter")}
+    assert set(dead) == {"pg-dl-suf-terminal", "pg-dl-suf-unclassified"}
+    assert all(job.last_error and "|stage=" in job.last_error for job in dead.values())
+
+    queued = {j.target_id: j for j in store.list_local_outbox_jobs(status="queued")}
+    assert set(queued) == {"pg-dl-suf-transient", "pg-dl-legacy-transient"}
+    for job in queued.values():
+        assert job.retry_count == 0
+        assert job.worker_id is None
+        assert job.lease_until is None
+        assert job.claimed_at is None
+        assert job.next_attempt_at is None
+
+
 def test_session_chunks_local_profile_and_legacy_column_untouched(isolated_pg_store, local_client):
     store = _local(isolated_pg_store)
     text = "세션 메모리에서 Model2Vec 256차원 로컬 임베딩 검색이 동작한다."

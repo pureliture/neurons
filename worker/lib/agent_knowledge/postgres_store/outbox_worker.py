@@ -23,6 +23,80 @@ from .pgvector_store import PgVectorStore, OutboxJob, LocalOutboxJob, make_dummy
 
 logger = logging.getLogger(__name__)
 
+_LOCAL_OUTBOX_ERROR_PARAMS = frozenset(
+    {
+        "capacity_exceeded",
+        "ConnectionError",
+        "internal_error",
+        "input_too_large",
+        "invalid_request",
+        "model_unavailable",
+        "RuntimeError",
+        "sdk_transport_error",
+        "TimeoutError",
+        "transport_unavailable",
+        "TypeError",
+        "unknown_model",
+        "ValueError",
+        "http_429",
+        "http_503",
+    }
+)
+_LOCAL_OUTBOX_STAGES = frozenset(
+    {"aggregate", "batch_http", "cas", "embedding", "prepare", "unknown", "vector_shape"}
+)
+_LOCAL_OUTBOX_ERROR_CLASSES = {
+    "LocalEmbeddingClientError": "client_error",
+    "ValueError": "value_error",
+    "TypeError": "type_error",
+    "RuntimeError": "runtime_error",
+    "TimeoutError": "timeout_error",
+    "ConnectionError": "connection_error",
+}
+
+
+def _tag_local_outbox_stage(exc: BaseException, stage: str) -> None:
+    """Attach a closed-allowlist stage code without touching exception text."""
+    safe_stage = stage if stage in _LOCAL_OUTBOX_STAGES else "unknown"
+    try:
+        setattr(exc, "_local_outbox_stage", safe_stage)
+    except Exception:
+        pass
+
+
+def _local_outbox_stage(exc: BaseException) -> str:
+    """Client-diagnosed stage wins, then the worker-owned stage tag."""
+    for candidate in (
+        getattr(exc, "stage", None),
+        getattr(exc, "_local_outbox_stage", None),
+    ):
+        if isinstance(candidate, str) and candidate in _LOCAL_OUTBOX_STAGES:
+            return candidate
+    return "unknown"
+
+
+def _local_outbox_error_fields(exc: Exception) -> tuple[str, bool]:
+    """Build a source-free error code from closed allowlists only."""
+    retryable = getattr(exc, "retryable", None)
+    if retryable is None:
+        retryable = not isinstance(exc, (ValueError, TypeError))
+
+    raw_param = getattr(exc, "code", None)
+    if isinstance(raw_param, str) and raw_param in _LOCAL_OUTBOX_ERROR_PARAMS:
+        error_param = raw_param
+    else:
+        class_name = type(exc).__name__
+        error_param = class_name if class_name in _LOCAL_OUTBOX_ERROR_PARAMS else "unclassified"
+
+    stage = _local_outbox_stage(exc)
+    error_class = _LOCAL_OUTBOX_ERROR_CLASSES.get(type(exc).__name__, "other")
+    prefix = "retryable_error:" if bool(retryable) else "terminal_error:"
+    error_code = (
+        f"{prefix}{error_param}"
+        f"|stage={stage}|error_class={error_class}|error_param={error_param}"
+    )
+    return error_code, bool(retryable)
+
 
 def generate_deterministic_embedding(text: str, dim: int = DEFAULT_EMBEDDING_DIM) -> list[float]:
     """Generate deterministic normalized vector from text content (safe for empty text)."""
@@ -464,18 +538,9 @@ class LocalEmbeddingOutboxWorker:
                         processed_count += 1
                     except Exception as exc:
                         self.last_batch_failed += 1
-                        retryable = getattr(exc, "retryable", None)
-                        if retryable is None:
-                            retryable = not isinstance(exc, (ValueError, TypeError))
-                        reason_code = getattr(exc, "code", None) or type(exc).__name__
-                        error_code = ("retryable_error:" if retryable else "terminal_error:") + str(reason_code)
-                        stage = getattr(exc, "stage", None)
-                        if (
-                            isinstance(stage, str)
-                            and stage
-                            and stage.isascii()
-                            and stage.replace("_", "").isalnum()
-                        ):
+                        error_code, retryable = _local_outbox_error_fields(exc)
+                        stage = _local_outbox_stage(exc)
+                        if stage != "unknown":
                             logger.error(
                                 "Local embedding outbox processing failed (%s stage=%s)",
                                 error_code,
@@ -506,23 +571,33 @@ class LocalEmbeddingOutboxWorker:
 
     def process_job(self, job: LocalOutboxJob) -> bool:
         """Compute 256-dim vector outside DB transaction, then complete via lock-ordered CAS."""
-        vector = self.embedding_fn(job.payload_text)
+        try:
+            vector = self.embedding_fn(job.payload_text)
+        except Exception as exc:
+            _tag_local_outbox_stage(exc, "embedding")
+            raise
         if not vector or len(vector) != LOCAL_EMBEDDING_DIM:
-            raise ValueError(
+            exc = ValueError(
                 f"Local embedding function returned invalid vector length {len(vector) if vector else 0}"
             )
+            _tag_local_outbox_stage(exc, "vector_shape")
+            raise exc
         heartbeat = getattr(self, "_lease_heartbeat", None)
         if heartbeat is not None and heartbeat.lease_lost(job.outbox_id):
             # Another worker reclaimed this job while the model call was in
             # flight; its fencing token is newer, so do not attempt a stale CAS.
             return False
-        return self.store.complete_local_outbox_cas(
-            outbox_id=job.outbox_id,
-            worker_id=self.worker_id,
-            fencing_token=job.fencing_token,
-            vector=vector,
-            profile_id=self.embedding_profile,
-        )
+        try:
+            return self.store.complete_local_outbox_cas(
+                outbox_id=job.outbox_id,
+                worker_id=self.worker_id,
+                fencing_token=job.fencing_token,
+                vector=vector,
+                profile_id=self.embedding_profile,
+            )
+        except Exception as exc:
+            _tag_local_outbox_stage(exc, "cas")
+            raise
 
     def renew_lease(
         self,
