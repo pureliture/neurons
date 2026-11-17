@@ -33,3 +33,10 @@ counter 64도 `healthy_baseline_required`로 거부되었다. 원인은 bulk와 
 `neurons-session-memory-build-29915750`의 `child_exit` 실패가 Job 히스토리에 남아
 게이트가 실패로 판정한 것이었다. 실패 Job을 정리하고(CronJob lastSuccessful은
 유효), 최신 성공 Job과 활성 Job 없음을 확인한 뒤 새 카운터로 배포한다.
+
+## counter 65 메모
+
+counter 65도 동일 게이트에서 거부되었다. 실패 Job을 삭제한 뒤에도 다음 스케줄 Job이
+max ~30분간 selection/materialization을 수행하며 활성 상태로 남아 게이트가 이를
+progressing으로 인정하지 않은 경우가 반복된다. 활성 Job의 `pipeline_progress.v1`
+이 신선하면 progressing으로 통과하므로, 새 카운터는 그 창을 노려 실행한다.
