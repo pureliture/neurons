@@ -1824,25 +1824,72 @@ def _legacy_currentness_components(
 def iter_active_source_hashes(
     store: CouchDBSourceStore, *, page_size: int = 256
 ) -> dict[str, str]:
-    """Collect current source hashes from active revision pointers in pages.
-    This is a selection-only fast path: one paged scan replaces thousands of
-    per-session control reads. Pointer bodies are authoritative for the
-    current-hash identity; the drift-fenced materialization path still
-    revalidates pointer, manifest and every member before any graph write.
-    Sessions without a usable pointer are absent and fall back to the legacy
-    currentness resolver.
+    """Collect verified current source hashes with two paged control scans.
+
+    Selection previously resolved a drift-fenced currentness hash per session,
+    which is thousands of member reads. Pointer and manifest control documents
+    are validated here (including manifest hash), so a missing or tampered
+    control record cannot mark a session current. Sessions without a verified
+    active revision are absent and fall back to the full resolver.
     """
-    hashes: dict[str, str] = {}
+    pointers: dict[str, dict] = {}
     for pointer in store.iter_by_type(
         dm.SourceDocType.ACTIVE_SOURCE_REVISION,
-        fields=["session_id_hash", "source_hash"],
+        fields=[
+            "_id",
+            "doc_type",
+            "session_id_hash",
+            "active_revision",
+            "manifest_id",
+            "manifest_hash",
+            "source_hash",
+        ],
         page_size=page_size,
     ):
         session_id_hash = str(pointer.get("session_id_hash") or "")
-        source_hash = str(pointer.get("source_hash") or "")
-        if session_id_hash and source_hash.startswith("sha256:"):
-            hashes[session_id_hash] = source_hash
+        if not session_id_hash:
+            continue
+        try:
+            pointers[session_id_hash] = _parse_pointer(
+                pointer, session_id_hash=session_id_hash
+            )
+        except SourceRevisionResolutionError:
+            continue
+    if not pointers:
+        return {}
+
+    hashes: dict[str, str] = {}
+    for manifest in store.iter_by_type(
+        dm.SourceDocType.SOURCE_REVISION_MANIFEST,
+        fields=[
+            "_id",
+            "doc_type",
+            "session_id_hash",
+            "source_revision",
+            "source_hash",
+            "manifest_hash",
+            "members",
+            "provenance",
+        ],
+        page_size=page_size,
+    ):
+        session_id_hash = str(manifest.get("session_id_hash") or "")
+        parsed = pointers.get(session_id_hash)
+        if parsed is None or str(manifest.get("_id") or "") != parsed["manifest_id"]:
+            continue
+        try:
+            _parse_manifest(
+                manifest,
+                session_id_hash=session_id_hash,
+                active_revision=parsed["active_revision"],
+                expected_manifest_hash=parsed["manifest_hash"],
+                expected_source_hash=parsed["source_hash"],
+            )
+        except SourceRevisionResolutionError:
+            continue
+        hashes[session_id_hash] = str(parsed["source_hash"])
     return hashes
+
 
 def source_hash_from_active_pointer(
     *,

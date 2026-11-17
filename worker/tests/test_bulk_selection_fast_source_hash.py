@@ -98,3 +98,17 @@ def test_selection_falls_back_to_full_currentness_without_active_pointer() -> No
     sessions = list(_iter_session_revisions(inner, project="", provider=""))
 
     assert sessions[0]["source_hash"] == expected
+
+
+def test_missing_manifest_is_not_trusted_as_current() -> None:
+    inner, _session_id_hash = _session_store()
+
+    class _MissingManifestStore(_CountingStore):
+        def iter_by_type(self, doc_type: str, *args: Any, **kwargs: Any):  # type: ignore[no-untyped-def]
+            if doc_type == dm.SourceDocType.SOURCE_REVISION_MANIFEST:
+                return iter([])
+            return super().iter_by_type(doc_type, *args, **kwargs)
+
+    from agent_knowledge.couchdb_source.source_revision import iter_active_source_hashes
+
+    assert iter_active_source_hashes(_MissingManifestStore(inner)) == {}
