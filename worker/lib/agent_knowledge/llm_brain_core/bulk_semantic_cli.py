@@ -7,9 +7,11 @@ import os
 import sys
 import time
 from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from agent_knowledge.couchdb_source.source_revision import SourceRevisionDeferredBudget
 from agent_knowledge.couchdb_source.source_store import CouchDBSourceStore
 from agent_knowledge.ledger import Ledger
 
@@ -42,6 +44,15 @@ from .runtime import (
 )
 
 BULK_SEMANTIC_SCHEMA_VERSION = "llm_brain_couchdb_bulk_semantic.v1"
+# A session that cannot be read inside one cycle's budget is deferred, never
+# truncated: the next cycle retries it first with a doubled budget, and only an
+# explicit dead-letter entry ends the escalation.
+DEFAULT_MAX_SESSION_MEMBER_DOCS = 20000
+DEFAULT_SESSION_DEADLINE_SECONDS = 180.0
+DEFERRED_MAX_ATTEMPTS = 4
+DEFERRED_BUDGET_ESCALATION = 2
+DEFERRED_MAX_MEMBER_DOCS = 200000
+DEFERRED_MAX_DEADLINE_SECONDS = 1800.0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -76,6 +87,23 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument("--allow-empty-sessions", action="store_true")
+    parser.add_argument(
+        "--max-session-member-docs",
+        type=int,
+        default=_positive_int_env(
+            os.environ.get("LLM_BRAIN_BULK_SEMANTIC_MAX_MEMBER_DOCS", ""),
+            DEFAULT_MAX_SESSION_MEMBER_DOCS,
+        ),
+    )
+    parser.add_argument(
+        "--session-deadline-seconds",
+        type=float,
+        default=_positive_float_env(
+            os.environ.get("LLM_BRAIN_BULK_SEMANTIC_SESSION_DEADLINE_SECONDS", ""),
+            DEFAULT_SESSION_DEADLINE_SECONDS,
+        ),
+    )
+    parser.add_argument("--deferred-jsonl", default="")
     args = parser.parse_args(argv)
 
     try:
@@ -98,6 +126,9 @@ def main(argv: list[str] | None = None) -> int:
             max_projects=int(args.max_projects),
             max_sessions_per_call=int(args.max_sessions_per_call),
             max_session_chars=int(args.max_session_chars),
+            max_session_member_docs=int(args.max_session_member_docs),
+            session_deadline_seconds=float(args.session_deadline_seconds),
+            deferred_jsonl=Path(args.deferred_jsonl) if args.deferred_jsonl else None,
             allow_empty_sessions=(
                 bool(args.allow_empty_sessions)
                 or _truthy(os.environ.get("LLM_BRAIN_BULK_SEMANTIC_ALLOW_EMPTY_SESSIONS", ""))
@@ -143,6 +174,9 @@ def run_couchdb_bulk_semantic_projection(
     allow_empty_sessions: bool = DEFAULT_BULK_SEMANTIC_ALLOW_EMPTY_SESSIONS,
     extractor: Any | None = None,
     writer: Any | None = None,
+    max_session_member_docs: int = 0,
+    session_deadline_seconds: float = 0.0,
+    deferred_jsonl: Path | None = None,
 ) -> dict[str, Any]:
     lock_handle, locked_report = _acquire_runtime_lock(runtime_dir)
     if locked_report is not None:
@@ -176,6 +210,39 @@ def run_couchdb_bulk_semantic_projection(
     max_session_chars = max(200, int(max_session_chars))
     report_every = max(1, int(report_every))
     max_projects = max(0, int(max_projects))
+    budget_docs = (
+        int(max_session_member_docs)
+        if int(max_session_member_docs) > 0
+        else DEFAULT_MAX_SESSION_MEMBER_DOCS
+    )
+    budget_seconds = (
+        float(session_deadline_seconds)
+        if float(session_deadline_seconds) > 0
+        else DEFAULT_SESSION_DEADLINE_SECONDS
+    )
+    deferred_path = deferred_jsonl
+    if deferred_path is None and runtime_dir is not None:
+        deferred_path = Path(runtime_dir) / "bulk-semantic-deferred.jsonl"
+    deferred_records = _load_deferred_records(deferred_path)
+    deferred_updates: dict[str, dict[str, Any]] = {}
+    retried_hashes: set[str] = set()
+    priority_sessions: list[dict[str, Any]] = []
+    for session_id_hash, record in deferred_records.items():
+        priority_sessions.append(
+            {
+                "session_id_hash": session_id_hash,
+                "project": str(record.get("project") or ""),
+                "provider": str(record.get("provider") or ""),
+                "_deferred_attempts": int(record.get("attempts") or 0),
+            }
+        )
+    if priority_sessions:
+        priority_sessions.sort(key=lambda item: item["session_id_hash"])
+        deferred_hashes = {item["session_id_hash"] for item in priority_sessions}
+        selected = priority_sessions + [
+            session for session in selected
+            if str(session.get("session_id_hash") or "") not in deferred_hashes
+        ]
 
     # Only touched sessions from this bounded selection are cached; historical
     # projection state is checked with an indexed exact-identity query above.
@@ -186,6 +253,7 @@ def run_couchdb_bulk_semantic_projection(
     durations: list[int] = []
     batch_items: list[tuple[dict[str, Any], Any]] = []
     projected = skipped_resumed = failed = materialized = llm_batches = 0
+    deferred = deferred_exhausted = 0
     entities_written = relations_written = 0
     fallback_single_session_batches = 0
     processed = 0
@@ -200,6 +268,9 @@ def run_couchdb_bulk_semantic_projection(
             "limit": int(limit),
             "max_sessions_per_call": max_sessions_per_call,
             "max_session_chars": max_session_chars,
+            "max_session_member_docs": budget_docs,
+            "session_deadline_seconds": budget_seconds,
+            "deferred_retried": len(priority_sessions),
         },
     )
 
@@ -218,6 +289,18 @@ def run_couchdb_bulk_semantic_projection(
             if max_projects and materialized >= max_projects:
                 stopped_after_max_projects = True
                 break
+            attempts = int(session.get("_deferred_attempts") or 0)
+            if attempts:
+                retried_hashes.add(session_id_hash)
+            session_budget_docs = min(
+                budget_docs * (DEFERRED_BUDGET_ESCALATION ** attempts),
+                DEFERRED_MAX_MEMBER_DOCS,
+            )
+            session_budget_seconds = min(
+                budget_seconds * (DEFERRED_BUDGET_ESCALATION ** attempts),
+                DEFERRED_MAX_DEADLINE_SECONDS,
+            )
+            session_deadline = time.monotonic() + session_budget_seconds
             try:
                 source_hash = session_source_revision_from_couchdb_source(
                     session_id_hash=session_id_hash,
@@ -238,6 +321,8 @@ def run_couchdb_bulk_semantic_projection(
                         source_store=source_store,
                         artifact_store=artifact_store,
                         extractor_version="couchdb-bulk-semantic.1",
+                        max_member_docs=session_budget_docs,
+                        deadline_monotonic=session_deadline,
                     )
                     batch_items.append(
                         (
@@ -276,6 +361,39 @@ def run_couchdb_bulk_semantic_projection(
                             reason = "extract_or_write"
                         else:
                             status = "projected"
+            except SourceRevisionDeferredBudget as exc:
+                # Budget/deadline is a scheduling signal: keep the session for
+                # a later cycle instead of truncating its source or dropping it.
+                reason = exc.reason_code or "session_budget_exceeded"
+                next_attempt = attempts + 1
+                if next_attempt > DEFERRED_MAX_ATTEMPTS:
+                    deferred_exhausted += 1
+                    failed += 1
+                    deferred_updates[session_id_hash] = None
+                    _write_dead_letter(
+                        dead_letter_jsonl,
+                        session=session,
+                        reason_code="session_budget_exhausted",
+                        stage="materialize_budget",
+                        diagnostics={
+                            "error_type": "SourceRevisionDeferredBudget",
+                            "error_param": reason,
+                        },
+                    )
+                    status = "failed"
+                    failure_reasons["session_budget_exhausted"] += 1
+                else:
+                    deferred += 1
+                    deferred_updates[session_id_hash] = {
+                        "session_id_hash": session_id_hash,
+                        "project": session_project,
+                        "provider": session_provider,
+                        "attempts": next_attempt,
+                        "reason_code": reason,
+                        "members_total": int(getattr(exc, "members_total", 0) or 0),
+                        "members_read": int(getattr(exc, "members_read", 0) or 0),
+                    }
+                    status = "deferred_budget"
             except Exception as exc:
                 failed += 1
                 status = "failed"
@@ -290,7 +408,12 @@ def run_couchdb_bulk_semantic_projection(
 
             elapsed_ms = int((time.monotonic() - item_started) * 1000)
             durations.append(elapsed_ms)
-            if index == 1 or index % report_every == 0 or status == "failed" or index == len(selected):
+            if (
+                index == 1
+                or index % report_every == 0
+                or status in {"failed", "deferred_budget"}
+                or index == len(selected)
+            ):
                 _write_jsonl(
                     progress_jsonl,
                     {
@@ -305,6 +428,7 @@ def run_couchdb_bulk_semantic_projection(
                         "projected": projected,
                         "skipped_resumed": skipped_resumed,
                         "failed": failed,
+                        "deferred": deferred,
                         "llm_batches": llm_batches,
                     },
                 )
@@ -332,10 +456,20 @@ def run_couchdb_bulk_semantic_projection(
     finally:
         if lock_handle is not None:
             _release_runtime_lock(lock_handle)
+        _persist_deferred_records(
+            deferred_path,
+            deferred_records,
+            deferred_updates,
+            retried_hashes,
+        )
 
     elapsed_total_ms = int((time.monotonic() - started) * 1000)
     attempted = processed
-    status = "ok" if failed == 0 else ("partial" if projected or skipped_resumed else "failed")
+    status = (
+        "ok"
+        if failed == 0 and deferred == 0
+        else ("partial" if projected or skipped_resumed or deferred else "failed")
+    )
     return {
         "schema_version": BULK_SEMANTIC_SCHEMA_VERSION,
         "projection_schema_version": PROJECTION_SCHEMA_VERSION,
@@ -366,6 +500,9 @@ def run_couchdb_bulk_semantic_projection(
             "projected": projected,
             "skipped_resumed": skipped_resumed,
             "failed": failed,
+            "deferred": deferred,
+            "deferred_exhausted": deferred_exhausted,
+            "deferred_retried": len(priority_sessions),
             "failure_rate": (failed / attempted) if attempted else 0.0,
             "failure_reasons": dict(sorted(failure_reasons.items())),
             "stopped_after_max_projects": stopped_after_max_projects,
@@ -548,8 +685,70 @@ def _positive_int_env(value: str, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
+def _positive_float_env(value: str, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if math.isfinite(parsed) and parsed > 0 else default
+
+
 def _truthy(value: str) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _load_deferred_records(path: Path | None) -> dict[str, dict[str, Any]]:
+    """Read explicit deferred-session records; unreadable lines stay ignored."""
+
+    if path is None:
+        return {}
+    records: dict[str, dict[str, Any]] = {}
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                session_id_hash = str(record.get("session_id_hash") or "")
+                if session_id_hash:
+                    records[session_id_hash] = record
+    except FileNotFoundError:
+        return {}
+    return records
+
+
+def _persist_deferred_records(
+    path: Path | None,
+    previous: Mapping[str, dict[str, Any]],
+    updates: Mapping[str, dict[str, Any] | None],
+    retried: set[str],
+) -> None:
+    """Rewrite the deferred file, dropping entries that resolved or exhausted."""
+
+    if path is None:
+        return
+    pending: dict[str, dict[str, Any]] = {}
+    for session_id_hash, record in previous.items():
+        if session_id_hash in retried:
+            continue
+        pending[session_id_hash] = record
+    for session_id_hash, record in updates.items():
+        if record is None:
+            pending.pop(session_id_hash, None)
+            continue
+        pending[session_id_hash] = record
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        for record in sorted(pending.values(), key=lambda item: str(item.get("session_id_hash") or "")):
+            handle.write(json.dumps(record, sort_keys=True) + "\n")
+    temporary.replace(path)
 
 
 def _reason_code(exc: Exception) -> str:
