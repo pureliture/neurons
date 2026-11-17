@@ -21,6 +21,7 @@ from agent_knowledge.couchdb_source.source_revision import (
     SourceRevisionSnapshotChangedError,
     _is_current_source_copy,
     _is_revision_snapshot_copy,
+    iter_active_source_hashes,
 )
 from agent_knowledge.couchdb_source.source_store import CouchDBSourceStore
 from agent_knowledge.ledger import Ledger
@@ -906,6 +907,8 @@ def _iter_session_revisions(
     project: str,
     provider: str,
 ):
+    active_hashes = iter_active_source_hashes(source_store)
+
     for source_session in _iter_authoritative_source_sessions(
         source_store.iter_by_type(
             SourceDocType.TRANSCRIPT_SESSION,
@@ -918,7 +921,10 @@ def _iter_session_revisions(
         session_id_hash = str(source_session.get("session_id_hash") or "")
         session = dict(source_session)
         try:
-            session["source_hash"] = session_source_revision_from_couchdb_source(
+            # Paged pointer scan above already holds the current hash for
+            # active revisions; only legacy/unpinned sessions need the full
+            # drift-fenced currentness scan.
+            session["source_hash"] = active_hashes.get(session_id_hash) or session_source_revision_from_couchdb_source(
                 session_id_hash=session_id_hash,
                 source_store=source_store,
             )
