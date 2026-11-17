@@ -22,6 +22,7 @@ from agent_knowledge.couchdb_source.source_revision import (
     _is_current_source_copy,
     _is_revision_snapshot_copy,
     iter_active_source_hashes,
+    iter_legacy_source_hashes,
 )
 from agent_knowledge.couchdb_source.source_store import CouchDBSourceStore
 from agent_knowledge.ledger import Ledger
@@ -908,6 +909,12 @@ def _iter_session_revisions(
     provider: str,
 ):
     active_hashes = iter_active_source_hashes(source_store)
+    legacy_hashes = iter_legacy_source_hashes(source_store)
+
+    probe_done = [False]
+    # Probe a session with an active revision (bounded validation). Legacy-only
+    # stores still probe their first session to preserve churn detection.
+    probe_session = next(iter(active_hashes), None)
 
     for source_session in _iter_authoritative_source_sessions(
         source_store.iter_by_type(
@@ -920,14 +927,26 @@ def _iter_session_revisions(
     ):
         session_id_hash = str(source_session.get("session_id_hash") or "")
         session = dict(source_session)
+        # One drift-fenced resolution per pass detects global snapshot churn;
+        # the remaining sessions use the bulk precomputed hashes.
         try:
-            # Paged pointer scan above already holds the current hash for
-            # active revisions; only legacy/unpinned sessions need the full
-            # drift-fenced currentness scan.
-            session["source_hash"] = active_hashes.get(session_id_hash) or session_source_revision_from_couchdb_source(
-                session_id_hash=session_id_hash,
-                source_store=source_store,
-            )
+            if not probe_done[0] and (
+                session_id_hash == probe_session or probe_session is None
+            ):
+                probe_done[0] = True
+                session["source_hash"] = session_source_revision_from_couchdb_source(
+                    session_id_hash=session_id_hash,
+                    source_store=source_store,
+                )
+            else:
+                session["source_hash"] = (
+                    active_hashes.get(session_id_hash)
+                    or legacy_hashes.get(session_id_hash)
+                    or session_source_revision_from_couchdb_source(
+                        session_id_hash=session_id_hash,
+                        source_store=source_store,
+                    )
+                )
         except SourceRevisionSnapshotChangedError:
             # Global database churn is a batch-level retry, not a per-session fault.
             raise

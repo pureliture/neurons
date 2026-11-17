@@ -1821,6 +1821,55 @@ def _legacy_currentness_components(
     return components
 
 
+def iter_legacy_source_hashes(
+    store: CouchDBSourceStore, *, page_size: int = 256
+) -> dict[str, str]:
+    """Compute legacy currentness hashes with three whole-store paged scans.
+
+    The per-session resolver issued one paged query per source doc type for
+    every one of the 9,000+ sessions. Grouping the same projected rows by
+    session in one pass yields identical canonical hashes with a bounded number
+    of requests. Sessions over budget or with invalid control data are omitted
+    so the caller falls back to the fail-closed per-session resolver.
+    """
+    components_by_session: dict[str, list[dict[str, str]]] = {}
+    budgets: dict[str, dict[str, int]] = {}
+    invalid: set[str] = set()
+    for doc_type in (
+        dm.SourceDocType.TRANSCRIPT_SESSION,
+        dm.SourceDocType.CONVERSATION_CHUNK,
+        dm.SourceDocType.TOOL_EVIDENCE_BUNDLE,
+    ):
+        fields = _CURRENTNESS_LEGACY_FIELDS.get(doc_type)
+        for document in store.iter_by_type(doc_type, fields=fields, page_size=page_size):
+            session_id_hash = str(document.get("session_id_hash") or "")
+            if not session_id_hash or session_id_hash in invalid:
+                continue
+            if _is_immutable_source_copy(document):
+                continue
+            if doc_type == dm.SourceDocType.TRANSCRIPT_SESSION and "body" in document:
+                invalid.add(session_id_hash)
+                components_by_session.pop(session_id_hash, None)
+                continue
+            budget = budgets.setdefault(session_id_hash, {"rows": 0, "compact_bytes": 0})
+            try:
+                component = _currentness_component(document, budget=budget)
+            except SourceRevisionResolutionError:
+                invalid.add(session_id_hash)
+                components_by_session.pop(session_id_hash, None)
+                continue
+            components_by_session.setdefault(session_id_hash, []).append(component)
+
+    hashes: dict[str, str] = {}
+    for session_id_hash, components in components_by_session.items():
+        if session_id_hash in invalid:
+            continue
+        try:
+            hashes[session_id_hash] = _source_hash_from_currentness_components(components)
+        except (SourceRevisionResolutionError, ValueError, KeyError):
+            continue
+    return hashes
+
 def iter_active_source_hashes(
     store: CouchDBSourceStore, *, page_size: int = 256
 ) -> dict[str, str]:
