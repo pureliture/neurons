@@ -3604,7 +3604,7 @@ class PgVectorStore:
                       FROM local_embedding_outbox
                      WHERE profile_id = %s
                        AND status = 'dead_letter'
-                       AND regexp_replace(last_error, '^retryable_error:', '') = ANY(%s)
+                       AND split_part(regexp_replace(last_error, '^retryable_error:', ''), '|', 1) = ANY(%s)
                        {target_clause}
                      ORDER BY outbox_id ASC
                     """,

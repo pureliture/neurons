@@ -217,7 +217,10 @@ def test_local_outbox_worker_logs_non_sensitive_stage_without_leaking_text(caplo
         assert worker.run_once() == 1
 
     assert len(failures) == 1
-    assert failures[0]["error_code"] == "terminal_error:internal_error"
+    assert failures[0]["error_code"] == (
+        "terminal_error:internal_error"
+        "|stage=batch_http|error_class=client_error|error_param=internal_error"
+    )
     assert failures[0]["retryable"] is False
     assert "RAW_SECRET_PATH" not in caplog.text
     assert "/Users/alice" not in caplog.text
