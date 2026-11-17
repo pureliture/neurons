@@ -49,8 +49,8 @@ _SOURCE_SNAPSHOT_SCOPE = "source_snapshot_scope"
 SOURCE_CURRENTNESS_PAGE_SIZE = 8
 SOURCE_CURRENTNESS_MAX_PAGE_BYTES = 512 * 1024
 SOURCE_CURRENTNESS_MAX_ROWS = 8_192
-SOURCE_CURRENTNESS_MAX_COMPACT_BYTES = 4 * 1024 * 1024
-SOURCE_CURRENTNESS_MAX_MANIFEST_BYTES = 2 * 1024 * 1024
+SOURCE_CURRENTNESS_MAX_COMPACT_BYTES = 8 * 1024 * 1024
+SOURCE_CURRENTNESS_MAX_MANIFEST_BYTES = 10 * 1024 * 1024
 SOURCE_CURRENTNESS_MAX_MANIFEST_MEMBERS = 8_192
 SOURCE_CURRENTNESS_MAX_POINTER_BYTES = 64 * 1024
 SOURCE_CURRENTNESS_MAX_RETRIES = 1
@@ -1354,6 +1354,18 @@ def _encoded_json_size(value: object, *, limit: int) -> int:
     return total
 
 
+def _consume_currentness_compact_bytes(budget: dict[str, int], compact: object) -> None:
+    budget["compact_bytes"] += _encoded_json_size(
+        compact,
+        limit=SOURCE_CURRENTNESS_MAX_COMPACT_BYTES,
+    )
+    if budget["compact_bytes"] > SOURCE_CURRENTNESS_MAX_COMPACT_BYTES:
+        raise SourceRevisionCurrentnessLimitError(
+            "source revision currentness compact-byte limit exceeded; session remains pending",
+            reason_code="source_revision_compact_bytes_exceeded",
+        )
+
+
 def _consume_currentness_row(budget: dict[str, int], *, compact: object | None = None) -> None:
     budget["rows"] += 1
     if budget["rows"] > SOURCE_CURRENTNESS_MAX_ROWS:
@@ -1362,15 +1374,7 @@ def _consume_currentness_row(budget: dict[str, int], *, compact: object | None =
             reason_code="source_revision_row_limit_exceeded",
         )
     if compact is not None:
-        budget["compact_bytes"] += _encoded_json_size(
-            compact,
-            limit=SOURCE_CURRENTNESS_MAX_COMPACT_BYTES,
-        )
-        if budget["compact_bytes"] > SOURCE_CURRENTNESS_MAX_COMPACT_BYTES:
-            raise SourceRevisionCurrentnessLimitError(
-                "source revision currentness compact-byte limit exceeded; session remains pending",
-                reason_code="source_revision_compact_bytes_exceeded",
-            )
+        _consume_currentness_compact_bytes(budget, compact)
 
 
 def _iter_bounded_currentness_documents(
@@ -1483,7 +1487,8 @@ def _currentness_component(
         "ended_at": str(document.get("ended_at") or ""),
         "revision_token": revision_token,
     }
-    _consume_currentness_row(budget, compact=component)
+    # Row count for this document was already charged by _iter_bounded_currentness_documents.
+    _consume_currentness_compact_bytes(budget, component)
     return component
 
 
@@ -1624,7 +1629,8 @@ def _active_currentness_components(
             "source revision currentness manifest-byte limit exceeded; session remains pending",
             reason_code="source_revision_manifest_bytes_exceeded",
         )
-    _consume_currentness_row(budget, compact=manifest)
+    # Manifest transport size is already enforced by SOURCE_CURRENTNESS_MAX_MANIFEST_BYTES.
+    _consume_currentness_row(budget)
     members = _parse_manifest(
         manifest,
         session_id_hash=session_id_hash,
@@ -1639,13 +1645,14 @@ def _active_currentness_components(
 
     member_fields_by_source: dict[str, dict[str, str]] = {}
     seen_member_ids: set[str] = set()
+    member_budget = {"rows": 0, "compact_bytes": budget["compact_bytes"]}
     for member_document in _iter_bounded_currentness_documents(
         store=store,
         session_id_hash=session_id_hash,
         doc_type=dm.SourceDocType.SOURCE_REVISION_MEMBER,
         fields=_CURRENTNESS_MEMBER_FIELDS,
         selector={"source_revision": parsed_pointer["active_revision"]},
-        budget=budget,
+        budget=member_budget,
     ):
         member_id = str(member_document.get("member_id") or "")
         membership = members_by_id.get(member_id)
@@ -1664,13 +1671,14 @@ def _active_currentness_components(
 
     components: list[dict[str, str]] = []
     seen_source_ids: set[str] = set()
+    source_budget = {"rows": 0, "compact_bytes": member_budget["compact_bytes"]}
     for doc_type in _SOURCE_MEMBER_TYPES:
         for source_document in _iter_bounded_currentness_documents(
             store=store,
             session_id_hash=session_id_hash,
             doc_type=doc_type,
             fields=None,
-            budget=budget,
+            budget=source_budget,
         ):
             source_id = str(source_document.get("_id") or "")
             membership = members_by_source.get(source_id)
@@ -1687,10 +1695,12 @@ def _active_currentness_components(
             components.append(
                 _currentness_component(
                     source_document,
-                    budget=budget,
+                    budget=source_budget,
                     validated_descriptor=descriptor,
                 )
             )
+    budget["compact_bytes"] = source_budget["compact_bytes"]
+    budget["rows"] = max(budget["rows"], member_budget["rows"], source_budget["rows"])
     if seen_source_ids != set(members_by_source):
         raise SourceRevisionResolutionError("active source revision source is missing")
     return components

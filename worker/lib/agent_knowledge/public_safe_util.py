@@ -83,8 +83,44 @@ def require_opaque_id(value: str, field: str) -> str:
     return text
 
 
+_PUBLIC_SAFE_REDACT_LOOKAHEAD_CHARS = 16384
+_QUOTED_SECRET_START_RE = re.compile(
+    r"""(?:[A-Z0-9_]*(?:TOKEN|SECRET|API_KEY|PASSWORD|PASSWD)|\b(?:password|passwd|secret|token|api[_-]?key)|["']?(?:Cookie|Set-Cookie)["']?)\s*[:=]\s*(["'])""",
+    re.IGNORECASE,
+)
+
+
+def _has_open_delimited_secret(normalized: str, cut: int) -> bool:
+    """Return True if a quoted secret or private-sentinel span crosses `cut`."""
+
+    prefix = normalized[:cut]
+    pos = 0
+    for match in _QUOTED_SECRET_START_RE.finditer(prefix):
+        if match.start() < pos:
+            continue
+        quote_char = match.group(1)
+        close_idx = normalized.find(quote_char, match.end())
+        if close_idx == -1 or close_idx >= cut:
+            return True
+        pos = close_idx + 1
+    tail_lower = prefix[-1024:].lower()
+    if "<private-" in tail_lower and ">" not in tail_lower[tail_lower.rfind("<private-"):]:
+        return True
+    if "[private-" in tail_lower and "]" not in tail_lower[tail_lower.rfind("[private-"):]:
+        return True
+    return False
+
+
 def public_safe_text(value: str, *, max_chars: int = 65536) -> str:
     normalized = " ".join(str(value or "").split())
+    if max_chars > 0 and len(normalized) > max_chars + _PUBLIC_SAFE_REDACT_LOOKAHEAD_CHARS:
+        cut = max_chars + _PUBLIC_SAFE_REDACT_LOOKAHEAD_CHARS
+        while cut < len(normalized) and not normalized[cut].isspace():
+            cut += 1
+        if not _has_open_delimited_secret(normalized, cut):
+            redacted_prefix = redact_public_ingress_text(normalized[:cut])
+            if len(redacted_prefix) >= max_chars:
+                return bound_text(redacted_prefix, max_chars)
     return bound_text(redact_public_ingress_text(normalized), max_chars)
 
 

@@ -1998,3 +1998,52 @@ def test_projection_records_safe_error_param_and_step_across_dead_letter_progres
     ):
         assert "alice" not in raw_blob
         assert ("sk-" + "1234567890") not in raw_blob
+
+
+def test_projection_cli_and_status_deduplicate_immutable_snapshot_session_copies(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    sid = _seed_session(store, raw_id="snapshot-dup-unresolved")
+    _corrupt_session_material_hash(store, sid)
+    session_doc = store.get(dm.session_doc_id(sid))
+    assert session_doc is not None
+    # Stage an immutable snapshot copy of the transcript_session doc (like build_cli does).
+    snapshot_doc = dict(session_doc)
+    snapshot_doc.pop("_rev", None)
+    snapshot_doc["_id"] = f"transcript_session:snapshot:dup001:{sid}"
+    snapshot_doc["source_snapshot_schema_version"] = "couchdb_source_revision_snapshot.v1"
+    snapshot_doc["source_snapshot_scope"] = dm.sha256_hash("scope:dup001")
+    snapshot_doc["source_snapshot_origin_id"] = session_doc["_id"]
+    store.put(snapshot_doc)
+
+    # Also seed one healthy session with a duplicate immutable snapshot copy.
+    healthy_sid = _seed_session(store, raw_id="snapshot-dup-healthy")
+    healthy_canonical = store.get(dm.session_doc_id(healthy_sid))
+    assert healthy_canonical is not None
+    healthy_snap = dict(healthy_canonical)
+    healthy_snap.pop("_rev", None)
+    healthy_snap["_id"] = f"transcript_session:snapshot:dup002:{healthy_sid}"
+    healthy_snap["source_snapshot_schema_version"] = "couchdb_source_revision_snapshot.v1"
+    healthy_snap["source_snapshot_scope"] = dm.sha256_hash("scope:dup002")
+    healthy_snap["source_snapshot_origin_id"] = healthy_canonical["_id"]
+    store.put(healthy_snap)
+
+    report = _project(
+        tmp_path=tmp_path,
+        store=store,
+        graph_adapter=FakeGraphMemoryAdapter(),
+        limit=10,
+    )
+    assert report["canonical_counts"]["source_sessions"] == 2
+    assert report["selection"]["unresolved_sessions"] == 1
+    assert report["selection"]["unresolved_reasons"] == {"SourceRevisionResolutionError": 1}
+
+    status = build_graph_projection_status(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        project=PROJECT,
+        provider=PROVIDER,
+    )
+    assert status["source"]["session_count"] == 2
+    assert status["source"]["unresolved_sessions"] == 1
+    assert status["source"]["unresolved_reasons"] == {"SourceRevisionResolutionError": 1}
+

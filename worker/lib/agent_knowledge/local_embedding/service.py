@@ -14,7 +14,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from .canonical import encode_base64_float32_le, validate_finite_nonzero_vector
+from .canonical import (
+    CanonicalEmbeddingAggregationError,
+    encode_base64_float32_le,
+    validate_finite_nonzero_vector,
+)
 from .profile import (
     LOCAL_MODEL2VEC_DEFAULT_BIND_HOST,
     LOCAL_MODEL2VEC_DEFAULT_CONCURRENCY,
@@ -437,6 +441,14 @@ class LocalEmbeddingServiceApplication:
                 encoded = self._engine.encode_batch(items)
             except LocalEmbeddingApiError:
                 raise
+            except CanonicalEmbeddingAggregationError as exc:
+                raise LocalEmbeddingApiError(
+                    status_code=422,
+                    error_type="invalid_request_error",
+                    code=getattr(exc, "code", None) or "zero_norm_vector",
+                    message=getattr(exc, "public_message", None)
+                    or "input produces zero-norm embedding vector",
+                ) from exc
             except LocalEmbeddingModelIntegrityError as exc:
                 raise LocalEmbeddingApiError(
                     status_code=503,

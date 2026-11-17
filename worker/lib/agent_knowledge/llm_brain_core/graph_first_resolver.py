@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import base64
+import contextvars
 import hashlib
 import json
 import os
 import sys
+import threading
 from bisect import bisect_left, bisect_right
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Annotated, Any, Callable, Literal, Mapping
 
@@ -185,6 +188,7 @@ class GraphFirstResolver:
         self._session_memory_search = session_memory_search
         self._session_memory_fetch = session_memory_fetch
         self._query_vectors: dict[str, list[float]] = {}
+        self._query_vector_lock = threading.Lock()
 
     def resolve(
         self,
@@ -320,19 +324,45 @@ class GraphFirstResolver:
             ),
         )
 
+    def _can_prefetch_session_chunks(self, request: _ResolveRequest) -> bool:
+        return (
+            not request.as_of
+            and request.response_mode != "with_evidence"
+            and self._graph_adapter is not None
+            and callable(getattr(self._store, "search_session_chunks", None))
+            and getattr(self._store, "connection", None) is None
+            and (self._embed_query is not None or callable(self._session_memory_search))
+        )
+
     def _resolve_query(self, request: _ResolveRequest) -> dict[str, Any]:
         graph_result: Any | None = None
-        if self._graph_adapter is None:
-            graph_status = "unavailable"
-        else:
-            try:
-                graph_result = self._graph_adapter.search_context(
-                    brain_id=f"/project/{request.project}", query=request.query, limit=_CARD_LIMIT,
-                    **({"as_of": request.as_of} if request.as_of else {}),
-                )
-                graph_status = self._public_graph_status(getattr(graph_result, "status", "unavailable"))
-            except Exception:
+        chunk_executor: ThreadPoolExecutor | None = None
+        chunk_future: Future[list[dict[str, Any]]] | None = None
+        if self._can_prefetch_session_chunks(request):
+            chunk_executor = ThreadPoolExecutor(max_workers=1)
+            chunk_future = chunk_executor.submit(self._session_chunk_cards, request)
+        try:
+            if self._graph_adapter is None:
                 graph_status = "unavailable"
+            else:
+                try:
+                    graph_result = self._graph_adapter.search_context(
+                        brain_id=f"/project/{request.project}", query=request.query, limit=_CARD_LIMIT,
+                        **({"as_of": request.as_of} if request.as_of else {}),
+                    )
+                    graph_status = self._public_graph_status(getattr(graph_result, "status", "unavailable"))
+                except Exception:
+                    graph_status = "unavailable"
+
+            prefetched_chunk_cards: list[dict[str, Any]] | None = None
+            if chunk_future is not None:
+                try:
+                    prefetched_chunk_cards = chunk_future.result()
+                except Exception:
+                    prefetched_chunk_cards = []
+        finally:
+            if chunk_executor is not None:
+                chunk_executor.shutdown(wait=True)
 
         try:
             health = self._store.graph_projection_health(request.project, as_of=request.as_of or None,
@@ -345,7 +375,13 @@ class GraphFirstResolver:
         freshness = self._freshness(request, lag=lag, unprojected=unprojected)
         if graph_status in {"degraded", "unavailable"}:
             # An outage/degraded state takes precedence over projection lag.
-            return self._resolve_fallback(request, graph_status=graph_status, lag=lag, freshness=freshness)
+            return self._resolve_fallback(
+                request,
+                graph_status=graph_status,
+                lag=lag,
+                freshness=freshness,
+                prefetched_chunk_cards=prefetched_chunk_cards,
+            )
 
         graph_cards, join_status = self._join_graph_candidates(
             request, tuple(getattr(graph_result, "episodes", ()) or ())
@@ -356,7 +392,9 @@ class GraphFirstResolver:
             fallback_cards, error_code, fallback_used, fallback_join = self._fallback_cards(request)
             if fallback_cards is not None:
                 cards = _dedupe_cards([*graph_cards, *fallback_cards])
-                cards, merged = self._merge_session_memory(request, cards)
+                cards, merged = self._merge_session_memory(
+                    request, cards, prefetched_chunk_cards=prefetched_chunk_cards
+                )
                 retrieval_path = "graph_neo4j" if graph_cards else "pgvector_fallback"
                 return self._serialize(
                     request,
@@ -372,7 +410,9 @@ class GraphFirstResolver:
                     ),
                 )
             if graph_cards:
-                cards, merged = self._merge_session_memory(request, graph_cards)
+                cards, merged = self._merge_session_memory(
+                    request, graph_cards, prefetched_chunk_cards=prefetched_chunk_cards
+                )
                 payload = self._serialize(
                     request,
                     cards,
@@ -407,7 +447,9 @@ class GraphFirstResolver:
                     graph_status="available",
                     lag=lag,
                 )
-            cards, merged = self._merge_session_memory(request, fallback_cards)
+            cards, merged = self._merge_session_memory(
+                request, fallback_cards, prefetched_chunk_cards=prefetched_chunk_cards
+            )
             return self._serialize(
                 request,
                 cards,
@@ -423,7 +465,9 @@ class GraphFirstResolver:
             )
         # 공용 뇌 계약: 관련 card가 있어도 다른 에이전트의 session-memory를 항상
         # rank fusion으로 병합한다. card가 가려서 더 최신인 세션 지식이 사라지지 않는다.
-        cards, merged = self._merge_session_memory(request, graph_cards)
+        cards, merged = self._merge_session_memory(
+            request, graph_cards, prefetched_chunk_cards=prefetched_chunk_cards
+        )
         if not graph_cards and merged:
             return self._serialize(
                 request,
@@ -606,11 +650,14 @@ class GraphFirstResolver:
         graph_status: str,
         lag: int | None,
         freshness: dict[str, Any] | None = None,
+        prefetched_chunk_cards: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         cards, error_code, fallback_used, join_status = self._fallback_cards(request)
         if cards is None:
             return self._error_payload(request, error_code=error_code or "authority_store_unavailable", graph_status=graph_status, lag=lag)
-        cards, merged = self._merge_session_memory(request, cards)
+        cards, merged = self._merge_session_memory(
+            request, cards, prefetched_chunk_cards=prefetched_chunk_cards
+        )
         return self._serialize(
             request,
             cards,
@@ -629,21 +676,26 @@ class GraphFirstResolver:
         """질의 embedding은 요청당 한 번만 계산한다. 실패하면 None."""
         if self._embed_query is None:
             return None
-        cached = self._query_vectors.get(request.query)
-        if cached is not None:
-            return cached
-        try:
-            vector = self._embed_query(request.query)
-        except Exception:
-            return None
-        if not isinstance(vector, (list, tuple)):
-            return None
-        vector = list(vector)
-        self._query_vectors[request.query] = vector
-        return vector
+        with self._query_vector_lock:
+            cached = self._query_vectors.get(request.query)
+            if cached is not None:
+                return cached
+            try:
+                vector = self._embed_query(request.query)
+            except Exception:
+                return None
+            if not isinstance(vector, (list, tuple)):
+                return None
+            vector = list(vector)
+            self._query_vectors[request.query] = vector
+            return vector
 
     def _merge_session_memory(
-        self, request: _ResolveRequest, cards: list[dict[str, Any]]
+        self,
+        request: _ResolveRequest,
+        cards: list[dict[str, Any]],
+        *,
+        prefetched_chunk_cards: list[dict[str, Any]] | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
         """권위 card 목록에 session-memory 검색 결과를 rank fusion으로 병합한다.
 
@@ -654,7 +706,11 @@ class GraphFirstResolver:
         tagged = [_tag_source(card, SOURCE_GRAPH_CARD) for card in cards]
         if request.as_of or not callable(getattr(self._store, "search_session_chunks", None)):
             return tagged, False
-        chunk_cards = self._session_chunk_cards(request)
+        chunk_cards = (
+            prefetched_chunk_cards
+            if prefetched_chunk_cards is not None
+            else self._session_chunk_cards(request)
+        )
         if not chunk_cards:
             return tagged, False
         return _rank_fuse(tagged, chunk_cards), True
@@ -770,7 +826,7 @@ class GraphFirstResolver:
                 card = self._session_memory_card(
                     request,
                     hit,
-                    summary_max_chars=65536,
+                    summary_max_chars=16384,
                 )
                 if card is None:
                     continue
@@ -805,7 +861,11 @@ class GraphFirstResolver:
                 if distance is not None
                 else (_finite_score_or_none(row.get("similarity_score", row.get("score"))) or 0.0)
             )
-            lexical_hits = len(tokens & _query_tokens(text)) if tokens else 0
+            lexical_hits = (
+                len(tokens & _query_tokens(text))
+                if (tokens and similarity < _SESSION_CHUNK_MIN_SIMILARITY)
+                else 0
+            )
             # 의미 유사도가 낮고 질의 토큰이 하나도 없는 청크만 제외한다. 토큰 비율
             # threshold는 다른 에이전트의 세션 지식을 과도하게 걸러냈다.
             if similarity < _SESSION_CHUNK_MIN_SIMILARITY and lexical_hits == 0:
@@ -821,7 +881,9 @@ class GraphFirstResolver:
                 continue
             seen_hashes.add(content_hash)
             body = _session_chunk_body(text)
-            safe_summary = _safe(body, 65536)
+            # Total MCP response budget is 32KB; bounding chunk summary here avoids
+            # scanning 100KB-800KB chunks repeatedly before Loop 2 truncation.
+            safe_summary = _safe(body, 16384)
             if not safe_summary:
                 continue
             first_line = next((line.strip("#* -") for line in safe_summary.splitlines() if line.strip("#* -")), "")
@@ -1012,6 +1074,27 @@ class GraphFirstResolver:
         return best_payload
 
     def _serialize(
+        self,
+        request: _ResolveRequest,
+        cards: list[dict[str, Any]],
+        *,
+        metadata: dict[str, Any],
+        error_code: str | None = None,
+        keyset: bool = False,
+    ) -> dict[str, Any]:
+        memo_token = _SAFE_TEXT_CACHE.set({})
+        try:
+            return self._serialize_impl(
+                request,
+                cards,
+                metadata=metadata,
+                error_code=error_code,
+                keyset=keyset,
+            )
+        finally:
+            _SAFE_TEXT_CACHE.reset(memo_token)
+
+    def _serialize_impl(
         self,
         request: _ResolveRequest,
         cards: list[dict[str, Any]],
@@ -2028,8 +2111,24 @@ def _drop_last_evidence_edge(evidence: dict[str, Any] | None, page: list[dict[st
     return True
 
 
+_SAFE_TEXT_CACHE: contextvars.ContextVar[dict[tuple[str, int], str] | None] = contextvars.ContextVar(
+    "_SAFE_TEXT_CACHE", default=None
+)
+
+
 def _safe(value: Any, max_chars: int = 65536) -> str:
-    return public_safe_text(str(value or ""), max_chars=max_chars)
+    raw = str(value or "")
+    cache = _SAFE_TEXT_CACHE.get()
+    if cache is not None:
+        key = (raw, int(max_chars))
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+        safe = public_safe_text(raw, max_chars=max_chars)
+        if len(cache) < 1024:
+            cache[key] = safe
+        return safe
+    return public_safe_text(raw, max_chars=max_chars)
 
 
 _CHUNK_TRANSCRIPT_MARKER = "## Transcript"

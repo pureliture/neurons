@@ -364,3 +364,73 @@ def test_backfill_skips_unauthorized_and_deleted_cards(isolated_pg_store, local_
     assert store.get_local_embedding_row(target_type="memory_card", target_id="pg-bfx-ok") is not None
     assert store.get_local_embedding_row(target_type="memory_card", target_id="pg-bfx-disabled") is None
     assert store.get_local_embedding_row(target_type="memory_card", target_id="pg-bfx-deleted") is None
+
+
+def test_dead_letter_requeue_retires_already_ready_row_preserving_terminal_failure(isolated_pg_store, local_client):
+    store = isolated_pg_store
+    ready_chunk = SessionChunk(
+        chunk_id="seg-ready-dl",
+        session_id_hash=sha256_hash("ready-dl-sess"),
+        project="proj",
+        provider="codex",
+        text="ready chunk content",
+        content_hash=sha256_hash("ready chunk content"),
+    )
+    failed_chunk = SessionChunk(
+        chunk_id="seg-failed-dl",
+        session_id_hash=sha256_hash("failed-dl-sess"),
+        project="proj",
+        provider="codex",
+        text="failed chunk content",
+        content_hash=sha256_hash("failed chunk content"),
+    )
+    store.insert_chunk_with_local_outbox(ready_chunk, enqueue_local=True)
+    store.insert_chunk_with_local_outbox(failed_chunk, enqueue_local=True)
+
+    ready_res = local_client.embed_document(ready_chunk.text)
+    jobs = store.claim_local_outbox_leases(worker_id="w-dl-setup", batch_size=10)
+    by_id = {job.target_id: job for job in jobs}
+
+    # Complete ready_chunk first, then push a duplicate/stale dead_letter row for it.
+    assert store.complete_local_outbox_cas(
+        outbox_id=by_id["seg-ready-dl"].outbox_id,
+        worker_id="w-dl-setup",
+        fencing_token=by_id["seg-ready-dl"].fencing_token,
+        vector=ready_res.vector,
+    )
+    store.enqueue_local_outbox(
+        target_type="session_chunk",
+        target_id="seg-ready-dl",
+        source_content_hash=ready_chunk.content_hash,
+        input_hash=ready_res.input_hash,
+        payload_text=ready_chunk.text,
+    )
+    reclaimed = store.claim_local_outbox_leases(worker_id="w-dl-setup2", batch_size=10)
+    for job in reclaimed:
+        if job.target_id == "seg-ready-dl":
+            store.mark_local_outbox_failed(
+                outbox_id=job.outbox_id,
+                worker_id="w-dl-setup2",
+                fencing_token=job.fencing_token,
+                error_code="terminal_error:ValueError",
+                retryable=False,
+                max_retries=1,
+            )
+
+    # Mark failed_chunk as terminal dead_letter too.
+    store.mark_local_outbox_failed(
+        outbox_id=by_id["seg-failed-dl"].outbox_id,
+        worker_id="w-dl-setup",
+        fencing_token=by_id["seg-failed-dl"].fencing_token,
+        error_code="terminal_error:internal_error",
+        retryable=False,
+        max_retries=1,
+    )
+
+    changed = store.requeue_local_dead_letters()
+    assert changed == 1
+    dl_jobs = [j for j in store.list_local_outbox_jobs(status="dead_letter")]
+    assert [j.target_id for j in dl_jobs] == ["seg-failed-dl"]
+    skipped = [j for j in store.list_local_outbox_jobs(status="cas_skipped") if j.target_id == "seg-ready-dl"]
+    assert len(skipped) == 1
+

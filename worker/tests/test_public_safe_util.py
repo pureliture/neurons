@@ -58,3 +58,44 @@ def test_nested_list_values_scanned():
     with pytest.raises(ValueError):
         ensure_public_safe({"items": [{"t": "ok"}, {"t": "~/private"}]}, "p")
     ensure_public_safe({"items": [{"t": "ok"}, {"t": "fine:\nnext"}]}, "p")
+
+
+def test_public_safe_text_bounds_large_input_before_redaction_and_redacts_boundary(monkeypatch):
+    import agent_knowledge.public_safe_util as public_safe_util
+
+    seen_lengths: list[int] = []
+    original = public_safe_util.redact_public_ingress_text
+
+    def spy_redact(value: str) -> str:
+        seen_lengths.append(len(value))
+        return original(value)
+
+    monkeypatch.setattr(public_safe_util, "redact_public_ingress_text", spy_redact)
+
+    # 1. Clean 200KB string should scan only bounded prefix (~8192 + margin), not all 200KB.
+    clean = ("alpha beta gamma delta " * 9000).strip()
+    assert len(clean) > 200_000
+    bounded = public_safe_util.public_safe_text(clean, max_chars=8192)
+    assert len(bounded) <= 8192
+    assert seen_lengths and seen_lengths[-1] <= 8192 + 16384 + 128
+
+    # 2. A secret starting just before max_chars and extending past it MUST still be redacted.
+    prefix = "ok " * 2728  # ~8184 chars
+    boundary_secret = prefix + "Authorization: Bearer super_secret_token_crossing_cut_boundary tail words"
+    redacted_boundary = public_safe_util.public_safe_text(boundary_secret, max_chars=8192)
+    assert "super_secret_token" not in redacted_boundary
+
+    # 3. A huge secret earlier in the string that shrinks length under max_chars falls back cleanly.
+    long_bearer = "Authorization: Bearer " + ("A" * 20000) + " "
+    shrink_text = long_bearer + ("trailing " * 3000)
+    redacted_shrink = public_safe_util.public_safe_text(shrink_text, max_chars=8192)
+    assert "AAAA" not in redacted_shrink
+    assert "trailing" in redacted_shrink
+    assert len(redacted_shrink) == 8192
+
+    # 4. Quoted secrets spanning beyond lookahead cut MUST still fall back and be redacted cleanly.
+    quoted_secret = 'API_KEY="' + ("synthetic_sensitive_value " * 2000) + '" tail after secret'
+    redacted_quoted = public_safe_util.public_safe_text(quoted_secret, max_chars=100)
+    assert "synthetic_sensitive_value" not in redacted_quoted
+    assert "<redacted:secret>" in redacted_quoted
+

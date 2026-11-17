@@ -684,3 +684,67 @@ def test_legacy_currentness_keeps_hard_error_for_preexisting_orphan_controls():
         )
     assert not isinstance(excinfo.value, SourceRevisionSnapshotChangedError)
     assert "without an active pointer" in str(excinfo.value)
+
+
+def test_legacy_currentness_counts_each_document_row_once(monkeypatch):
+    import agent_knowledge.couchdb_source.source_revision as sr
+
+    session_id_hash = dm.build_session_id_hash("codex", "single-count-legacy")
+    inner = InMemoryCouchDBSourceStore()
+    inner.put(
+        dm.build_transcript_session_document(
+            session=TranscriptSession(
+                session_id_hash=session_id_hash,
+                provider="codex",
+                project="neurons",
+                started_at="2026-11-01T00:00:00Z",
+                ended_at="2026-11-01T00:01:00Z",
+            )
+        )
+    )
+    for index in range(4):
+        inner.put(
+            dm.build_conversation_chunk_document(
+                chunk=TranscriptChunk.from_text(
+                    chunk_id=f"single-count-chunk-{index}",
+                    session_id_hash=session_id_hash,
+                    provider="codex",
+                    project="neurons",
+                    turn_start_index=index,
+                    turn_end_index=index,
+                    text=f"body {index}",
+                )
+            )
+        )
+
+    # 1 session + 4 chunks = 5 documents total. Exact cap = 5 must succeed without double-counting.
+    monkeypatch.setattr(sr, "SOURCE_CURRENTNESS_MAX_ROWS", 5)
+    expected = resolve_active_source_revision(store=inner, session_id_hash=session_id_hash).source_hash
+    actual = resolve_source_hash_for_currentness(session_id_hash=session_id_hash, store=inner)
+    assert actual == expected
+
+    # Tighter cap = 4 must still fail closed.
+    monkeypatch.setattr(sr, "SOURCE_CURRENTNESS_MAX_ROWS", 4)
+    with pytest.raises(SourceRevisionCurrentnessLimitError) as exc:
+        resolve_source_hash_for_currentness(session_id_hash=session_id_hash, store=inner)
+    assert exc.value.reason_code == "source_revision_row_limit_exceeded"
+
+
+def test_active_source_currentness_decouples_manifest_bytes_from_compact_bytes_and_raises_default_cap(
+    monkeypatch,
+):
+    import agent_knowledge.couchdb_source.source_revision as sr
+
+    # Production cap must accommodate up to 8192 manifest members (~4.1 MiB observed in production).
+    assert sr.SOURCE_CURRENTNESS_MAX_MANIFEST_BYTES >= 8 * 1024 * 1024
+
+    session_id_hash, inner, _session, _chunks = _legacy_session_fixture("manifest-decoupled")
+    expected = activate_source_revision(store=inner, session_id_hash=session_id_hash).source_hash
+
+    # Simulate manifest size exceeding compact byte budget (3 compact components ~850B <= 1024B,
+    # whereas the manifest JSON alone is ~2KB). Must NOT fail on compact_bytes.
+    monkeypatch.setattr(sr, "SOURCE_CURRENTNESS_MAX_MANIFEST_BYTES", 64 * 1024)
+    monkeypatch.setattr(sr, "SOURCE_CURRENTNESS_MAX_COMPACT_BYTES", 1024)
+    monkeypatch.setattr(sr, "SOURCE_CURRENTNESS_MAX_ROWS", 10)
+    assert resolve_source_hash_for_currentness(session_id_hash=session_id_hash, store=inner) == expected
+
