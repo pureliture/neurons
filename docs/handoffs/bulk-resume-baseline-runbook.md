@@ -40,3 +40,8 @@ counter 65도 동일 게이트에서 거부되었다. 실패 Job을 삭제한 �
 max ~30분간 selection/materialization을 수행하며 활성 상태로 남아 게이트가 이를
 progressing으로 인정하지 않은 경우가 반복된다. 활성 Job의 `pipeline_progress.v1`
 이 신선하면 progressing으로 통과하므로, 새 카운터는 그 창을 노려 실행한다.
+
+## counter 66 메모
+
+활성한 session-memory-build Job의 progress 이벤트가 10분 이상 갭이 생기는 구간에서
+게이트가 거부했다. 이벤트가 신선한 시점에 새 카운터를 트리거한다. bulk는 replicas 0 유지.
