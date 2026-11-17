@@ -3994,6 +3994,93 @@ class PgVectorStore:
             )
         return results
 
+    def search_cards_lexical(
+        self,
+        *,
+        project: str,
+        text: str,
+        limit: int = 5,
+        as_of: Any = None,
+        steward_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Substring identifier lane over memory card title/summary.
+
+        Runs independently of the vector candidate set: a card that the embedding
+        lane misses (short identifier, alias-free exact token) is still a
+        candidate. Authority/currentness/project filters are the same SQL clauses
+        used by :meth:`list_authorized_cards`, so the lane can never widen scope.
+        """
+
+        from ..llm_brain_core.terms import (
+            identifier_probe_tokens,
+            is_short_ascii_identifier,
+        )
+
+        tokens = identifier_probe_tokens(text)
+        if not tokens:
+            return []
+        if int(limit) <= 0:
+            raise ValueError("limit must be positive")
+        norm_text = (
+            "regexp_replace(lower(coalesce(mc.title, '') || ' ' || coalesce(mc.summary, '')), "
+            "'[\\s\\-_]+', '', 'g')"
+        )
+        clauses, params = _authority_filter(project, as_of)
+        # Same eligibility contract as the vector lane: a card without a ready
+        # local embedding for this profile is not publicly retrievable yet.
+        clauses = [
+            "cle.profile_id = %s",
+            "cle.state = 'ready'",
+            "cle.vector IS NOT NULL",
+            "cle.source_content_hash = mc.content_hash",
+            *clauses,
+        ]
+        params = [LOCAL_EMBEDDING_PROFILE_ID, *params]
+        if steward_only:
+            clauses.extend(
+                (
+                    "mc.steward_envelope IS NOT NULL",
+                    "mc.steward_envelope->>'approval_state' IN ('approved', 'auto_accepted')",
+                    "coalesce(mc.steward_envelope->>'steward_proposal_kind', '') <> 'stale'",
+                )
+            )
+        for token in tokens:
+            if is_short_ascii_identifier(token):
+                # Boundary-only match keeps ``M1`` from matching ``M10``; the
+                # normalized substring would reintroduce that false positive.
+                clauses.append(
+                    "lower(coalesce(mc.title, '') || ' ' || coalesce(mc.summary, '')) ~* %s"
+                )
+                params.append(rf"\m{token}\M")
+            else:
+                clauses.append(f"{norm_text} LIKE %s")
+                params.append(f"%{token}%")
+        with self._scope() as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    f"""SELECT mc.memory_id, mc.project, mc.card_type, mc.title, mc.summary,
+                               mc.typed_payload, mc.currentness, mc.content_hash, mc.source_ref,
+                               mc.lifecycle_state, mc.authorization_status, mc.created_at,
+                               mc.valid_from, mc.valid_to,
+                               mc.freshness_state, mc.freshness_checked_at, mc.freshness_next_check_after, mc.source_hash,
+                               (SELECT count(*) FROM unnest(%s::text[]) AS probe(tok)
+                                 WHERE regexp_replace(lower(coalesce(mc.title, '')),
+                                                      '[\\s\\-_]+', '', 'g')
+                                       LIKE ('%%' || probe.tok || '%%')) AS title_hits
+                          FROM memory_cards AS mc
+                          JOIN card_local_embeddings AS cle
+                            ON cle.memory_id = mc.memory_id
+                         WHERE {' AND '.join(clauses)}
+                         ORDER BY title_hits DESC, mc.memory_id ASC
+                         LIMIT %s""",
+                    [tokens, *params, int(limit)],
+                )
+                names = [column.name for column in cur.description]
+                return [
+                    dict(row) if isinstance(row, Mapping) else dict(zip(names, row))
+                    for row in cur.fetchall()
+                ]
+
     def search_session_chunks_local(
         self,
         query_vector: list[float],
