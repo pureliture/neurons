@@ -465,3 +465,51 @@ def test_deferral_state_is_persisted_without_runtime_dir(
     assert persisted.exists()
     record = json.loads(persisted.read_text().splitlines()[0])
     assert record["attempts"] == 1
+
+
+def test_interrupted_cycle_releases_lock_and_stays_resumable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_id_hash = "sha256:" + "8" * 64
+    _patch_selection_and_episode(monkeypatch, [_session_descriptor(session_id_hash)])
+    calls: list[str] = []
+
+    def _interrupt(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append(str(kwargs["session_id_hash"]))
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "session_episode_from_couchdb_source", _interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        cli.run_couchdb_bulk_semantic_projection(
+            ledger_path=tmp_path / "ledger.sqlite",
+            source_store=object(),  # type: ignore[arg-type]
+            limit=10,
+            runtime_dir=tmp_path,
+            progress_jsonl=tmp_path / "progress.jsonl",
+            dead_letter_jsonl=tmp_path / "dead.jsonl",
+            max_session_member_docs=10,
+            extractor=graph_helpers._BatchJsonThenSingleExtractor(),
+            writer=graph_helpers._FakeBulkWriter(),
+        )
+
+    def _resume(**kwargs):  # type: ignore[no-untyped-def]
+        calls.append(str(kwargs["session_id_hash"]))
+        return SimpleNamespace(natural_id=str(kwargs["session_id_hash"]))
+
+    monkeypatch.setattr(cli, "session_episode_from_couchdb_source", _resume)
+    report = cli.run_couchdb_bulk_semantic_projection(
+        ledger_path=tmp_path / "ledger.sqlite",
+        source_store=object(),  # type: ignore[arg-type]
+        limit=10,
+        runtime_dir=tmp_path,
+        progress_jsonl=tmp_path / "progress2.jsonl",
+        dead_letter_jsonl=tmp_path / "dead2.jsonl",
+        max_session_member_docs=10,
+        extractor=graph_helpers._BatchJsonThenSingleExtractor(),
+        writer=graph_helpers._FakeBulkWriter(),
+    )
+
+    assert report["status"] == "ok"
+    assert calls == [session_id_hash, session_id_hash]
+    assert report["projection"]["projected"] == 1
