@@ -1821,6 +1821,120 @@ def _legacy_currentness_components(
     return components
 
 
+def iter_active_source_hashes(
+    store: CouchDBSourceStore, *, page_size: int = 256
+) -> dict[str, str]:
+    """Collect verified current source hashes with two paged control scans.
+
+    Selection previously resolved a drift-fenced currentness hash per session,
+    which is thousands of member reads. Pointer and manifest control documents
+    are validated here (including manifest hash), so a missing or tampered
+    control record cannot mark a session current. Sessions without a verified
+    active revision are absent and fall back to the full resolver.
+    """
+    pointers: dict[str, dict] = {}
+    for pointer in store.iter_by_type(
+        dm.SourceDocType.ACTIVE_SOURCE_REVISION,
+        fields=[
+            "_id",
+            "doc_type",
+            "session_id_hash",
+            "active_revision",
+            "manifest_id",
+            "manifest_hash",
+            "source_hash",
+        ],
+        page_size=page_size,
+    ):
+        session_id_hash = str(pointer.get("session_id_hash") or "")
+        if not session_id_hash:
+            continue
+        try:
+            pointers[session_id_hash] = _parse_pointer(
+                pointer, session_id_hash=session_id_hash
+            )
+        except SourceRevisionResolutionError:
+            continue
+    if not pointers:
+        return {}
+
+    hashes: dict[str, str] = {}
+    for manifest in store.iter_by_type(
+        dm.SourceDocType.SOURCE_REVISION_MANIFEST,
+        fields=[
+            "_id",
+            "doc_type",
+            "session_id_hash",
+            "source_revision",
+            "source_hash",
+            "manifest_hash",
+            "members",
+            "provenance",
+        ],
+        page_size=page_size,
+    ):
+        session_id_hash = str(manifest.get("session_id_hash") or "")
+        parsed = pointers.get(session_id_hash)
+        if parsed is None or str(manifest.get("_id") or "") != parsed["manifest_id"]:
+            continue
+        try:
+            _parse_manifest(
+                manifest,
+                session_id_hash=session_id_hash,
+                active_revision=parsed["active_revision"],
+                expected_manifest_hash=parsed["manifest_hash"],
+                expected_source_hash=parsed["source_hash"],
+            )
+        except SourceRevisionResolutionError:
+            continue
+        hashes[session_id_hash] = str(parsed["source_hash"])
+    return hashes
+
+
+def source_hash_from_active_pointer(
+    *,
+    session_id_hash: str,
+    store: CouchDBSourceStore,
+) -> str | None:
+    """Read a verified active source hash from its control documents only.
+
+    Selection needs the *current* source hash to compare against projection
+    state, but it does not need to re-validate every member body: activation
+    already did that. Two bounded control reads plus the manifest-hash check
+    preserve the same hash identity without hundreds of member requests.
+    Returns ``None`` when no active revision is available (legacy/unpinned) or
+    the control documents fail validation, so callers can fall back to the
+    full drift-fenced currentness resolver.
+    """
+    try:
+        pointer = _get_bounded_currentness_document(
+            store=store,
+            document_id=dm.active_source_revision_pointer_doc_id(session_id_hash),
+            max_response_bytes=SOURCE_CURRENTNESS_MAX_POINTER_BYTES,
+            reason_code="source_revision_pointer_bytes_exceeded",
+        )
+        if pointer is None:
+            return None
+        parsed = _parse_pointer(pointer, session_id_hash=session_id_hash)
+        manifest = _get_bounded_currentness_document(
+            store=store,
+            document_id=parsed["manifest_id"],
+            max_response_bytes=SOURCE_CURRENTNESS_MAX_MANIFEST_BYTES,
+            reason_code="source_revision_manifest_bytes_exceeded",
+        )
+        if manifest is None:
+            return None
+        _parse_manifest(
+            manifest,
+            session_id_hash=session_id_hash,
+            active_revision=parsed["active_revision"],
+            expected_manifest_hash=parsed["manifest_hash"],
+            expected_source_hash=parsed["source_hash"],
+        )
+        return str(parsed["source_hash"])
+    except SourceRevisionResolutionError:
+        return None
+
 def resolve_source_hash_for_currentness(
     *,
     session_id_hash: str,
