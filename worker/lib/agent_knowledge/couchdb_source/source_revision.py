@@ -41,14 +41,14 @@ _SOURCE_SNAPSHOT_SCHEMA_VERSION = "couchdb_source_revision_snapshot.v1"
 _SOURCE_SNAPSHOT_ORIGIN_ID = "source_snapshot_origin_id"
 _SOURCE_SNAPSHOT_SCOPE = "source_snapshot_scope"
 
-# Currentness scans retain at most one CouchDB page (100 metadata rows / 512 KiB)
-# plus 8,192 compact rows (4 MiB encoded). The currentness path requests metadata
-# fields only (a body on this path is rejected), so a 100-row page stays far
-# below the byte cap while cutting round trips for large sessions. An 8-row page
-# needed ~560 _find requests / 263s for a 4,474-member session, which made the
-# bulk lane stall before its first progress event. Over-limit sessions still
-# fail closed and surface a reason code for the graph pending/blocked report.
-SOURCE_CURRENTNESS_PAGE_SIZE = 100
+# Currentness scans retain at most one CouchDB page within a 512 KiB cap, plus
+# 8,192 compact rows (4 MiB encoded). Metadata-only scans (member/pointer rows)
+# use 100 rows/page: an 8-row page needed ~560 _find requests / 263s for a
+# 4,474-member session and stalled the bulk lane. Full-document scans
+# (`fields=None`, active/legacy source bodies) must stay at 8 rows: a 100-row
+# page of 32 KiB bodies is ~3.3 MiB and fails closed with page-bytes-exceeded.
+SOURCE_CURRENTNESS_METADATA_PAGE_SIZE = 100
+SOURCE_CURRENTNESS_FULL_DOCUMENT_PAGE_SIZE = 8
 SOURCE_CURRENTNESS_MAX_PAGE_BYTES = 512 * 1024
 SOURCE_CURRENTNESS_MAX_ROWS = 8_192
 SOURCE_CURRENTNESS_MAX_COMPACT_BYTES = 8 * 1024 * 1024
@@ -1471,13 +1471,18 @@ def _iter_bounded_currentness_documents(
         raise SourceRevisionResolutionError(
             "bounded session reader is required for source currentness"
         )
+    page_size = (
+        SOURCE_CURRENTNESS_FULL_DOCUMENT_PAGE_SIZE
+        if fields is None
+        else SOURCE_CURRENTNESS_METADATA_PAGE_SIZE
+    )
     try:
         rows = iterator(
             session_id_hash=session_id_hash,
             doc_type=doc_type,
             fields=fields,
             selector=selector,
-            page_size=SOURCE_CURRENTNESS_PAGE_SIZE,
+            page_size=page_size,
             max_page_bytes=SOURCE_CURRENTNESS_MAX_PAGE_BYTES,
         )
         for row in rows:
