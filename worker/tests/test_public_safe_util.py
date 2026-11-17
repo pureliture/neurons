@@ -93,3 +93,9 @@ def test_public_safe_text_bounds_large_input_before_redaction_and_redacts_bounda
     assert "trailing" in redacted_shrink
     assert len(redacted_shrink) == 8192
 
+    # 4. Quoted secrets spanning beyond lookahead cut MUST still fall back and be redacted cleanly.
+    quoted_secret = 'API_KEY="' + ("synthetic_sensitive_value " * 2000) + '" tail after secret'
+    redacted_quoted = public_safe_util.public_safe_text(quoted_secret, max_chars=100)
+    assert "synthetic_sensitive_value" not in redacted_quoted
+    assert "<redacted:secret>" in redacted_quoted
+

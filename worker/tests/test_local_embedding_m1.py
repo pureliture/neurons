@@ -530,7 +530,8 @@ def test_client_skips_trailing_whitespace_and_isolates_zero_norm_chunks(monkeypa
     assert len(doc_trailing_ws.encode("utf-8")) == 122_881
 
     sent_batches: list[list[str]] = []
-    fail_on_token = "---ZERO_NORM_TRIGGER---"
+    zero_norm_token = "---ZERO_NORM_TRIGGER---"
+    crash_token = "---INTERNAL_CRASH_TRIGGER---"
 
     class _FakeResp:
         def __init__(self, body: bytes) -> None:
@@ -550,7 +551,7 @@ def test_client_skips_trailing_whitespace_and_isolates_zero_norm_chunks(monkeypa
         inputs = list(payload["input"])
         sent_batches.append(inputs)
         for chunk in inputs:
-            if not chunk.strip() or fail_on_token in chunk:
+            if not chunk.strip():
                 import io
                 err_bytes = json.dumps(
                     {
@@ -564,6 +565,36 @@ def test_client_skips_trailing_whitespace_and_isolates_zero_norm_chunks(monkeypa
                 ).encode("utf-8")
                 raise urllib.error.HTTPError(
                     req.full_url, 500, "Internal Server Error", hdrs={}, fp=io.BytesIO(err_bytes)
+                )
+            if crash_token in chunk:
+                import io
+                err_bytes = json.dumps(
+                    {
+                        "error": {
+                            "message": "internal embedding inference error",
+                            "type": "server_error",
+                            "param": None,
+                            "code": "internal_error",
+                        }
+                    }
+                ).encode("utf-8")
+                raise urllib.error.HTTPError(
+                    req.full_url, 500, "Internal Server Error", hdrs={}, fp=io.BytesIO(err_bytes)
+                )
+            if zero_norm_token in chunk:
+                import io
+                err_bytes = json.dumps(
+                    {
+                        "error": {
+                            "message": "input produces zero-norm embedding vector",
+                            "type": "invalid_request_error",
+                            "param": None,
+                            "code": "zero_norm_vector",
+                        }
+                    }
+                ).encode("utf-8")
+                raise urllib.error.HTTPError(
+                    req.full_url, 422, "Unprocessable Entity", hdrs={}, fp=io.BytesIO(err_bytes)
                 )
         norm_val = 1.0 / math.sqrt(256.0)
         resp_bytes = json.dumps(
@@ -590,17 +621,26 @@ def test_client_skips_trailing_whitespace_and_isolates_zero_norm_chunks(monkeypa
     assert len(res_ws.vector) == 256
     assert all(all(c.strip() != "" for c in batch) for batch in sent_batches)
 
-    # Now test non-whitespace chunk triggering internal_error/zero_norm -> bisects and still succeeds
+    # Now test explicit 422 zero_norm_vector chunk -> bisects and isolates only that chunk
     sent_batches.clear()
     valid_one_chunk = "first substantive session body text"
-    zero_norm_chunk = ("x" * 8192)[: 8192 - len(fail_on_token)] + fail_on_token
+    zero_norm_chunk = ("x" * 8192)[: 8192 - len(zero_norm_token)] + zero_norm_token
     doc_with_oov_chunk = valid_one_chunk.ljust(8192, "a") + zero_norm_chunk + "third valid chunk"
     res_oov = client.embed_document(doc_with_oov_chunk)
     assert len(res_oov.vector) == 256
     assert math.isclose(math.sqrt(sum(v * v for v in res_oov.vector)), 1.0, rel_tol=1e-4)
 
+    # Genuine HTTP 500 internal_error MUST NOT be skipped or swallowed in multi-chunk docs
+    crash_chunk = ("x" * 8192)[: 8192 - len(crash_token)] + crash_token
+    doc_with_crash_chunk = valid_one_chunk.ljust(8192, "a") + crash_chunk + "third valid chunk"
+    with pytest.raises(LocalEmbeddingClientError) as crash_exc:
+        client.embed_document(doc_with_crash_chunk)
+    assert crash_exc.value.code == "internal_error"
+    assert crash_exc.value.retryable is False
+    assert crash_exc.value.stage == "batch_http"
+
     # Pure non-whitespace zero-norm document (no valid chunk at all) MUST still fail closed with stage set
-    doc_all_oov = fail_on_token
+    doc_all_oov = zero_norm_token
     with pytest.raises(LocalEmbeddingClientError) as excinfo:
         client.embed_document(doc_all_oov)
     assert excinfo.value.retryable is False

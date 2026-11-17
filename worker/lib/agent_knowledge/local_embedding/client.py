@@ -35,7 +35,7 @@ from .profile import (
 )
 
 
-_ZERO_NORM_RECOVERY_CODES = frozenset({"internal_error", "zero_norm_vector"})
+_ZERO_NORM_RECOVERY_CODES = frozenset({"zero_norm_vector"})
 
 
 def _is_embeddable_chunk(chunk: str) -> bool:
