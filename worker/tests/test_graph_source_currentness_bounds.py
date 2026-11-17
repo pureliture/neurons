@@ -9,6 +9,8 @@ import pytest
 from agent_knowledge.couchdb_source import document_model as dm
 from agent_knowledge.couchdb_source.couchdb_http_store import CouchDBResponseTooLarge
 from agent_knowledge.couchdb_source.source_revision import (
+    SOURCE_CURRENTNESS_FULL_DOCUMENT_PAGE_SIZE,
+    SOURCE_CURRENTNESS_METADATA_PAGE_SIZE,
     SourceRevisionCurrentnessLimitError,
     SourceRevisionResolutionError,
     SourceRevisionSnapshotChangedError,
@@ -27,7 +29,8 @@ from agent_knowledge.llm_brain_core.runtime import (
 from agent_knowledge.session_memory.transcript_model import TranscriptChunk, TranscriptSession
 
 
-_PAGE_SIZE = 8
+_PAGE_SIZE = SOURCE_CURRENTNESS_METADATA_PAGE_SIZE
+_FULL_DOC_PAGE_SIZE = SOURCE_CURRENTNESS_FULL_DOCUMENT_PAGE_SIZE
 _MAX_PAGE_BYTES = 512 * 1024
 _MAX_COMPACT_ROWS = 8_192
 _MAX_COMPACT_BYTES = 4 * 1024 * 1024
@@ -194,6 +197,57 @@ def _active_source_fixture() -> tuple[str, list[dict], str]:
     return session_id_hash, store.find_by_session(session_id_hash=session_id_hash), expected
 
 
+def test_currentness_page_size_covers_large_sessions_without_body_pages():
+    # A 4,474-member session needed ~560 _find requests at the old 8-row page.
+    # 100 metadata rows/page keeps the same bounded byte cap with ~45 page reads.
+    assert SOURCE_CURRENTNESS_METADATA_PAGE_SIZE == 100
+    assert SOURCE_CURRENTNESS_FULL_DOCUMENT_PAGE_SIZE == 8
+
+
+def test_active_currentness_large_bodies_stay_within_page_byte_cap():
+    """Regression for the CodeRabbit major finding on 32 KiB full-document rows."""
+    session_id_hash = dm.build_session_id_hash("codex", "large-active-currentness")
+    store = InMemoryCouchDBSourceStore()
+    store.put(
+        dm.build_transcript_session_document(
+            session=TranscriptSession(
+                session_id_hash=session_id_hash,
+                provider="codex",
+                project="neurons",
+                started_at="2026-11-01T00:00:00Z",
+                ended_at="2026-11-01T00:01:00Z",
+            )
+        )
+    )
+    for index in range(100):
+        store.put(
+            dm.build_conversation_chunk_document(
+                chunk=TranscriptChunk.from_text(
+                    chunk_id=f"large-currentness-{index:04d}",
+                    session_id_hash=session_id_hash,
+                    provider="codex",
+                    project="neurons",
+                    turn_start_index=index,
+                    turn_end_index=index,
+                    text="x" * _BODY_BYTES_PER_CHUNK,
+                )
+            )
+        )
+    activate_source_revision(store=store, session_id_hash=session_id_hash)
+    paged = _PagedSourceStore(store.find_by_session(session_id_hash=session_id_hash))
+
+    actual = resolve_source_hash_for_currentness(
+        session_id_hash=session_id_hash,
+        store=cast(CouchDBSourceStore, paged),
+    )
+
+    assert str(actual).startswith("sha256:")
+    assert paged.max_page_bytes <= _MAX_PAGE_BYTES
+    full_doc_requests = [r for r in paged.iter_requests if r["fields"] is None]
+    assert full_doc_requests
+    assert all(r["page_size"] == _FULL_DOC_PAGE_SIZE for r in full_doc_requests)
+
+
 def test_session_source_currentness_pages_metadata_without_retaining_transcript_bodies():
     documents = _source_documents()
     session_id_hash = str(documents[0]["session_id_hash"])
@@ -210,7 +264,7 @@ def test_session_source_currentness_pages_metadata_without_retaining_transcript_
 
     assert actual == expected
     assert store.find_by_session_calls == 0
-    assert len(store.page_sizes) > 1
+    assert store.page_sizes
     assert max(store.page_sizes) <= _PAGE_SIZE
     assert store.max_page_bytes <= _MAX_PAGE_BYTES
     assert store.max_legacy_result_bytes == 0
@@ -276,7 +330,11 @@ def test_active_source_currentness_preserves_hash_and_bounds_source_pages():
     assert store.page_sizes
     assert max(store.page_sizes) <= _PAGE_SIZE
     assert store.max_page_bytes <= _MAX_PAGE_BYTES
-    assert all(request["page_size"] == _PAGE_SIZE for request in store.iter_requests)
+    assert all(
+        request["page_size"]
+        == (_FULL_DOC_PAGE_SIZE if request["fields"] is None else _PAGE_SIZE)
+        for request in store.iter_requests
+    )
 
 
 def test_active_source_currentness_rejects_body_change_against_old_member_hash():
