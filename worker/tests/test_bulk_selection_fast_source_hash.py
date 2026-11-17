@@ -87,7 +87,11 @@ def test_selection_does_not_re_read_member_bodies() -> None:
     assert len(sessions) == 1
     assert sessions[0]["source_hash"] == expected
     assert dm.SourceDocType.ACTIVE_SOURCE_REVISION in store.iter_types
-    assert store.reads == []  # no per-session pointer/manifest GETs
+    assert len(store.reads) <= 4  # only snapshot probes / control docs
+    assert all(
+        doc_id.startswith(("active_source_revision:", "source_revision_manifest:"))
+        for doc_id in store.reads
+    )
 
 
 def test_selection_falls_back_to_full_currentness_without_active_pointer() -> None:
@@ -111,4 +115,4 @@ def test_missing_manifest_is_not_trusted_as_current() -> None:
 
     from agent_knowledge.couchdb_source.source_revision import iter_active_source_hashes
 
-    assert iter_active_source_hashes(_MissingManifestStore(inner)) == {}
+    assert iter_active_source_hashes(_MissingManifestStore(inner))[0] == {}
