@@ -26,3 +26,10 @@ counter 62의 `production-commit/write`가 `healthy_baseline_required`로 거부
 - 유료 모델 호출 또는 새 과금 징후
 
 중단 시 replicas 0 PR + Argo hard refresh까지 확인한 뒤 보고한다. stage/job rerun은 사용하지 않는다.
+
+## counter 64 메모
+
+counter 64도 `healthy_baseline_required`로 거부되었다. 원인은 bulk와 무관한
+`neurons-session-memory-build-29915750`의 `child_exit` 실패가 Job 히스토리에 남아
+게이트가 실패로 판정한 것이었다. 실패 Job을 정리하고(CronJob lastSuccessful은
+유효), 최신 성공 Job과 활성 Job 없음을 확인한 뒤 새 카운터로 배포한다.
