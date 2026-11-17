@@ -505,7 +505,7 @@ def test_build_cli_emits_selection_and_per_session_stages(tmp_path, monkeypatch)
     events: list[tuple[str, int, int]] = []
     sessions = [{"session_id_hash": "sha256:" + "a" * 64}, {"session_id_hash": "sha256:" + "b" * 64}]
 
-    monkeypatch.setattr(build_cli, "emit_progress", lambda stage, done, total: events.append((stage, done, total)))
+    monkeypatch.setattr(build_cli, "emit_progress", lambda stage, done, total, **_kw: events.append((stage, done, total)))
     monkeypatch.setattr(build_cli, "_select_sessions_for_cycle", lambda *a, **kw: sessions)
 
     class _Projector:
