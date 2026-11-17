@@ -4022,16 +4022,26 @@ class PgVectorStore:
         if int(limit) <= 0:
             raise ValueError("limit must be positive")
         norm_text = (
-            "regexp_replace(lower(coalesce(title, '') || ' ' || coalesce(summary, '')), "
+            "regexp_replace(lower(coalesce(mc.title, '') || ' ' || coalesce(mc.summary, '')), "
             "'[\\s\\-_]+', '', 'g')"
         )
         clauses, params = _authority_filter(project, as_of)
+        # Same eligibility contract as the vector lane: a card without a ready
+        # local embedding for this profile is not publicly retrievable yet.
+        clauses = [
+            "cle.profile_id = %s",
+            "cle.state = 'ready'",
+            "cle.vector IS NOT NULL",
+            "cle.source_content_hash = mc.content_hash",
+            *clauses,
+        ]
+        params = [LOCAL_EMBEDDING_PROFILE_ID, *params]
         if steward_only:
             clauses.extend(
                 (
-                    "steward_envelope IS NOT NULL",
-                    "steward_envelope->>'approval_state' IN ('approved', 'auto_accepted')",
-                    "coalesce(steward_envelope->>'steward_proposal_kind', '') <> 'stale'",
+                    "mc.steward_envelope IS NOT NULL",
+                    "mc.steward_envelope->>'approval_state' IN ('approved', 'auto_accepted')",
+                    "coalesce(mc.steward_envelope->>'steward_proposal_kind', '') <> 'stale'",
                 )
             )
         for token in tokens:
@@ -4039,7 +4049,7 @@ class PgVectorStore:
                 # Boundary-only match keeps ``M1`` from matching ``M10``; the
                 # normalized substring would reintroduce that false positive.
                 clauses.append(
-                    "lower(coalesce(title, '') || ' ' || coalesce(summary, '')) ~* %s"
+                    "lower(coalesce(mc.title, '') || ' ' || coalesce(mc.summary, '')) ~* %s"
                 )
                 params.append(rf"\m{token}\M")
             else:
@@ -4048,17 +4058,20 @@ class PgVectorStore:
         with self._scope() as db:
             with db.cursor() as cur:
                 cur.execute(
-                    f"""SELECT memory_id, project, card_type, title, summary,
-                               typed_payload, currentness, content_hash, source_ref,
-                               lifecycle_state, authorization_status, created_at,
-                               valid_from, valid_to,
-                               freshness_state, freshness_checked_at, freshness_next_check_after, source_hash,
+                    f"""SELECT mc.memory_id, mc.project, mc.card_type, mc.title, mc.summary,
+                               mc.typed_payload, mc.currentness, mc.content_hash, mc.source_ref,
+                               mc.lifecycle_state, mc.authorization_status, mc.created_at,
+                               mc.valid_from, mc.valid_to,
+                               mc.freshness_state, mc.freshness_checked_at, mc.freshness_next_check_after, mc.source_hash,
                                (SELECT count(*) FROM unnest(%s::text[]) AS probe(tok)
-                                 WHERE regexp_replace(lower(coalesce(memory_cards.title, '')),
+                                 WHERE regexp_replace(lower(coalesce(mc.title, '')),
                                                       '[\\s\\-_]+', '', 'g')
                                        LIKE ('%%' || probe.tok || '%%')) AS title_hits
-                          FROM memory_cards WHERE {' AND '.join(clauses)}
-                         ORDER BY title_hits DESC, memory_id ASC
+                          FROM memory_cards AS mc
+                          JOIN card_local_embeddings AS cle
+                            ON cle.memory_id = mc.memory_id
+                         WHERE {' AND '.join(clauses)}
+                         ORDER BY title_hits DESC, mc.memory_id ASC
                          LIMIT %s""",
                     [tokens, *params, int(limit)],
                 )

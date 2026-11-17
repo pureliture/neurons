@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from agent_knowledge.postgres_store.pgvector_store import PgVectorStore
+from agent_knowledge.model_connectors import LOCAL_EMBEDDING_DIM
+from agent_knowledge.postgres_store.pgvector_store import PgVectorStore, make_dummy_vector
 from test_local_embedding_m2_pg import _card, _local
 
 PROJECT = "lexlane"
@@ -16,6 +17,15 @@ def _seed(store: PgVectorStore) -> None:
     store.upsert_card(_card("lex-m10", "M10 릴리스", project=PROJECT, title="M10 release"))
     store.upsert_card(_card("lex-kr", "마이그레이션 계획", project=PROJECT, title="마이그레이션 계획"))
     store.upsert_card(_card("lex-other", "GoCD 릴리스 게이트", project="other-project", title="GoCD release gate"))
+    # The lane shares the vector lane's eligibility contract: only cards with a
+    # ready local embedding are retrievable.
+    for job in store.claim_local_outbox_leases("lex-seed", batch_size=20, lease_seconds=30):
+        assert store.complete_local_outbox_cas(
+            outbox_id=job.outbox_id,
+            worker_id="lex-seed",
+            fencing_token=job.fencing_token,
+            vector=make_dummy_vector(42, LOCAL_EMBEDDING_DIM),
+        )
 
 
 def test_lexical_lane_matches_hyphenated_and_case_insensitive_identifiers(isolated_pg_store) -> None:
