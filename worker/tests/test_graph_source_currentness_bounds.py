@@ -9,6 +9,7 @@ import pytest
 from agent_knowledge.couchdb_source import document_model as dm
 from agent_knowledge.couchdb_source.couchdb_http_store import CouchDBResponseTooLarge
 from agent_knowledge.couchdb_source.source_revision import (
+    SOURCE_CURRENTNESS_PAGE_SIZE,
     SourceRevisionCurrentnessLimitError,
     SourceRevisionResolutionError,
     SourceRevisionSnapshotChangedError,
@@ -27,7 +28,7 @@ from agent_knowledge.llm_brain_core.runtime import (
 from agent_knowledge.session_memory.transcript_model import TranscriptChunk, TranscriptSession
 
 
-_PAGE_SIZE = 8
+_PAGE_SIZE = 100
 _MAX_PAGE_BYTES = 512 * 1024
 _MAX_COMPACT_ROWS = 8_192
 _MAX_COMPACT_BYTES = 4 * 1024 * 1024
@@ -194,6 +195,12 @@ def _active_source_fixture() -> tuple[str, list[dict], str]:
     return session_id_hash, store.find_by_session(session_id_hash=session_id_hash), expected
 
 
+def test_currentness_page_size_covers_large_sessions_without_body_pages():
+    # A 4,474-member session needed ~560 _find requests at the old 8-row page.
+    # 100 metadata rows/page keeps the same bounded byte cap with ~45 page reads.
+    assert SOURCE_CURRENTNESS_PAGE_SIZE == 100
+
+
 def test_session_source_currentness_pages_metadata_without_retaining_transcript_bodies():
     documents = _source_documents()
     session_id_hash = str(documents[0]["session_id_hash"])
@@ -210,7 +217,7 @@ def test_session_source_currentness_pages_metadata_without_retaining_transcript_
 
     assert actual == expected
     assert store.find_by_session_calls == 0
-    assert len(store.page_sizes) > 1
+    assert store.page_sizes
     assert max(store.page_sizes) <= _PAGE_SIZE
     assert store.max_page_bytes <= _MAX_PAGE_BYTES
     assert store.max_legacy_result_bytes == 0

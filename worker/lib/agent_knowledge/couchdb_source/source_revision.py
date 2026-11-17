@@ -41,13 +41,14 @@ _SOURCE_SNAPSHOT_SCHEMA_VERSION = "couchdb_source_revision_snapshot.v1"
 _SOURCE_SNAPSHOT_ORIGIN_ID = "source_snapshot_origin_id"
 _SOURCE_SNAPSHOT_SCOPE = "source_snapshot_scope"
 
-# Currentness scans retain at most one CouchDB page (8 documents / 512 KiB)
-# plus 8,192 compact rows (4 MiB encoded). Eight body-bearing documents per
-# response keeps transient transcript memory below 512 KiB; compact rows are
-# capped separately because the canonical hash sorts those fields. Over-limit
-# sessions fail closed and surface a reason code for the graph pending/blocked
-# report; production samples should track that code before changing these caps.
-SOURCE_CURRENTNESS_PAGE_SIZE = 8
+# Currentness scans retain at most one CouchDB page (100 metadata rows / 512 KiB)
+# plus 8,192 compact rows (4 MiB encoded). The currentness path requests metadata
+# fields only (a body on this path is rejected), so a 100-row page stays far
+# below the byte cap while cutting round trips for large sessions. An 8-row page
+# needed ~560 _find requests / 263s for a 4,474-member session, which made the
+# bulk lane stall before its first progress event. Over-limit sessions still
+# fail closed and surface a reason code for the graph pending/blocked report.
+SOURCE_CURRENTNESS_PAGE_SIZE = 100
 SOURCE_CURRENTNESS_MAX_PAGE_BYTES = 512 * 1024
 SOURCE_CURRENTNESS_MAX_ROWS = 8_192
 SOURCE_CURRENTNESS_MAX_COMPACT_BYTES = 8 * 1024 * 1024
