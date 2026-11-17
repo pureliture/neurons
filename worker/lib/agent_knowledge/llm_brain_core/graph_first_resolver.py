@@ -32,13 +32,17 @@ from .temporal_envelope import build_temporal_envelope
 # 전송 안전 상한이다. 응답 내용을 3KB로 줄이던 제품 상한은 필수 temporal 22필드를
 # 잘라내므로 폐기했다. 응답 크기는 limit/next_cursor 페이지로 조절하고, 이 값은
 # 클라이언트가 감당할 수 없는 비정상적으로 큰 응답만 막는다.
-# Wire budget for a single tool result. Kept below the client-side inline limit
-# (Hermes ~50 KB, Codex stricter) so the existing trimming ladder (drop cards,
-# shrink text) activates before a client would fail to parse the payload.
+# Wire budget for a single tool result. 128 KB keeps a full 5-item page plus
+# metadata on the wire while still bounding pathological responses. Bounded
+# per-item previews (`_PREVIEW_SUMMARY_CHARS`) do the real size control, so the
+# budget is a safety net rather than the default truncation mechanism.
 # Override via NEURON_LBRAIN_MAX_BYTES for environments that need a different cap.
-_MAX_BYTES = int(os.environ.get("NEURON_LBRAIN_MAX_BYTES", "32768"))
+_MAX_BYTES = int(os.environ.get("NEURON_LBRAIN_MAX_BYTES", "131072"))
 _SEGMENT_TITLE_MAX_CHARS = 120
 _SEGMENT_SUMMARY_FLOOR_BYTES = 256
+# Session-memory titles are labels, never body text. The body itself is never
+# truncated; pages are packed by byte budget instead.
+_TITLE_MAX_CHARS = 200
 _CARD_LIMIT = 100
 _EVIDENCE_ROOT_LIMIT = 20
 _EVIDENCE_MAX_DEPTH = 5
@@ -51,6 +55,27 @@ SOURCE_SESSION_MEMORY = "session_memory"
 # Reciprocal rank fusion 상수. 두 lane의 1위가 동점이면 graph/권위 card가 먼저 온다.
 _RRF_K = 60
 _SESSION_CHUNK_MIN_SIMILARITY = 0.45
+
+
+_ITEM_FIELDS = frozenset(
+    {
+        "id",
+        "card_type",
+        "title",
+        "summary",
+        "currentness",
+        "content_hash",
+        "typed_payload",
+        "source",
+        "created_at",
+        "temporal",
+        "segment_turn_range",
+        "summary_byte_range",
+        "full_content_hash",
+        "temporal_conflict",
+        "authority_source",
+    }
+)
 
 
 class _ResolveRequest(BaseModel):
@@ -76,6 +101,7 @@ class _ResolveRequest(BaseModel):
     age_bucket: Literal["fresh", "recent", "aging", "old", "historical", "unknown"] | None = Field(default=None)
     currentness: Literal["current", "superseded", "stale", "retired", "conflicted", "unknown"] | None = Field(default=None)
     time_confidence: Literal["high", "medium", "low", "anomalous", "unknown"] | None = Field(default=None)
+    fields: list[str] | None = Field(default=None, max_length=32)
 
     @field_validator("include_historical", mode="before")
     @classmethod
@@ -89,6 +115,16 @@ class _ResolveRequest(BaseModel):
         if not value:
             raise ValueError("project is required")
         return value
+
+    @field_validator("fields")
+    @classmethod
+    def _validate_fields(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        unknown = [name for name in value if name not in _ITEM_FIELDS]
+        if unknown:
+            raise ValueError(f"unknown fields: {', '.join(unknown)}")
+        return list(dict.fromkeys(value))
 
     @field_validator("as_of")
     @classmethod
@@ -207,6 +243,7 @@ class GraphFirstResolver:
         age_bucket: Literal["fresh", "recent", "aging", "old", "historical", "unknown"] | None = None,
         currentness: Literal["current", "superseded", "stale", "retired", "conflicted", "unknown"] | None = None,
         time_confidence: Literal["high", "medium", "low", "anomalous", "unknown"] | None = None,
+        fields: list[str] | None = None,
     ) -> dict[str, Any]:
         request = _ResolveRequest(
             project=project,
@@ -223,6 +260,7 @@ class GraphFirstResolver:
             age_bucket=age_bucket,
             currentness=currentness,
             time_confidence=time_confidence,
+            fields=fields,
         )
         if request.memory_id is not None:
             return self._resolve_memory_fetch(request)
@@ -823,11 +861,7 @@ class GraphFirstResolver:
             for hit in authorized_hits or ():
                 if not isinstance(hit, Mapping):
                     continue
-                card = self._session_memory_card(
-                    request,
-                    hit,
-                    summary_max_chars=16384,
-                )
+                card = self._session_memory_card(request, hit)
                 if card is None:
                     continue
                 cards.append(card)
@@ -881,23 +915,15 @@ class GraphFirstResolver:
                 continue
             seen_hashes.add(content_hash)
             body = _session_chunk_body(text)
-            # Total MCP response budget is 32KB; bounding chunk summary here avoids
-            # scanning 100KB-800KB chunks repeatedly before Loop 2 truncation.
-            safe_summary = _safe(body, 16384)
+            title, safe_summary = _session_card_text(body)
             if not safe_summary:
                 continue
-            first_line = next((line.strip("#* -") for line in safe_summary.splitlines() if line.strip("#* -")), "")
-            title = _safe(first_line or f"{request.project} session context", 1000)
             chunk_card: dict[str, Any] = {
                 "memory_id": f"chunk:{chunk_id[:56]}",
                 "project": str(row.get("project") or request.project),
                 "card_type": "status",
                 "title": title,
                 "summary": safe_summary,
-                "typed_payload": {
-                    "status": safe_summary,
-                    "status_value": safe_summary,
-                },
                 "currentness": str(row.get("currentness") or "current"),
                 "content_hash": content_hash,
                 "source": SOURCE_SESSION_MEMORY,
@@ -915,46 +941,37 @@ class GraphFirstResolver:
         self,
         request: _ResolveRequest,
         hit: Mapping[str, Any],
-        *,
-        summary_max_chars: int,
     ) -> dict[str, Any] | None:
         text = str(hit.get("summary") or "").strip()
         chunk_id = str(hit.get("memory_id") or "")
         if not text or not chunk_id:
             return None
         body = _session_chunk_body(text)
-        summary = _safe(body, summary_max_chars)
+        segment_range = hit.get("segment_turn_range")
+        original_hash = str(hit.get("content_hash") or "")
+        title, summary = _session_card_text(body)
         if not summary:
             return None
-        title_line = next(
-            (line.strip("#* -") for line in summary.splitlines() if line.strip("#* -")),
-            "",
-        )
-        segment_range = hit.get("segment_turn_range")
-        title = title_line or f"{request.project} session context"
         if segment_range is not None:
             if len(title) > _SEGMENT_TITLE_MAX_CHARS:
                 title = title[:_SEGMENT_TITLE_MAX_CHARS] + "…"
             title = _safe(title, _SEGMENT_TITLE_MAX_CHARS + 1)
-            typed_payload = {"segment_turn_range": segment_range}
+            typed_payload: dict[str, Any] = {"segment_turn_range": segment_range}
         else:
-            title = _safe(title, 1000)
-            typed_payload = {
-                "status": summary,
-                "status_value": summary,
-            }
+            typed_payload = {}
         card = {
             "memory_id": f"chunk:{chunk_id[:56]}",
             "project": request.project,
             "card_type": "status",
             "title": title,
             "summary": summary,
-            "typed_payload": typed_payload,
             "currentness": str(hit.get("currentness") or "current"),
-            "content_hash": str(hit.get("content_hash") or ""),
+            "content_hash": original_hash,
             "source": SOURCE_SESSION_MEMORY,
             "semantic_score": hit.get("score"),
         }
+        if typed_payload:
+            card["typed_payload"] = typed_payload
         if segment_range is not None:
             card["segment_turn_range"] = segment_range
         if hit.get("observed_at") is not None:
@@ -976,11 +993,7 @@ class GraphFirstResolver:
 
         raw_summary = str(hit.get("summary") or "").strip()
         body = _session_chunk_body(raw_summary)
-        card = self._session_memory_card(
-            request,
-            hit,
-            summary_max_chars=sys.maxsize,
-        )
+        card = self._session_memory_card(request, hit)
         if card is None or card["memory_id"] != request.memory_id:
             return self._error_payload(request, error_code="memory_not_found")
 
@@ -1030,12 +1043,10 @@ class GraphFirstResolver:
             has_more = end < total_bytes
             if cursor.offset == 0 and end == total_bytes:
                 page_card["content_hash"] = full_content_hash
-                page_card.pop("summary_truncated", None)
                 page_card.pop("full_content_hash", None)
                 page_card.pop("summary_byte_range", None)
             else:
                 page_card["content_hash"] = sha256_hash(fragment)
-                page_card["summary_truncated"] = True
                 page_card["full_content_hash"] = full_content_hash
                 page_card["summary_byte_range"] = {
                     "start": cursor.offset,
@@ -1148,8 +1159,32 @@ class GraphFirstResolver:
         fingerprint = _fingerprint(request, [] if keyset else filtered)
         cursor = self._decode_cursor(request.cursor, fingerprint)
         offset = 0 if keyset else cursor.offset
-        page = filtered[offset : offset + request.limit]
-        evidence: dict[str, Any] | None = None
+        page: list[dict[str, Any]] = []
+        payload: dict[str, Any] = {}
+        for card in filtered[offset : offset + request.limit]:
+            trial = [*page, card]
+            candidate = self._final_payload(
+                request,
+                trial,
+                metadata,
+                offset,
+                len(filtered),
+                fingerprint,
+                error_code,
+                keyset,
+                None,
+            )
+            # Pages are packed by wire budget: item bodies are never truncated or
+            # rewritten. The first item of a page is always returned, so a single
+            # oversized card cannot empty the page.
+            if page and tool_result_bytes(candidate) > _MAX_BYTES:
+                break
+            page = trial
+            payload = candidate
+        if not page:
+            payload = self._final_payload(
+                request, page, metadata, offset, len(filtered), fingerprint, error_code, keyset, None,
+            )
         if request.response_mode == "with_evidence":
             try:
                 evidence = self._read_evidence(request, page)
@@ -1157,61 +1192,13 @@ class GraphFirstResolver:
                 # Evidence is an authority-bearing extension. Do not return the
                 # cards as a successful evidence response when its PG check fails.
                 return self._error_payload(request, error_code="evidence_unavailable")
-        payload = self._final_payload(request, page, metadata, offset, len(filtered), fingerprint, error_code, keyset, evidence)
-        # 선택적 evidence 확장을 먼저 줄여 기본 결정/요약을 보존한다.
-        while tool_result_bytes(payload) > _MAX_BYTES and _drop_last_evidence_edge(evidence, page):
-            payload = self._final_payload(request, page, metadata, offset, len(filtered), fingerprint, error_code, keyset, evidence)
-        if request.mode == "context":
-            # Fit inside the wire budget without destroying the meaning of the
-            # context: bound readable text first, then drop the lowest-priority
-            # cards. Emptying section text leaves an agent with ids and hashes but
-            # no work subject, decision, status or next action.
-            while tool_result_bytes(payload) > _MAX_BYTES and _trim_context_text(page):
-                payload = self._final_payload(request, page, metadata, offset, len(filtered), fingerprint, error_code, keyset, evidence)
-            while tool_result_bytes(payload) > _MAX_BYTES and _drop_context_card(page):
-                payload = self._final_payload(request, page, metadata, offset, len(filtered), fingerprint, error_code, keyset, evidence)
-            # Last resort: keep the page bounded and let the cursor carry the
-            # remainder instead of failing the entire default context call.
-            while tool_result_bytes(payload) > _MAX_BYTES and len(page) > 1:
-                page.pop()
-                payload = self._final_payload(request, page, metadata, offset, len(filtered), fingerprint, error_code, keyset, evidence)
-        else:
-            if request.mode == "query":
-                payload = _fit_segment_summaries(
-                    page,
-                    payload,
-                    tokens=_query_tokens(request.query),
-                    rebuild_payload=lambda: self._final_payload(
-                        request,
-                        page,
-                        metadata,
-                        offset,
-                        len(filtered),
-                        fingerprint,
-                        error_code,
-                        keyset,
-                        evidence,
-                    ),
+            payload = self._final_payload(
+                request, page, metadata, offset, len(filtered), fingerprint, error_code, keyset, evidence,
+            )
+            while tool_result_bytes(payload) > _MAX_BYTES and _drop_last_evidence_edge(evidence, page):
+                payload = self._final_payload(
+                    request, page, metadata, offset, len(filtered), fingerprint, error_code, keyset, evidence,
                 )
-            while tool_result_bytes(payload) > _MAX_BYTES and len(page) > 1:
-                page.pop()
-                payload = self._final_payload(request, page, metadata, offset, len(filtered), fingerprint, error_code, keyset, evidence)
-            while tool_result_bytes(payload) > _MAX_BYTES and page:
-                previous_summary = page[0].get("summary")
-                if not _shrink_card(page[0]):
-                    break
-                if (
-                    request.mode == "query"
-                    and page[0].get("source") == SOURCE_SESSION_MEMORY
-                    and isinstance(page[0].get("segment_turn_range"), Mapping)
-                    and page[0].get("summary") != previous_summary
-                ):
-                    excerpt = str(page[0].get("summary") or "")
-                    page[0]["summary_truncated"] = True
-                    page[0]["content_hash"] = sha256_hash(excerpt)
-                payload = self._final_payload(request, page, metadata, offset, len(filtered), fingerprint, error_code, keyset, evidence)
-        if tool_result_bytes(payload) > _MAX_BYTES:
-            return self._error_payload(request, error_code="response_budget_exceeded")
         ensure_public_safe(payload, "GraphFirstResolver response")
         return payload
 
@@ -1271,7 +1258,6 @@ class GraphFirstResolver:
                     excluded_fields.update(
                         {
                             "summary",
-                            "summary_truncated",
                             "summary_byte_range",
                             "full_content_hash",
                             "title",
@@ -1304,6 +1290,11 @@ class GraphFirstResolver:
                     heavy_fields.append("content_hash")
                 for heavy in heavy_fields:
                     item.pop(heavy, None)
+            if request.fields is not None:
+                item = {
+                    "id": item.get("id", ""),
+                    **{name: item[name] for name in request.fields if name in item},
+                }
             items.append(item)
             raw_typed = card.get("typed_payload")
             typed: dict[str, Any] = dict(raw_typed) if isinstance(raw_typed, Mapping) else {}
@@ -1761,74 +1752,35 @@ def _segment_excerpt(text: str, max_bytes: int, tokens: set[str]) -> str:
     return prefix + text[best_start:best_end] + suffix
 
 
-def _fit_segment_summaries(
-    page: list[dict[str, Any]],
-    payload: dict[str, Any],
-    *,
-    tokens: set[str],
-    rebuild_payload: Callable[[], dict[str, Any]],
-) -> dict[str, Any]:
-    segment_cards = [
-        card
-        for card in page
-        if card.get("source") == SOURCE_SESSION_MEMORY
-        and isinstance(card.get("segment_turn_range"), Mapping)
-    ]
-    if not segment_cards or tool_result_bytes(payload) <= _MAX_BYTES:
-        return payload
-
-    fields = ("summary", "content_hash", "summary_truncated")
-    originals = [
-        (
-            card,
-            {key: (key in card, card.get(key)) for key in fields},
-            str(card.get("summary") or ""),
-        )
-        for card in segment_cards
-    ]
-
-    def apply_cap(cap: int) -> dict[str, Any]:
-        for card, original_fields, original_summary in originals:
-            for key, (present, value) in original_fields.items():
-                if present:
-                    card[key] = value
-                else:
-                    card.pop(key, None)
-            if len(original_summary.encode("utf-8")) <= cap:
-                continue
-            excerpt = _segment_excerpt(original_summary, cap, tokens)
-            if excerpt == original_summary:
-                continue
-            card["summary"] = excerpt
-            card["summary_truncated"] = True
-            card["content_hash"] = sha256_hash(excerpt)
-        return rebuild_payload()
-
-    longest_summary = max(len(summary.encode("utf-8")) for _, _, summary in originals)
-    low = _SEGMENT_SUMMARY_FLOOR_BYTES
-    high = longest_summary
-    best_cap: int | None = None
-    while low <= high:
-        cap = (low + high) // 2
-        candidate = apply_cap(cap)
-        if tool_result_bytes(candidate) <= _MAX_BYTES:
-            best_cap = cap
-            low = cap + 1
-        else:
-            high = cap - 1
-
-    return apply_cap(best_cap if best_cap is not None else _SEGMENT_SUMMARY_FLOOR_BYTES)
+def _session_card_text(body: str) -> tuple[str, str]:
+    """Return (title, body) for a session-memory card without truncating it."""
+    full = str(body or "").strip()
+    if not full:
+        return "", ""
+    safe = _safe(full, sys.maxsize)
+    first_line = next(
+        (line.strip("#* -") for line in safe.splitlines() if line.strip("#* -")),
+        "",
+    )
+    title = _safe(first_line or "session context", _TITLE_MAX_CHARS)
+    return title, safe
 
 
 def _item(card: Mapping[str, Any], *, include_created_at: bool = True) -> dict[str, Any]:
+    raw_summary = str(card.get("summary") or "")
+    # Byte-range fragments are already public-safe slices of the full body;
+    # sanitizing them again would collapse whitespace at page boundaries.
     summary = (
-        str(card.get("summary") or "")
-        if card.get("source") == SOURCE_SESSION_MEMORY
-        and isinstance(card.get("summary_byte_range"), Mapping)
-        else _safe(card.get("summary"), 65536)
+        raw_summary
+        if isinstance(card.get("summary_byte_range"), Mapping)
+        else _safe(raw_summary, len(raw_summary) + 1)
     )
+    identifier = _safe(card.get("memory_id") or card.get("id"), 180)
+    if not identifier:
+        hash_value = str(card.get("content_hash") or "")
+        identifier = f"hash:{hash_value[-16:]}" if hash_value else ""
     item = {
-        "id": _safe(card.get("memory_id") or card.get("id"), 180),
+        "id": identifier,
         "card_type": _safe(card.get("card_type"), 64),
         "title": _safe(card.get("title"), 1000),
         "summary": summary,
@@ -1844,8 +1796,6 @@ def _item(card: Mapping[str, Any], *, include_created_at: bool = True) -> dict[s
         item["source"] = _safe(card.get("source"), 32)
     if isinstance(card.get("segment_turn_range"), Mapping):
         item["segment_turn_range"] = _safe_typed_value(card["segment_turn_range"])
-    if card.get("summary_truncated") is True:
-        item["summary_truncated"] = True
     if isinstance(card.get("summary_byte_range"), Mapping):
         item["summary_byte_range"] = _safe_typed_value(card["summary_byte_range"])
     if card.get("full_content_hash"):
@@ -2331,7 +2281,6 @@ def _shrink_card(card: dict[str, Any]) -> bool:
         container[key] = value[: max(1, len(value) // 2 - 1)] + "…"
     return True
 
-
 # Semantic text is bounded (not emptied) before a context card is sacrificed, so
 # a startup context still names the work, the decision, the status and the next
 # step instead of returning only ids and hashes.
@@ -2363,6 +2312,7 @@ _CONTEXT_TYPE_QUERY_ALIASES = frozenset(
         "preference", "preferences", "guardrail", "guardrails", "선호", "제약",
     }
 )
+
 
 
 def _task_subject(card: Mapping[str, Any], typed: Mapping[str, Any]) -> str:

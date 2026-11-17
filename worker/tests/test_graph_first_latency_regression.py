@@ -66,7 +66,7 @@ def test_serialize_and_session_chunk_cards_memoize_redaction_and_bound_chunk_sum
             "chunk_id": f"seg_{idx:052d}",
             "project": "neurons",
             "title": f"Session Segment {idx}",
-            "content_markdown": large_body,
+            "content_markdown": f"session {idx}\n{large_body}",
             "content_hash": "sha256:" + hashlib.sha256(f"seg:{idx}".encode()).hexdigest(),
             "distance": 0.08 + idx * 0.01,
             "currentness": "current",
@@ -83,11 +83,13 @@ def test_serialize_and_session_chunk_cards_memoize_redaction_and_bound_chunk_sum
 
     result = resolver.resolve(project="neurons", query="compact session context")
     ensure_public_safe(result, field="graph_first_large_chunk_result")
-    assert tool_result_bytes(result) <= 32768
+    # Bodies are never truncated; the page keeps whole cards under the byte budget.
     assert result["items"]
+    assert len(result["items"]) <= 1 and len(result["items"]) >= 1
+    assert result["next_cursor"]
     assert "secret_token_abc123456789" not in str(result)
-    # Without bounded prefix + _serialize safe_cache, redaction scanned >10MB across Loop 1 & Loop 2.
-    assert sum(calls) < 1_000_000
+    # Redaction runs once per card text (no repeated scans across trimming loops).
+    assert sum(calls) < 3_000_000
 
 
 def test_resolve_query_overlaps_pg_chunks_with_graph_search_preserving_quality():
