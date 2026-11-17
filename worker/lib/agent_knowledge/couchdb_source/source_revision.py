@@ -1853,6 +1853,7 @@ def iter_legacy_source_hashes(
                 continue
             budget = budgets.setdefault(session_id_hash, {"rows": 0, "compact_bytes": 0})
             try:
+                _consume_currentness_row(budget)
                 component = _currentness_component(document, budget=budget)
             except SourceRevisionResolutionError:
                 invalid.add(session_id_hash)
@@ -1872,7 +1873,7 @@ def iter_legacy_source_hashes(
 
 def iter_active_source_hashes(
     store: CouchDBSourceStore, *, page_size: int = 256
-) -> dict[str, str]:
+) -> tuple[dict[str, str], set[str]]:
     """Collect verified current source hashes with two paged control scans.
 
     Selection previously resolved a drift-fenced currentness hash per session,
@@ -1881,6 +1882,7 @@ def iter_active_source_hashes(
     control record cannot mark a session current. Sessions without a verified
     active revision are absent and fall back to the full resolver.
     """
+    invalid: set[str] = set()
     pointers: dict[str, dict] = {}
     for pointer in store.iter_by_type(
         dm.SourceDocType.ACTIVE_SOURCE_REVISION,
@@ -1903,9 +1905,10 @@ def iter_active_source_hashes(
                 pointer, session_id_hash=session_id_hash
             )
         except SourceRevisionResolutionError:
+            invalid.add(session_id_hash)
             continue
     if not pointers:
-        return {}
+        return {}, invalid
 
     hashes: dict[str, str] = {}
     for manifest in store.iter_by_type(
@@ -1924,7 +1927,10 @@ def iter_active_source_hashes(
     ):
         session_id_hash = str(manifest.get("session_id_hash") or "")
         parsed = pointers.get(session_id_hash)
-        if parsed is None or str(manifest.get("_id") or "") != parsed["manifest_id"]:
+        if parsed is None:
+            continue
+        if str(manifest.get("_id") or "") != parsed["manifest_id"]:
+            invalid.add(session_id_hash)
             continue
         try:
             _parse_manifest(
@@ -1935,9 +1941,10 @@ def iter_active_source_hashes(
                 expected_source_hash=parsed["source_hash"],
             )
         except SourceRevisionResolutionError:
+            invalid.add(session_id_hash)
             continue
         hashes[session_id_hash] = str(parsed["source_hash"])
-    return hashes
+    return hashes, invalid
 
 
 def source_hash_from_active_pointer(

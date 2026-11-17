@@ -908,7 +908,7 @@ def _iter_session_revisions(
     project: str,
     provider: str,
 ):
-    active_hashes = iter_active_source_hashes(source_store)
+    active_hashes, invalid_active = iter_active_source_hashes(source_store)
     legacy_hashes = iter_legacy_source_hashes(source_store)
 
     probe_done = [False]
@@ -934,6 +934,13 @@ def _iter_session_revisions(
                 session_id_hash == probe_session or probe_session is None
             ):
                 probe_done[0] = True
+                session["source_hash"] = session_source_revision_from_couchdb_source(
+                    session_id_hash=session_id_hash,
+                    source_store=source_store,
+                )
+            elif session_id_hash in invalid_active:
+                # A broken active control record must not be silently treated
+                # as a legacy session; the full resolver fails closed.
                 session["source_hash"] = session_source_revision_from_couchdb_source(
                     session_id_hash=session_id_hash,
                     source_store=source_store,

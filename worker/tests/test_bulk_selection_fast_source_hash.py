@@ -115,4 +115,4 @@ def test_missing_manifest_is_not_trusted_as_current() -> None:
 
     from agent_knowledge.couchdb_source.source_revision import iter_active_source_hashes
 
-    assert iter_active_source_hashes(_MissingManifestStore(inner)) == {}
+    assert iter_active_source_hashes(_MissingManifestStore(inner))[0] == {}
