@@ -1084,6 +1084,12 @@ def _dispatch_brain_resolve_tool(tool_name: str, arguments: dict, service: Knowl
             raise ValueError(f"{tool_name} include_historical must be a boolean")
         resolve_kwargs["include_historical"] = inc
 
+    if arguments.get("fields") is not None:
+        fields = arguments["fields"]
+        if not isinstance(fields, list) or not all(isinstance(name, str) for name in fields):
+            raise ValueError(f"{tool_name} fields must be a list of strings")
+        resolve_kwargs["fields"] = fields
+
     if "max_age" in arguments and arguments["max_age"] is not None:
         val = arguments["max_age"]
         if isinstance(val, bool) or not isinstance(val, int) or val < 0:

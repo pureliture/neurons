@@ -228,7 +228,8 @@ def list_public_agent_tools() -> list[dict]:
                 "rank fusion으로 병합해 돌려준다(items[].source=graph_card|session_memory). "
                 "프로젝트 활성 컨텍스트(mode='context'), 카드 목록(mode='list')도 지원한다. "
                 "그래프 장애·미투영 시 PG fallback과 검색 경로·신선도(metadata.freshness)를 명시한다. "
-                "summary_truncated segment의 items[].id를 memory_id로 보내면 query 없이 전체 본문을 cursor로 이어 받을 수 있다."
+                "응답 본문은 절단하지 않고 128KB 예산으로 페이지를 채우며, 더 긴 본문은 items[].id를 "
+                "memory_id로 보내 query 없이 next_cursor로 이어 받는다. 필드만 필요하면 fields로 고른다."
             ),
             "inputSchema": {
                 "type": "object",
@@ -264,7 +265,24 @@ def list_public_agent_tools() -> list[dict]:
                         "minimum": 1,
                         "maximum": 20,
                         "default": 5,
-                        "description": "최대 반환 항목 수",
+                        "description": "최대 반환 항목 수 (본문 절단이 아니라 항목 수·바이트 예산으로 페이징)",
+                    },
+                    "fields": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "id", "card_type", "title", "summary", "currentness",
+                                "content_hash", "typed_payload", "source", "created_at",
+                                "temporal", "segment_turn_range", "summary_byte_range",
+                                "full_content_hash", "temporal_conflict", "authority_source",
+                            ],
+                        },
+                        "maxItems": 32,
+                        "description": (
+                            "items[]에서 반환할 필드 선택. 지정하지 않으면 전체 필드를 반환한다. "
+                            "id는 항상 포함된다. 본문 축약이 필요하면 필드 선택 또는 작은 limit을 사용한다."
+                        ),
                     },
                     "as_of": {
                         "type": "string",
@@ -280,7 +298,7 @@ def list_public_agent_tools() -> list[dict]:
                         "maxLength": 64,
                         "pattern": r"^chunk:seg_[0-9a-f]{52}$",
                         "description": (
-                            "query 결과에서 summary_truncated가 붙은 segment 항목의 items[].id를 넣으면 "
+                            "query 결과의 segment 항목 items[].id를 넣으면 "
                             "해당 결과 1건의 전체 본문을 반환한다. query는 필요 없고, 응답 상한을 넘으면 "
                             "next_cursor로 이어 받는다. 이 경로에서는 as_of·age·currentness·"
                             "time_confidence·include_historical·limit 필터를 적용하지 않는다."

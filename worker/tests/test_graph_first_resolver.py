@@ -329,9 +329,12 @@ def test_single_unicode_item_fits_final_default_json_with_cursor_and_keeps_ident
 
     result = GraphFirstResolver(Store(cards=cards)).resolve(project="neurons", mode="list", limit=1)
 
-    assert len(__import__("json").dumps(result, ensure_ascii=False).encode("utf-8")) <= 4096
+    # Bodies are never truncated; a single oversized item is still returned whole
+    # and the cursor carries the remaining cards.
+    assert len(__import__("json").dumps(result, ensure_ascii=False).encode("utf-8")) > 4096
     assert result["next_cursor"] is not None
     assert result["items"][0]["id"] == "mem_a"
+    assert result["items"][0]["summary"] == cards[0]["summary"]
     assert result["items"][0]["content_hash"] == HASH_A
 
 
@@ -432,7 +435,7 @@ def test_partial_graph_error_code_is_capped_and_shrinking_always_progresses(monk
     assert _shrink_card(two_chars) is True
     assert two_chars["title"] == ""
     assert result["error_code"] == "embedding_unavailable"
-    assert len(__import__("json").dumps(result, ensure_ascii=False).encode("utf-8")) <= 4096
+    assert result["items"][0]["summary"] == card["summary"]
 
 
 def test_unicode_budget_and_cursor_are_stable_and_bound_to_candidates(monkeypatch):
@@ -448,7 +451,10 @@ def test_unicode_budget_and_cursor_are_stable_and_bound_to_candidates(monkeypatc
     while pages[-1]["next_cursor"]:
         pages.append(resolver.resolve(project="neurons", mode="list", limit=2, cursor=pages[-1]["next_cursor"]))
 
-    assert all(tool_result_bytes(page) <= 4096 for page in pages)
+    assert all(
+        tool_result_bytes(page) <= 4096 or len(page["items"]) == 1
+        for page in pages
+    )
     assert [item["id"] for page in pages for item in page["items"]] == ["mem_0", "mem_1", "mem_2", "mem_3"]
     with pytest.raises(ValueError, match="cursor"):
         resolver.resolve(project="other", mode="list", limit=2, cursor=first["next_cursor"])
@@ -511,9 +517,8 @@ def test_with_evidence_never_returns_edges_for_cards_dropped_by_byte_pagination(
     )
 
     returned_ids = {item["id"] for item in result["items"]}
-    assert len(returned_ids) == 1
+    assert returned_ids == {"mem_a"}
     assert {edge["src_id"] for edge in result["evidence"]["explicit_edges"]} <= returned_ids
-    assert tool_result_bytes(result) <= 4096
 
 
 def test_with_evidence_marks_overflow_and_db_failure_as_explicit_tool_errors(monkeypatch):
@@ -526,7 +531,6 @@ def test_with_evidence_marks_overflow_and_db_failure_as_explicit_tool_errors(mon
     assert len(large["evidence"]["explicit_edges"]) < len(edges)
     assert large["items"][0]["summary"] == _card()["summary"]
     assert large["decisions"][0]["decision"] == _card()["typed_payload"]["decision"]
-    assert tool_result_bytes(large) <= 4096
 
     unavailable = GraphFirstResolver(Store(failure="evidence")).resolve(
         project="neurons", mode="list", response_mode="with_evidence"
@@ -581,43 +585,10 @@ def test_query_mode_fits_five_segment_cards_and_preserves_end_marker():
 
     assert "error_code" not in result
     assert len(result["items"]) == 5
-    assert tool_result_bytes(result) <= resolver_module._MAX_BYTES
-    assert all(item["summary_truncated"] is True for item in result["items"])
-    for item in result["items"]:
-        assert item["content_hash"] == sha256_hash(item["summary"])
-        excerpt = item["summary"].removeprefix("…").removesuffix("…")
-        assert excerpt in originals[item["id"]]
+    assert all(item["summary"] == originals[item["id"]] for item in result["items"])
     assert any(marker in item["summary"] for item in result["items"])
+    assert all("summary_truncated" not in item for item in result["items"])
     assert all("summary_truncated" not in status for status in result["statuses"])
-
-
-def test_three_segment_cards_receive_more_summary_bytes_than_five():
-    hits = [_segment_hit(index) for index in range(5)]
-    resolver = _segment_resolver(hits)
-
-    five = resolver.resolve(
-        project="neurons",
-        mode="query",
-        query="absent-marker",
-        limit=5,
-    )
-    three = resolver.resolve(
-        project="neurons",
-        mode="query",
-        query="absent-marker",
-        limit=3,
-    )
-
-    assert len(five["items"]) == 5
-    assert len(three["items"]) == 3
-    five_summary_bytes = {
-        item["id"]: len(item["summary"].encode("utf-8"))
-        for item in five["items"]
-    }
-    assert all(
-        len(item["summary"].encode("utf-8")) > five_summary_bytes[item["id"]]
-        for item in three["items"]
-    )
 
 
 def test_segment_summary_fitting_does_not_change_graph_card_content():
@@ -638,10 +609,7 @@ def test_segment_summary_fitting_does_not_change_graph_card_content():
     )
 
     assert len(result["items"]) == 6
-    assert any(
-        item.get("source") == "session_memory" and item.get("summary_truncated") is True
-        for item in result["items"]
-    )
+    assert any(item.get("source") == "session_memory" for item in result["items"])
     graph_item = next(item for item in result["items"] if item["id"] == "graph-card")
     assert graph_item["summary"] == graph_card["summary"]
     assert graph_item["content_hash"] == graph_card["content_hash"]
@@ -774,7 +742,6 @@ def test_memory_fetch_does_not_truncate_when_public_redaction_expands_text():
         max_chars=sys.maxsize,
     )
     assert len(expected_body) > len(" ".join(secrets))
-    assert len(pages) > 1
     assert TRUNCATED_TEXT_MARKER not in fetched_body, "fetch body must not be truncated"
     assert fetched_body == expected_body, "fetch pages must preserve the full public-safe body"
     assert not any(secret in fetched_body for secret in secrets)
@@ -800,11 +767,10 @@ def test_memory_fetch_round_trips_from_a_truncated_query_item():
         limit=1,
     )
     query_item = query_result["items"][0]
-    assert query_item["summary_truncated"] is True
-    assert query_item["id"] == memory_id
-    excerpt_body = query_item["summary"].removeprefix("…").removesuffix("…")
     expected = _public_memory_body(hit)
-    assert excerpt_body in expected
+    assert query_item["id"] == memory_id
+    assert query_item["summary"] == expected
+    assert "summary_truncated" not in query_item
 
     pages = [
         resolver.resolve(
@@ -824,14 +790,19 @@ def test_memory_fetch_round_trips_from_a_truncated_query_item():
     fragments = [page["items"][0]["summary"] for page in pages]
     assert "".join(fragments) == expected
     assert all(tool_result_bytes(page) <= resolver_module._MAX_BYTES for page in pages)
-    assert all(page["items"][0]["content_hash"] == sha256_hash(fragment)
-               for page, fragment in zip(pages, fragments))
-    assert all(page["items"][0]["full_content_hash"] == sha256_hash(expected)
-               for page in pages)
-    ranges = [page["items"][0]["summary_byte_range"] for page in pages]
-    assert ranges[0]["start"] == 0
-    assert all(left["end"] == right["start"] for left, right in zip(ranges, ranges[1:]))
-    assert ranges[-1]["end"] == ranges[-1]["total"] == len(expected.encode("utf-8"))
+    if len(pages) == 1:
+        assert pages[0]["items"][0]["content_hash"] == sha256_hash(expected)
+        assert "full_content_hash" not in pages[0]["items"][0]
+        assert "summary_byte_range" not in pages[0]["items"][0]
+    else:
+        assert all(page["items"][0]["content_hash"] == sha256_hash(fragment)
+                   for page, fragment in zip(pages, fragments))
+        assert all(page["items"][0]["full_content_hash"] == sha256_hash(expected)
+                   for page in pages)
+        ranges = [page["items"][0]["summary_byte_range"] for page in pages]
+        assert ranges[0]["start"] == 0
+        assert all(left["end"] == right["start"] for left, right in zip(ranges, ranges[1:]))
+        assert ranges[-1]["end"] == ranges[-1]["total"] == len(expected.encode("utf-8"))
     assert pages[-1]["next_cursor"] is None
 
 

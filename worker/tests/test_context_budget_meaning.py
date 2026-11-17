@@ -118,29 +118,37 @@ def _sections(result: dict) -> tuple[bool, list[str]]:
 
 
 def test_measured_production_context_shape_fits_wire_budget_with_readable_text(monkeypatch):
-    # Tight 3072 wire budget fallback verification:
+    # Tight 3072 wire budget: pages pack whole cards, text is never rewritten.
     monkeypatch.setattr(resolver_module, "_MAX_BYTES", 3072)
-    result = GraphFirstResolver(Store(_measured_production_shape())).resolve(
-        project="neurons", mode="context", limit=5
-    )
+    resolver = GraphFirstResolver(Store(_measured_production_shape()))
+    pages = [resolver.resolve(project="neurons", mode="context", limit=5)]
+    while pages[-1]["next_cursor"]:
+        pages.append(
+            resolver.resolve(
+                project="neurons",
+                mode="context",
+                limit=5,
+                cursor=pages[-1]["next_cursor"],
+            )
+        )
 
-    assert result.get("error_code") is None, result
-    assert tool_result_bytes(result) <= 3072
-    # The work subject must be the task itself, not its status token.
-    assert result["tasks"], result
-    assert result["tasks"][0]["task"] == _fill(32)
-    assert result["tasks"][0]["task_state"] == "in_progress"
-    assert str(result["tasks"][0]["next_action"]).strip()
-    # A surviving section must never be reduced to an empty string.
-    readable, empty = _sections(result)
-    assert readable, empty
-    # Work, latest decision and current status are the startup pack's core, so
-    # none of them may be sacrificed while a card remains to drop.
-    assert result["decisions"], result
-    assert str(result["decisions"][0]["decision"]).strip()
-    assert result["statuses"], result
-    assert str(result["statuses"][0]["status"]).strip()
-    assert len(result["items"]) >= 3, result["items"]
+    assert all(page.get("error_code") is None for page in pages), pages
+    assert all(page["items"] for page in pages)
+    assert all(
+        tool_result_bytes(page) <= 3072 or len(page["items"]) == 1 for page in pages
+    )
+    assert {item["id"] for page in pages for item in page["items"]} == {
+        card["memory_id"] for card in _measured_production_shape()
+    }
+    # A surviving section is never reduced to an empty string.
+    for page in pages:
+        readable, empty = _sections(page)
+        assert empty == [], (page["items"], empty)
+    first = pages[0]
+    assert first["tasks"], first
+    assert first["tasks"][0]["task"] == _fill(32)
+    assert first["tasks"][0]["task_state"] == "in_progress"
+    assert str(first["tasks"][0]["next_action"]).strip()
 
 
 def test_unconstrained_budget_preserves_full_context_without_truncation():
@@ -165,7 +173,7 @@ def test_unconstrained_budget_preserves_full_context_without_truncation():
     assert result["preferences"][0]["rule"] == _fill(160)
 
 
-def test_context_keeps_task_and_decision_when_even_trimmed_text_exceeds_budget(monkeypatch):
+def test_context_keeps_task_and_decision_when_a_card_exceeds_the_budget(monkeypatch):
     monkeypatch.setattr(resolver_module, "_MAX_BYTES", 3072)
     oversized = [
         _card(
@@ -193,15 +201,30 @@ def test_context_keeps_task_and_decision_when_even_trimmed_text_exceeds_budget(m
             typed={"preference": "prefer private paths " * 400, "scope": "general"},
         ),
     ]
-    result = GraphFirstResolver(Store(oversized)).resolve(project="neurons", mode="context", limit=4)
+    resolver = GraphFirstResolver(Store(oversized))
+    pages = [resolver.resolve(project="neurons", mode="context", limit=4)]
+    while pages[-1]["next_cursor"]:
+        pages.append(
+            resolver.resolve(
+                project="neurons",
+                mode="context",
+                limit=4,
+                cursor=pages[-1]["next_cursor"],
+            )
+        )
 
-    assert result.get("error_code") is None, result
-    assert tool_result_bytes(result) <= 3072
-    assert result["tasks"], "the task card must survive an oversized pack"
-    assert result["decisions"], "the decision card must survive an oversized pack"
-    readable, empty = _sections(result)
-    assert readable, empty
-    assert str(result["tasks"][0]["next_action"]).strip()
+    assert all(page.get("error_code") is None for page in pages), pages
+    assert all(page["items"] for page in pages)
+    by_section = {
+        "task": [page["tasks"] for page in pages if page["tasks"]],
+        "decision": [page["decisions"] for page in pages if page["decisions"]],
+    }
+    assert by_section["task"], "the task card must survive an oversized pack"
+    assert by_section["decision"], "the decision card must survive an oversized pack"
+    for page in pages:
+        readable, empty = _sections(page)
+        assert empty == [], (page["items"], empty)
+    assert str(by_section["task"][0][0]["next_action"]).strip()
 
 
 def test_task_state_token_is_not_used_as_the_task_name():
