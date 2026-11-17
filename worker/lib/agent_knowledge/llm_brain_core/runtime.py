@@ -17,6 +17,7 @@ from agent_knowledge.couchdb_source.hermes_project_scope import (
     decide_hermes_project_scope,
 )
 from agent_knowledge.couchdb_source.source_revision import (
+    SourceRevisionDeferredBudget,
     resolve_active_source_revision,
     resolve_active_source_revision_from_snapshot,
     resolve_source_hash_for_currentness,
@@ -91,6 +92,8 @@ def materialize_artifact_from_couchdb_source(
     artifact_store: SessionMemoryArtifactStore | None = None,
     ontology_version: str = "1.0.0",
     extractor_version: str = "runtime.1",
+    max_member_docs: int | None = None,
+    deadline_monotonic: float | None = None,
 ) -> SessionMemoryArtifact:
     artifact, _chunks, _evidence = _materialize_artifact_with_snapshot(
         session_id_hash=session_id_hash,
@@ -98,6 +101,8 @@ def materialize_artifact_from_couchdb_source(
         artifact_store=artifact_store,
         ontology_version=ontology_version,
         extractor_version=extractor_version,
+        max_member_docs=max_member_docs,
+        deadline_monotonic=deadline_monotonic,
     )
     return artifact
 
@@ -110,6 +115,8 @@ def _materialize_artifact_with_snapshot(
     ontology_version: str = "1.0.0",
     extractor_version: str = "runtime.1",
     max_attempts: int = 3,
+    max_member_docs: int | None = None,
+    deadline_monotonic: float | None = None,
 ) -> tuple[SessionMemoryArtifact, tuple[Mapping[str, Any], ...], tuple[Mapping[str, Any], ...]]:
     """Persist only an eventually-current bounded source snapshot.
 
@@ -124,13 +131,20 @@ def _materialize_artifact_with_snapshot(
     """
 
     for _attempt in range(max_attempts):
-        artifact, chunks, evidence = _materialize_artifact_from_couchdb_source_once(
-            session_id_hash=session_id_hash,
-            source_store=source_store,
-            artifact_store=artifact_store,
-            ontology_version=ontology_version,
-            extractor_version=extractor_version,
-        )
+        try:
+            artifact, chunks, evidence = _materialize_artifact_from_couchdb_source_once(
+                session_id_hash=session_id_hash,
+                source_store=source_store,
+                artifact_store=artifact_store,
+                ontology_version=ontology_version,
+                extractor_version=extractor_version,
+                max_member_docs=max_member_docs,
+                deadline_monotonic=deadline_monotonic,
+            )
+        except SourceRevisionDeferredBudget:
+            # A read-budget/deadline signal is not a transient race; retrying
+            # inside this cycle would burn the same budget again.
+            raise
         current_source_revision = session_source_revision_from_couchdb_source(
             session_id_hash=session_id_hash,
             source_store=source_store,
@@ -149,12 +163,16 @@ def _materialize_artifact_from_couchdb_source_once(
     artifact_store: SessionMemoryArtifactStore | None = None,
     ontology_version: str = "1.0.0",
     extractor_version: str = "runtime.1",
+    max_member_docs: int | None = None,
+    deadline_monotonic: float | None = None,
 ) -> tuple[SessionMemoryArtifact, tuple[Mapping[str, Any], ...]]:
     """Build a core artifact from CouchDB source docs without copying source bodies."""
 
     resolved = resolve_active_source_revision(
         session_id_hash=session_id_hash,
         store=source_store,
+        max_member_docs=max_member_docs,
+        deadline_monotonic=deadline_monotonic,
     )
     sessions = list(resolved.sessions)
     chunks = list(resolved.conversation_chunks)
@@ -728,6 +746,8 @@ def session_episode_from_couchdb_source(
     artifact_store: SessionMemoryArtifactStore | None = None,
     ontology_version: str = "1.0.0",
     extractor_version: str = "runtime.1",
+    max_member_docs: int | None = None,
+    deadline_monotonic: float | None = None,
 ) -> OntologyEpisode:
     """Materialize a Session OntologyEpisode carrying real conversation prose.
 
@@ -744,6 +764,8 @@ def session_episode_from_couchdb_source(
         artifact_store=artifact_store,
         ontology_version=ontology_version,
         extractor_version=extractor_version,
+        max_member_docs=max_member_docs,
+        deadline_monotonic=deadline_monotonic,
     )
     extraction_text = _extraction_text_from_chunks(
         captured_chunks,

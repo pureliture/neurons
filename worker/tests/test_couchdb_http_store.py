@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import urllib.request
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import pytest
 
@@ -86,6 +86,27 @@ class FakeCouch:
 
         if method == "POST" and len(parts) == 2 and parts[1] == "_find":
             return self._handle_find(store, body)
+
+        if method == "POST" and len(parts) == 2 and parts[1] == "_all_docs":
+            keys = [str(key) for key in json.loads(body.decode())["keys"]]
+            # Stored ids stay percent-encoded because this fake never unquotes
+            # the request path; index by the canonical id CouchDB returns.
+            index = {unquote(stored): document for stored, document in store.items()}
+            rows = []
+            for key in keys:
+                document = store.get(key) or index.get(key)
+                if document is None:
+                    rows.append({"id": key, "key": key, "error": "not_found"})
+                else:
+                    rows.append(
+                        {
+                            "id": key,
+                            "key": key,
+                            "value": {"rev": document.get("_rev")},
+                            "doc": document,
+                        }
+                    )
+            return self._json(200, {"rows": rows})
 
         if len(parts) == 2:
             doc_id = parts[1]
@@ -173,6 +194,20 @@ def _active_snapshot_chunk(store: CouchDBHttpSourceStore) -> dict:
 
 def test_satisfies_protocol():
     assert isinstance(_store(FakeCouch()), CouchDBSourceStore)
+
+
+def test_get_many_pages_keys_and_reports_missing_documents():
+    store = _store(FakeCouch())
+    session = _session_doc()
+    chunk = _chunk_doc("batched body")
+    store.put(session)
+    store.put(chunk)
+
+    docs = store.get_many([session["_id"], chunk["_id"], "transcript_session:missing"], page_size=2)
+
+    assert docs[session["_id"]]["doc_type"] == dm.SourceDocType.TRANSCRIPT_SESSION
+    assert docs[chunk["_id"]]["_id"] == chunk["_id"]
+    assert docs["transcript_session:missing"] is None
 
 
 def test_ensure_database():

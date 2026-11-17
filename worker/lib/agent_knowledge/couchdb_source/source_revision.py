@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+import time
 from dataclasses import dataclass
 from typing import Callable, Iterable, Iterator, Mapping
 
@@ -74,6 +75,31 @@ class SourceRevisionSnapshotChangedError(SourceRevisionResolutionError):
     """A paged currentness scan observed a changing CouchDB database snapshot."""
 
     code = "source_revision_snapshot_changed_retry"
+
+
+class SourceRevisionDeferredBudget(Exception):
+    """A session exceeds the per-cycle read budget or wall-clock deadline.
+
+    This is a scheduling signal, not a data error: the source revision is left
+    untouched, nothing partial is returned, and the caller must retry the same
+    session in a later cycle with an escalated budget instead of dropping it.
+    ``members_read`` reports verified members, so retries stay resumable.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_code: str,
+        session_id_hash: str = "",
+        members_total: int = 0,
+        members_read: int = 0,
+    ):
+        super().__init__(message)
+        self.reason_code = str(reason_code)
+        self.session_id_hash = str(session_id_hash)
+        self.members_total = int(members_total)
+        self.members_read = int(members_read)
 
 
 @dataclass(frozen=True)
@@ -1132,13 +1158,35 @@ def _snapshot_legacy_documents(
     return legacy_documents
 
 
+MEMBER_PREFETCH_DOC_IDS = 400
+MEMBER_DEADLINE_CHECK_EVERY = 50
+
+
 def resolve_active_source_revision(
     *,
     session_id_hash: str,
     store: CouchDBSourceStore,
     progress_callback=None,
+    max_member_docs: int | None = None,
+    deadline_monotonic: float | None = None,
 ) -> ResolvedSourceRevision:
-    """Resolve an active immutable revision, or the legacy set only if unpinned."""
+    """Resolve an active immutable revision, or the legacy set only if unpinned.
+
+    ``max_member_docs``/``deadline_monotonic`` bound one cycle's read cost. A
+    session that exceeds either raises :class:`SourceRevisionDeferredBudget`
+    before returning anything, leaving the source untouched so a later cycle
+    can retry it with a larger budget.
+    """
+
+    def _check_budget(members_total: int, members_read: int) -> None:
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            raise SourceRevisionDeferredBudget(
+                "source revision read deadline exceeded",
+                reason_code="session_deadline_exceeded",
+                session_id_hash=session_id_hash,
+                members_total=members_total,
+                members_read=members_read,
+            )
 
     dm.assert_hash_like("session_id_hash", session_id_hash)
     pointer = store.get(dm.active_source_revision_pointer_doc_id(session_id_hash))
@@ -1167,11 +1215,42 @@ def resolve_active_source_revision(
         expected_manifest_hash=parsed_pointer["manifest_hash"],
         expected_source_hash=parsed_pointer["source_hash"],
     )
+    if max_member_docs is not None and len(members) > int(max_member_docs):
+        raise SourceRevisionDeferredBudget(
+            "source revision member count exceeds the cycle budget",
+            reason_code="session_member_budget_exceeded",
+            session_id_hash=session_id_hash,
+            members_total=len(members),
+            members_read=0,
+        )
+    _check_budget(len(members), 0)
+
+    fetch_many = getattr(store, "get_many", None)
+    prefetched: dict[str, dict | None] | None = None
+    if callable(fetch_many):
+        prefetched = {}
+        member_ids: list[str] = []
+        for membership in members:
+            for key in ("member_id", "source_document_id"):
+                doc_id = str(membership.get(key) or "")
+                if doc_id:
+                    member_ids.append(doc_id)
+        for start in range(0, len(member_ids), MEMBER_PREFETCH_DOC_IDS):
+            _check_budget(len(members), len(prefetched))
+            prefetched.update(
+                fetch_many(member_ids[start : start + MEMBER_PREFETCH_DOC_IDS])
+            )
+        get_document: Callable[[str], dict | None] = prefetched.get
+    else:
+        get_document = store.get
+
     documents = []
     for index, member in enumerate(members, start=1):
+        if index % MEMBER_DEADLINE_CHECK_EVERY == 0:
+            _check_budget(len(members), index - 1)
         documents.append(
             _validate_member_and_source(
-                get_document=store.get,
+                get_document=get_document,
                 session_id_hash=session_id_hash,
                 source_revision=parsed_pointer["active_revision"],
                 membership=member,

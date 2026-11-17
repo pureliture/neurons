@@ -23,7 +23,7 @@ import hashlib
 import json
 import time
 from collections import OrderedDict
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from urllib.parse import quote
 
 from ..rag_ingress.idempotency import IdempotencyOutcome
@@ -291,6 +291,42 @@ class CouchDBHttpSourceStore:
         if status != 200:
             raise CouchDBError(f"GET {doc_id} failed: HTTP {status}", status_code=status)
         return payload
+
+    def get_many(
+        self,
+        doc_ids: Sequence[str],
+        *,
+        page_size: int = 100,
+    ) -> dict[str, dict | None]:
+        """Read many documents through bounded ``_all_docs`` pages.
+
+        ``include_docs=true`` keeps the per-document revision/hash validation
+        identical to :meth:`get`; only the round-trip count changes. The result
+        contains an entry for every requested id (missing documents map to
+        ``None``) so callers can keep their existing missing-document errors.
+        """
+
+        unique = list(dict.fromkeys(str(doc_id) for doc_id in doc_ids))
+        if not unique:
+            return {}
+        effective_page = max(1, int(page_size))
+        result: dict[str, dict | None] = {}
+        for start in range(0, len(unique), effective_page):
+            page = unique[start : start + effective_page]
+            status, payload = self._request(
+                "POST",
+                f"/{self.db}/_all_docs?include_docs=true",
+                json_body={"keys": page},
+            )
+            if status != 200:
+                raise CouchDBError(f"POST _all_docs failed: HTTP {status}", status_code=status)
+            for row in payload.get("rows") or []:
+                key = str(row.get("key") or "")
+                document = row.get("doc")
+                result[key] = document if isinstance(document, dict) else None
+        for doc_id in unique:
+            result.setdefault(doc_id, None)
+        return result
 
     def get_bounded(self, doc_id: str, *, max_response_bytes: int) -> dict | None:
         """Read a document with the transport byte cap applied before JSON parsing."""
