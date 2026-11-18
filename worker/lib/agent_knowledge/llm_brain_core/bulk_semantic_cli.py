@@ -297,6 +297,7 @@ def run_couchdb_bulk_semantic_projection(
             by_project[session_project] += 1
             by_provider[session_provider] += 1
             natural_id = session_id_hash.replace(":", "_")
+            stage = "source_revision"
             status = "unknown"
             reason = ""
             if max_projects and materialized >= max_projects:
@@ -319,6 +320,7 @@ def run_couchdb_bulk_semantic_projection(
                     session_id_hash=session_id_hash,
                     source_store=source_store,
                 )
+                stage = "projection_state"
                 if projection_state_store.has_projected_source_hash(
                     session_project,
                     natural_id,
@@ -329,6 +331,7 @@ def run_couchdb_bulk_semantic_projection(
                     skipped_resumed += 1
                     status = "skipped_resumed"
                 else:
+                    stage = "materialize"
                     episode = session_episode_from_couchdb_source(
                         session_id_hash=session_id_hash,
                         source_store=source_store,
@@ -352,6 +355,7 @@ def run_couchdb_bulk_semantic_projection(
                     if len(batch_items) >= max_sessions_per_call or (
                         max_projects and materialized >= max_projects
                     ):
+                        stage = "extract_write"
                         report = _flush_batch_items(
                             batch_items,
                             extractor=extractor,
@@ -375,6 +379,7 @@ def run_couchdb_bulk_semantic_projection(
                         else:
                             status = "projected"
             except SourceRevisionDeferredBudget as exc:
+                stage = "materialize_budget"
                 # Budget/deadline is a scheduling signal: keep the session for
                 # a later cycle instead of truncating its source or dropping it.
                 reason = exc.reason_code or "session_budget_exceeded"
@@ -408,6 +413,7 @@ def run_couchdb_bulk_semantic_projection(
                     }
                     status = "deferred_budget"
             except Exception as exc:
+                stage = "materialize_extract_or_write"
                 failed += 1
                 status = "failed"
                 reason = _reason_code(exc)
@@ -438,6 +444,7 @@ def run_couchdb_bulk_semantic_projection(
                         "elapsed_ms": elapsed_ms,
                         "project_ref": _project_ref(session_project),
                         "provider": session_provider,
+                        "stage": stage,
                         "projected": projected,
                         "skipped_resumed": skipped_resumed,
                         "failed": failed,
