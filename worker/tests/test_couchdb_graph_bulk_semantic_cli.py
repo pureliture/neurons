@@ -821,3 +821,35 @@ def test_embedding_batcher_chunks_inputs_by_max_batch_size():
     assert vectors[0] == [1.0, 0.0]
     assert vectors[2] == [2.0, 0.0]
     assert vectors[4] == [3.0, 0.0]
+
+
+def test_bulk_extractor_retries_empty_content_only_with_approved_free_model():
+    calls: list[str] = []
+
+    def fake_post(url, *, headers, body, timeout):  # type: ignore[no-untyped-def]
+        _ = (url, headers, timeout)
+        calls.append(json.loads(body)["model"])
+        content = "" if len(calls) == 1 else '{"sessions": []}'
+        return json.dumps({"choices": [{"message": {"content": content}}]})
+
+    extractor = OpenAICompatibleBulkSemanticExtractor(
+        base_url="https://opencode.ai/zen/go/v1",
+        model="hy4-flash-free",
+        post_fn=fake_post,
+        fallback_models=("beam-free", "deepseek-v4.1-flash"),
+    )
+    result = extractor.extract([])
+
+    assert result.sessions == ()
+    assert calls == ["hy4-flash-free", "beam-free"]
+
+
+def test_bulk_extractor_from_env_ignores_paid_fallback_models():
+    extractor = OpenAICompatibleBulkSemanticExtractor.from_env(
+        {
+            "LLM_BRAIN_LLM_BASE_URL": "https://opencode.ai/zen/go/v1",
+            "LLM_BRAIN_LLM_MODEL": "hy4-flash-free",
+            "LLM_BRAIN_LLM_FALLBACK_MODELS": "deepseek-v4.1-flash,beam-free",
+        }
+    )
+    assert extractor._fallback_models == ("beam-free",)

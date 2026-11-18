@@ -98,6 +98,11 @@ class BulkSemanticWriteReport:
     projected_natural_ids: tuple[str, ...] = ()
 
 
+# Only explicitly approved free models may be used as automatic fallbacks.
+# Paid models require a separate operator decision and are never auto-selected.
+_FREE_FALLBACK_MODELS = frozenset({"beam-free"})
+
+
 class OpenAICompatibleBulkSemanticExtractor:
     """Batch semantic extractor using a single OpenAI-compatible chat call."""
 
@@ -111,6 +116,7 @@ class OpenAICompatibleBulkSemanticExtractor:
         timeout_seconds: int = DEFAULT_BULK_SEMANTIC_TIMEOUT_SECONDS,
         max_tokens: int = DEFAULT_BULK_SEMANTIC_MAX_TOKENS,
         post_fn: Callable[..., str] = None,
+        fallback_models: tuple[str, ...] = (),
     ) -> None:
         _reject_forbidden_gemini_llm_model(model)
         if not base_url:
@@ -124,6 +130,9 @@ class OpenAICompatibleBulkSemanticExtractor:
         self._timeout_seconds = max(1, int(timeout_seconds))
         self._max_tokens = max(1, int(max_tokens))
         self._post_fn = post_fn or _urllib_post
+        self._fallback_models: tuple[str, ...] = tuple(
+            dict.fromkeys(model for model in fallback_models if model in _FREE_FALLBACK_MODELS and model != self._model)
+        )
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> "OpenAICompatibleBulkSemanticExtractor":
@@ -141,11 +150,32 @@ class OpenAICompatibleBulkSemanticExtractor:
                 env.get("LLM_BRAIN_BULK_SEMANTIC_MAX_TOKENS", ""),
                 DEFAULT_BULK_SEMANTIC_MAX_TOKENS,
             ),
+            fallback_models=tuple(
+                item.strip()
+                for item in env.get("LLM_BRAIN_LLM_FALLBACK_MODELS", "beam-free").split(",")
+                if item.strip()
+            ),
         )
 
     def extract(self, batch: list[BulkSemanticSessionInput]) -> BulkSemanticExtractionResult:
+        last_error: Exception | None = None
+        for model in (self._model, *self._fallback_models):
+            try:
+                return self._extract_with_model(batch, model)
+            except ValueError as exc:
+                # Empty completion or schema/parse rejection is model-specific;
+                # retry only with an explicitly approved free fallback.
+                if str(exc) == "bulk semantic extractor returned empty content":
+                    last_error = exc
+                    continue
+                raise
+        raise last_error or ValueError("bulk semantic extractor returned empty content")
+
+    def _extract_with_model(
+        self, batch: list[BulkSemanticSessionInput], model: str
+    ) -> BulkSemanticExtractionResult:
         body: dict[str, Any] = {
-            "model": self._model,
+            "model": model,
             "messages": _bulk_semantic_messages(batch),
             "temperature": 0,
             "max_tokens": self._max_tokens,
