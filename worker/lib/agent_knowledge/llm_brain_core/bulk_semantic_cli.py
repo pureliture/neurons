@@ -430,7 +430,7 @@ def run_couchdb_bulk_semantic_projection(
             if (
                 index == 1
                 or index % report_every == 0
-                or status in {"failed", "deferred_budget"}
+                or stage == "extract_write"
                 or index == len(selected)
             ):
                 _write_jsonl(
@@ -473,6 +473,25 @@ def run_couchdb_bulk_semantic_projection(
             failed += int(report["failed"])
             entities_written += int(report["entities_written"])
             relations_written += int(report["relations_written"])
+            _write_jsonl(
+                progress_jsonl,
+                {
+                    "event": "progress",
+                    "index": processed,
+                    "selected": len(selected),
+                    "status": "projected" if not int(report["failed"]) else "failed",
+                    "reason_code": "extract_or_write" if int(report["failed"]) else "",
+                    "elapsed_ms": 0,
+                    "project_ref": _project_ref(str(selected[-1].get("project") or "") if selected else ""),
+                    "provider": str(selected[-1].get("provider") or "") if selected else "",
+                    "stage": "extract_write",
+                    "projected": projected,
+                    "skipped_resumed": skipped_resumed,
+                    "failed": failed,
+                    "deferred": deferred,
+                    "llm_batches": llm_batches,
+                },
+            )
     finally:
         # Persist inside the runtime lock so a successor cannot read a stale
         # snapshot or race the same temporary file.

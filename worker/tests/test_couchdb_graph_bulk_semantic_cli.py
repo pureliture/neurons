@@ -876,7 +876,7 @@ def test_bulk_progress_records_non_sensitive_stage(tmp_path):
     records = [json.loads(line) for line in progress.read_text().splitlines() if line.strip()]
     progress_records = [record for record in records if record.get("event") == "progress"]
     assert progress_records
-    assert progress_records[-1]["status"] == "queued"
+    assert progress_records[-1]["stage"] == "extract_write"
     assert progress_records[-1]["stage"] in {
         "source_revision",
         "projection_state",
@@ -888,3 +888,4 @@ def test_bulk_progress_records_non_sensitive_stage(tmp_path):
     assert all(
         "session_id_hash" not in record and "body" not in record for record in records
     )
+    assert "extract_write" in {record.get("stage") for record in records}
