@@ -853,3 +853,39 @@ def test_bulk_extractor_from_env_ignores_paid_fallback_models():
         }
     )
     assert extractor._fallback_models == ("beam-free",)
+
+
+def test_bulk_progress_records_non_sensitive_stage(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    _seed_session(store, raw_id="stage-diagnostic")
+    progress = tmp_path / "progress.jsonl"
+
+    report = run_couchdb_bulk_semantic_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=1,
+        project=PROJECT,
+        provider=PROVIDER,
+        progress_jsonl=progress,
+        max_sessions_per_call=5,
+        extractor=_FakeBulkExtractor(),
+        writer=_FakeBulkWriter(),
+    )
+
+    assert report["projection"]["projected"] == 1
+    records = [json.loads(line) for line in progress.read_text().splitlines() if line.strip()]
+    progress_records = [record for record in records if record.get("event") == "progress"]
+    assert progress_records
+    assert progress_records[-1]["stage"] == "extract_write"
+    assert progress_records[-1]["stage"] in {
+        "source_revision",
+        "projection_state",
+        "materialize",
+        "extract_write",
+        "materialize_budget",
+        "materialize_extract_or_write",
+    }
+    assert all(
+        "session_id_hash" not in record and "body" not in record for record in records
+    )
+    assert "extract_write" in {record.get("stage") for record in records}
