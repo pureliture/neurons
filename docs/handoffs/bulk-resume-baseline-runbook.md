@@ -45,3 +45,9 @@ progressing으로 인정하지 않은 경우가 반복된다. 활성 Job의 `pip
 
 활성한 session-memory-build Job의 progress 이벤트가 10분 이상 갭이 생기는 구간에서
 게이트가 거부했다. 이벤트가 신선한 시점에 새 카운터를 트리거한다. bulk는 replicas 0 유지.
+
+## 세션메모리 실제 원인 반영
+
+- selection의 세션당 find_by_session이 10분 progress 공백을 만들었다. paged currentness hash + by_type Mango index로 교체(PR #409/#410).
+- child_exit는 projected 실패 1건으로 발생하며, 원인 코드가 로그에 남지 않아 sanitized reason_code 이벤트를 추가했다. 실패 재현 시 reason_code로 분류한다.
+- counter 68은 8/8 통과, counter 69는 활성 Job progress 타이밍으로 거부되었다. 게이트 완화 없이 새 카운터로 재시도한다.
