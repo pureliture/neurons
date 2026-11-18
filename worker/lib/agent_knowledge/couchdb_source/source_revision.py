@@ -1821,6 +1821,24 @@ def _legacy_currentness_components(
     return components
 
 
+def _doc_type_index(store: CouchDBSourceStore) -> list[str] | str:
+    """Resolve the by-doc_type Mango index descriptor on HTTP stores."""
+    if not getattr(store, "base_url", ""):
+        return ""
+    try:
+        status, payload = store._request("GET", f"/{store.db}/_index")  # type: ignore[attr-defined]
+    except Exception:
+        return ""
+    if status != 200:
+        return ""
+    for index in payload.get("indexes") or []:
+        if index.get("name") == "by_type" and index.get("def", {}).get("fields") == [{"doc_type": "asc"}]:
+            ddoc = str(index.get("ddoc") or "").removeprefix("design/")
+            if ddoc:
+                return [ddoc, "by_type"]
+    return ""
+
+
 def iter_legacy_source_hashes(
     store: CouchDBSourceStore, *, page_size: int = 256
 ) -> dict[str, str]:
@@ -1835,13 +1853,19 @@ def iter_legacy_source_hashes(
     components_by_session: dict[str, list[dict[str, str]]] = {}
     budgets: dict[str, dict[str, int]] = {}
     invalid: set[str] = set()
+    scan_kwargs: dict[str, object] = {"page_size": 2000}
+    use_index = _doc_type_index(store)
+    if use_index:
+        # Production has a doc_type Mango index. Forcing it avoids a full DB
+        # scan per bookmark page (which stalled selection for 10+ minutes).
+        scan_kwargs.update(use_index=use_index, allow_fallback=False)
     for doc_type in (
         dm.SourceDocType.TRANSCRIPT_SESSION,
         dm.SourceDocType.CONVERSATION_CHUNK,
         dm.SourceDocType.TOOL_EVIDENCE_BUNDLE,
     ):
         fields = _CURRENTNESS_LEGACY_FIELDS.get(doc_type)
-        for document in store.iter_by_type(doc_type, fields=fields, page_size=page_size):
+        for document in store.iter_by_type(doc_type, fields=fields, **scan_kwargs):
             session_id_hash = str(document.get("session_id_hash") or "")
             if not session_id_hash or session_id_hash in invalid:
                 continue
