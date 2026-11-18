@@ -1853,7 +1853,7 @@ def iter_legacy_source_hashes(
     components_by_session: dict[str, list[dict[str, str]]] = {}
     budgets: dict[str, dict[str, int]] = {}
     invalid: set[str] = set()
-    scan_kwargs: dict[str, object] = {"page_size": 2000}
+    scan_kwargs: dict[str, object] = {"page_size": 256}
     use_index = _doc_type_index(store)
     if use_index:
         # Production has a doc_type Mango index. Forcing it avoids a full DB
