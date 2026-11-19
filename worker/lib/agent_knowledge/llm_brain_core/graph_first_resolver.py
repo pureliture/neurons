@@ -719,6 +719,8 @@ class GraphFirstResolver:
                 authority_join_status=join_status,
                 fallback_used=fallback_used,
                 projection_lag_ms=lag,
+                session_memory_merged=merged,
+                lexical_lane_cards=lexical_count,
                 freshness=freshness,
                 shadow_read=shadow_read,
             ),
