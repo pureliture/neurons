@@ -28,7 +28,6 @@ from agent_knowledge.session_memory.transcript_model import TranscriptChunk, Tra
 pytestmark = pytest.mark.skipif(not os.environ.get("TRIAL_PG_DSN"), reason="no local PG")
 P = "synthetic-provider"
 PFX = uuid.uuid4().hex[:8] + "-"
-SCRATCH = Path("/Users/ddalkak/.hermes/profiles/atlas/workspace/neurons-recovery-20261117/bulk-prevalidation-scratch")
 
 
 class _Extractor:

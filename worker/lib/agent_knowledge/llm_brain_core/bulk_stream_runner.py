@@ -16,7 +16,9 @@ from .bulk_full_input_reader import PgAuthorityCardStore
 from .bulk_full_input import shadow_group_ids
 from .bulk_semantic import BulkSemanticSessionInput
 from .bulk_source_validation import plan_validated_source
-from .bulk_streaming import iter_batches, iter_planned_chunks, planned_chunk_key, safe_reason
+from .bulk_streaming import (
+    expected_source_bytes, iter_batches, iter_planned_chunks, planned_chunk_key, safe_reason,
+)
 from .couchdb_projection_cli import _select_sessions_bounded
 from .ledger_adapter import EXTRACTION_LEVEL_ENTITY, LedgerGraphProjectionStateStore
 from .models import OntologyEpisode
@@ -62,9 +64,17 @@ def run_streamed_full_input(
         source_store, project=project, provider="", limit=limit,
         projection_state_store=None, extraction_level=EXTRACTION_LEVEL_ENTITY,
     )
-    processed = projected = failed = skipped = deferred = 0
+    processed = projected = skipped = deferred = 0
+    failed_sessions = failed_chunks = 0
+    resumed_chunks = 0
     stream_bytes = 0
     expected_bytes_total = 0
+    expected_separator_bytes = 0
+    expected_full_bytes = 0
+    zero_byte_members = 0
+    expected_ordered_hashes: list[str] = []
+    model_received_ordered_hashes: list[str] = []
+    verified_ordered_hashes: list[str] = []
     session_coverage: dict[str, dict[str, Any]] = {}
     superseded = 0
     reasons: dict[str, int] = {}
@@ -99,14 +109,38 @@ def run_streamed_full_input(
                 source_hash=source_hash, map_digest=map_digest, chunk_keys=keys,
             ):
                 skipped += 1
+                resumed_chunks += len(keys)
                 session_ref = "sess_" + hashlib.sha256(sid.encode("utf-8")).hexdigest()[:12]
                 session_coverage[session_ref] = {
                     "skipped_resumed": True,
+                    "metadata_only": True,
                     "planned_chunks": len(keys),
                     "verified_chunks": len(keys),
-                    "coverage_complete": bool(keys),
+                    "planned_bytes": 0,
+                    "verified_bytes": 0,
+                    "expected_separator_bytes": 0,
+                    "zero_byte_members": 0,
+                    "expected_ordered_hashes": [],
+                    "verified_ordered_hashes": [],
+                    "hash_order_match": True,
+                    "coverage_complete": True,
                 }
                 continue
+
+            expectation = expected_source_bytes(
+                source_store, plan, forbidden_markers=forbidden_markers,
+            )
+            expected_items = expectation["ordered"]
+            expected_by_key = {item["key"]: item for item in expected_items}
+            expected_hashes = [
+                item["canonical_hash"] for item in expected_items
+                if item["byte_length"] > 0
+            ]
+            expected_bytes_total += expectation["body_bytes"]
+            expected_separator_bytes += expectation["separator_bytes"]
+            expected_full_bytes += expectation["full_bytes"]
+            zero_byte_members += expectation["zero_byte_members"]
+            expected_ordered_hashes.extend(expected_hashes)
 
             shadow = shadow_group_ids(f"/project/{session_project}", policy_version)
             if not shadow:
@@ -126,8 +160,8 @@ def run_streamed_full_input(
             ranges: dict[str, tuple[int, int]] = {}
             verified_ranges: dict[str, tuple[int, int]] = {}
             tokens: dict[str, int] = {}
-            received_keys: set[str] = set()
-            received_hashes: set[str] = set()
+            receipt_keys: set[str] = set()
+            resumed_chunks += len(done_keys)
 
             streams = iter_planned_chunks(
                 source_store, plan, forbidden_markers=forbidden_markers
@@ -157,7 +191,7 @@ def run_streamed_full_input(
                             "fence_token": tokens.get(chunk.key, 0),
                             "graph_group_id": shadow_group,
                             "authority_sources": authority_by_hash.get(
-                                chunk.canonical_hash, []
+                                chunk.source_hash or chunk.canonical_hash, []
                             ),
                         },
                     )
@@ -167,11 +201,6 @@ def run_streamed_full_input(
                             session_key=chunk.key, episode=episode, text=chunk.text,
                         ),
                     ))
-                received_keys.update(item.session_key for _, item in batch_items)
-                received_hashes.update(
-                    str(item.episode.payload.get("canonical_chunk_hash") or "")
-                    for _, item in batch_items
-                )
                 if not batch_items:
                     continue
                 try:
@@ -218,17 +247,43 @@ def run_streamed_full_input(
                                     output_digest=entry["output_digest"],
                                     receipt=entry["write_receipt"],
                                 )
+                    confirmed = {
+                        key for key in receipts
+                        if receipts.get(key) and key in expected_by_key
+                    }
+                    receipt_keys.update(confirmed)
+                    received_keys.update(confirmed)
+                    received_hashes.update(
+                        expected_by_key[key]["canonical_hash"] for key in confirmed
+                    )
                     projected += len(batch_entries)
-                    failed += len(batch_items) - len(receipts)
+                    failed_chunks += sum(
+                        1 for _session, item in batch_items
+                        if not receipts.get(item.session_key)
+                    )
                     for chunk in batch_chunks:
                         ranges[chunk.key] = (chunk.byte_start, chunk.byte_end)
                         if receipts.get(chunk.key):
                             verified_ranges[chunk.key] = (chunk.byte_start, chunk.byte_end)
-                    stream_bytes += sum(c.byte_end - c.byte_start for c in batch_chunks)
+                    stream_bytes += sum(
+                        c.byte_end - c.byte_start for c in batch_chunks
+                        if c.key not in done_keys
+                    )
                 finally:
                     _close_spooled_items(batch_items)
-            expected_bytes = sum(end - start for start, end in ranges.values())
-            verified_bytes = sum(end - start for start, end in verified_ranges.values())
+            verified_keys = {
+                key for key in (done_keys | receipt_keys) if key in expected_by_key
+            }
+            model_received_ordered_hashes_local = [
+                item["canonical_hash"] for item in expected_items
+                if item["byte_length"] > 0 and item["key"] in receipt_keys
+            ]
+            verified_ordered_hashes_local = [
+                item["canonical_hash"] for item in expected_items
+                if item["byte_length"] > 0 and item["key"] in verified_keys
+            ]
+            hash_order_match = verified_ordered_hashes_local == expected_hashes
+            verified_bytes = sum(expected_by_key[key]["byte_length"] for key in verified_keys)
             conversation_count = sum(1 for member in plan.members if member.lane == "conversation")
             current_after = session_source_revision_from_couchdb_source(
                 session_id_hash=sid, source_store=source_store
@@ -237,18 +292,27 @@ def run_streamed_full_input(
                 _supersede(full_input_state, keys)
                 superseded += len(keys)
             session_ref = "sess_" + hashlib.sha256(sid.encode("utf-8")).hexdigest()[:12]
+            model_received_ordered_hashes.extend(model_received_ordered_hashes_local)
+            verified_ordered_hashes.extend(verified_ordered_hashes_local)
             session_coverage[session_ref] = {
                 "source_hash": plan.source_hash,
                 "current_source_hash": current_after,
                 "planned_chunks": len(keys),
-                "verified_chunks": len(verified_ranges),
-                "planned_bytes": expected_bytes + max(0, conversation_count - 1),
+                "verified_chunks": len(verified_keys),
+                "planned_bytes": expectation["full_bytes"],
                 "verified_bytes": verified_bytes,
+                "expected_separator_bytes": expectation["separator_bytes"],
+                "zero_byte_members": expectation["zero_byte_members"],
+                "expected_ordered_hashes": expected_hashes,
+                "model_received_ordered_hashes": model_received_ordered_hashes_local,
+                "verified_ordered_hashes": verified_ordered_hashes_local,
+                "hash_order_match": hash_order_match,
                 "conversation_chunks": conversation_count,
                 "evidence_chunks": len(plan.members) - conversation_count,
                 "coverage_complete": (
-                    len(verified_ranges) == len(keys)
-                    and verified_bytes == expected_bytes
+                    len(verified_keys) == len(keys)
+                    and verified_bytes == expectation["body_bytes"]
+                    and hash_order_match
                     and current_after == plan.source_hash
                 ),
             }
@@ -260,11 +324,12 @@ def run_streamed_full_input(
             reasons[reason] = reasons.get(reason, 0) + 1
             failure_types.append(f"{type(exc).__name__}:{reason}")
         except Exception as exc:
-            failed += 1
+            failed_sessions += 1
             reason = safe_reason(exc)
             reasons[reason] = reasons.get(reason, 0) + 1
             failure_types.append(f"{type(exc).__name__}:{getattr(exc, 'name', '')}")
 
+    failed = failed_sessions + failed_chunks
     status = (
         "ok" if failed == 0 and deferred == 0
         else ("partial" if projected or skipped or deferred else "failed")
@@ -278,12 +343,23 @@ def run_streamed_full_input(
         "deferred": deferred,
         "skipped_resumed": skipped,
         "superseded": superseded,
+        "failed_sessions": failed_sessions,
+        "failed_chunks": failed_chunks,
+        "deferred_sessions": deferred,
+        "resumed_chunks": resumed_chunks,
         "full_input_chunks": projected or 0,
         "stream_total_bytes": stream_bytes,
         "stream_coverage_complete": bool(session_coverage)
         and all(item["coverage_complete"] for item in session_coverage.values()),
         "session_coverage": session_coverage,
         "expected_total_bytes": expected_bytes_total,
+        "expected_separator_bytes": expected_separator_bytes,
+        "expected_full_bytes": expected_full_bytes,
+        "zero_byte_members": zero_byte_members,
+        "expected_ordered_hashes": expected_ordered_hashes,
+        "model_received_ordered_hashes": model_received_ordered_hashes,
+        "verified_ordered_hashes": verified_ordered_hashes,
+        "hash_order_match": expected_ordered_hashes == verified_ordered_hashes,
         "model_received_chunks": len(received_keys),
         "model_received_hashes": sorted(received_hashes),
         "failure_reasons": reasons,

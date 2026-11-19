@@ -18,9 +18,10 @@ from agent_knowledge.llm_brain_core.bulk_full_input import (
     privacy_gate,
 )
 from agent_knowledge.llm_brain_core.runtime import (
-    _conversation_chunk_order_key,
+    _CHUNK_METADATA_HEADER_KEYS, _conversation_chunk_order_key,
     _strip_chunk_metadata_header,
 )
+from agent_knowledge.llm_brain_core.bulk_spool_privacy import measure_canonical_spool
 
 SAFE_REASONS = frozenset({
     "source_invalid", "privacy_violation", "currentness_mismatch",
@@ -55,6 +56,7 @@ class StreamedChunk:
     canonical_hash: str
     text: str
     redaction_version: str
+    source_hash: str = ""
 
 
 def _key(prefix: str, material: str) -> str:
@@ -194,17 +196,23 @@ def iter_planned_chunks(
                 if body.content_hash != member.content_hash:
                     body.close()
                     raise SourceInvalid("member body hash mismatch")
-                hasher = hashlib.sha256()
-                total = 0
-                for page in body.iter_pages():
-                    data = page.encode("utf-8")
-                    privacy_gate(data, forbidden_markers=forbidden_markers, all_redacted=True)
-                    hasher.update(data)
-                    total += len(data)
-                if "sha256:" + hasher.hexdigest() != member.content_hash or total != body.byte_length:
+                raw_hasher = hashlib.sha256()
+                raw_total = 0
+                try:
+                    for page in body.iter_pages():
+                        page_data = page.encode("utf-8")
+                        raw_hasher.update(page_data)
+                        raw_total += len(page_data)
+                except Exception:
+                    body.close()
+                    raise
+                if ("sha256:" + raw_hasher.hexdigest() != member.content_hash
+                        or raw_total != body.byte_length):
                     body.close()
                     raise SourceInvalid("member body coverage mismatch")
-                digest = member.content_hash
+                canonical, canonical_digest, total = measure_canonical_spool(
+                    body, lane=member.lane, forbidden_markers=forbidden_markers,
+                )
                 if member.lane == "conversation" and member.ordinal:
                     cursor += 1
                 start = cursor
@@ -215,30 +223,29 @@ def iter_planned_chunks(
                 )
                 yield StreamedChunk(
                     key=key, ordinal=member.ordinal, lane=member.lane,
-                    byte_start=start, byte_end=cursor, canonical_hash=digest,
-                    text=body, redaction_version=member.redaction_version,
+                    byte_start=start, byte_end=cursor,
+                    canonical_hash=canonical_digest, source_hash=member.content_hash,
+                    text=canonical, redaction_version=member.redaction_version,
                 )
                 continue
             raw = str(body or "")
-            raw_bytes = raw.encode("utf-8")
-            digest = "sha256:" + hashlib.sha256(raw_bytes).hexdigest()
-            if digest != member.content_hash:
+            source_digest = "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+            if source_digest != member.content_hash:
                 raise SourceInvalid("member body hash mismatch")
             if member.lane == "conversation":
                 raw = _strip_chunk_metadata_header(raw)
             data = raw.encode("utf-8")
             privacy_gate(data, forbidden_markers=forbidden_markers, all_redacted=True)
+            canonical_digest = "sha256:" + hashlib.sha256(data).hexdigest()
             if member.lane == "conversation" and member.ordinal:
                 cursor += 1
             start = cursor
             cursor += len(data)
-            key = _key(
-                f"{plan.source_hash}:{member.lane}:{member.ordinal}:{member.doc_id}",
-                f"{member.content_hash}",
-            )
+            key = planned_chunk_key(plan, member)
             yield StreamedChunk(
                 key=key, ordinal=member.ordinal, lane=member.lane,
-                byte_start=start, byte_end=cursor, canonical_hash=digest,
+                byte_start=start, byte_end=cursor,
+                canonical_hash=canonical_digest, source_hash=member.content_hash,
                 text=data.decode("utf-8"), redaction_version=member.redaction_version,
             )
         index += len(batch)
@@ -249,3 +256,85 @@ def planned_chunk_key(plan: Any, member: Any) -> str:
         f"{plan.source_hash}:{member.lane}:{member.ordinal}:{member.doc_id}",
         member.content_hash,
     )
+
+
+def expected_source_bytes(
+    source_store: Any,
+    plan: Any,
+    *,
+    forbidden_markers: tuple[bytes, ...] = (),
+) -> dict[str, Any]:
+    """Measure the pinned plan's canonical bytes without building model input.
+
+    Bodies are fetched in bounded batches and released per member; only hashes,
+    lengths, and the planned order are retained. Conversation separators are
+    excluded from ``body_bytes`` and reported separately so callers can state
+    whether the full streamed byte count includes them.
+    """
+    ordered: list[dict[str, Any]] = []
+    body_bytes = 0
+    separator_bytes = 0
+    get_many = getattr(source_store, "get_many", None)
+    members = list(plan.members)
+    index = 0
+    while index < len(members):
+        batch = members[index:index + 8]
+        if get_many is not None:
+            fetched = _fetch_with_split(get_many, batch, source_store)
+        else:
+            fetched = {member.doc_id: source_store.get(member.doc_id) for member in batch}
+        for member in batch:
+            doc = fetched.get(member.doc_id)
+            if not doc:
+                raise SourceInvalid("planned member disappeared")
+            body = doc.get("body")
+            if isinstance(body, SpooledText):
+                if body.content_hash != member.content_hash:
+                    body.close()
+                    raise SourceInvalid("member body hash mismatch")
+                raw_hasher = hashlib.sha256()
+                raw_total = 0
+                try:
+                    for page in body.iter_pages():
+                        page_data = page.encode("utf-8")
+                        raw_hasher.update(page_data)
+                        raw_total += len(page_data)
+                except Exception:
+                    body.close()
+                    raise
+                if ("sha256:" + raw_hasher.hexdigest() != member.content_hash
+                        or raw_total != body.byte_length):
+                    body.close()
+                    raise SourceInvalid("member body coverage mismatch")
+                canonical, canonical_hash, size = measure_canonical_spool(
+                    body, lane=member.lane, forbidden_markers=forbidden_markers,
+                )
+                canonical.close()
+            else:
+                raw = str(body or "")
+                if ("sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+                        != member.content_hash):
+                    raise SourceInvalid("member body hash mismatch")
+                if member.lane == "conversation":
+                    raw = _strip_chunk_metadata_header(raw)
+                data = raw.encode("utf-8")
+                privacy_gate(data, forbidden_markers=forbidden_markers, all_redacted=True)
+                canonical_hash = "sha256:" + hashlib.sha256(data).hexdigest()
+                size = len(data)
+            if member.lane == "conversation" and member.ordinal:
+                separator_bytes += 1
+            body_bytes += size
+            ordered.append({
+                "key": planned_chunk_key(plan, member),
+                "canonical_hash": canonical_hash,
+                "byte_length": size,
+                "lane": member.lane,
+            })
+        index += len(batch)
+    return {
+        "ordered": ordered,
+        "body_bytes": body_bytes,
+        "separator_bytes": separator_bytes,
+        "full_bytes": body_bytes + separator_bytes,
+        "zero_byte_members": sum(1 for item in ordered if item["byte_length"] == 0),
+    }

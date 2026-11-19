@@ -49,6 +49,7 @@ ROOT_MODULE_AREA_MANIFEST: dict[str, frozenset[str]] = {
         "bulk_source_validation",
         "bulk_stream_runner",
         "bulk_streaming",
+        "bulk_spool_privacy",
         "context",
         "context_builder",
         "graph_first_resolver",
