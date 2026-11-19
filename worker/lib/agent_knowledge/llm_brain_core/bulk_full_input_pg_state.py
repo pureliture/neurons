@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterable
+from typing import Any
 
 import psycopg
 
@@ -207,7 +208,7 @@ class PgChunkState:
         with psycopg.connect(self._dsn, autocommit=True) as connection:
             rows = connection.execute(
                 """
-                SELECT status, source_hash, map_digest, receipt
+                SELECT status, source_hash, map_digest, receipt, project, policy_version
                 FROM llm_brain_full_input_chunk_trial WHERE chunk_key = ANY(%s)
                 """,
                 (list(keys),),
@@ -215,8 +216,12 @@ class PgChunkState:
         if len(rows) != len(keys):
             return False
         return all(
-            row[0] == "completed" and row[1] == source_hash
-            and row[2] == map_digest and bool(row[3])
+            row[0] == "completed"
+            and row[1] == source_hash
+            and row[2] == map_digest
+            and bool(row[3])
+            and row[4] == project
+            and row[5] == policy_version
             for row in rows
         )
 
@@ -249,17 +254,33 @@ class PgChunkState:
                 )
 
 
-    def is_complete_many(self, keys: list[str]) -> set[str]:
+    def is_complete_many(
+        self,
+        keys: list[str],
+        *,
+        project: str | None = None,
+        policy_version: str | None = None,
+        source_hash: str | None = None,
+    ) -> set[str]:
         if not keys:
             return set()
+        clauses = ["chunk_key = ANY(%s)", "status = 'completed'", "receipt IS NOT NULL"]
+        params: list[Any] = [keys]
+        if project is not None:
+            clauses.append("project = %s")
+            params.append(project)
+        if policy_version is not None:
+            clauses.append("policy_version = %s")
+            params.append(policy_version)
+        if source_hash is not None:
+            clauses.append("source_hash = %s")
+            params.append(source_hash)
+        query = (
+            "SELECT chunk_key FROM llm_brain_full_input_chunk_trial WHERE "
+            + " AND ".join(clauses)
+        )
         with psycopg.connect(self._dsn, autocommit=True) as connection:
-            rows = connection.execute(
-                """
-                SELECT chunk_key FROM llm_brain_full_input_chunk_trial
-                WHERE chunk_key = ANY(%s) AND status = 'completed' AND receipt IS NOT NULL
-                """,
-                (keys,),
-            ).fetchall()
+            rows = connection.execute(query, tuple(params)).fetchall()
         return {str(row[0]) for row in rows}
 
     def claim_many(

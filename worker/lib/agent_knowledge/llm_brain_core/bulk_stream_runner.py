@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import hashlib
 import time
@@ -14,21 +15,47 @@ from .bulk_authority import revalidate_authority_sources
 from agent_knowledge.couchdb_source.source_revision import SourceRevisionCurrentnessLimitError
 from .bulk_authority import authorized_sources_by_hash
 from .bulk_full_input_reader import PgAuthorityCardStore
-from .bulk_full_input import SourceInvalid, shadow_group_ids
+from .bulk_full_input import SourceInvalid, resolve_trial_pg_dsn, shadow_group_ids
 from .bulk_semantic import BulkRequestLimitExceeded, BulkSemanticSessionInput
 from .bulk_source_validation import plan_validated_source
 from .bulk_streaming import (
     expected_source_bytes, iter_batches, iter_planned_chunks, planned_chunk_key, safe_reason,
 )
 from .couchdb_projection_cli import _select_sessions_bounded
-from .ledger_adapter import EXTRACTION_LEVEL_ENTITY, LedgerGraphProjectionStateStore
+from .ledger_adapter import EXTRACTION_LEVEL_ENTITY
 from .models import OntologyEpisode
 from .runtime import session_source_revision_from_couchdb_source
-from agent_knowledge.ledger import Ledger
 
 
 def _pg_authority_by_hash(dsn: str, project: str, hashes: list[str], *, as_of=None):
     return authorized_sources_by_hash(dsn, project, hashes, as_of=as_of)
+
+def _completed_keys(
+    full_input_state: Any,
+    keys: list[str],
+    *,
+    project: str,
+    policy_version: str,
+    source_hash: str,
+) -> set[str]:
+    is_complete_many = getattr(full_input_state, "is_complete_many", None)
+    if callable(is_complete_many):
+        try:
+            params = inspect.signature(is_complete_many).parameters
+        except (TypeError, ValueError):
+            params = {}
+        if "policy_version" in params:
+            return set(
+                is_complete_many(
+                    keys,
+                    project=project,
+                    policy_version=policy_version,
+                    source_hash=source_hash,
+                )
+            )
+        return set(is_complete_many(keys))
+    return {key for key in keys if full_input_state.is_complete(key)}
+
 
 def _opaque(prefix: str, material: str) -> str:
     return prefix + hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
@@ -63,8 +90,7 @@ def run_streamed_full_input(
     effective_max_chunk_bytes = (
         int(max_chunk_bytes) if max_chunk_bytes and int(max_chunk_bytes) > 0 else None
     )
-    ledger = Ledger(ledger_path)
-    projection_state_store = LedgerGraphProjectionStateStore(ledger)
+    del ledger_path  # streamed full-input tracks state in full_input_state, never legacy Ledger DDL
     selection = _select_sessions_bounded(
         source_store, project=project, provider="", limit=limit,
         projection_state_store=None, extraction_level=EXTRACTION_LEVEL_ENTITY,
@@ -104,7 +130,10 @@ def run_streamed_full_input(
                 source_store, session_id_hash=sid, expected_source_hash=source_hash
             )
             if effective_max_chunk_bytes is None:
-                keys = [planned_chunk_key(plan, member) for member in plan.members]
+                keys = [
+                    planned_chunk_key(plan, member, policy_version=policy_version)
+                    for member in plan.members
+                ]
                 map_digest = "sha256:" + hashlib.sha256(
                     "|".join(keys).encode("utf-8")
                 ).hexdigest()
@@ -138,7 +167,10 @@ def run_streamed_full_input(
                     continue
 
                 expectation = expected_source_bytes(
-                    source_store, plan, forbidden_markers=forbidden_markers,
+                    source_store,
+                    plan,
+                    forbidden_markers=forbidden_markers,
+                    policy_version=policy_version,
                 )
             else:
                 expectation = expected_source_bytes(
@@ -146,6 +178,7 @@ def run_streamed_full_input(
                     plan,
                     forbidden_markers=forbidden_markers,
                     max_chunk_bytes=effective_max_chunk_bytes,
+                    policy_version=policy_version,
                 )
                 keys = [item["key"] for item in expectation["ordered"]]
                 map_digest = "sha256:" + hashlib.sha256(
@@ -212,14 +245,16 @@ def run_streamed_full_input(
             shadow_group = shadow[0]
             owner = f"stream-{uuid.uuid4().hex}"
             authority_by_hash = _pg_authority_by_hash(
-                os.environ.get("TRIAL_PG_DSN", ""),
+                resolve_trial_pg_dsn(),
                 session_project,
                 [member.content_hash for member in plan.members],
             )
-            done_keys = (
-                full_input_state.is_complete_many(keys)
-                if hasattr(full_input_state, "is_complete_many")
-                else {key for key in keys if full_input_state.is_complete(key)}
+            done_keys = _completed_keys(
+                full_input_state,
+                keys,
+                project=session_project,
+                policy_version=policy_version,
+                source_hash=source_hash,
             )
             ranges: dict[str, tuple[int, int]] = {}
             verified_ranges: dict[str, tuple[int, int]] = {}
@@ -277,7 +312,7 @@ def run_streamed_full_input(
                 for _session, item in sub_items:
                     sources = item.episode.payload.get("authority_sources") or []
                     if sources and not revalidate_authority_sources(
-                        os.environ.get("TRIAL_PG_DSN", ""), session_project, sources
+                        resolve_trial_pg_dsn(), session_project, sources
                     ):
                         raise SourceInvalid("authority revoked before completion")
                 if hasattr(full_input_state, "complete_many"):
@@ -322,6 +357,7 @@ def run_streamed_full_input(
                 plan,
                 forbidden_markers=forbidden_markers,
                 max_chunk_bytes=effective_max_chunk_bytes,
+                policy_version=policy_version,
             )
             try:
                 for batch_chunks in iter_batches(streams, batch_size):

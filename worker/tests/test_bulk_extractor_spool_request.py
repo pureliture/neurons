@@ -356,6 +356,7 @@ def test_full_input_cli_wires_no_redirect_while_legacy_consumers_keep_default(mo
     monkeypatch.setattr(cli, "_build_source_store", lambda **kwargs: object())
     monkeypatch.setattr(bulk_full_input_neo4j_writer, "Neo4jShadowWriter", _FakeWriter)
     monkeypatch.delenv("TRIAL_PG_DSN", raising=False)
+    monkeypatch.delenv("NEURON_LEDGER_PG_DSN", raising=False)
     monkeypatch.setenv("NEURON_TRIAL_MODE", "1")
     monkeypatch.setenv("TRIAL_NEO4J_URI", "bolt://127.0.0.1:7687")
     monkeypatch.setenv("TRIAL_NEO4J_PASSWORD", "synthetic-pw")
@@ -424,3 +425,112 @@ def test_full_input_cli_wires_no_redirect_while_legacy_consumers_keep_default(mo
     assert recorded_stream[0][0] == {"disallow_redirects": True}
     assert recorded_stream[0][1]._disallow_redirects is True
     assert recorded_stream[0][1]._post_fn is _urllib_post_no_redirects
+
+
+def test_trial_env_fallback_precedence_blank_safety_and_non_secret_errors(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from agent_knowledge.llm_brain_core.bulk_full_input import (
+        resolve_trial_neo4j_config,
+        resolve_trial_pg_dsn,
+    )
+    from agent_knowledge.llm_brain_core.shadow_search_adapter import (
+        ShadowSearchAdapter,
+        build_shadow_search_adapter_from_env,
+    )
+
+    # 1) resolve_trial_pg_dsn: TRIAL_PG_DSN > NEURON_LEDGER_PG_DSN; whitespace falls back safely.
+    assert resolve_trial_pg_dsn({
+        "TRIAL_PG_DSN": "postgresql://t:tpw@127.0.0.1:5432/t",
+        "NEURON_LEDGER_PG_DSN": "postgresql://o:opw@127.0.0.1:5432/o",
+    }) == "postgresql://t:tpw@127.0.0.1:5432/t"
+    assert resolve_trial_pg_dsn({
+        "TRIAL_PG_DSN": "   ",
+        "NEURON_LEDGER_PG_DSN": "  postgresql://o:opw@127.0.0.1:5432/o  ",
+    }) == "postgresql://o:opw@127.0.0.1:5432/o"
+    assert resolve_trial_pg_dsn({}) == ""
+
+    # 2) resolve_trial_neo4j_config: TRIAL_* > LLM_BRAIN_NEO4J_* > missing raises without secrets.
+    assert resolve_trial_neo4j_config({
+        "TRIAL_NEO4J_URI": "bolt://127.0.0.1:17687",
+        "TRIAL_NEO4J_PASSWORD": "trial-only-secret-xyz",
+        "LLM_BRAIN_NEO4J_URI": "bolt://127.0.0.1:7687",
+        "LLM_BRAIN_NEO4J_PASSWORD": "ops-only-secret-abc",
+    }) == ("bolt://127.0.0.1:17687", "neo4j", "trial-only-secret-xyz")
+    assert resolve_trial_neo4j_config({
+        "TRIAL_NEO4J_URI": "  ",
+        "TRIAL_NEO4J_USER": "",
+        "TRIAL_NEO4J_PASSWORD": "",
+        "LLM_BRAIN_NEO4J_URI": "bolt://127.0.0.1:7687",
+        "LLM_BRAIN_NEO4J_USER": "opsuser",
+        "LLM_BRAIN_NEO4J_PASSWORD": "ops-only-secret-abc",
+    }) == ("bolt://127.0.0.1:7687", "opsuser", "ops-only-secret-abc")
+    with pytest.raises(RuntimeError) as exc_info:
+        resolve_trial_neo4j_config({
+            "LLM_BRAIN_NEO4J_URI": "bolt://127.0.0.1:7687",
+            "LLM_BRAIN_NEO4J_PASSWORD": "   ",
+        })
+    assert "ops-only-secret-abc" not in str(exc_info.value)
+    assert "TRIAL_NEO4J_PASSWORD/LLM_BRAIN_NEO4J_PASSWORD" in str(exc_info.value)
+
+    # 3) cli.main --stream-mode uses ops fallback when TRIAL_* absent and calls PgChunkState + Neo4jShadowWriter.
+    seen_writer_args: list[tuple[str, str, str]] = []
+    seen_pg_dsns: list[str] = []
+
+    class _SpyWriter:
+        def __init__(self, uri: str, user: str, password: str) -> None:
+            seen_writer_args.append((uri, user, password))
+
+        def close(self) -> None:
+            return
+
+    class _SpyPgState:
+        def __init__(self, dsn: str) -> None:
+            seen_pg_dsns.append(dsn)
+
+    monkeypatch.setattr(cli, "_build_source_store", lambda **kwargs: object())
+    monkeypatch.setattr(bulk_full_input_neo4j_writer, "Neo4jShadowWriter", _SpyWriter)
+    monkeypatch.setattr(
+        "agent_knowledge.llm_brain_core.bulk_full_input_pg_state.PgChunkState",
+        _SpyPgState,
+    )
+    monkeypatch.setattr(bulk_stream_runner, "run_streamed_full_input", lambda **kwargs: {"status": "ok"})
+    for key in ("TRIAL_PG_DSN", "TRIAL_NEO4J_URI", "TRIAL_NEO4J_USER", "TRIAL_NEO4J_PASSWORD"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("NEURON_TRIAL_MODE", "1")
+    monkeypatch.setenv("NEURON_LEDGER_PG_DSN", "postgresql://ops:opspw@127.0.0.1:5432/opsdb")
+    monkeypatch.setenv("LLM_BRAIN_NEO4J_URI", "bolt://127.0.0.1:7687")
+    monkeypatch.setenv("LLM_BRAIN_NEO4J_PASSWORD", "ops-neo4j-pw")
+    monkeypatch.setenv("LLM_BRAIN_LLM_BASE_URL", "https://opencode.ai/zen/go/v1")
+    monkeypatch.setenv("LLM_BRAIN_LLM_MODEL", "hy4-flash-free")
+    monkeypatch.setenv("LLM_BRAIN_LLM_API_KEY", "synthetic-key")
+    monkeypatch.setenv("LLM_BRAIN_BULK_FREE_MODEL_ALLOWLIST", "hy4-flash-free")
+
+    rc = cli.main([
+        "--ledger", str(tmp_path / "ledger.db"),
+        "--runtime-dir", str(tmp_path / "runtime"),
+        "--stream-mode",
+        "--trial-neo4j-writer",
+        "--full-input-policy-version", "policy-ops-fallback",
+    ])
+    assert rc == 0
+    assert seen_writer_args == [("bolt://127.0.0.1:7687", "neo4j", "ops-neo4j-pw")]
+    assert seen_pg_dsns == ["postgresql://ops:opspw@127.0.0.1:5432/opsdb"]
+
+    # 4) build_shadow_search_adapter_from_env supports NEURON_LEDGER_PG_DSN fallback and TRIAL_* precedence.
+    legacy = object()
+    store_no_dsn = SimpleNamespace()
+    ops_only_env = {
+        "NEURON_BULK_SHADOW_READ_ELIGIBLE": "1",
+        "LLM_BRAIN_BULK_FULL_INPUT_POLICY_VERSION": "policy-v1",
+        "NEURON_LEDGER_PG_DSN": "postgresql://ops:opspw@127.0.0.1:5432/opsdb",
+        "LLM_BRAIN_NEO4J_URI": "bolt://127.0.0.1:7687",
+        "LLM_BRAIN_NEO4J_PASSWORD": "ops-neo4j-pw",
+        "COUCHDB_URL": "http://127.0.0.1:5984",
+        "COUCHDB_DB": "synthetic_db",
+        "COUCHDB_USER": "u",
+        "COUCHDB_PASSWORD": "p",
+    }
+    adapter_ops = build_shadow_search_adapter_from_env(legacy, store_no_dsn, ops_only_env)
+    assert isinstance(adapter_ops, ShadowSearchAdapter)
+    assert adapter_ops.policy_version == "policy-v1"
+    assert build_shadow_search_adapter_from_env(legacy, store_no_dsn, {**ops_only_env, "NEURON_LEDGER_PG_DSN": "  "}) is legacy

@@ -239,17 +239,35 @@ def build_shadow_search_adapter_from_env(
     Explicit settings: ``NEURON_BULK_SHADOW_READ_ELIGIBLE=1`` plus existing
     policy/PG/Neo4j/CouchDB keys. Missing prerequisites leave legacy unchanged.
     """
-    if str(environ.get("NEURON_BULK_SHADOW_READ_ELIGIBLE") or "") != "1":
+    if str(environ.get("NEURON_BULK_SHADOW_READ_ELIGIBLE") or "").strip() != "1":
         return legacy
-    policy_version = str(environ.get("LLM_BRAIN_BULK_FULL_INPUT_POLICY_VERSION") or "")
-    dsn = str(getattr(pgvector_store, "dsn", "") or environ.get("NEURON_LBRAIN_PGVECTOR_DSN", ""))
-    uri = str(environ.get("LLM_BRAIN_NEO4J_URI") or environ.get("NEO4J_URI") or "")
-    user = str(environ.get("LLM_BRAIN_NEO4J_USER") or environ.get("NEO4J_USER") or "neo4j")
-    password = str(environ.get("LLM_BRAIN_NEO4J_PASSWORD") or environ.get("NEO4J_PASSWORD") or "")
-    couch_url = str(environ.get("COUCHDB_URL") or "")
-    couch_db = str(environ.get("COUCHDB_DB") or "transcript_source")
-    couch_user = str(environ.get("COUCHDB_USER") or "")
-    couch_password = str(environ.get("COUCHDB_PASSWORD") or "")
+    policy_version = str(environ.get("LLM_BRAIN_BULK_FULL_INPUT_POLICY_VERSION") or "").strip()
+    dsn = (
+        str(getattr(pgvector_store, "dsn", "") or "").strip()
+        or str(environ.get("TRIAL_PG_DSN") or "").strip()
+        or str(environ.get("NEURON_LBRAIN_PGVECTOR_DSN") or "").strip()
+        or str(environ.get("NEURON_LEDGER_PG_DSN") or "").strip()
+    )
+    uri = (
+        str(environ.get("TRIAL_NEO4J_URI") or "").strip()
+        or str(environ.get("LLM_BRAIN_NEO4J_URI") or "").strip()
+        or str(environ.get("NEO4J_URI") or "").strip()
+    )
+    user = (
+        str(environ.get("TRIAL_NEO4J_USER") or "").strip()
+        or str(environ.get("LLM_BRAIN_NEO4J_USER") or "").strip()
+        or str(environ.get("NEO4J_USER") or "").strip()
+        or "neo4j"
+    )
+    password = (
+        str(environ.get("TRIAL_NEO4J_PASSWORD") or "").strip()
+        or str(environ.get("LLM_BRAIN_NEO4J_PASSWORD") or "").strip()
+        or str(environ.get("NEO4J_PASSWORD") or "").strip()
+    )
+    couch_url = str(environ.get("COUCHDB_URL") or "").strip()
+    couch_db = str(environ.get("COUCHDB_DB") or "").strip() or "transcript_source"
+    couch_user = str(environ.get("COUCHDB_USER") or "").strip()
+    couch_password = str(environ.get("COUCHDB_PASSWORD") or "").strip()
     if not (policy_version and dsn and uri and password and couch_url):
         return legacy
     from ..couchdb_source.couchdb_http_store import CouchDBHttpSourceStore

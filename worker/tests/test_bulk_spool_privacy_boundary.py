@@ -151,7 +151,7 @@ def test_empty_forbidden_marker_rejects_empty_body_and_closes_spool():
 def test_resumed_completed_chunk_is_not_reopened_for_privacy_gate(tmp_path):
     body = FakeSpool(["SECRET"])
     store, plan, _doc = _store(body)
-    completed_key = planned_chunk_key(plan, plan.members[0])
+    completed_key = planned_chunk_key(plan, plan.members[0], policy_version="synthetic")
 
     class _State:
         def is_session_complete(self, *, chunk_keys, **kwargs):

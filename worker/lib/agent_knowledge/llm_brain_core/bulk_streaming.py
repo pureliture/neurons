@@ -220,6 +220,7 @@ def iter_planned_chunks(
     *,
     forbidden_markers: tuple[bytes, ...] = (),
     max_chunk_bytes: int | None = None,
+    policy_version: str | None = None,
 ) -> Iterator[StreamedChunk]:
     """Yield validated bodies one at a time using bounded batch reads."""
     if max_chunk_bytes is not None and max_chunk_bytes < 4:
@@ -248,14 +249,26 @@ def iter_planned_chunks(
                     try:
                         if member.lane == "conversation" and member.ordinal:
                             cursor += 1
+                        member_offset = 0
                         for part_index, piece in enumerate(
                             _iter_utf8_byte_slices(canonical.iter_pages(), max_chunk_bytes)
                         ):
+                            part_start = member_offset
+                            part_end = member_offset + len(piece)
+                            member_offset = part_end
                             start = cursor
                             cursor += len(piece)
                             piece_digest = "sha256:" + hashlib.sha256(piece).hexdigest()
                             yield StreamedChunk(
-                                key=planned_chunk_key(plan, member, part_index=part_index),
+                                key=planned_chunk_key(
+                                    plan,
+                                    member,
+                                    part_index=part_index,
+                                    byte_start=part_start,
+                                    byte_end=part_end,
+                                    max_chunk_bytes=max_chunk_bytes,
+                                    policy_version=policy_version,
+                                ),
                                 ordinal=member.ordinal,
                                 lane=member.lane,
                                 byte_start=start,
@@ -272,7 +285,7 @@ def iter_planned_chunks(
                     cursor += 1
                 start = cursor
                 cursor += total
-                key = planned_chunk_key(plan, member)
+                key = planned_chunk_key(plan, member, policy_version=policy_version)
                 yield StreamedChunk(
                     key=key, ordinal=member.ordinal, lane=member.lane,
                     byte_start=start, byte_end=cursor,
@@ -291,14 +304,26 @@ def iter_planned_chunks(
             if max_chunk_bytes is not None and len(data) > max_chunk_bytes:
                 if member.lane == "conversation" and member.ordinal:
                     cursor += 1
+                member_offset = 0
                 for part_index, piece in enumerate(
                     _iter_utf8_byte_slices([data.decode("utf-8")], max_chunk_bytes)
                 ):
+                    part_start = member_offset
+                    part_end = member_offset + len(piece)
+                    member_offset = part_end
                     start = cursor
                     cursor += len(piece)
                     piece_digest = "sha256:" + hashlib.sha256(piece).hexdigest()
                     yield StreamedChunk(
-                        key=planned_chunk_key(plan, member, part_index=part_index),
+                        key=planned_chunk_key(
+                            plan,
+                            member,
+                            part_index=part_index,
+                            byte_start=part_start,
+                            byte_end=part_end,
+                            max_chunk_bytes=max_chunk_bytes,
+                            policy_version=policy_version,
+                        ),
                         ordinal=member.ordinal,
                         lane=member.lane,
                         byte_start=start,
@@ -314,7 +339,7 @@ def iter_planned_chunks(
                 cursor += 1
             start = cursor
             cursor += len(data)
-            key = planned_chunk_key(plan, member)
+            key = planned_chunk_key(plan, member, policy_version=policy_version)
             yield StreamedChunk(
                 key=key, ordinal=member.ordinal, lane=member.lane,
                 byte_start=start, byte_end=cursor,
@@ -324,8 +349,26 @@ def iter_planned_chunks(
         index += len(batch)
 
 
-def planned_chunk_key(plan: Any, member: Any, *, part_index: int | None = None) -> str:
-    suffix = f":p{part_index}" if part_index is not None else ""
+def planned_chunk_key(
+    plan: Any,
+    member: Any,
+    *,
+    part_index: int | None = None,
+    byte_start: int | None = None,
+    byte_end: int | None = None,
+    max_chunk_bytes: int | None = None,
+    policy_version: str | None = None,
+) -> str:
+    parts: list[str] = []
+    if policy_version:
+        parts.append(f"pol={policy_version}")
+    if part_index is not None:
+        if byte_start is None or byte_end is None or max_chunk_bytes is None:
+            raise ValueError(
+                "split planned_chunk_key requires byte_start, byte_end, and max_chunk_bytes"
+            )
+        parts.append(f"p{part_index}:b{byte_start}-{byte_end}:m{max_chunk_bytes}")
+    suffix = (":" + ":".join(parts)) if parts else ""
     return _key(
         f"{plan.source_hash}:{member.lane}:{member.ordinal}:{member.doc_id}{suffix}",
         member.content_hash,
@@ -338,6 +381,7 @@ def expected_source_bytes(
     *,
     forbidden_markers: tuple[bytes, ...] = (),
     max_chunk_bytes: int | None = None,
+    policy_version: str | None = None,
 ) -> dict[str, Any]:
     """Measure the pinned plan's canonical bytes without building model input.
 
@@ -374,13 +418,25 @@ def expected_source_bytes(
                 )
                 try:
                     if max_chunk_bytes is not None and size > max_chunk_bytes:
+                        member_offset = 0
                         for part_index, piece in enumerate(
                             _iter_utf8_byte_slices(canonical.iter_pages(), max_chunk_bytes)
                         ):
                             part_len = len(piece)
+                            part_start = member_offset
+                            part_end = member_offset + part_len
+                            member_offset = part_end
                             body_bytes += part_len
                             ordered.append({
-                                "key": planned_chunk_key(plan, member, part_index=part_index),
+                                "key": planned_chunk_key(
+                                    plan,
+                                    member,
+                                    part_index=part_index,
+                                    byte_start=part_start,
+                                    byte_end=part_end,
+                                    max_chunk_bytes=max_chunk_bytes,
+                                    policy_version=policy_version,
+                                ),
                                 "canonical_hash": "sha256:" + hashlib.sha256(piece).hexdigest(),
                                 "byte_length": part_len,
                                 "lane": member.lane,
@@ -398,13 +454,25 @@ def expected_source_bytes(
                 data = raw.encode("utf-8")
                 privacy_gate(data, forbidden_markers=forbidden_markers, all_redacted=True)
                 if max_chunk_bytes is not None and len(data) > max_chunk_bytes:
+                    member_offset = 0
                     for part_index, piece in enumerate(
                         _iter_utf8_byte_slices([data.decode("utf-8")], max_chunk_bytes)
                     ):
                         part_len = len(piece)
+                        part_start = member_offset
+                        part_end = member_offset + part_len
+                        member_offset = part_end
                         body_bytes += part_len
                         ordered.append({
-                            "key": planned_chunk_key(plan, member, part_index=part_index),
+                            "key": planned_chunk_key(
+                                plan,
+                                member,
+                                part_index=part_index,
+                                byte_start=part_start,
+                                byte_end=part_end,
+                                max_chunk_bytes=max_chunk_bytes,
+                                policy_version=policy_version,
+                            ),
                             "canonical_hash": "sha256:" + hashlib.sha256(piece).hexdigest(),
                             "byte_length": part_len,
                             "lane": member.lane,
@@ -414,7 +482,7 @@ def expected_source_bytes(
                 size = len(data)
             body_bytes += size
             ordered.append({
-                "key": planned_chunk_key(plan, member),
+                "key": planned_chunk_key(plan, member, policy_version=policy_version),
                 "canonical_hash": canonical_hash,
                 "byte_length": size,
                 "lane": member.lane,

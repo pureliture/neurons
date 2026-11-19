@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
@@ -465,6 +466,42 @@ def enforce_free_only_extractor(extractor: Any, allowlist: frozenset[str]) -> No
     )
     assert_free_only(policy, allowlist)
 
+
+
+def resolve_trial_pg_dsn(environ: Mapping[str, str] | None = None) -> str:
+    """Resolve trial PG DSN with explicit TRIAL_PG_DSN overriding ops NEURON_LEDGER_PG_DSN."""
+    env = environ if environ is not None else os.environ
+    for key in ("TRIAL_PG_DSN", "NEURON_LEDGER_PG_DSN"):
+        value = str(env.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def resolve_trial_neo4j_config(
+    environ: Mapping[str, str] | None = None,
+) -> tuple[str, str, str]:
+    """Resolve trial Neo4j (uri, user, password), preferring TRIAL_* over LLM_BRAIN_*."""
+    env = environ if environ is not None else os.environ
+
+    def _pick(*keys: str) -> str:
+        for key in keys:
+            value = str(env.get(key) or "").strip()
+            if value:
+                return value
+        return ""
+
+    uri = _pick("TRIAL_NEO4J_URI", "LLM_BRAIN_NEO4J_URI")
+    user = _pick("TRIAL_NEO4J_USER", "LLM_BRAIN_NEO4J_USER") or "neo4j"
+    password = _pick("TRIAL_NEO4J_PASSWORD", "LLM_BRAIN_NEO4J_PASSWORD")
+    missing: list[str] = []
+    if not uri:
+        missing.append("TRIAL_NEO4J_URI/LLM_BRAIN_NEO4J_URI")
+    if not password:
+        missing.append("TRIAL_NEO4J_PASSWORD/LLM_BRAIN_NEO4J_PASSWORD")
+    if missing:
+        raise RuntimeError(f"missing trial Neo4j config env: {', '.join(missing)}")
+    return uri, user, password
 
 
 def enforce_opencode_go_hy4_flash_free(

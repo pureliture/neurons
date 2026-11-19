@@ -32,6 +32,7 @@ from .bulk_full_input import (
     shadow_group_ids,
     validate_source_documents,
 )
+from .bulk_full_input import resolve_trial_neo4j_config, resolve_trial_pg_dsn
 from .bulk_streaming import safe_reason
 from .bulk_full_input_neo4j_writer import Neo4jShadowWriter
 from .bulk_full_input_pg_state import PgChunkState
@@ -225,12 +226,12 @@ def main(argv: list[str] | None = None) -> int:
                 )
             if not args.trial_neo4j_writer:
                 raise RuntimeError("stream mode requires the isolated shadow writer")
-            writer = Neo4jShadowWriter(
-                os.environ["TRIAL_NEO4J_URI"], "neo4j", os.environ["TRIAL_NEO4J_PASSWORD"]
-            )
+            neo4j_uri, neo4j_user, neo4j_password = resolve_trial_neo4j_config()
+            writer = Neo4jShadowWriter(neo4j_uri, neo4j_user, neo4j_password)
+            trial_pg_dsn = resolve_trial_pg_dsn()
             state = (
-                PgChunkState(os.environ["TRIAL_PG_DSN"])
-                if os.environ.get("TRIAL_PG_DSN")
+                PgChunkState(trial_pg_dsn)
+                if trial_pg_dsn
                 else FullInputState(Path(args.runtime_dir) if args.runtime_dir else Path("."))
             )
             try:
@@ -354,14 +355,16 @@ def run_couchdb_bulk_semantic_projection(
     ):
         raise RuntimeError("trial Neo4j writer requires trial full-input mode")
     if use_trial_neo4j_writer:
+        neo4j_uri, neo4j_user, neo4j_password = resolve_trial_neo4j_config()
         writer = Neo4jShadowWriter(
-            os.environ["TRIAL_NEO4J_URI"],
-            "neo4j",
-            os.environ["TRIAL_NEO4J_PASSWORD"],
+            neo4j_uri,
+            neo4j_user,
+            neo4j_password,
         )
+    trial_pg_dsn = resolve_trial_pg_dsn() if full_input_policy_version else ""
     full_input_state = full_input_state or (
-        PgChunkState(os.environ["TRIAL_PG_DSN"])
-        if full_input_policy_version and os.environ.get("TRIAL_PG_DSN")
+        PgChunkState(trial_pg_dsn)
+        if full_input_policy_version and trial_pg_dsn
         else FullInputState(runtime_dir)
         if full_input_policy_version and runtime_dir is not None
         else None
@@ -527,7 +530,7 @@ def run_couchdb_bulk_semantic_projection(
                             evidence_documents=evidence_docs,
                         )
                         authority_by_hash = _pg_authority_by_hash(
-                            os.environ.get("TRIAL_PG_DSN", ""),
+                            resolve_trial_pg_dsn(),
                             session_project,
                             [chunk.canonical_hash for chunk in builder.plan.chunks]
                             + [chunk.canonical_hash for chunk in builder.evidence_plan.chunks],

@@ -860,7 +860,13 @@ def test_full_product_chain_cli_couchdb_real_extractor_loopback_pg_neo4j_and_mcp
                 for i in range(len(req["sessions"]))
             ] == report_a["expected_ordered_hashes"]
 
-            # Also ingest project B to test project isolation on read.
+            # Also ingest project B using ONLY ops fallback keys (TRIAL_* unset).
+            monkeypatch.delenv("TRIAL_PG_DSN", raising=False)
+            monkeypatch.delenv("TRIAL_NEO4J_URI", raising=False)
+            monkeypatch.delenv("TRIAL_NEO4J_PASSWORD", raising=False)
+            monkeypatch.setenv("NEURON_LEDGER_PG_DSN", isolated_pg_store.dsn)
+            monkeypatch.setenv("LLM_BRAIN_NEO4J_URI", cfg.neo4j_uri)
+            monkeypatch.setenv("LLM_BRAIN_NEO4J_PASSWORD", cfg.neo4j_password)
             rc_b = cli.main([
                 "--ledger", str(tmp_path / "ledger.db"),
                 "--runtime-dir", str(tmp_path / "runtime"),

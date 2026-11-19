@@ -125,7 +125,7 @@ def _plan_keys(store, sid):
         session_id_hash=sid, source_store=store)
     plan = plan_validated_source(store, session_id_hash=sid,
                                  expected_source_hash=source_hash)
-    return [planned_chunk_key(plan, member) for member in plan.members]
+    return [planned_chunk_key(plan, member, policy_version=PFX + "v1") for member in plan.members]
 
 
 def _run(tmp_path, monkeypatch, store, project, sid, *, writer=None, extractor=None, state=None):
@@ -541,3 +541,228 @@ def test_active_revision_preserves_turn_order_over_snapshot_hash_order():
     ]
     assert [item["canonical_hash"] for item in expectation["ordered"]] == expected_turn_hashes
     assert [member.ordinal for member in plan.members] == [0, 1, 2, 3, 4]
+
+
+def test_max_chunk_bytes_change_a_to_b_and_b_to_a_never_collides_on_p0_or_leaves_byte_gap(
+    tmp_path, monkeypatch,
+):
+    store = InMemoryCouchDBSourceStore()
+    project = PFX + "resize"
+    big_body = "".join(f"[chunk:{idx:03d}:한글😀]" + ("Z" * 16) for idx in range(70))
+    assert len(big_body.encode("utf-8")) > 2000
+    _seed(store, project, [big_body], evidence=1)
+    monkeypatch.setattr(runner_mod, "_pg_authority_by_hash", lambda *a, **k: {})
+
+    class _RecordingExtractor:
+        model = "free-model"
+        provider = P
+        endpoint_class = "approved_free"
+        price_status = "free_confirmed"
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.seen_texts: list[str] = []
+
+        def extract(self, batch):
+            self.calls += 1
+            for item in batch:
+                self.seen_texts.append(
+                    item.text if isinstance(item.text, str) else "".join(item.text.iter_pages())
+                )
+            return BulkSemanticExtractionResult(tuple(
+                BulkSemanticSessionResult(
+                    session_key=item.session_key,
+                    entities=(BulkSemanticEntity(name=PFX + "E", type="Concept", summary="s"),),
+                )
+                for item in batch
+            ))
+
+    class _PartialPrefixWriter:
+        def __init__(self, accept_count: int) -> None:
+            self._remaining = accept_count
+            self.accepted_texts: list[str] = []
+
+        def write_batch(self, inputs, extraction, *, allow_empty_sessions=False):
+            receipts: dict[str, str] = {}
+            for item in inputs:
+                if self._remaining > 0:
+                    self._remaining -= 1
+                    receipts[item.session_key] = "receipt:" + item.session_key
+                    self.accepted_texts.append(
+                        item.text if isinstance(item.text, str) else "".join(item.text.iter_pages())
+                    )
+            return BulkSemanticWriteReport(
+                projected=len(receipts), entities_written=len(receipts), relations_written=0,
+                chunk_receipts=receipts,
+            )
+
+    policy = PFX + "v1"
+
+    # Sub-case A: A -> B (400 -> 800) after p0 completes under A=400.
+    state_a = _State()
+    ext_a1 = _RecordingExtractor()
+    rep_a1 = run_streamed_full_input(
+        ledger_path=tmp_path / "a1.db", source_store=store, extractor=ext_a1,
+        writer=_PartialPrefixWriter(1), full_input_state=state_a, policy_version=policy,
+        project=project, limit=1, batch_size=1, max_chunk_bytes=400,
+    )
+    assert rep_a1["status"] == "partial"
+    assert rep_a1["projected"] == 1
+
+    ext_a2 = _RecordingExtractor()
+    rep_a2 = run_streamed_full_input(
+        ledger_path=tmp_path / "a2.db", source_store=store, extractor=ext_a2,
+        writer=_Writer(), full_input_state=state_a, policy_version=policy,
+        project=project, limit=1, batch_size=1, max_chunk_bytes=800,
+    )
+    assert rep_a2["status"] == "ok"
+    assert rep_a2["resumed_chunks"] == 0
+    assert rep_a2["stream_coverage_complete"] is True
+    assert rep_a2["hash_order_match"] is True
+    assert "evidence-0" in ext_a2.seen_texts
+    assert "".join(t for t in ext_a2.seen_texts if t != "evidence-0") == big_body
+
+    # Sub-case B: B -> A (800 -> 400) after p0 completes under B=800.
+    state_b = _State()
+    ext_b1 = _RecordingExtractor()
+    rep_b1 = run_streamed_full_input(
+        ledger_path=tmp_path / "b1.db", source_store=store, extractor=ext_b1,
+        writer=_PartialPrefixWriter(1), full_input_state=state_b, policy_version=policy,
+        project=project, limit=1, batch_size=1, max_chunk_bytes=800,
+    )
+    assert rep_b1["status"] == "partial"
+    assert rep_b1["projected"] == 1
+
+    ext_b2 = _RecordingExtractor()
+    rep_b2 = run_streamed_full_input(
+        ledger_path=tmp_path / "b2.db", source_store=store, extractor=ext_b2,
+        writer=_Writer(), full_input_state=state_b, policy_version=policy,
+        project=project, limit=1, batch_size=1, max_chunk_bytes=400,
+    )
+    assert rep_b2["status"] == "ok"
+    assert rep_b2["resumed_chunks"] == 0
+    assert rep_b2["stream_coverage_complete"] is True
+    assert rep_b2["hash_order_match"] is True
+    assert "".join(t for t in ext_b2.seen_texts if t != "evidence-0") == big_body
+
+    # Sub-case C: Partial restart with identical max_chunk_bytes=400 resumes cleanly without duplicates.
+    state_c = _State()
+    partial_writer = _PartialPrefixWriter(2)
+    ext_c1 = _RecordingExtractor()
+    rep_c1 = run_streamed_full_input(
+        ledger_path=tmp_path / "c1.db", source_store=store, extractor=ext_c1,
+        writer=partial_writer, full_input_state=state_c, policy_version=policy,
+        project=project, limit=1, batch_size=1, max_chunk_bytes=400,
+    )
+    assert rep_c1["status"] == "partial"
+    assert len(partial_writer.accepted_texts) == 2
+
+    ext_c2 = _RecordingExtractor()
+    rep_c2 = run_streamed_full_input(
+        ledger_path=tmp_path / "c2.db", source_store=store, extractor=ext_c2,
+        writer=_Writer(), full_input_state=state_c, policy_version=policy,
+        project=project, limit=1, batch_size=1, max_chunk_bytes=400,
+    )
+    assert rep_c2["status"] == "ok"
+    assert rep_c2["resumed_chunks"] == 2
+    assert rep_c2["stream_coverage_complete"] is True
+    assert rep_c2["hash_order_match"] is True
+    for already in partial_writer.accepted_texts:
+        assert already not in ext_c2.seen_texts
+    assert "".join(partial_writer.accepted_texts) + "".join(
+        t for t in ext_c2.seen_texts if t != "evidence-0"
+    ) == big_body
+
+    ext_c3 = _RecordingExtractor()
+    rep_c3 = run_streamed_full_input(
+        ledger_path=tmp_path / "c3.db", source_store=store, extractor=ext_c3,
+        writer=_Writer(), full_input_state=state_c, policy_version=policy,
+        project=project, limit=1, batch_size=1, max_chunk_bytes=400,
+    )
+    assert rep_c3["status"] == "ok"
+    assert rep_c3["skipped_resumed"] == 1
+    assert ext_c3.calls == 0
+
+
+def test_policy_version_change_and_legacy_checkpoint_never_false_complete(tmp_path, monkeypatch):
+    import hashlib
+
+    store = InMemoryCouchDBSourceStore()
+    project = PFX + "legacy"
+    body = "".join(f"[seg:{idx:03d}]" + ("K" * 20) for idx in range(50))
+    sid = _seed(store, project, [body], evidence=1)
+    monkeypatch.setattr(runner_mod, "_pg_authority_by_hash", lambda *a, **k: {})
+
+    class _RecExtractor:
+        model = "free-model"
+        provider = P
+        endpoint_class = "approved_free"
+        price_status = "free_confirmed"
+
+        def __init__(self) -> None:
+            self.seen_texts: list[str] = []
+
+        def extract(self, batch):
+            for item in batch:
+                self.seen_texts.append(
+                    item.text if isinstance(item.text, str) else "".join(item.text.iter_pages())
+                )
+            return BulkSemanticExtractionResult(tuple(
+                BulkSemanticSessionResult(
+                    session_key=item.session_key,
+                    entities=(BulkSemanticEntity(name=PFX + "E", type="Concept", summary="s"),),
+                )
+                for item in batch
+            ))
+
+    # 1) Completing under v1 must NEVER false-complete or skip chunks under v2.
+    shared_state = _State()
+    ext_v1 = _RecExtractor()
+    rep_v1 = run_streamed_full_input(
+        ledger_path=tmp_path / "v1.db", source_store=store, extractor=ext_v1,
+        writer=_Writer(), full_input_state=shared_state, policy_version=PFX + "v1",
+        project=project, limit=1, batch_size=1, max_chunk_bytes=500,
+    )
+    assert rep_v1["status"] == "ok"
+    assert rep_v1["stream_coverage_complete"] is True
+
+    ext_v2 = _RecExtractor()
+    rep_v2 = run_streamed_full_input(
+        ledger_path=tmp_path / "v2.db", source_store=store, extractor=ext_v2,
+        writer=_Writer(), full_input_state=shared_state, policy_version=PFX + "v2",
+        project=project, limit=1, batch_size=1, max_chunk_bytes=500,
+    )
+    assert rep_v2["status"] == "ok"
+    assert rep_v2["skipped_resumed"] == 0
+    assert rep_v2["resumed_chunks"] == 0
+    assert "".join(t for t in ext_v2.seen_texts if t != "evidence-0") == body
+
+    # 2) Pre-fix legacy keys (no pol=, no :b...-:m...) must fail closed and trigger full reprocessing.
+    source_hash = session_source_revision_from_couchdb_source(session_id_hash=sid, source_store=store)
+    plan = plan_validated_source(store, session_id_hash=sid, expected_source_hash=source_hash)
+
+    def _legacy_key(prefix: str, material: str) -> str:
+        return "sha256:" + hashlib.sha256(f"{prefix}|{material}".encode("utf-8")).hexdigest()
+
+    legacy_keys = {
+        _legacy_key(f"{plan.source_hash}:{m.lane}:{m.ordinal}:{m.doc_id}", m.content_hash)
+        for m in plan.members
+    }
+    legacy_keys.add(
+        _legacy_key(
+            f"{plan.source_hash}:{plan.members[0].lane}:{plan.members[0].ordinal}:{plan.members[0].doc_id}:p0",
+            plan.members[0].content_hash,
+        )
+    )
+    legacy_state = _State(complete=legacy_keys)
+    ext_legacy = _RecExtractor()
+    rep_legacy = run_streamed_full_input(
+        ledger_path=tmp_path / "leg.db", source_store=store, extractor=ext_legacy,
+        writer=_Writer(), full_input_state=legacy_state, policy_version=PFX + "v1",
+        project=project, limit=1, batch_size=1, max_chunk_bytes=500,
+    )
+    assert rep_legacy["status"] == "ok"
+    assert rep_legacy["skipped_resumed"] == 0
+    assert rep_legacy["resumed_chunks"] == 0
+    assert rep_legacy["stream_coverage_complete"] is True
+    assert "".join(t for t in ext_legacy.seen_texts if t != "evidence-0") == body

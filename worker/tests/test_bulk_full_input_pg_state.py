@@ -85,3 +85,32 @@ def test_concurrent_claims_only_latest_token_completes():
     latest = max(tokens)
     state.complete(key=key, fence_token=latest, output_digest="o", write_receipt="r")
     assert state.is_complete(key)
+
+
+def test_pg_chunk_state_enforces_policy_version_project_and_rejects_legacy_keys():
+    state = _state()
+    k_v1 = PREFIX + "pv-k1"
+    state.register_plan(
+        run_id="r5", project=PREFIX + "projA", session_hash="s5", policy_version="pol-v1",
+        source_hash="src-5", map_digest="map-5", chunk_keys=(k_v1,),
+    )
+    tok = state.claim(key=k_v1, owner="w5")
+    state.complete(key=k_v1, fence_token=tok, output_digest="out-5", write_receipt="rcpt-5")
+
+    assert state.is_complete_many(
+        [k_v1], project=PREFIX + "projA", policy_version="pol-v1", source_hash="src-5"
+    ) == {k_v1}
+    assert state.is_complete_many(
+        [k_v1], project=PREFIX + "projA", policy_version="pol-v2", source_hash="src-5"
+    ) == set()
+    assert state.is_complete_many(
+        [k_v1], project=PREFIX + "projB", policy_version="pol-v1", source_hash="src-5"
+    ) == set()
+    assert state.is_session_complete(
+        project=PREFIX + "projA", policy_version="pol-v2", source_hash="src-5",
+        map_digest="map-5", chunk_keys=(k_v1,),
+    ) is False
+    assert state.is_session_complete(
+        project=PREFIX + "projA", policy_version="pol-v1", source_hash="src-5",
+        map_digest="map-5", chunk_keys=(k_v1,),
+    ) is True
