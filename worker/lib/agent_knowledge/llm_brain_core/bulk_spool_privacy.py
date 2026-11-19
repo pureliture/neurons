@@ -8,6 +8,9 @@ from agent_knowledge.llm_brain_core.bulk_full_input import SourceInvalid, privac
 from agent_knowledge.llm_brain_core.runtime import _CHUNK_METADATA_HEADER_KEYS
 
 _LINE_BREAK_CHARS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+_OTHER_LINE_BREAK_TRANS = str.maketrans(
+    {ch: "\n" for ch in "\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"}
+)
 _MAX_HEADER_CHARS = 64 * 1024
 _MAX_PENDING_CHARS = 64 * 1024
 
@@ -79,6 +82,20 @@ def detect_metadata_header(body: SpooledText) -> tuple[bool, int]:
                 metadata_lines += 1
                 continue
             return False, 0
+        if buffer:
+            stripped_prefix = buffer.lstrip()
+            if stripped_prefix:
+                if ":" in stripped_prefix:
+                    key = stripped_prefix.partition(":")[0].strip()
+                    if key not in _CHUNK_METADATA_HEADER_KEYS:
+                        return False, 0
+                else:
+                    candidate = stripped_prefix.rstrip(" \t\r")
+                    if (
+                        not any(k.startswith(stripped_prefix) for k in _CHUNK_METADATA_HEADER_KEYS)
+                        and candidate not in _CHUNK_METADATA_HEADER_KEYS
+                    ):
+                        return False, 0
     if buffer:
         stripped = _line_content(buffer).strip()
         if not stripped and metadata_lines > 0:
@@ -87,9 +104,9 @@ def detect_metadata_header(body: SpooledText) -> tuple[bool, int]:
 
 
 def iter_normalized_pages(body: SpooledText, *, header_end: int) -> Iterator[str]:
-    """Yield lines after a metadata header with newline-normalized joins."""
-    pending = ""
+    """Yield body pages after a metadata header with streaming newline normalization."""
     remaining = header_end
+    pending_cr = False
     for page in body.iter_pages():
         if remaining:
             if len(page) <= remaining:
@@ -97,13 +114,24 @@ def iter_normalized_pages(body: SpooledText, *, header_end: int) -> Iterator[str
                 continue
             page = page[remaining:]
             remaining = 0
-        complete, pending = _split_complete_lines(pending + page)
-        if len(pending) > _MAX_PENDING_CHARS:
-            raise SourceInvalid("canonical line exceeds bounded scan window")
-        for raw_line in complete:
-            yield _line_content(raw_line) + "\n"
-    if pending:
-        yield _line_content(pending)
+        if not page:
+            continue
+        if pending_cr:
+            if page.startswith("\n"):
+                yield "\n"
+                page = page[1:]
+            else:
+                yield "\n"
+            pending_cr = False
+            if not page:
+                continue
+        if page.endswith("\r"):
+            pending_cr = True
+            page = page[:-1]
+        if page:
+            yield page.replace("\r\n", "\n").translate(_OTHER_LINE_BREAK_TRANS)
+    if pending_cr:
+        yield "\n"
 
 
 def iter_stripped_pages(pages: Iterable[str]) -> Iterator[str]:

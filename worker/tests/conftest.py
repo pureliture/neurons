@@ -21,6 +21,7 @@ _AUTHORITY_TEST_MODULES = {
     "test_nonstream_authority_and_http_adaptive", "test_trial_one_chain_mcp_http",
     "test_trial_production_manifest_authority_http", "test_bulk_hash_e2e",
     "test_bulk_spool_e2e", "test_couchdb_spool_reader",
+    "test_bulk_full_input_loopback_e2e",
 }
 
 @pytest.fixture(autouse=True)

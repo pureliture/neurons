@@ -52,6 +52,54 @@ def _unique_keys(keys: Iterable[tuple]) -> tuple[tuple, ...]:
     return tuple(ordered)
 
 
+_ORDER_METADATA_FIELDS = (
+    "turn_start_index",
+    "turn_end_index",
+    "part_index",
+    "char_start",
+    "coverage_hash",
+    "evidence_index_start",
+    "evidence_index_end",
+    "record_content_hashes",
+)
+
+
+def _enrich_active_members(
+    source_store: Any,
+    *,
+    session_id_hash: str,
+    doc_type: str,
+    active_members: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Attach ordering coordinates from immutable snapshot metadata without reading bodies."""
+    if not active_members:
+        return []
+    wanted_ids = {str(doc["_id"]) for doc in active_members}
+    meta_by_id: dict[str, dict[str, Any]] = {}
+    for meta in source_store.iter_by_session(
+        session_id_hash=session_id_hash,
+        doc_type=doc_type,
+        fields=_CONVERSATION_FIELDS,
+    ):
+        doc_id = str(meta.get("_id") or "")
+        if doc_id in wanted_ids:
+            meta_by_id[doc_id] = meta
+    enriched: list[dict[str, Any]] = []
+    for doc in active_members:
+        doc_id = str(doc["_id"])
+        meta = meta_by_id.get(doc_id)
+        if meta is None:
+            raise SourceInvalid("active source snapshot metadata missing")
+        merged = dict(doc)
+        for field in _ORDER_METADATA_FIELDS:
+            if meta.get(field) is not None:
+                merged[field] = meta[field]
+        if not merged.get("redaction_version") and meta.get("redaction_version"):
+            merged["redaction_version"] = meta["redaction_version"]
+        enriched.append(merged)
+    return enriched
+
+
 def plan_validated_source(
     source_store: Any, *, session_id_hash: str, expected_source_hash: str
 ) -> ValidatedSourcePlan:
@@ -71,14 +119,26 @@ def plan_validated_source(
         source_store, session_id_hash, current
     )
     if active_docs:
-        conversation = [
+        active_conv = [
             doc for doc in active_docs
             if str(doc.get("source_doc_type") or "") == SourceDocType.CONVERSATION_CHUNK
         ]
-        evidence = [
+        active_ev = [
             doc for doc in active_docs
             if str(doc.get("source_doc_type") or "") == SourceDocType.TOOL_EVIDENCE_BUNDLE
         ]
+        conversation = _enrich_active_members(
+            source_store,
+            session_id_hash=session_id_hash,
+            doc_type=SourceDocType.CONVERSATION_CHUNK,
+            active_members=active_conv,
+        )
+        evidence = _enrich_active_members(
+            source_store,
+            session_id_hash=session_id_hash,
+            doc_type=SourceDocType.TOOL_EVIDENCE_BUNDLE,
+            active_members=active_ev,
+        )
     else:
         conversation = list(
             source_store.iter_by_session(

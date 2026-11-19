@@ -1,19 +1,21 @@
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import os
+import tempfile
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable
+from types import SimpleNamespace
+from typing import Any, Callable, Iterator
 
 from graphiti_core.local_profile import (
-    compute_graph_edge_embedding_input_hash,
     compute_graph_node_embedding_input_hash,
+    compute_graph_edge_embedding_input_hash,
     format_graph_edge_embedding_input,
     format_graph_node_embedding_input,
     is_local_embedding_enabled,
@@ -52,6 +54,32 @@ DEFAULT_BULK_SEMANTIC_MAX_TOKENS = 4096
 DEFAULT_BULK_SEMANTIC_TIMEOUT_SECONDS = 600
 DEFAULT_BULK_SEMANTIC_ALLOW_EMPTY_SESSIONS = False
 DEFAULT_BULK_SEMANTIC_EMBEDDINGS = True
+DEFAULT_BULK_SEMANTIC_MAX_STREAMED_REQUEST_BYTES = 2 * 1024 * 1024
+
+
+class BulkRequestLimitExceeded(RuntimeError):
+    """Serialized chat request exceeded the configured client byte limit.
+
+    Streaming a large single HTTP body does not bypass provider context-window
+    limits; callers must split batches or split oversized chunks on UTF-8
+    boundaries, or defer the session rather than truncating input.
+    """
+
+    reason_code = "request_limit_exceeded"
+    limit_cause = "client_request_byte_limit_exceeded_split_required"
+
+    def __init__(self, message: str, *, request_bytes: int, max_request_bytes: int) -> None:
+        super().__init__(message)
+        self.request_bytes = int(request_bytes)
+        self.max_request_bytes = int(max_request_bytes)
+
+
+class BulkRedirectRejected(ValueError):
+    """Fail-closed error when an endpoint returns an HTTP redirect in no-redirect mode."""
+
+    def __init__(self, message: str, *, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = int(status_code)
 
 
 @dataclass(frozen=True)
@@ -59,6 +87,126 @@ class BulkSemanticSessionInput:
     session_key: str
     episode: OntologyEpisode
     text: str
+
+
+class _StreamedRequestBody:
+    """Spool-backed JSON request body with incremental serialization evidence."""
+
+    def __init__(self, *, max_bytes: int | None = None) -> None:
+        self._file = tempfile.SpooledTemporaryFile(max_size=64 * 1024, mode="w+b")
+        self._hasher = hashlib.sha256()
+        self.byte_length = 0
+        self._max_bytes = max(1, int(max_bytes)) if max_bytes is not None else None
+
+    def write(self, fragment: str) -> None:
+        data = fragment.encode("utf-8")
+        next_length = self.byte_length + len(data)
+        if self._max_bytes is not None and next_length > self._max_bytes:
+            raise BulkRequestLimitExceeded(
+                "bulk semantic streamed request exceeds configured byte limit",
+                request_bytes=next_length,
+                max_request_bytes=self._max_bytes,
+            )
+        self._file.write(data)
+        self._hasher.update(data)
+        self.byte_length = next_length
+
+    @property
+    def digest(self) -> str:
+        return "sha256:" + self._hasher.hexdigest()
+
+    def iter_bytes(self, size: int = 64 * 1024):
+        self._file.seek(0)
+        while True:
+            chunk = self._file.read(size)
+            if not chunk:
+                break
+            yield chunk
+
+    def close(self) -> None:
+        self._file.close()
+
+
+def _iter_text_pages(text: Any) -> Iterator[str]:
+    pages = getattr(text, "iter_pages", None)
+    if callable(pages):
+        yield from pages()
+        return
+    yield str(text)
+
+
+def _build_streamed_bulk_request(
+    batch: list[BulkSemanticSessionInput],
+    body: dict[str, Any],
+    *,
+    max_request_bytes: int | None = None,
+) -> tuple[_StreamedRequestBody, dict[str, dict[str, Any]]]:
+    """Serialize the request while streaming spooled text page by page."""
+    request = _StreamedRequestBody(max_bytes=max_request_bytes)
+    evidence: dict[str, dict[str, Any]] = {}
+    write = request.write
+
+    def write_inner(fragment: str) -> None:
+        write(json.dumps(fragment, ensure_ascii=True)[1:-1])
+
+    try:
+        write("{")
+        for index, (key, value) in enumerate(body.items()):
+            if index:
+                write(", ")
+            write(json.dumps(key, ensure_ascii=True))
+            write(": ")
+            if key == "messages" and isinstance(value, list) and len(value) >= 2:
+                write("[")
+                write(json.dumps(value[0], ensure_ascii=True))
+                write(", ")
+                write('{"role": "user", "content": "')
+                write_inner('{"sessions": [')
+                for item_index, item in enumerate(batch):
+                    if item_index:
+                        write_inner(", ")
+                    payload = item.episode.payload
+                    write_inner('{"project_ref": ')
+                    write_inner(json.dumps(
+                        "sha256:" + short_hash(str(payload.get("project") or "")),
+                        ensure_ascii=True,
+                    ))
+                    write_inner(', "provider": ')
+                    write_inner(json.dumps(str(payload.get("provider") or ""), ensure_ascii=True))
+                    write_inner(', "session_key": ')
+                    write_inner(json.dumps(item.session_key, ensure_ascii=True))
+                    write_inner(', "text": ')
+                    write_inner('"')
+                    hasher = hashlib.sha256()
+                    text_bytes = 0
+                    escaped_buffer = ""
+                    for page in _iter_text_pages(item.text):
+                        page_bytes = page.encode("utf-8")
+                        hasher.update(page_bytes)
+                        text_bytes += len(page_bytes)
+                        escaped_buffer += json.dumps(page, ensure_ascii=True)[1:-1]
+                        if len(escaped_buffer) >= 64 * 1024:
+                            write_inner(escaped_buffer)
+                            escaped_buffer = ""
+                    if escaped_buffer:
+                        write_inner(escaped_buffer)
+                    write_inner('"')
+                    evidence[item.session_key] = {
+                        "text_digest": "sha256:" + hasher.hexdigest(),
+                        "text_bytes": text_bytes,
+                    }
+                    write_inner("}")
+                write_inner("]}")
+                write('"}')
+                write("]")
+                continue
+            write(json.dumps(value, ensure_ascii=True))
+        write("}")
+    except Exception:
+        request.close()
+        raise
+    return request, evidence
+
 
 
 @dataclass(frozen=True)
@@ -118,6 +266,8 @@ class OpenAICompatibleBulkSemanticExtractor:
         max_tokens: int = DEFAULT_BULK_SEMANTIC_MAX_TOKENS,
         post_fn: Callable[..., str] = None,
         fallback_models: tuple[str, ...] = (),
+        max_streamed_request_bytes: int = DEFAULT_BULK_SEMANTIC_MAX_STREAMED_REQUEST_BYTES,
+        disallow_redirects: bool = False,
     ) -> None:
         _reject_forbidden_gemini_llm_model(model)
         if not base_url:
@@ -130,10 +280,14 @@ class OpenAICompatibleBulkSemanticExtractor:
         self._reasoning_effort = _llm_reasoning_effort_env(reasoning_effort)
         self._timeout_seconds = max(1, int(timeout_seconds))
         self._max_tokens = max(1, int(max_tokens))
-        self._post_fn = post_fn or _urllib_post
+        self._disallow_redirects = bool(disallow_redirects)
+        default_post = _urllib_post_no_redirects if self._disallow_redirects else _urllib_post
+        self._post_fn = post_fn or default_post
         self._fallback_models: tuple[str, ...] = tuple(
             dict.fromkeys(model for model in fallback_models if model in _FREE_FALLBACK_MODELS and model != self._model)
         )
+        self._max_streamed_request_bytes = max(1, int(max_streamed_request_bytes))
+        self.last_client_serialization: dict[str, Any] | None = None
 
     @property
     def provider(self) -> str:
@@ -153,7 +307,12 @@ class OpenAICompatibleBulkSemanticExtractor:
 
 
     @classmethod
-    def from_env(cls, environ: dict[str, str] | None = None) -> "OpenAICompatibleBulkSemanticExtractor":
+    def from_env(
+        cls,
+        environ: dict[str, str] | None = None,
+        *,
+        disallow_redirects: bool = False,
+    ) -> "OpenAICompatibleBulkSemanticExtractor":
         env = environ or os.environ
         return cls(
             base_url=env.get("LLM_BRAIN_LLM_BASE_URL", env.get("OPENAI_BASE_URL", "")),
@@ -173,6 +332,11 @@ class OpenAICompatibleBulkSemanticExtractor:
                 for item in env.get("LLM_BRAIN_LLM_FALLBACK_MODELS", "beam-free").split(",")
                 if item.strip()
             ),
+            max_streamed_request_bytes=_positive_int_env(
+                env.get("LLM_BRAIN_BULK_SEMANTIC_MAX_REQUEST_BYTES", ""),
+                DEFAULT_BULK_SEMANTIC_MAX_STREAMED_REQUEST_BYTES,
+            ),
+            disallow_redirects=disallow_redirects,
         )
 
     def extract(self, batch: list[BulkSemanticSessionInput]) -> BulkSemanticExtractionResult:
@@ -192,9 +356,9 @@ class OpenAICompatibleBulkSemanticExtractor:
     def _extract_with_model(
         self, batch: list[BulkSemanticSessionInput], model: str
     ) -> BulkSemanticExtractionResult:
+        self.last_client_serialization = None
         body: dict[str, Any] = {
             "model": model,
-            "messages": _bulk_semantic_messages(batch),
             "temperature": 0,
             "max_tokens": self._max_tokens,
             "response_format": {
@@ -209,21 +373,67 @@ class OpenAICompatibleBulkSemanticExtractor:
             body["reasoning_effort"] = self._reasoning_effort
         headers = {
             "Content-Type": "application/json",
-            # Cloudflare in front of OpenAI-compatible gateways (e.g. opencode zen)
-            # rejects the default Python-urllib UA with 403 error 1010; identify us.
             "User-Agent": "neurons-bulk-semantic/1.0",
-            # opencode-go requires a per-client session id for quota routing;
-            # without it every request fails with 400 MissingSessionID.
             "x-opencode-session": "neurons-bulk-semantic",
         }
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
-        raw = self._post_fn(
-            self._base_url + "/chat/completions",
-            headers=headers,
-            body=json.dumps(body, ensure_ascii=True),
-            timeout=self._timeout_seconds,
-        )
+        has_spooled = any(callable(getattr(item.text, "iter_pages", None)) for item in batch)
+        if has_spooled:
+            messages = _bulk_semantic_messages([
+                SimpleNamespace(
+                    session_key=item.session_key, episode=item.episode, text=""
+                ) for item in batch
+            ])
+            body_with_messages = dict(body)
+            body_with_messages["messages"] = messages
+            request, evidence = _build_streamed_bulk_request(
+                batch,
+                body_with_messages,
+                max_request_bytes=self._max_streamed_request_bytes,
+            )
+            self.last_client_serialization = {
+                "evidence_scope": "client_serialized_only",
+                "request_digest": request.digest,
+                "request_bytes": request.byte_length,
+                "max_request_bytes": self._max_streamed_request_bytes,
+                "sessions": evidence,
+            }
+            try:
+                raw = self._post_fn(
+                    self._base_url + "/chat/completions",
+                    headers=headers, body=request, timeout=self._timeout_seconds,
+                )
+            finally:
+                request.close()
+        else:
+            body["messages"] = _bulk_semantic_messages(batch)
+            encoded = json.dumps(body, ensure_ascii=True)
+            encoded_bytes = encoded.encode("utf-8")
+            if len(encoded_bytes) > self._max_streamed_request_bytes:
+                raise BulkRequestLimitExceeded(
+                    "bulk semantic request exceeds configured byte limit",
+                    request_bytes=len(encoded_bytes),
+                    max_request_bytes=self._max_streamed_request_bytes,
+                )
+            self.last_client_serialization = {
+                "evidence_scope": "client_serialized_only",
+                "request_digest": "sha256:" + hashlib.sha256(encoded_bytes).hexdigest(),
+                "request_bytes": len(encoded_bytes),
+                "max_request_bytes": self._max_streamed_request_bytes,
+                "sessions": {
+                    item.session_key: {
+                        "text_digest": "sha256:" + hashlib.sha256(
+                            str(item.text).encode("utf-8")
+                        ).hexdigest(),
+                        "text_bytes": len(str(item.text).encode("utf-8")),
+                    } for item in batch
+                },
+            }
+            raw = self._post_fn(
+                self._base_url + "/chat/completions",
+                headers=headers, body=encoded, timeout=self._timeout_seconds,
+            )
         data = json.loads(raw)
         content = str(data["choices"][0]["message"]["content"] or "")
         if not content.strip():
@@ -1031,11 +1241,53 @@ def _validate_endpoint_url(url: str, *, allowed_hosts: frozenset[str] | None = N
         raise ValueError("bulk semantic endpoint host is not in the allowlist")
 
 
-def _urllib_post(url: str, *, headers: dict, body: str, timeout: int) -> str:
+class _FailClosedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> None:
+        raise BulkRedirectRejected(
+            f"bulk semantic endpoint redirect blocked (HTTP {code})", status_code=code
+        )
+
+    def http_error_302(self, req: Any, fp: Any, code: int, msg: str, headers: Any) -> Any:
+        if fp is not None:
+            try:
+                fp.close()
+            except Exception:
+                pass
+        raise BulkRedirectRejected(
+            f"bulk semantic endpoint redirect blocked (HTTP {code})", status_code=code
+        )
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
+
+
+def _urllib_post(
+    url: str,
+    *,
+    headers: dict,
+    body: Any,
+    timeout: int,
+    disallow_redirects: bool = False,
+) -> str:
     _validate_endpoint_url(url)
-    request = urllib.request.Request(url, data=body.encode("utf-8"), headers=headers, method="POST")
+    if hasattr(body, "iter_bytes"):
+        headers = dict(headers)
+        headers["Content-Length"] = str(body.byte_length)
+        data = body.iter_bytes()
+    else:
+        data = body.encode("utf-8")
+    request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    if disallow_redirects:
+        opener = urllib.request.build_opener(_FailClosedRedirectHandler())
+        with opener.open(request, timeout=timeout) as response:  # noqa: S310 - scheme validated above
+            return response.read().decode("utf-8")
     with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - scheme validated above
         return response.read().decode("utf-8")
+
+
+def _urllib_post_no_redirects(url: str, *, headers: dict, body: Any, timeout: int) -> str:
+    return _urllib_post(url, headers=headers, body=body, timeout=timeout, disallow_redirects=True)
 
 
 def _positive_int_env(value: str, default: int) -> int:

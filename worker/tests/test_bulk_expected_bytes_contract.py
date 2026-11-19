@@ -154,7 +154,7 @@ def test_omitted_planned_member_is_detected_with_independent_expected_bytes(
         report["expected_total_bytes"] + report["expected_separator_bytes"]
     )
     assert len(report["expected_ordered_hashes"]) == 4
-    assert report["model_received_ordered_hashes"] != report["expected_ordered_hashes"]
+    assert report["writer_receipt_ordered_hashes"] != report["expected_ordered_hashes"]
     assert report["hash_order_match"] is False
     assert report["stream_coverage_complete"] is False
     assert report["failed_chunks"] == 1
@@ -234,3 +234,310 @@ def test_zero_byte_members_are_excluded_from_hash_order_contract(tmp_path, monke
     assert report["zero_byte_members"] == 1
     assert report["hash_order_match"] is True
     assert report["stream_coverage_complete"] is True
+
+
+def test_canonical_hash_identity_collision_fails_closed(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_knowledge.llm_brain_core import bulk_stream_runner as runner_mod
+
+    def _member(doc_id, source_hash):
+        return SimpleNamespace(
+            doc_id=doc_id, lane="evidence", ordinal=0,
+            order_key=("synthetic", doc_id), content_hash=source_hash,
+            redaction_version="v1",
+        )
+
+    body = "SAME-BODY"
+    source_hash_a = "sha256:" + "a" * 64
+    source_hash_b = "sha256:" + "b" * 64
+    docs = {
+        "doc-a": {"body": body, "content_hash": source_hash_a, "redaction_version": "v1"},
+        "doc-b": {"body": body, "content_hash": source_hash_b, "redaction_version": "v1"},
+    }
+    plan = SimpleNamespace(
+        source_hash="sha256:source",
+        members=(_member("doc-a", source_hash_a), _member("doc-b", source_hash_b)),
+    )
+    store = SimpleNamespace(get=lambda doc_id: docs[doc_id])
+    original_select = runner_mod._select_sessions_bounded
+    original_revision = runner_mod.session_source_revision_from_couchdb_source
+    original_plan = runner_mod.plan_validated_source
+    original_authority = runner_mod._pg_authority_by_hash
+    runner_mod._select_sessions_bounded = lambda *a, **k: SimpleNamespace(sessions=[{
+        "session_id_hash": "collision-session", "project": "collision-project",
+    }])
+    runner_mod.session_source_revision_from_couchdb_source = lambda **k: plan.source_hash
+    runner_mod.plan_validated_source = lambda *a, **k: plan
+    runner_mod._pg_authority_by_hash = lambda *a, **k: {}
+    try:
+        report = runner_mod.run_streamed_full_input(
+            ledger_path=tmp_path / "ledger.db", source_store=store,
+            extractor=_Extractor(), writer=_Writer(), full_input_state=_State(),
+            policy_version="collision", project="collision-project", limit=1,
+        )
+    finally:
+        runner_mod._select_sessions_bounded = original_select
+        runner_mod.session_source_revision_from_couchdb_source = original_revision
+        runner_mod.plan_validated_source = original_plan
+        runner_mod._pg_authority_by_hash = original_authority
+    assert report["status"] == "failed"
+    assert report["failed_sessions"] == 1
+    assert report["projected"] == 0
+    assert report["failure_reasons"] == {"source_invalid": 1}
+
+
+def test_genuine_canonical_hash_collision_via_metadata_headers_fails_closed(tmp_path, monkeypatch):
+    import hashlib
+    from agent_knowledge.llm_brain_core import bulk_stream_runner as runner_mod
+
+    store = InMemoryCouchDBSourceStore()
+    project = PFX + "hdrcollision"
+    sid = dm.build_session_id_hash(P, project + "-session")
+    store.put(dm.build_transcript_session_document(
+        session=TranscriptSession(session_id_hash=sid, provider=P, project=project,
+                                  started_at="2026-01-01T00:00:00Z")))
+    raw0 = "session_id_hash: s\nturn_start_index: 0\n\nIDENTICAL-BODY"
+    raw1 = "session_id_hash: s\nturn_start_index: 1\n\nIDENTICAL-BODY"
+    docs = []
+    for idx, raw in enumerate((raw0, raw1)):
+        chunk = TranscriptChunk.from_text(
+            chunk_id=f"chunk_{idx}", session_id_hash=sid, provider=P, project=project,
+            turn_start_index=idx, turn_end_index=idx, text=raw,
+        )
+        doc = dm.build_conversation_chunk_document(chunk=chunk)
+        doc["body"] = raw
+        doc["content_hash"] = "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        store.put(doc)
+        docs.append(doc)
+    store.put(dm.build_coverage_manifest_document(
+        session_id_hash=sid, provider=P, project=project,
+        conversation_chunk_count=2, tool_evidence_bundle_count=0,
+        conversation_content_hashes=[str(d["content_hash"]) for d in docs],
+        tool_evidence_coverage_hashes=[],
+        project_authority={"project": project, "ambiguous": False,
+                           "eligible_for_retirement": True}))
+
+    report = _run(tmp_path, monkeypatch, store, project, sid)
+    assert report["status"] == "failed"
+    assert report["failed_sessions"] == 1
+    assert report["projected"] == 0
+    assert report["failure_reasons"] == {"source_invalid": 1}
+
+
+def test_batch_exceeding_request_limit_splits_and_succeeds(tmp_path, monkeypatch):
+    import json
+    from agent_knowledge.llm_brain_core.bulk_semantic import OpenAICompatibleBulkSemanticExtractor
+
+    store = InMemoryCouchDBSourceStore()
+    project = PFX + "splitbatch"
+    _seed(store, project, ["FRONT-" + "A" * 600, "END-" + "B" * 600], evidence=0)
+    captured_batches: list[list[str]] = []
+
+    def _post(url, *, headers, body, timeout):
+        parsed = json.loads(body)
+        sessions = json.loads(parsed["messages"][1]["content"])["sessions"]
+        captured_batches.append([item["text"] for item in sessions])
+        return json.dumps({
+            "choices": [{
+                "message": {
+                    "content": json.dumps({
+                        "sessions": [{
+                            "session_key": item["session_key"],
+                            "entities": [{"name": PFX + "Entity", "type": "Concept", "summary": "ok"}],
+                            "relations": [],
+                        } for item in sessions]
+                    })
+                }
+            }]
+        })
+
+    # Measure single-session request size (~2,410 B) so 1 chunk fits, 2 chunks (~3,195 B) exceed.
+    extractor = OpenAICompatibleBulkSemanticExtractor(
+        base_url="http://127.0.0.1:9/v1",
+        model="synthetic-model",
+        post_fn=_post,
+        max_streamed_request_bytes=2800,
+    )
+    monkeypatch.setattr(runner_mod, "_pg_authority_by_hash", lambda *a, **k: {})
+    report = run_streamed_full_input(
+        ledger_path=tmp_path / "ledger.db",
+        source_store=store,
+        extractor=extractor,
+        writer=_Writer(),
+        full_input_state=_State(),
+        policy_version=PFX + "v1",
+        project=project,
+        limit=1,
+        batch_size=4,
+    )
+    assert report["status"] == "ok"
+    assert report["stream_coverage_complete"] is True
+    assert report["hash_order_match"] is True
+    assert len(captured_batches) == 2
+    assert all(len(batch) == 1 for batch in captured_batches)
+
+
+def test_oversized_single_chunk_defers_fail_closed_then_splits_utf8_and_resumes(tmp_path, monkeypatch):
+    import json
+    from agent_knowledge.llm_brain_core.bulk_semantic import OpenAICompatibleBulkSemanticExtractor
+
+    store = InMemoryCouchDBSourceStore()
+    project = PFX + "oversize"
+    front_seg = "".join(f"[{i}:가나다😀]" for i in range(250))
+    back_seg = "".join(f"[{i}:라마바]" for i in range(250))
+    big_body = "FRONT-" + front_seg + "-MIDDLE-" + back_seg + "-END"
+    _seed(store, project, ["SMALL-CHUNK", big_body], evidence=1)
+    seen_texts: list[str] = []
+
+    def _post(url, *, headers, body, timeout):
+        parsed = json.loads(body)
+        sessions = json.loads(parsed["messages"][1]["content"])["sessions"]
+        for item in sessions:
+            seen_texts.append(item["text"])
+        return json.dumps({
+            "choices": [{
+                "message": {
+                    "content": json.dumps({
+                        "sessions": [{
+                            "session_key": item["session_key"],
+                            "entities": [{"name": PFX + "Entity", "type": "Concept", "summary": "ok"}],
+                            "relations": [],
+                        } for item in sessions]
+                    })
+                }
+            }]
+        })
+
+    state = _State()
+    extractor = OpenAICompatibleBulkSemanticExtractor(
+        base_url="http://127.0.0.1:9/v1",
+        model="synthetic-model",
+        post_fn=_post,
+        max_streamed_request_bytes=5000,
+    )
+    monkeypatch.setattr(runner_mod, "_pg_authority_by_hash", lambda *a, **k: {})
+
+    # Pass 1 (without max_chunk_bytes): SMALL-CHUNK succeeds, big_body fails closed -> deferred.
+    report1 = run_streamed_full_input(
+        ledger_path=tmp_path / "ledger.db",
+        source_store=store,
+        extractor=extractor,
+        writer=_Writer(),
+        full_input_state=state,
+        policy_version=PFX + "v1",
+        project=project,
+        limit=1,
+        batch_size=1,
+    )
+    assert report1["status"] == "partial"
+    assert report1["deferred_sessions"] == 1
+    assert report1["failed_sessions"] == 0
+    assert report1["projected"] == 1
+    assert report1["limit_causes"] == {"client_request_byte_limit_exceeded_split_required": 1}
+    assert seen_texts == ["SMALL-CHUNK"]
+
+    # Pass 2 (with max_chunk_bytes): SMALL-CHUNK is resumed (not resent!), big_body is split on UTF-8 boundaries, and evidence completes.
+    seen_texts.clear()
+    report2 = run_streamed_full_input(
+        ledger_path=tmp_path / "ledger.db",
+        source_store=store,
+        extractor=extractor,
+        writer=_Writer(),
+        full_input_state=state,
+        policy_version=PFX + "v1",
+        project=project,
+        limit=1,
+        batch_size=1,
+        max_chunk_bytes=800,
+    )
+    assert report2["status"] == "ok"
+    assert report2["resumed_chunks"] == 1
+    assert report2["stream_coverage_complete"] is True
+    assert report2["hash_order_match"] is True
+    assert "SMALL-CHUNK" not in seen_texts
+    assert "evidence-0" in seen_texts
+    reconstructed = "".join(t for t in seen_texts if t != "evidence-0")
+    assert reconstructed == big_body
+
+
+def test_privacy_marker_across_split_boundary_fails_closed_with_max_chunk_bytes(tmp_path, monkeypatch):
+    store = InMemoryCouchDBSourceStore()
+    project = PFX + "privsplit"
+    # Place marker right across byte offset 20 (max_chunk_bytes=20).
+    body = ("A" * 17) + "SECRET" + ("B" * 20)
+    _seed(store, project, [body], evidence=0)
+    extractor = _Extractor()
+    monkeypatch.setattr(runner_mod, "_pg_authority_by_hash", lambda *a, **k: {})
+    report = run_streamed_full_input(
+        ledger_path=tmp_path / "ledger.db",
+        source_store=store,
+        extractor=extractor,
+        writer=_Writer(),
+        full_input_state=_State(),
+        policy_version=PFX + "v1",
+        project=project,
+        limit=1,
+        forbidden_markers=(b"SECRET",),
+        max_chunk_bytes=20,
+    )
+    assert report["status"] == "failed"
+    assert report["failure_reasons"] == {"privacy_violation": 1}
+    assert extractor.calls == 0
+
+
+def test_authority_revalidation_uses_session_project_when_filter_project_empty(tmp_path, monkeypatch):
+    store = InMemoryCouchDBSourceStore()
+    session_project = PFX + "reval"
+    _seed(store, session_project, ["BODY"], evidence=0)
+    seen_projects: list[str] = []
+
+    monkeypatch.setattr(
+        runner_mod,
+        "_pg_authority_by_hash",
+        lambda dsn, proj, hashes, **kw: {
+            hashes[0]: [{"authority_memory_id": "mem-1", "content_hash": hashes[0]}]
+        },
+    )
+
+    def _reval(dsn, proj, sources):
+        seen_projects.append(proj)
+        return proj == session_project
+
+    monkeypatch.setattr(runner_mod, "revalidate_authority_sources", _reval)
+    report = run_streamed_full_input(
+        ledger_path=tmp_path / "ledger.db",
+        source_store=store,
+        extractor=_Extractor(),
+        writer=_Writer(),
+        full_input_state=_State(),
+        policy_version=PFX + "v1",
+        project="",
+        limit=1,
+    )
+    assert report["status"] == "ok"
+    assert seen_projects == [session_project]
+
+
+def test_active_revision_preserves_turn_order_over_snapshot_hash_order():
+    import hashlib
+    from agent_knowledge.couchdb_source.source_revision import activate_source_revision
+    from agent_knowledge.llm_brain_core.bulk_streaming import expected_source_bytes
+
+    store = InMemoryCouchDBSourceStore()
+    project = PFX + "actorder"
+    bodies = [f"TURN-{i}" for i in range(5)]
+    sid = _seed(store, project, bodies, evidence=0)
+    activate_source_revision(store=store, session_id_hash=sid)
+
+    source_hash = session_source_revision_from_couchdb_source(
+        session_id_hash=sid, source_store=store
+    )
+    plan = plan_validated_source(store, session_id_hash=sid, expected_source_hash=source_hash)
+    expectation = expected_source_bytes(store, plan)
+
+    expected_turn_hashes = [
+        "sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest() for body in bodies
+    ]
+    assert [item["canonical_hash"] for item in expectation["ordered"]] == expected_turn_hashes
+    assert [member.ordinal for member in plan.members] == [0, 1, 2, 3, 4]

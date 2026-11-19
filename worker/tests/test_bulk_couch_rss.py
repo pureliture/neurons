@@ -132,8 +132,8 @@ def test_real_couchdb_http_active_branch_coverage():
             assert flags["texts"] > 0
             assert flags["first"] and flags["middle"] and flags["last"]
             assert flags["evidence"] >= 1
-            assert report["model_received_chunks"] == count + 1
-            received = set(report["model_received_hashes"])
+            assert report["writer_receipt_chunks"] == count + 1
+            received = set(report["writer_receipt_hashes"])
             expected = set(result["expected_hashes"])
             assert received == expected, (
                 len(received), len(expected), len(received - expected), len(expected - received)

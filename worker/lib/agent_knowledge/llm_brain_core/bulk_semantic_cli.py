@@ -44,6 +44,8 @@ from .bulk_semantic import (
     DEFAULT_BULK_SEMANTIC_MAX_SESSIONS_PER_CALL,
     DeterministicGraphitiSemanticWriter,
     OpenAICompatibleBulkSemanticExtractor,
+    _urllib_post,
+    _urllib_post_no_redirects,
     make_bulk_session_input,
 )
 from .couchdb_projection_cli import (
@@ -163,6 +165,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--privacy-forbidden-marker", action="append", default=[])
     parser.add_argument("--stream-mode", action="store_true")
     parser.add_argument(
+        "--max-chunk-bytes", type=int,
+        default=_positive_int_env(os.environ.get("LLM_BRAIN_BULK_MAX_CHUNK_BYTES", ""), 0),
+    )
+    parser.add_argument(
         "--spool-body-budget-bytes", type=int,
         default=int(os.environ.get("NEURON_BULK_SPOOL_BODY_BUDGET_BYTES") or 32 * 1024 * 1024),
     )
@@ -202,12 +208,21 @@ def main(argv: list[str] | None = None) -> int:
             from .bulk_full_input_neo4j_writer import Neo4jShadowWriter
             from .bulk_stream_runner import run_streamed_full_input
 
-            extractor = OpenAICompatibleBulkSemanticExtractor.from_env()
+            allowlist = frozenset(filter(None,
+                os.environ.get("LLM_BRAIN_BULK_FREE_MODEL_ALLOWLIST", "").split(",")))
+            extractor = OpenAICompatibleBulkSemanticExtractor.from_env(disallow_redirects=True)
             enforce_opencode_go_hy4_flash_free(
                 extractor,
-                allowlist=frozenset(filter(None,
-                    os.environ.get("LLM_BRAIN_BULK_FREE_MODEL_ALLOWLIST", "").split(","))),
+                allowlist=allowlist,
             )
+            if getattr(extractor, "_post_fn", None) is _urllib_post:
+                extractor._post_fn = _urllib_post_no_redirects
+                extractor._disallow_redirects = True
+            if hasattr(extractor, "_fallback_models"):
+                extractor._fallback_models = tuple(
+                    m for m in extractor._fallback_models
+                    if m in allowlist and m == "hy4-flash-free"
+                )
             if not args.trial_neo4j_writer:
                 raise RuntimeError("stream mode requires the isolated shadow writer")
             writer = Neo4jShadowWriter(
@@ -218,16 +233,20 @@ def main(argv: list[str] | None = None) -> int:
                 if os.environ.get("TRIAL_PG_DSN")
                 else FullInputState(Path(args.runtime_dir) if args.runtime_dir else Path("."))
             )
-            report = run_streamed_full_input(
-                ledger_path=Path(args.ledger), source_store=source_store,
-                extractor=extractor, writer=writer, full_input_state=state,
-                policy_version=str(args.full_input_policy_version or "stream-default"),
-                project=str(args.project or ""), limit=int(args.limit),
-                forbidden_markers=tuple(
-                    marker.encode("utf-8") for marker in args.privacy_forbidden_marker
-                ),
-                batch_size=max(1, int(args.max_sessions_per_call)),
-            )
+            try:
+                report = run_streamed_full_input(
+                    ledger_path=Path(args.ledger), source_store=source_store,
+                    extractor=extractor, writer=writer, full_input_state=state,
+                    policy_version=str(args.full_input_policy_version or "stream-default"),
+                    project=str(args.project or ""), limit=int(args.limit),
+                    forbidden_markers=tuple(
+                        marker.encode("utf-8") for marker in args.privacy_forbidden_marker
+                    ),
+                    batch_size=max(1, int(args.max_sessions_per_call)),
+                    max_chunk_bytes=int(args.max_chunk_bytes) or None,
+                )
+            finally:
+                writer.close()
             print(json.dumps(report, sort_keys=True))
             return 0 if report.get("status") in {"ok", "already_running"} else 1
         report = run_couchdb_bulk_semantic_projection(
@@ -320,7 +339,12 @@ def run_couchdb_bulk_semantic_projection(
     ledger = Ledger(ledger_path)
     artifact_store = LedgerSessionMemoryArtifactStore(ledger)
     projection_state_store = LedgerGraphProjectionStateStore(ledger)
-    extractor = extractor or OpenAICompatibleBulkSemanticExtractor.from_env()
+    if extractor is None:
+        extractor = (
+            OpenAICompatibleBulkSemanticExtractor.from_env(disallow_redirects=True)
+            if full_input_policy_version
+            else OpenAICompatibleBulkSemanticExtractor.from_env()
+        )
     writer = writer or DeterministicGraphitiSemanticWriter.from_env()
 
     if full_input_policy_version and os.environ.get("NEURON_TRIAL_MODE") != "1":
@@ -349,6 +373,9 @@ def run_couchdb_bulk_semantic_projection(
             if item.strip()
         )
         enforce_free_only_extractor(extractor, free_allowlist)
+        if getattr(extractor, "_post_fn", None) is _urllib_post:
+            extractor._post_fn = _urllib_post_no_redirects
+            extractor._disallow_redirects = True
     selection = _select_sessions_bounded(
         source_store,
         project=project,

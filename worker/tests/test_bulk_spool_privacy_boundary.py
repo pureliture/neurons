@@ -199,3 +199,45 @@ def test_extractor_exception_closes_spooled_text(tmp_path):
         if close is not None:
             close()
     assert body.closed is True
+
+
+def test_spool_single_line_over_64k_without_header_matches_nonspool():
+    raw = "FRONT-" + "".join(f"[seg:{i}:한글😀]" + ("X" * 30) for i in range(3000)) + "-END"
+    assert len(raw.encode("utf-8")) > 128 * 1024
+    assert "\n" not in raw
+
+    nonspool_store, nonspool_plan, _ = _store(raw, lane="conversation")
+    nonspool = list(iter_planned_chunks(nonspool_store, nonspool_plan))[0]
+
+    pages = [raw[i:i + 32 * 1024] for i in range(0, len(raw), 32 * 1024)]
+    spool_store, spool_plan, _ = _store(FakeSpool(pages, lane="conversation"), lane="conversation")
+    spool = list(iter_planned_chunks(spool_store, spool_plan))[0]
+
+    nonspool_bytes = _chunk_input(nonspool).encode("utf-8")
+    spool_bytes = _chunk_input(spool).encode("utf-8")
+    assert nonspool_bytes == _strip_chunk_metadata_header(raw).encode("utf-8")
+    assert spool_bytes == nonspool_bytes
+    assert spool.canonical_hash == nonspool.canonical_hash
+
+
+def test_spool_single_line_over_64k_with_header_and_crlf_matches_nonspool():
+    header = "turn_start_index: 0\r\n\r\n"
+    long_line = "LONG-" + ("가나다😀" * 18000) + "-MID"
+    raw = header + long_line + "\r\nTAIL-LINE\r\n"
+    assert len(long_line.encode("utf-8")) > 128 * 1024
+
+    nonspool_store, nonspool_plan, _ = _store(raw, lane="conversation")
+    nonspool = list(iter_planned_chunks(nonspool_store, nonspool_plan))[0]
+
+    # Split right between \r and \n after long_line across FakeSpool pages.
+    crlf_cut = len(header) + len(long_line) + 1
+    mid_cut = len(header) + 65536
+    pages = [raw[:mid_cut], raw[mid_cut:crlf_cut], raw[crlf_cut:]]
+    spool_store, spool_plan, _ = _store(FakeSpool(pages, lane="conversation"), lane="conversation")
+    spool = list(iter_planned_chunks(spool_store, spool_plan))[0]
+
+    nonspool_bytes = _chunk_input(nonspool).encode("utf-8")
+    spool_bytes = _chunk_input(spool).encode("utf-8")
+    assert nonspool_bytes == _strip_chunk_metadata_header(raw).encode("utf-8")
+    assert spool_bytes == nonspool_bytes
+    assert spool.canonical_hash == nonspool.canonical_hash

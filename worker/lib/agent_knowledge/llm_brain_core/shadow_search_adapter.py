@@ -252,8 +252,8 @@ def build_shadow_search_adapter_from_env(
     couch_password = str(environ.get("COUCHDB_PASSWORD") or "")
     if not (policy_version and dsn and uri and password and couch_url):
         return legacy
-    from .couchdb_source.couchdb_http_store import CouchDBHttpSourceStore
-    from .couchdb_source.source_revision import resolve_source_hash_for_currentness
+    from ..couchdb_source.couchdb_http_store import CouchDBHttpSourceStore
+    from ..couchdb_source.source_revision import resolve_source_hash_for_currentness
     from .trial_shadow_adapter import TrialShadowGraphAdapter
 
     credentials = base64.b64encode(f"{couch_user}:{couch_password}".encode("utf-8")).decode("ascii")

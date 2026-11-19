@@ -40,13 +40,16 @@ class TrialShadowGraphAdapter:
             return GraphMemoryResult(
                 status="available", episodes=(), details=("shadow_groups_not_eligible",)
             )
+        project = brain_id.removeprefix("/project/") if brain_id.startswith("/project/") else ""
         driver = GraphDatabase.driver(self._uri, auth=(self._user, self._password))
         try:
             with driver.session() as session:
                 rows = list(session.run(
                     "MATCH (n:TrialShadowEntity) "
-                    "WHERE n.group_id IN $groups AND n.authority_memory_id IS NOT NULL "
-                    "AND n.authority_content_hash IS NOT NULL "
+                    "WHERE n.group_id IN $groups "
+                    "AND n.authority_memory_id IS NOT NULL AND n.authority_memory_id <> '' "
+                    "AND n.authority_content_hash IS NOT NULL AND n.authority_content_hash <> '' "
+                    "AND ($project = '' OR n.project = $project) "
                     "RETURN n.uid AS uid, n.group_id AS group_id, "
                     "n.source_id AS source_id, n.entity_name AS entity_name, "
                     "n.entity_type AS entity_type, n.project AS project, "
@@ -55,7 +58,7 @@ class TrialShadowGraphAdapter:
                     "n.authority_content_hash AS authority_content_hash, "
                     "n.chunk_key AS chunk_key, n.receipt AS receipt "
                     "ORDER BY n.uid LIMIT $limit",
-                    groups=list(groups), limit=max(1, min(int(limit), 100)),
+                    groups=list(groups), project=project, limit=max(1, min(int(limit), 100)),
                 ))
         finally:
             driver.close()

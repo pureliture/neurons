@@ -198,3 +198,21 @@ def test_revocation_between_validation_and_merge_is_not_exposed():
     assert result.episodes == ()
     assert "shadow_merge_rejected" in result.details
     assert calls["n"] == 2
+
+
+def test_factory_returns_shadow_search_adapter_when_opt_in_prerequisites_present():
+    legacy = _Legacy()
+    store = SimpleNamespace(dsn="postgresql://synthetic-user:synthetic-pw@127.0.0.1:5432/synthetic")
+    environ = {
+        "NEURON_BULK_SHADOW_READ_ELIGIBLE": "1",
+        "LLM_BRAIN_BULK_FULL_INPUT_POLICY_VERSION": POLICY,
+        "LLM_BRAIN_NEO4J_URI": "bolt://127.0.0.1:7687",
+        "LLM_BRAIN_NEO4J_PASSWORD": "synthetic-neo4j-password",
+        "COUCHDB_URL": "http://127.0.0.1:5984",
+        "COUCHDB_DB": "synthetic_db",
+        "COUCHDB_USER": "admin",
+        "COUCHDB_PASSWORD": "synthetic-couch-password",
+    }
+    adapter = build_shadow_search_adapter_from_env(legacy, store, environ)
+    assert isinstance(adapter, ShadowSearchAdapter)
+    assert adapter.policy_version == POLICY

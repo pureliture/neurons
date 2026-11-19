@@ -88,6 +88,7 @@ class Neo4jShadowWriter:
                     source_id = str(item.episode.natural_id)
                     token = int(payload.get("fence_token") or 0)
                     fence_uid = _uid(group, chunk_hash, "fence", source_id)
+                    chunk_receipt = _receipt(fence_uid, chunk_hash, source_id)
                     row = tx.run(
                         "MERGE (f:TrialFence {uid: $uid}) "
                         "ON CREATE SET f.fence_token = $token "
@@ -100,7 +101,6 @@ class Neo4jShadowWriter:
                         raise RuntimeError("graph fence rejected stale writer token")
                     for entity in result.entities:
                         uid = _uid(group, chunk_hash, entity.type, entity.name)
-                        receipt = _receipt(uid, chunk_hash, source_id)
                         tx.run(
                             f"MERGE (n:{_LABEL} {{uid: $uid}}) "
                             "SET n.group_id = $group, n.source_id = $source_id, "
@@ -112,7 +112,7 @@ class Neo4jShadowWriter:
                             "n.authority_content_hash = $authority_content_hash",
                             uid=uid, group=group, source_id=source_id,
                             chunk_key=item.session_key, hash=chunk_hash,
-                            name=entity.name, receipt=receipt,
+                            name=entity.name, receipt=chunk_receipt,
                             entity_type=meta["entity_type"] or str(entity.type),
                             project=meta["project"], source_hash=meta["source_hash"],
                             source_revision=meta["source_revision"],
@@ -120,7 +120,7 @@ class Neo4jShadowWriter:
                             authority_content_hash=meta["authority_content_hash"],
                         )
                         entities += 1
-                        chunk_receipts.setdefault(item.session_key, receipt)
+                        chunk_receipts.setdefault(item.session_key, chunk_receipt)
                     endpoint_types = _endpoint_types(result)
                     for relation in result.relations:
                         src_name = str(relation.source)
@@ -134,19 +134,26 @@ class Neo4jShadowWriter:
                             f"{group}|{chunk_hash}|{src_type}|{src_name}|"
                             f"{dst_type}|{dst_name}|{rel_type}|{relation.fact}".encode("utf-8")
                         ).hexdigest()[:16]
-                        receipt = "receipt:" + hashlib.sha256(
-                            f"{rel_uid}|{chunk_hash}|{source_id}".encode("utf-8")
-                        ).hexdigest()[:16]
                         tx.run(
                             f"MERGE (a:{_LABEL} {{uid: $src}}) "
                             f"MERGE (b:{_LABEL} {{uid: $dst}}) "
                             f"MERGE (a)-[r:{_REL} {{uid: $rel_uid}}]->(b) "
-                            "SET a.group_id = $group, a.chunk_key = $chunk_key, "
+                            "SET a.group_id = $group, a.source_id = $source_id, "
+                            "a.chunk_key = $chunk_key, "
                             "a.entity_type = $src_type, a.entity_name = $src_name, "
-                            "a.canonical_chunk_hash = $hash, a.receipt = $src_receipt, "
-                            "b.group_id = $group, b.chunk_key = $chunk_key, "
+                            "a.canonical_chunk_hash = $hash, a.receipt = $receipt, "
+                            "a.project = $project, a.source_hash = $source_hash, "
+                            "a.source_revision = $source_revision, "
+                            "a.authority_memory_id = $authority_memory_id, "
+                            "a.authority_content_hash = $authority_content_hash, "
+                            "b.group_id = $group, b.source_id = $source_id, "
+                            "b.chunk_key = $chunk_key, "
                             "b.entity_type = $dst_type, b.entity_name = $dst_name, "
-                            "b.canonical_chunk_hash = $hash, b.receipt = $dst_receipt, "
+                            "b.canonical_chunk_hash = $hash, b.receipt = $receipt, "
+                            "b.project = $project, b.source_hash = $source_hash, "
+                            "b.source_revision = $source_revision, "
+                            "b.authority_memory_id = $authority_memory_id, "
+                            "b.authority_content_hash = $authority_content_hash, "
                             "r.group_id = $group, r.chunk_key = $chunk_key, "
                             "r.fact = $fact, r.relation_type = $relation_type, "
                             "r.canonical_chunk_hash = $hash, r.receipt = $receipt, "
@@ -154,19 +161,18 @@ class Neo4jShadowWriter:
                             "r.authority_memory_id = $authority_memory_id, "
                             "r.authority_content_hash = $authority_content_hash",
                             src=src, dst=dst, rel_uid=rel_uid,
-                            group=group, chunk_key=item.session_key,
+                            group=group, source_id=source_id, chunk_key=item.session_key,
                             src_type=src_type, dst_type=dst_type,
                             src_name=src_name, dst_name=dst_name,
-                            src_receipt=_receipt(src, chunk_hash, source_id),
-                            dst_receipt=_receipt(dst, chunk_hash, source_id),
-                            hash=chunk_hash, receipt=receipt,
+                            hash=chunk_hash, receipt=chunk_receipt,
                             fact=str(relation.fact), relation_type=rel_type,
+                            project=meta["project"],
                             source_hash=meta["source_hash"],
                             source_revision=meta["source_revision"],
                             authority_memory_id=meta["authority_memory_id"],
                             authority_content_hash=meta["authority_content_hash"],
                         )
-                        chunk_receipts.setdefault(item.session_key, receipt)
+                        chunk_receipts.setdefault(item.session_key, chunk_receipt)
                         relations += 1
         return BulkSemanticWriteReport(
             projected=len(inputs),
