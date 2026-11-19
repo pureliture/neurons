@@ -77,6 +77,36 @@ def test_bulk_semantic_trigger_execute_calls_child_with_lock_and_redacted_plan(t
     assert "neurons" not in json.dumps(report, sort_keys=True)
 
 
+
+def test_bulk_semantic_trigger_forwards_full_input_flags(tmp_path):
+    calls: list[list[str]] = []
+
+    def _child(argv):  # type: ignore[no-untyped-def]
+        calls.append(list(argv or []))
+        print(json.dumps({"status": "ok", "projection": {"materialized": 0}, "semantic": {}}))
+        return 0
+
+    report = run_bulk_semantic_trigger(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        runtime_dir=tmp_path / "runtime",
+        limit=1,
+        execute=True,
+        deferred_jsonl=str(tmp_path / "deferred.jsonl"),
+        full_input_policy_version="full-input.v1",
+        trial_neo4j_writer=True,
+        privacy_forbidden_markers=("PRIVATE",),
+        stream_mode=True,
+        bulk_main=_child,
+    )
+    assert report["status"] == "ok"
+    argv = calls[0]
+    assert ["--deferred-jsonl", str(tmp_path / "deferred.jsonl")] == argv[argv.index("--deferred-jsonl"):argv.index("--deferred-jsonl") + 2]
+    assert "--full-input-policy-version" in argv
+    assert "--trial-neo4j-writer" in argv
+    assert "--privacy-forbidden-marker" in argv
+    assert "--stream-mode" in argv
+    assert "PRIVATE" in argv
+
 def test_bulk_semantic_trigger_forwards_optional_per_call_caps_when_set(tmp_path):
     calls: list[list[str]] = []
 

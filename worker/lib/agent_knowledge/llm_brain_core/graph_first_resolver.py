@@ -375,6 +375,7 @@ class GraphFirstResolver:
 
     def _resolve_query(self, request: _ResolveRequest) -> dict[str, Any]:
         graph_result: Any | None = None
+        shadow_read: str | None = None
         chunk_executor: ThreadPoolExecutor | None = None
         chunk_future: Future[list[dict[str, Any]]] | None = None
         if self._can_prefetch_session_chunks(request):
@@ -390,6 +391,7 @@ class GraphFirstResolver:
                         **({"as_of": request.as_of} if request.as_of else {}),
                     )
                     graph_status = self._public_graph_status(getattr(graph_result, "status", "unavailable"))
+                    shadow_read = self._shadow_read_status(getattr(graph_result, "details", ()))
                 except Exception:
                     graph_status = "unavailable"
 
@@ -419,6 +421,7 @@ class GraphFirstResolver:
                 graph_status=graph_status,
                 lag=lag,
                 freshness=freshness,
+                shadow_read=shadow_read,
                 prefetched_chunk_cards=prefetched_chunk_cards,
             )
 
@@ -447,6 +450,7 @@ class GraphFirstResolver:
                         session_memory_merged=merged,
                         lexical_lane_cards=lexical_count,
                         freshness=freshness,
+                        shadow_read=shadow_read,
                     ),
                 )
             if graph_cards:
@@ -465,6 +469,7 @@ class GraphFirstResolver:
                         session_memory_merged=merged,
                         lexical_lane_cards=lexical_count,
                         freshness=freshness,
+                        shadow_read=shadow_read,
                     ),
                     error_code=error_code,
                 )
@@ -503,6 +508,7 @@ class GraphFirstResolver:
                     session_memory_merged=merged,
                     lexical_lane_cards=lexical_count,
                     freshness=freshness,
+                    shadow_read=shadow_read,
                 ),
             )
         # 공용 뇌 계약: 관련 card가 있어도 다른 에이전트의 session-memory를 항상
@@ -522,6 +528,7 @@ class GraphFirstResolver:
                     projection_lag_ms=lag,
                     session_memory_merged=True,
                     freshness=freshness,
+                    shadow_read=shadow_read,
                 ),
             )
         auth_src = "postgres" if any(c.get("authority_source") == "postgres" for c in graph_cards) else None
@@ -538,6 +545,7 @@ class GraphFirstResolver:
                 session_memory_merged=merged,
                 lexical_lane_cards=lexical_count,
                 freshness=freshness,
+                shadow_read=shadow_read,
             ),
         )
 
@@ -694,6 +702,7 @@ class GraphFirstResolver:
         lag: int | None,
         freshness: dict[str, Any] | None = None,
         prefetched_chunk_cards: list[dict[str, Any]] | None = None,
+        shadow_read: str | None = None,
     ) -> dict[str, Any]:
         cards, error_code, fallback_used, join_status = self._fallback_cards(request)
         if cards is None:
@@ -710,9 +719,8 @@ class GraphFirstResolver:
                 authority_join_status=join_status,
                 fallback_used=fallback_used,
                 projection_lag_ms=lag,
-                session_memory_merged=merged,
-                lexical_lane_cards=lexical_count,
                 freshness=freshness,
+                shadow_read=shadow_read,
             ),
         )
 
@@ -1523,6 +1531,20 @@ class GraphFirstResolver:
         return "unavailable"
 
     @staticmethod
+    def _shadow_read_status(details: Any) -> str | None:
+        """Map internal shadow-adapter detail tokens to one public marker."""
+        tokens = {str(item) for item in (details or ())}
+        for token, status in (
+            ("shadow_unavailable", "unavailable"),
+            ("shadow_eligibility_unavailable", "eligibility_unavailable"),
+            ("shadow_merge_rejected", "rejected"),
+            ("shadow_merge_eligible", "eligible"),
+        ):
+            if token in tokens:
+                return status
+        return None
+
+    @staticmethod
     def _metadata(
         retrieval_path: str,
         graph_status: str,
@@ -1533,6 +1555,7 @@ class GraphFirstResolver:
         session_memory_merged: bool | None = None,
         lexical_lane_cards: int | None = None,
         freshness: dict[str, Any] | None = None,
+        shadow_read: str | None = None,
     ) -> dict[str, Any]:
         meta = {
             "retrieval_path": retrieval_path,
@@ -1549,6 +1572,8 @@ class GraphFirstResolver:
             meta["lexical_lane_cards"] = int(lexical_lane_cards)
         if freshness is not None:
             meta["freshness"] = dict(freshness)
+        if shadow_read is not None:
+            meta["shadow_read"] = shadow_read
         return meta
 
     @staticmethod

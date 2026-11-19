@@ -19,13 +19,40 @@ from __future__ import annotations
 
 import base64
 import copy
+import errno
 import hashlib
 import json
+import os
+import shutil
+import tempfile
 import time
 from collections import OrderedDict
 from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from pathlib import Path
 from urllib.parse import quote
 
+from .couchdb_currentness_stream import (
+    parse_spooled_descriptor_page,
+    read_error_payload,
+)
+from .spool_reader import (
+    SpoolDiskFull,
+    SpoolError,
+    _CURRENTNESS_HTTP_NAMESPACE,
+    _write_manifest,
+    acquire_spool,
+    body_budget_bytes,
+    cleanup_currentness_spools,
+    cleanup_stale_spools,
+    create_owned_spool,
+    current_worker_id,
+    load_complete_spool,
+    parse_spooled_document,
+    remove_spool,
+    response_budget_bytes,
+    spool_base,
+)
 from ..rag_ingress.idempotency import IdempotencyOutcome
 from ..transport_contract import ProxyResponse
 from .document_model import (
@@ -271,6 +298,92 @@ class CouchDBHttpSourceStore:
             raise CouchDBError("invalid JSON response from CouchDB") from exc
         return response.status_code, payload
 
+    @contextmanager
+    def _request_to_spool(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: dict,
+        max_response_bytes: int,
+    ) -> Iterator[tuple[int, Path]]:
+        """Stream one HTTP response to a private 0600 file with a hard cap."""
+
+        limit = max(1, int(max_response_bytes))
+        headers = {"Accept": "application/json"}
+        body = json.dumps(json_body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+        if self.auth_header:
+            headers["Authorization"] = self.auth_header
+        timeout_seconds = self.request_timeout_seconds
+        if self.deadline_monotonic is not None:
+            remaining = self.deadline_monotonic - time.monotonic()
+            if remaining <= 0:
+                raise CouchDBError("operation deadline exceeded")
+            timeout_seconds = min(timeout_seconds, remaining)
+        cleanup_currentness_spools()
+        root, lease = create_owned_spool(
+            _CURRENTNESS_HTTP_NAMESPACE,
+            prefix="neuron-currentness-http-",
+            kind="currentness-http",
+        )
+        response_path = root / "response.json"
+        try:
+            descriptor = os.open(response_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "wb") as sink:
+                def copy_limited(source) -> None:
+                    total = 0
+                    while True:
+                        chunk = source.read(64 * 1024)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > limit:
+                            raise CouchDBResponseTooLarge(
+                                "CouchDB response exceeded configured byte limit"
+                            )
+                        sink.write(chunk)
+
+                if self.transport is _urllib_transport:
+                    from urllib import request
+                    from urllib.error import HTTPError, URLError
+
+                    req = request.Request(
+                        self.base_url + path,
+                        data=body,
+                        headers=headers,
+                        method=method,
+                    )
+                    try:
+                        with request.urlopen(req, timeout=timeout_seconds) as response:
+                            status = int(response.status)
+                            copy_limited(response)
+                    except HTTPError as exc:
+                        status = int(exc.code)
+                        copy_limited(exc)
+                    except (URLError, TimeoutError) as exc:
+                        raise CouchDBError(f"connection failed: {exc}") from exc
+                else:
+                    status, payload = self._request(
+                        method, path, json_body=json_body, max_response_bytes=limit
+                    )
+                    payload_bytes = (
+                        payload
+                        if isinstance(payload, bytes)
+                        else json.dumps(
+                            payload, separators=(",", ":"), ensure_ascii=False
+                        ).encode("utf-8")
+                    )
+                    if len(payload_bytes) > limit:
+                        raise CouchDBResponseTooLarge(
+                            "CouchDB response exceeded configured byte limit"
+                        )
+                    sink.write(payload_bytes)
+            yield status, response_path
+        finally:
+            lease.close()
+            shutil.rmtree(root, ignore_errors=True)
+
     def _doc_path(self, doc_id: str) -> str:
         return f"/{self.db}/{quote(doc_id, safe='')}"
 
@@ -297,13 +410,13 @@ class CouchDBHttpSourceStore:
         doc_ids: Sequence[str],
         *,
         page_size: int = 100,
+        max_response_bytes: int | None = None,
     ) -> dict[str, dict | None]:
         """Read many documents through bounded ``_all_docs`` pages.
 
-        ``include_docs=true`` keeps the per-document revision/hash validation
-        identical to :meth:`get`; only the round-trip count changes. The result
-        contains an entry for every requested id (missing documents map to
-        ``None``) so callers can keep their existing missing-document errors.
+        ``max_response_bytes`` is applied by the transport before JSON parsing.
+        Omission preserves existing callers; bounded callers get fail-closed
+        ``CouchDBResponseTooLarge`` rather than an in-memory oversized response.
         """
 
         unique = list(dict.fromkeys(str(doc_id) for doc_id in doc_ids))
@@ -316,7 +429,7 @@ class CouchDBHttpSourceStore:
             status, payload = self._request(
                 "POST",
                 f"/{self.db}/_all_docs?include_docs=true",
-                json_body={"keys": page},
+                json_body={"keys": page}, max_response_bytes=max_response_bytes,
             )
             if status != 200:
                 raise CouchDBError(f"POST _all_docs failed: HTTP {status}", status_code=status)
@@ -346,6 +459,75 @@ class CouchDBHttpSourceStore:
             raise CouchDBError("bounded GET returned an invalid document")
         return payload
 
+
+    def open_document_spool(
+        self,
+        doc_id: str,
+        *,
+        expected_hash: str,
+        max_body_bytes: int | None = None,
+        max_response_bytes: int | None = None,
+        worker_id: str | None = None,
+    ):
+        """Stream one oversized document into a private, resumable 0600 spool."""
+        from urllib import request
+        from urllib.error import HTTPError, URLError
+
+        body_limit = body_budget_bytes() if max_body_bytes is None else max_body_bytes
+        response_limit = response_budget_bytes() if max_response_bytes is None else max_response_bytes
+        owner = worker_id or current_worker_id()
+        cleanup_stale_spools(current_worker_id=owner)
+        directory, lease = acquire_spool(doc_id, expected_hash, worker_id=owner)
+        raw_path = directory / "response.json"
+        try:
+            reuse = load_complete_spool(directory, expected_hash=expected_hash, lease=lease)
+            if reuse is not None:
+                return reuse
+            _write_manifest(directory, {
+                "schema_version": "bulk_spool.v1", "state": "partial",
+                "doc_id": doc_id, "worker_id": owner, "pid": os.getpid(),
+                "content_hash": expected_hash, "body_bytes": 0,
+                "response_bytes": 0, "updated_at": time.time(),
+            })
+            headers = {"Accept": "application/json"}
+            if self.auth_header:
+                headers["Authorization"] = self.auth_header
+            req = request.Request(
+                f"{self.base_url}{self._doc_path(doc_id)}",
+                headers=headers, method="GET",
+            )
+            with request.urlopen(req, timeout=self.request_timeout_seconds) as response:
+                if response.status != 200:
+                    raise CouchDBError(f"spool GET failed: HTTP {response.status}")
+                total = 0
+                with raw_path.open("wb") as sink:
+                    while True:
+                        chunk = response.read(64 * 1024)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > response_limit:
+                            raise CouchDBResponseTooLarge("spool response exceeds bound")
+                        try:
+                            sink.write(chunk)
+                        except OSError as exc:
+                            if getattr(exc, "errno", None) in (errno.ENOSPC, errno.EDQUOT):
+                                raise SpoolDiskFull("temporary spool disk full") from None
+                            raise
+            body = parse_spooled_document(
+                raw_path, expected_hash=expected_hash, max_body_bytes=body_limit,
+                directory=directory, doc_id=doc_id, worker_id=owner, response_bytes=total,
+            )
+            body._lease = lease
+            return body
+        except Exception:
+            raw_path.unlink(missing_ok=True)
+            remove_spool(directory)
+            try:
+                lease.close()
+            except Exception:
+                pass
+            raise
     def _require_source_document_unpinned(
         self,
         doc_id: str,
@@ -1008,6 +1190,105 @@ class CouchDBHttpSourceStore:
             next_bookmark = str(payload.get("bookmark") or "")
             if not next_bookmark:
                 if len(docs) >= size:
+                    raise CouchDBError("_find by session omitted a required continuation bookmark")
+                return
+            if next_bookmark == bookmark:
+                raise CouchDBError("_find by session bookmark did not advance")
+            bookmark = next_bookmark
+
+    def iter_by_session_descriptors(
+        self,
+        *,
+        session_id_hash: str,
+        doc_type: str,
+        fields: list[str] | None,
+        selector: dict | None,
+        page_size: int,
+        max_page_bytes: int,
+    ) -> Iterator[dict]:
+        """Yield bounded canonical descriptors without materializing source bodies.
+
+        Every response page is streamed to a private 0600 file, parsed as a JSON
+        byte stream, and reduced to small descriptor fields plus the exact
+        canonical SHA-256 of the full public document. ``fields`` must be unset;
+        projected metadata scans use :meth:`iter_by_session`.
+        """
+
+        if fields is not None:
+            raise CouchDBError("descriptor streaming requires the full source document")
+        if not session_id_hash or not doc_type:
+            raise ValueError("session query requires exact session and document type")
+        if max_page_bytes < 1:
+            raise ValueError("session query byte limit must be positive")
+        extra_selector = dict(selector or {})
+        if "session_id_hash" in extra_selector or "doc_type" in extra_selector:
+            raise ValueError("session query selector cannot override its scope")
+        query_selector = {
+            **extra_selector,
+            "session_id_hash": session_id_hash,
+            "doc_type": doc_type,
+        }
+        size = min(SESSION_QUERY_MAX_PAGE_SIZE, max(1, int(page_size)))
+        bookmark = ""
+        sort_spec = [dict(item) for item in _DEFAULT_SESSION_SORT]
+        cache_key = (
+            self.base_url,
+            self.db,
+            doc_type,
+            _canonical_mango_digest(extra_selector),
+            _canonical_mango_digest(sort_spec),
+            _canonical_mango_digest(None),
+        )
+        use_sort = not self._is_sort_unusable_cached(cache_key)
+        while True:
+            request_body: dict = {"selector": query_selector, "limit": size}
+            if use_sort:
+                request_body["sort"] = sort_spec
+            if bookmark:
+                request_body["bookmark"] = bookmark
+            with self._request_to_spool(
+                "POST",
+                f"/{self.db}/_find",
+                json_body=request_body,
+                max_response_bytes=max_page_bytes,
+            ) as (status, response_path):
+                if status == 400 and _is_no_usable_index(read_error_payload(response_path)) and use_sort:
+                    self._remember_unusable_sort(cache_key)
+                    if bookmark:
+                        raise CouchDBError(
+                            "_find by session sort index disappeared mid-pagination: HTTP 400",
+                            status_code=400,
+                        )
+                    use_sort = False
+                    request_body.pop("sort", None)
+                    with self._request_to_spool(
+                        "POST",
+                        f"/{self.db}/_find",
+                        json_body=request_body,
+                        max_response_bytes=max_page_bytes,
+                    ) as (fallback_status, fallback_path):
+                        if fallback_status != 200:
+                            raise CouchDBError(
+                                f"_find by session failed: HTTP {fallback_status}",
+                                status_code=fallback_status,
+                            )
+                        rows, next_bookmark = parse_spooled_descriptor_page(
+                            fallback_path, max_page_bytes=max_page_bytes, max_items=size
+                        )
+                elif status == 200:
+                    if use_sort and not bookmark:
+                        self._clear_unusable_sort(cache_key)
+                    rows, next_bookmark = parse_spooled_descriptor_page(
+                        response_path, max_page_bytes=max_page_bytes, max_items=size
+                    )
+                else:
+                    raise CouchDBError(f"_find by session failed: HTTP {status}", status_code=status)
+            if not rows:
+                return
+            for row in rows:
+                yield row
+            if not next_bookmark:
+                if len(rows) >= size:
                     raise CouchDBError("_find by session omitted a required continuation bookmark")
                 return
             if next_bookmark == bookmark:

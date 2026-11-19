@@ -334,6 +334,18 @@ services:
       LLM_BRAIN_BULK_SEMANTIC_TRIGGER_PROJECT: ${LLM_BRAIN_BULK_SEMANTIC_TRIGGER_PROJECT:-}
       LLM_BRAIN_BULK_SEMANTIC_TRIGGER_PROVIDER: ${LLM_BRAIN_BULK_SEMANTIC_TRIGGER_PROVIDER:-}
       LLM_BRAIN_BULK_SEMANTIC_TRIGGER_REPORT_EVERY: ${LLM_BRAIN_BULK_SEMANTIC_TRIGGER_REPORT_EVERY:-25}
+      # Full-input shadow trial is opt-in; all values default to disabled/empty.
+      LLM_BRAIN_BULK_STREAM_MODE: ${LLM_BRAIN_BULK_STREAM_MODE:-0}
+      NEURON_TRIAL_MODE: ${NEURON_TRIAL_MODE:-0}
+      LLM_BRAIN_BULK_FULL_INPUT_POLICY_VERSION: ${LLM_BRAIN_BULK_FULL_INPUT_POLICY_VERSION:-}
+      LLM_BRAIN_BULK_TRIAL_NEO4J_WRITER: ${LLM_BRAIN_BULK_TRIAL_NEO4J_WRITER:-0}
+      LLM_BRAIN_BULK_DEFERRED_JSONL: ${LLM_BRAIN_BULK_DEFERRED_JSONL:-}
+      LLM_BRAIN_BULK_PRIVACY_FORBIDDEN_MARKERS: ${LLM_BRAIN_BULK_PRIVACY_FORBIDDEN_MARKERS:-}
+      LLM_BRAIN_BULK_FREE_MODEL_ALLOWLIST: ${LLM_BRAIN_BULK_FREE_MODEL_ALLOWLIST:-}
+      # Reuse existing ops authorities/secret refs; no new secret is introduced.
+      TRIAL_PG_DSN: ${TRIAL_PG_DSN:-${NEURON_LEDGER_PG_DSN:-}}
+      TRIAL_NEO4J_URI: ${TRIAL_NEO4J_URI:-${LLM_BRAIN_NEO4J_URI:-}}
+      TRIAL_NEO4J_PASSWORD: ${TRIAL_NEO4J_PASSWORD:-${LLM_BRAIN_NEO4J_PASSWORD:-}}
     depends_on:
       - llm-brain-couchdb
       - llm-brain-ledger-postgres
@@ -432,6 +444,10 @@ services:
       MCP_HTTP_ALLOWED_HOSTS_FROM_COMPOSE: ${MCP_HTTP_ALLOWED_HOSTS:-}
       # 실 ledger는 PG. open_read_only의 --ledger 파일은 placeholder. network_mode host면 DSN host=127.0.0.1.
       NEURON_LEDGER_PG_DSN: ${NEURON_LEDGER_PG_DSN:?set NEURON_LEDGER_PG_DSN (PG ledger)}
+      # A-decision reader is disabled unless this explicit opt-in is set in ops env.
+      NEURON_BULK_SHADOW_READ_ELIGIBLE: ${NEURON_BULK_SHADOW_READ_ELIGIBLE:-0}
+      # Must match the policy version used by the full-input writer.
+      LLM_BRAIN_BULK_FULL_INPUT_POLICY_VERSION: ${LLM_BRAIN_BULK_FULL_INPUT_POLICY_VERSION:-}
     healthcheck:
       # python:3.13-slim엔 curl/wget이 없으므로 stdlib urllib로 점검. 서버가 tailnet IP에
       # bind하므로 loopback이 아닌 MCP_HTTP_HOST로 확인(network_mode: host라 도달 가능).

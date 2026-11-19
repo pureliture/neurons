@@ -9,6 +9,7 @@ control/source document is an explicit fail-closed error.
 
 from __future__ import annotations
 
+import os
 import copy
 import json
 import re
@@ -17,6 +18,10 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, Iterator, Mapping
 
 from . import document_model as dm
+from .couchdb_currentness_stream import (
+    CurrentnessStreamBudgetExceeded,
+    CurrentnessStreamInvalid,
+)
 from .source_store import CouchDBSourceStore, SourceStoreConflict, SourceStoreError
 
 
@@ -50,8 +55,20 @@ _SOURCE_SNAPSHOT_SCOPE = "source_snapshot_scope"
 SOURCE_CURRENTNESS_METADATA_PAGE_SIZE = 100
 SOURCE_CURRENTNESS_FULL_DOCUMENT_PAGE_SIZE = 8
 SOURCE_CURRENTNESS_MAX_PAGE_BYTES = 512 * 1024
-SOURCE_CURRENTNESS_MAX_ROWS = 8_192
 SOURCE_CURRENTNESS_MAX_COMPACT_BYTES = 8 * 1024 * 1024
+
+
+def currentness_page_bytes() -> int:
+    override = os.environ.get("NEURON_SOURCE_CURRENTNESS_MAX_PAGE_BYTES")
+    return max(1, int(override or SOURCE_CURRENTNESS_MAX_PAGE_BYTES))
+
+
+def currentness_compact_bytes() -> int:
+    override = os.environ.get("NEURON_SOURCE_CURRENTNESS_MAX_COMPACT_BYTES")
+    return max(1, int(override or SOURCE_CURRENTNESS_MAX_COMPACT_BYTES))
+
+SOURCE_CURRENTNESS_MAX_ROWS = 8_192
+
 SOURCE_CURRENTNESS_MAX_MANIFEST_BYTES = 10 * 1024 * 1024
 SOURCE_CURRENTNESS_MAX_MANIFEST_MEMBERS = 8_192
 SOURCE_CURRENTNESS_MAX_POINTER_BYTES = 64 * 1024
@@ -165,6 +182,61 @@ def _source_member_descriptor(document: Mapping[str, object], *, session_id_hash
             document, material_hash_field=material_hash_field
         )
         source_document_hash = _source_document_hash(document)
+    except (TypeError, ValueError) as exc:
+        raise SourceRevisionResolutionError(
+            "source revision member material is invalid"
+        ) from exc
+    return {
+        "source_document_id": doc_id,
+        "source_doc_type": doc_type,
+        "material_hash_field": material_hash_field,
+        "material_hash": material_hash,
+        "member_revision_hash": member_revision_hash,
+        "source_document_hash": source_document_hash,
+    }
+
+
+def _source_member_descriptor_from_streamed_document(
+    document: Mapping[str, object],
+    *,
+    session_id_hash: str,
+) -> dict:
+    """Build the identical descriptor from bounded canonical-stream fields.
+
+    The stream carries only scalar descriptor inputs plus the canonical hash of
+    the complete public document. It never trusts a metadata-only substitute
+    for that hash: every body/provenance byte is covered by the streamed
+    canonical serialization.
+    """
+
+    doc_id = str(document.get("_id") or "")
+    doc_type = str(document.get("doc_type") or "")
+    if not doc_id or doc_type not in _SOURCE_MEMBER_TYPES:
+        raise SourceRevisionResolutionError("source revision member contract is invalid")
+    if str(document.get("session_id_hash") or "") != session_id_hash:
+        raise SourceRevisionResolutionError("source revision member session does not match")
+    source_document_hash = str(document.get("__source_document_hash") or "")
+    if not source_document_hash:
+        raise SourceRevisionResolutionError("source revision canonical stream hash is missing")
+    try:
+        dm.assert_hash_like("source_document_hash", source_document_hash)
+        material_hash_field = "document_hash"
+        material_hash = ""
+        for field in ("content_hash", "coverage_hash", "source_hash"):
+            value = str(document.get(field) or "")
+            if value:
+                dm.assert_hash_like(field, value)
+                material_hash_field = field
+                material_hash = value
+                break
+        if material_hash_field == "document_hash":
+            material_hash = source_document_hash
+        token_candidate = dict(document)
+        token_candidate[material_hash_field] = material_hash
+        member_revision_hash = dm.build_source_revision_token(
+            token_candidate,
+            material_hash_field=material_hash_field,
+        )
     except (TypeError, ValueError) as exc:
         raise SourceRevisionResolutionError(
             "source revision member material is invalid"
@@ -1102,6 +1174,8 @@ def _validate_source_document_against_member(
     return descriptor
 
 
+
+
 def _validate_member_and_source(
     *,
     get_document: Callable[[str], dict | None],
@@ -1437,9 +1511,9 @@ def _encoded_json_size(value: object, *, limit: int) -> int:
 def _consume_currentness_compact_bytes(budget: dict[str, int], compact: object) -> None:
     budget["compact_bytes"] += _encoded_json_size(
         compact,
-        limit=SOURCE_CURRENTNESS_MAX_COMPACT_BYTES,
+        limit=currentness_compact_bytes(),
     )
-    if budget["compact_bytes"] > SOURCE_CURRENTNESS_MAX_COMPACT_BYTES:
+    if budget["compact_bytes"] > currentness_compact_bytes():
         raise SourceRevisionCurrentnessLimitError(
             "source revision currentness compact-byte limit exceeded; session remains pending",
             reason_code="source_revision_compact_bytes_exceeded",
@@ -1471,20 +1545,36 @@ def _iter_bounded_currentness_documents(
         raise SourceRevisionResolutionError(
             "bounded session reader is required for source currentness"
         )
+    streamed_iterator = getattr(store, "iter_by_session_descriptors", None)
+    use_stream = (
+        doc_type in _SOURCE_MEMBER_TYPES
+        and callable(streamed_iterator)
+        and (fields is None or doc_type in _BODY_MATERIAL_DOC_TYPES)
+    )
     page_size = (
-        SOURCE_CURRENTNESS_FULL_DOCUMENT_PAGE_SIZE
-        if fields is None
-        else SOURCE_CURRENTNESS_METADATA_PAGE_SIZE
+        SOURCE_CURRENTNESS_METADATA_PAGE_SIZE
+        if fields is not None and not use_stream
+        else SOURCE_CURRENTNESS_FULL_DOCUMENT_PAGE_SIZE
     )
     try:
-        rows = iterator(
-            session_id_hash=session_id_hash,
-            doc_type=doc_type,
-            fields=fields,
-            selector=selector,
-            page_size=page_size,
-            max_page_bytes=SOURCE_CURRENTNESS_MAX_PAGE_BYTES,
-        )
+        if use_stream:
+            rows = streamed_iterator(
+                session_id_hash=session_id_hash,
+                doc_type=doc_type,
+                fields=None,
+                selector=selector,
+                page_size=page_size,
+                max_page_bytes=currentness_page_bytes(),
+            )
+        else:
+            rows = iterator(
+                session_id_hash=session_id_hash,
+                doc_type=doc_type,
+                fields=fields,
+                selector=selector,
+                page_size=page_size,
+                max_page_bytes=currentness_page_bytes(),
+            )
         for row in rows:
             if not isinstance(row, Mapping):
                 raise SourceRevisionResolutionError(
@@ -1502,6 +1592,15 @@ def _iter_bounded_currentness_documents(
             yield document
     except SourceRevisionCurrentnessLimitError:
         raise
+    except CurrentnessStreamBudgetExceeded as exc:
+        raise SourceRevisionCurrentnessLimitError(
+            "source revision canonical stream budget exceeded; session remains pending",
+            reason_code="source_revision_stream_budget_exceeded",
+        ) from exc
+    except CurrentnessStreamInvalid as exc:
+        raise SourceRevisionResolutionError(
+            "source revision canonical stream is invalid"
+        ) from exc
     except Exception as exc:
         if getattr(exc, "code", "") == "couchdb_response_too_large":
             raise SourceRevisionCurrentnessLimitError(
@@ -1542,17 +1641,38 @@ def _currentness_component(
     validated_descriptor: Mapping[str, object] | None = None,
 ) -> dict[str, str]:
     doc_type = str(document.get("doc_type") or "")
+    if (
+        doc_type in _BODY_MATERIAL_DOC_TYPES
+        and "__body_hash" in document
+        and document.get("__body_hash") != document.get("content_hash")
+    ):
+        raise SourceRevisionResolutionError(
+            "source revision body hash does not match its content hash"
+        )
     if validated_descriptor is None:
         try:
             material_hash_field, _ = _material_identity(document)
-            if material_hash_field == "document_hash" and doc_type != dm.SourceDocType.TRANSCRIPT_SESSION:
+            if (
+                material_hash_field == "document_hash"
+                and doc_type != dm.SourceDocType.TRANSCRIPT_SESSION
+            ):
                 raise SourceRevisionResolutionError(
                     "source revision currentness requires a material hash for body-free source types"
                 )
-            revision_token = _revision_fingerprint(
-                document,
-                material_hash_field=material_hash_field,
-            )
+            if (
+                material_hash_field == "document_hash"
+                and "__source_document_hash" in document
+            ):
+                candidate = dict(document)
+                candidate["document_hash"] = document["__source_document_hash"]
+                revision_token = dm.build_source_revision_token(
+                    candidate, material_hash_field=material_hash_field
+                )
+            else:
+                revision_token = _revision_fingerprint(
+                    document,
+                    material_hash_field=material_hash_field,
+                )
         except SourceRevisionResolutionError:
             raise
         except (TypeError, ValueError) as exc:
@@ -1772,11 +1892,24 @@ def _active_currentness_components(
             if source_id in seen_source_ids:
                 raise SourceRevisionResolutionError("active source revision source is duplicated")
             seen_source_ids.add(source_id)
-            descriptor = _validate_source_document_against_member(
-                source=source_document,
-                session_id_hash=session_id_hash,
-                member_fields=member_fields_by_source[source_id],
-            )
+            if "__source_document_hash" in source_document:
+                descriptor = _source_member_descriptor_from_streamed_document(
+                    source_document,
+                    session_id_hash=session_id_hash,
+                )
+                if any(
+                    descriptor.get(key) != member_fields_by_source[source_id].get(key)
+                    for key in descriptor
+                ):
+                    raise SourceRevisionResolutionError(
+                        "active source revision source changed"
+                    )
+            else:
+                descriptor = _validate_source_document_against_member(
+                    source=source_document,
+                    session_id_hash=session_id_hash,
+                    member_fields=member_fields_by_source[source_id],
+                )
             components.append(
                 _currentness_component(
                     source_document,

@@ -7,7 +7,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -32,6 +32,7 @@ from ..local_embedding.profile import (
     LOCAL_EMBEDDING_MODEL_ALIAS,
     LOCAL_EMBEDDING_PROFILE_ID,
 )
+from ..model_connectors.session_headers import is_opencode_base_url
 from ..model_connectors.policy import validate_local_embedding_write_or_query_policy
 from ._util import PRIVATE_OUTPUT_RE, SECRET_ASSIGNMENT_RE, public_safe_text, short_hash
 from .graphiti_adapter import (
@@ -96,7 +97,7 @@ class BulkSemanticWriteReport:
     entities_written: int
     relations_written: int
     projected_natural_ids: tuple[str, ...] = ()
-
+    chunk_receipts: dict[str, str] = field(default_factory=dict)
 
 # Only explicitly approved free models may be used as automatic fallbacks.
 # Paid models require a separate operator decision and are never auto-selected.
@@ -133,6 +134,23 @@ class OpenAICompatibleBulkSemanticExtractor:
         self._fallback_models: tuple[str, ...] = tuple(
             dict.fromkeys(model for model in fallback_models if model in _FREE_FALLBACK_MODELS and model != self._model)
         )
+
+    @property
+    def provider(self) -> str:
+        return "opencode-go" if is_opencode_base_url(self._base_url) else ""
+
+    @property
+    def model(self) -> str:
+        return self._model
+
+    @property
+    def endpoint_class(self) -> str:
+        return "approved_free" if self.provider == "opencode-go" else "unapproved"
+
+    @property
+    def price_status(self) -> str:
+        return "free_confirmed" if self.provider == "opencode-go" else "unknown"
+
 
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> "OpenAICompatibleBulkSemanticExtractor":

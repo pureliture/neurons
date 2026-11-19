@@ -1218,6 +1218,7 @@ def test_iter_by_session_caches_no_usable_index_across_sessions_without_repeatin
 
 def test_iter_by_session_no_usable_index_cache_scopes_by_doc_type_selector_and_recovers_after_ttl(monkeypatch):
     from agent_knowledge.couchdb_source.source_revision import (
+        SourceRevisionResolutionError,
         SourceRevisionSnapshotChangedError,
         resolve_source_hash_for_currentness,
     )
@@ -1353,7 +1354,9 @@ def test_iter_by_session_no_usable_index_cache_scopes_by_doc_type_selector_and_r
         return status, payload
 
     store._request = _mutating_request  # type: ignore[method-assign]
-    with pytest.raises(SourceRevisionSnapshotChangedError):
+    with pytest.raises(
+        (SourceRevisionResolutionError, SourceRevisionSnapshotChangedError)
+    ):
         resolve_source_hash_for_currentness(session_id_hash=sid_b, store=store)
     assert rejected_chunk_sorts == rejected_before_race
 

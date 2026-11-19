@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 from typing import Any, Callable
 
@@ -32,6 +33,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--couchdb-db", default="")
     parser.add_argument("--couchdb-user", default="")
     parser.add_argument("--couchdb-password-env", default="COUCHDB_PASSWORD")
+    parser.add_argument("--deferred-jsonl", default=os.environ.get("LLM_BRAIN_BULK_DEFERRED_JSONL", ""))
+    parser.add_argument(
+        "--full-input-policy-version",
+        default=os.environ.get("LLM_BRAIN_BULK_FULL_INPUT_POLICY_VERSION", ""),
+    )
+    parser.add_argument(
+        "--trial-neo4j-writer",
+        action="store_true",
+        default=os.environ.get("LLM_BRAIN_BULK_TRIAL_NEO4J_WRITER", "") == "1",
+    )
+    parser.add_argument(
+        "--privacy-forbidden-marker",
+        action="append",
+        default=[item for item in os.environ.get("LLM_BRAIN_BULK_PRIVACY_FORBIDDEN_MARKERS", "").split(",") if item],
+    )
+    parser.add_argument(
+        "--stream-mode",
+        action="store_true",
+        default=os.environ.get("LLM_BRAIN_BULK_STREAM_MODE", "") == "1",
+    )
     args = parser.parse_args(argv)
 
     report = run_bulk_semantic_trigger(
@@ -50,6 +71,11 @@ def main(argv: list[str] | None = None) -> int:
         couchdb_db=str(args.couchdb_db or ""),
         couchdb_user=str(args.couchdb_user or ""),
         couchdb_password_env=str(args.couchdb_password_env or "COUCHDB_PASSWORD"),
+        deferred_jsonl=str(args.deferred_jsonl or ""),
+        full_input_policy_version=str(args.full_input_policy_version or ""),
+        trial_neo4j_writer=bool(args.trial_neo4j_writer),
+        privacy_forbidden_markers=tuple(args.privacy_forbidden_marker or ()),
+        stream_mode=bool(args.stream_mode),
     )
     print(json.dumps(report, sort_keys=True))
     return 0 if report["status"] in {"dry_run", "ok", "already_running"} else 1
@@ -72,6 +98,11 @@ def run_bulk_semantic_trigger(
     couchdb_db: str = "",
     couchdb_user: str = "",
     couchdb_password_env: str = "COUCHDB_PASSWORD",
+    deferred_jsonl: str = "",
+    full_input_policy_version: str = "",
+    trial_neo4j_writer: bool = False,
+    privacy_forbidden_markers: tuple[str, ...] = (),
+    stream_mode: bool = False,
     bulk_main: ChildMain = bulk_semantic_cli.main,
 ) -> dict[str, Any]:
     progress_jsonl = runtime_dir / "bulk-semantic-progress.jsonl"
@@ -93,6 +124,11 @@ def run_bulk_semantic_trigger(
         couchdb_db=couchdb_db,
         couchdb_user=couchdb_user,
         couchdb_password_env=couchdb_password_env,
+        deferred_jsonl=deferred_jsonl,
+        full_input_policy_version=full_input_policy_version,
+        trial_neo4j_writer=trial_neo4j_writer,
+        privacy_forbidden_markers=privacy_forbidden_markers,
+        stream_mode=stream_mode,
     )
     plan = {
         "mode": "execute" if execute else "dry_run",
@@ -149,6 +185,11 @@ def _child_argv(
     couchdb_db: str,
     couchdb_user: str,
     couchdb_password_env: str,
+    deferred_jsonl: str,
+    full_input_policy_version: str,
+    trial_neo4j_writer: bool,
+    privacy_forbidden_markers: tuple[str, ...],
+    stream_mode: bool,
 ) -> list[str]:
     argv = [
         "--ledger",
@@ -185,6 +226,17 @@ def _child_argv(
         argv.extend(["--couchdb-user", couchdb_user])
     if couchdb_password_env:
         argv.extend(["--couchdb-password-env", couchdb_password_env])
+    if deferred_jsonl:
+        argv.extend(["--deferred-jsonl", deferred_jsonl])
+    if full_input_policy_version:
+        argv.extend(["--full-input-policy-version", full_input_policy_version])
+    if trial_neo4j_writer:
+        argv.append("--trial-neo4j-writer")
+    for marker in privacy_forbidden_markers:
+        if marker:
+            argv.extend(["--privacy-forbidden-marker", marker])
+    if stream_mode:
+        argv.append("--stream-mode")
     return argv
 
 
