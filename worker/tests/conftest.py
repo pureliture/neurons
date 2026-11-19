@@ -8,8 +8,28 @@ from psycopg import sql
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 import pytest
 
+from agent_knowledge.llm_brain_core import bulk_semantic_cli as _cli
+from agent_knowledge.llm_brain_core.bulk_authority import authorized_sources_by_hash
+from agent_knowledge.llm_brain_core import bulk_stream_runner as _stream_runner
 from agent_knowledge.postgres_store.pgvector_store import PgVectorStore
 
+
+
+_AUTHORITY_TEST_MODULES = {
+    "test_pg_authority_hash_lookup", "test_source_hash_to_authority_chain",
+    "test_authority_lookup_batching", "test_adaptive_fetch_and_authority",
+    "test_nonstream_authority_and_http_adaptive", "test_trial_one_chain_mcp_http",
+    "test_trial_production_manifest_authority_http", "test_bulk_hash_e2e",
+    "test_bulk_spool_e2e", "test_couchdb_spool_reader",
+    "test_bulk_full_input_loopback_e2e",
+}
+
+@pytest.fixture(autouse=True)
+def _legacy_no_authority_seam(request, monkeypatch):
+    if request.module.__name__.split(".")[-1] in _AUTHORITY_TEST_MODULES:
+        return
+    monkeypatch.setattr(_cli, "_pg_authority_by_hash", lambda *a, **k: {})
+    monkeypatch.setattr(_stream_runner, "_pg_authority_by_hash", lambda *a, **k: {})
 
 @pytest.fixture
 def isolated_pg_store_factory():

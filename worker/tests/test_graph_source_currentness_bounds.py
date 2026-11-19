@@ -299,11 +299,11 @@ def test_session_source_currentness_rejects_compact_row_budget_overrun(monkeypat
 def test_session_source_currentness_rejects_compact_byte_budget_overrun(monkeypatch):
     from agent_knowledge.couchdb_source import source_revision
 
+    monkeypatch.delenv("NEURON_SOURCE_CURRENTNESS_MAX_COMPACT_BYTES", raising=False)
     documents = _source_documents()
     session_id_hash = str(documents[0]["session_id_hash"])
     store = _PagedSourceStore(documents)
     monkeypatch.setattr(source_revision, "SOURCE_CURRENTNESS_MAX_COMPACT_BYTES", 128)
-
     with pytest.raises(SourceRevisionCurrentnessLimitError) as exc:
         session_source_revision_from_couchdb_source(
             session_id_hash=session_id_hash,
@@ -793,6 +793,7 @@ def test_active_source_currentness_decouples_manifest_bytes_from_compact_bytes_a
 ):
     import agent_knowledge.couchdb_source.source_revision as sr
 
+    monkeypatch.delenv("NEURON_SOURCE_CURRENTNESS_MAX_COMPACT_BYTES", raising=False)
     # Production cap must accommodate up to 8192 manifest members (~4.1 MiB observed in production).
     assert sr.SOURCE_CURRENTNESS_MAX_MANIFEST_BYTES >= 8 * 1024 * 1024
 

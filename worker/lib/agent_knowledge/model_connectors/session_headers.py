@@ -41,6 +41,15 @@ def is_opencode_base_url(base_url: str) -> bool:
     return host == OPENCODE_SESSION_DOMAIN or host.endswith("." + OPENCODE_SESSION_DOMAIN)
 
 
+def is_opencode_go_openai_base_url(base_url: str) -> bool:
+    """True only for the OpenCode Go OpenAI-compatible relay paths."""
+    if not is_opencode_base_url(base_url):
+        return False
+    parsed = urllib.parse.urlparse(str(base_url or "").strip())
+    path = (parsed.path or "").rstrip("/")
+    return path in {OPENCODE_LEGACY_OPENAI_PATH, OPENCODE_CANONICAL_OPENAI_PATH}
+
+
 def opencode_session_id() -> str:
     """Return this process' stable OpenCode session id."""
 

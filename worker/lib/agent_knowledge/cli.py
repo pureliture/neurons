@@ -338,6 +338,11 @@ def _build_recall_service(
                 2,
                 f"pgvector store wiring failed: {type(exc).__name__}",
             ) from exc
+    from .llm_brain_core.shadow_search_adapter import build_shadow_search_adapter_from_env
+
+    graph_adapter = build_shadow_search_adapter_from_env(
+        graph_adapter, pgvector_store, os.environ
+    )
     semantic_ranker = None
     if os.environ.get("LLM_BRAIN_EMBEDDING_BASE_URL") and os.environ.get(
         "LLM_BRAIN_EMBEDDING_MODEL"

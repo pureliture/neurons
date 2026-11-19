@@ -357,10 +357,11 @@ def materialize_session_memory(
 ) -> MaterializedSessionMemory:
     """Materialize the resolved source revision into one session-memory body.
 
-    Resolution re-hashes every resident conversation chunk and tool evidence
-    bundle body against its ``content_hash`` and fails closed on mismatch; the
-    bounded currentness path (``resolve_source_hash_for_currentness``) only
-    compares stored hash metadata and relies on this step for content checks.
+    Resolution validates every source document's full descriptor, including its
+    body and redaction/parser/chunker provenance, against the active member
+    record. Materialization then re-resolves that revision and re-hashes the
+    resident conversation and evidence bodies against their content hashes;
+    both layers fail closed on mismatch.
     """
 
     def _fetched(done: int, total: int) -> None:

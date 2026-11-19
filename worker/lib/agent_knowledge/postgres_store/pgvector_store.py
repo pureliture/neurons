@@ -1839,6 +1839,82 @@ class PgVectorStore:
                 return [dict(row) if isinstance(row, Mapping) else dict(zip(names, row))
                         for row in cur.fetchall()]
 
+    @staticmethod
+    def _hash_rows(rows, *, max_hashes: int) -> dict[str, object]:
+        by_hash: dict[str, list[str]] = {}
+        ambiguous: set[str] = set()
+        for row in rows:
+            content_hash = str(row["content_hash"])
+            memory_id = str(row["memory_id"])
+            if int(row["card_count"]) > 1:
+                ambiguous.add(content_hash)
+                by_hash.pop(content_hash, None)
+                continue
+            by_hash.setdefault(content_hash, []).append(memory_id)
+        return {"by_hash": by_hash, "ambiguous_hashes": ambiguous}
+
+    def _find_authorized_by_content_hashes(
+        self, db, *, project: str, content_hashes: list[str],
+        as_of, max_hashes: int
+    ) -> dict[str, object]:
+        wanted = list(dict.fromkeys(str(value) for value in content_hashes if value))
+        if not wanted:
+            return {"by_hash": {}, "ambiguous_hashes": set()}
+        if len(wanted) > max_hashes:
+            raise ValueError("content hash batch exceeds authority lookup bound")
+        clauses, params = _authority_filter(project, as_of)
+        clauses.extend((
+            "steward_envelope IS NOT NULL",
+            "steward_envelope->>'approval_state' IN ('approved', 'auto_accepted')",
+            "coalesce(steward_envelope->>'steward_proposal_kind', '') <> 'stale'",
+            "content_hash = ANY(%s)",
+        ))
+        params.append(wanted)
+        with db.cursor() as cur:
+            cur.execute(
+                "SELECT content_hash, memory_id, "
+                "count(*) OVER (PARTITION BY content_hash) AS card_count "
+                f"FROM memory_cards WHERE {' AND '.join(clauses)} "
+                "ORDER BY content_hash, memory_id",
+                params,
+            )
+            rows = cur.fetchall()
+        return self._hash_rows(rows, max_hashes=max_hashes)
+
+    def find_authorized_by_content_hashes(
+        self, *, project: str, content_hashes: list[str],
+        as_of: datetime | date | str | None = None, max_hashes: int = 100
+    ) -> dict[str, object]:
+        """Resolve wanted source hashes in one SQL snapshot; fail closed on ambiguity."""
+        if not project:
+            raise ValueError("project required")
+        with self._scope() as db:
+            return self._find_authorized_by_content_hashes(
+                db, project=project, content_hashes=content_hashes,
+                as_of=as_of, max_hashes=max_hashes,
+            )
+
+    def find_authorized_by_content_hashes_snapshot(
+        self, *, project: str, batches: list[list[str]],
+        as_of: datetime | date | str | None = None, max_hashes: int = 100
+    ) -> dict[str, object]:
+        """Resolve all batches inside one repeatable-read snapshot."""
+        if not project or not batches:
+            return {"by_hash": {}, "ambiguous_hashes": set()}
+        merged: dict[str, list[str]] = {}
+        ambiguous: set[str] = set()
+        with self.transaction() as db:
+            db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            for batch in batches:
+                result = self._find_authorized_by_content_hashes(
+                    db, project=project, content_hashes=batch,
+                    as_of=as_of, max_hashes=max_hashes,
+                )
+                for content_hash, memory_ids in result["by_hash"].items():
+                    merged.setdefault(content_hash, []).extend(memory_ids)
+                ambiguous.update(result["ambiguous_hashes"])
+        return {"by_hash": merged, "ambiguous_hashes": ambiguous}
+
     def list_context_cards(
         self, *, project: str, query: str = "", as_of: datetime | date | str | None = None,
         limit: int = 5, steward_only: bool = False,

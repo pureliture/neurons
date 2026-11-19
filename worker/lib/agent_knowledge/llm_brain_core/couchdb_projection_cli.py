@@ -17,12 +17,15 @@ from typing import Any
 from agent_knowledge.couchdb_source.couchdb_http_store import CouchDBHttpSourceStore
 from agent_knowledge.couchdb_source.document_model import SourceDocType
 from agent_knowledge.couchdb_source.source_revision import (
+    SourceRevisionCurrentnessLimitError,
+    SourceRevisionDeferredBudget,
     SourceRevisionResolutionError,
     SourceRevisionSnapshotChangedError,
     _is_current_source_copy,
     _is_revision_snapshot_copy,
     iter_active_source_hashes,
     iter_legacy_source_hashes,
+    resolve_active_source_revision,
 )
 from agent_knowledge.couchdb_source.source_store import CouchDBSourceStore
 from agent_knowledge.ledger import Ledger
@@ -50,7 +53,10 @@ GRAPH_SELECTION_PAGE_SIZE = 256
 MAX_GRAPH_SELECTION_SIZE = 1000
 MAX_GRAPH_SELECTION_PROJECTS = 256
 GRAPH_SELECTION_SNAPSHOT_ATTEMPTS = 2
+GRAPH_SELECTION_MAX_PROBE_ATTEMPTS = 2
 SELECTION_ERROR_FIELD = "selection_error"
+SELECTION_DEFERRED_FIELD = "selection_deferred"
+SELECTION_LEGACY_HASH_FIELD = "_selection_legacy_hash"
 
 
 @dataclass(frozen=True)
@@ -220,6 +226,7 @@ def run_couchdb_projection(
         failure_steps: Counter[str] = Counter()
         projected = duplicates = failed = skipped_resumed = skipped_disabled = 0
         skipped_inconsistent = 0
+        skipped_deferred = 0
         processed = 0
         stopped_after_max_projects = False
         started = time.monotonic()
@@ -256,6 +263,12 @@ def run_couchdb_projection(
 
         for index, session in enumerate(sessions, start=1):
             processed = index
+            deferred_reason = str(session.get(SELECTION_DEFERRED_FIELD) or "")
+            if deferred_reason:
+                skipped_deferred += 1
+                status = "skipped_deferred"
+                reason = deferred_reason
+                continue
             item_started = time.monotonic()
             session_project = str(session.get("project") or "")
             session_provider = str(session.get("provider") or "")
@@ -377,6 +390,7 @@ def run_couchdb_projection(
                     "skipped_resumed": skipped_resumed,
                     "skipped_disabled": skipped_disabled,
                     "skipped_inconsistent": skipped_inconsistent,
+                    "skipped_deferred": skipped_deferred,
                 }
                 for key in ("error_class", "http_status", "error_code", "error_type", "error_param", "error_step"):
                     if key in error_meta:
@@ -388,7 +402,10 @@ def run_couchdb_projection(
 
         elapsed_total_ms = int((time.monotonic() - started) * 1000)
         attempted = processed
-        status = "ok" if failed == 0 else ("partial" if projected or duplicates or skipped_resumed else "failed")
+        status = (
+            "ok" if failed == 0 and skipped_deferred == 0
+            else ("partial" if projected or duplicates or skipped_resumed or skipped_deferred else "failed")
+        )
         if status == "ok" and selection.unresolved_count:
             # Healthy sessions were processed, but excluded sessions still need attention.
             status = "partial"
@@ -418,7 +435,7 @@ def run_couchdb_projection(
                 "skipped_resumed": skipped_resumed,
                 "skipped_disabled": skipped_disabled,
                 "skipped_inconsistent": skipped_inconsistent,
-                "unresolved_sessions": selection.unresolved_count,
+                "skipped_deferred": skipped_deferred,
                 "elapsed_total_ms": elapsed_total_ms,
                 "project_set": bool(project),
                 "project_ref": _project_ref(project),
@@ -708,6 +725,12 @@ def _select_sessions_bounded(
             provider=provider,
         ):
             source_count += 1
+            _validate_legacy_hash_for_currentness(
+                session,
+                source_store=source_store,
+                projection_state_store=projection_state_store,
+                extraction_level=extraction_level,
+            )
             if session.get(SELECTION_ERROR_FIELD):
                 unresolved_count += 1
                 _update_selection_digest(first_digest, session, is_current=False)
@@ -764,10 +787,15 @@ def _select_sessions_bounded(
             provider=provider,
         ):
             observed_source_count += 1
+            _validate_legacy_hash_for_currentness(
+                session,
+                source_store=source_store,
+                projection_state_store=projection_state_store,
+                extraction_level=extraction_level,
+            )
             if session.get(SELECTION_ERROR_FIELD):
                 observed_unresolved_count += 1
-                unresolved_reasons[str(session[SELECTION_ERROR_FIELD])] += 1
-                # Keep the retained dead-letter window bounded like the selection itself.
+                unresolved_reasons[str(session.get(SELECTION_ERROR_FIELD))] += 1
                 if len(unresolved) < MAX_GRAPH_SELECTION_SIZE:
                     unresolved.append(session)
                 _update_selection_digest(second_digest, session, is_current=False)
@@ -912,8 +940,10 @@ def _iter_session_revisions(
     legacy_hashes = iter_legacy_source_hashes(source_store)
 
     probe_done = [False]
-    # Probe a session with an active revision (bounded validation). Legacy-only
-    # stores still probe their first session to preserve churn detection.
+    probe_attempts = [0]
+    # Probe a bounded active session for snapshot churn. If the first candidate
+    # exceeds the currentness read cap, defer it and try the next active session
+    # instead of treating a pending session as corrupted.
     probe_session = next(iter(active_hashes), None)
 
     for source_session in _iter_authoritative_source_sessions(
@@ -930,14 +960,25 @@ def _iter_session_revisions(
         # One drift-fenced resolution per pass detects global snapshot churn;
         # the remaining sessions use the bulk precomputed hashes.
         try:
-            if not probe_done[0] and (
-                session_id_hash == probe_session or probe_session is None
+            if (
+                not probe_done[0]
+                and probe_attempts[0] < GRAPH_SELECTION_MAX_PROBE_ATTEMPTS
+                and (session_id_hash == probe_session or probe_session is None)
             ):
-                probe_done[0] = True
-                session["source_hash"] = session_source_revision_from_couchdb_source(
-                    session_id_hash=session_id_hash,
-                    source_store=source_store,
-                )
+                probe_attempts[0] += 1
+                try:
+                    session["source_hash"] = session_source_revision_from_couchdb_source(
+                        session_id_hash=session_id_hash,
+                        source_store=source_store,
+                    )
+                    probe_done[0] = True
+                except SourceRevisionCurrentnessLimitError as exc:
+                    session["source_hash"] = ""
+                    session[SELECTION_DEFERRED_FIELD] = _selection_error_code(exc)
+                    next_probe = next(
+                        (sid for sid in active_hashes if sid != session_id_hash), None
+                    )
+                    probe_session = next_probe
             elif session_id_hash in invalid_active:
                 # A broken active control record must not be silently treated
                 # as a legacy session; the full resolver fails closed.
@@ -946,20 +987,28 @@ def _iter_session_revisions(
                     source_store=source_store,
                 )
             else:
-                session["source_hash"] = (
-                    active_hashes.get(session_id_hash)
-                    or legacy_hashes.get(session_id_hash)
-                    or session_source_revision_from_couchdb_source(
+                legacy_hash = legacy_hashes.get(session_id_hash)
+                if legacy_hash:
+                    # Projection-only batch hashes cannot prove body integrity.
+                    # Keep them for ordering but require fail-closed validation
+                    # before they may suppress a session as already current.
+                    session["source_hash"] = legacy_hash
+                    session[SELECTION_LEGACY_HASH_FIELD] = True
+                else:
+                    session["source_hash"] = session_source_revision_from_couchdb_source(
                         session_id_hash=session_id_hash,
                         source_store=source_store,
                     )
-                )
         except SourceRevisionSnapshotChangedError:
             # Global database churn is a batch-level retry, not a per-session fault.
             raise
+        except SourceRevisionCurrentnessLimitError as exc:
+            # A currentness read/page cap means the session remains pending; it
+            # must not be dead-lettered as a corrupted source.
+            session["source_hash"] = ""
+            session[SELECTION_DEFERRED_FIELD] = _selection_error_code(exc)
         except SourceRevisionResolutionError as exc:
-            # One corrupted or over-budget session must not stop the whole batch:
-            # mark it so selection excludes it and the caller dead-letters it.
+            # A genuinely invalid source is excluded and dead-lettered.
             session["source_hash"] = ""
             session[SELECTION_ERROR_FIELD] = _selection_error_code(exc)
         yield session
@@ -1003,12 +1052,50 @@ def _update_selection_digest(digest: Any, session: dict[str, Any], *, is_current
             str(session.get("source_hash") or ""),
             bool(is_current),
             str(session.get(SELECTION_ERROR_FIELD) or ""),
+            str(session.get(SELECTION_DEFERRED_FIELD) or ""),
+            bool(session.get(SELECTION_LEGACY_HASH_FIELD) or False),
         ],
         ensure_ascii=False,
         separators=(",", ":"),
     )
     digest.update(payload.encode("utf-8"))
     digest.update(b"\n")
+def _validate_legacy_hash_for_currentness(
+    session: dict[str, Any],
+    *,
+    source_store: CouchDBSourceStore,
+    projection_state_store: LedgerGraphProjectionStateStore | None,
+    extraction_level: str | None,
+) -> None:
+    """Re-hash a projection-only hash only when it would suppress a session."""
+    if not session.get(SELECTION_LEGACY_HASH_FIELD):
+        return
+    if not _session_projection_is_current(
+        session,
+        projection_state_store=projection_state_store,
+        extraction_level=extraction_level,
+    ):
+        return
+    session_id_hash = str(session.get("session_id_hash") or "")
+    try:
+        verified = resolve_active_source_revision(
+            session_id_hash=session_id_hash,
+            store=source_store,
+            max_member_docs=MAX_GRAPH_SELECTION_SIZE,
+            deadline_monotonic=time.monotonic() + 30.0,
+        )
+    except (SourceRevisionDeferredBudget, SourceRevisionCurrentnessLimitError) as exc:
+        session["source_hash"] = ""
+        session[SELECTION_DEFERRED_FIELD] = _selection_error_code(exc)
+        session.pop(SELECTION_LEGACY_HASH_FIELD, None)
+        return
+    except SourceRevisionResolutionError as exc:
+        session["source_hash"] = ""
+        session[SELECTION_ERROR_FIELD] = _selection_error_code(exc)
+        session.pop(SELECTION_LEGACY_HASH_FIELD, None)
+        return
+    session["source_hash"] = verified.source_hash
+    session.pop(SELECTION_LEGACY_HASH_FIELD, None)
 
 
 def _round_robin_rank(
