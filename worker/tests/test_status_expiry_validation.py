@@ -46,6 +46,7 @@ INVALID = [
     "until next deploy",
     "2999-01-01T23:59:60.5Z",
     "2999-01-01T12:00:00." + "0" * 200 + "Z",
+    "2999-01-01T12:00:00." + "0" * 129 + "Z",
 ]
 
 
@@ -135,6 +136,16 @@ def test_existing_malformed_card_remains_readable_and_reviewable():
     with pytest.raises(ValueError, match="expires_at"):
         validate_memory_card_envelope(card, strict_status_expiry=True)
     assert classify_candidate_block_reason(card) == "invalid_status_expires_at"
+
+
+@pytest.mark.parametrize("suffix", ["Z", "+09:00", "-15:59"])
+def test_status_expiry_postgres_length_boundary(suffix):
+    prefix = "2999-01-01T12:00:00."
+    readable = prefix + "0" * (149 - len(prefix) - len(suffix)) + suffix
+    unreadable = prefix + "0" * (150 - len(prefix) - len(suffix)) + suffix
+    validate_status_expires_at(readable)
+    with pytest.raises(ValueError, match="expires_at"):
+        validate_status_expires_at(unreadable)
 
 
 def test_empty_expiry_remains_no_expiry():

@@ -842,7 +842,7 @@ def test_projection_field_sets_are_stable(isolated_pg_store, tmp_path):
 
     auth_item = steward.authority_pack_read(project=PROJECT)["items"][0]
     assert set(auth_item) == {
-        "memory_id", "card_type", "scope", "project", "provider", "title", "summary",
+        "memory_id", "brain_id", "card_type", "scope", "project", "provider", "title", "summary",
         "lifecycle_state", "approval_state", "freshness", "currentness", "governance_tier",
         "confidence", "confidence_basis", "supersedes", "superseded_by",
         "source_ref_count", "evidence_hash_count",
@@ -852,10 +852,11 @@ def test_projection_field_sets_are_stable(isolated_pg_store, tmp_path):
         if i["proposal_kind"] == "candidate"
     )
     assert set(review_item) == {
-        "memory_id", "proposal_kind", "proposed_by", "target_memory_id", "card_type", "scope",
+        "memory_id", "brain_id", "proposal_kind", "proposed_by", "target_memory_id", "card_type", "scope",
         "project", "provider", "title", "summary", "lifecycle_state", "judgment_state",
         "approval_state", "currentness", "freshness", "governance_tier", "confidence", "reason",
-        "supersedes", "source_ref_count", "evidence_hash_count",
+        "supersedes", "source_ref_count", "evidence_hash_count", "review_class",
+        "review_flags", "conflicts_with_memory_id",
     }
 
 
