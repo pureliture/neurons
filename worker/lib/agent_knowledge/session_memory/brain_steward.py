@@ -642,7 +642,7 @@ class BrainStewardService:
                     },
                 }
             )
-            validate_memory_card_envelope(accepted)
+            validate_memory_card_envelope(accepted, strict_status_expiry=True)
             return accepted, None
 
         changed = self._pg().steward_decision(

@@ -254,7 +254,9 @@ def build_memory_card(candidate: dict, *, approved_by: str, supersedes: str = ""
     }
 
 
-def validate_memory_card_envelope(card: Mapping[str, Any]) -> dict:
+def validate_memory_card_envelope(
+    card: Mapping[str, Any], *, strict_status_expiry: bool = False
+) -> dict:
     """Validate the LLM-brain MemoryCard v1 envelope without mutating storage."""
 
     if not isinstance(card, Mapping):
@@ -292,7 +294,10 @@ def validate_memory_card_envelope(card: Mapping[str, Any]) -> dict:
     _require_list(normalized.get("superseded_by"), "superseded_by")
     _require_list(normalized.get("conflicts"), "conflicts")
     validate_typed_payload(
-        str(normalized["card_type"]), normalized.get("typed_payload"), field_name="typed_payload"
+        str(normalized["card_type"]),
+        normalized.get("typed_payload"),
+        field_name="typed_payload",
+        strict_status_expiry=strict_status_expiry,
     )
     validate_memory_card_state_invariants(normalized)
     reason_required = (
@@ -339,7 +344,69 @@ def validate_content_hash(
     return hash_val
 
 
-def validate_typed_payload(card_type: str, payload: Mapping[str, Any], *, field_name: str = "payload") -> dict:
+_STATUS_EXPIRES_AT_RE = re.compile(
+    r"^(?P<year>[0-9]{4})-(?P<month>[0-9]{2})-(?P<day>[0-9]{2})"
+    r"T(?P<hour>[0-9]{2}):(?P<minute>[0-9]{2})"
+    r"(?::(?P<second>[0-9]{2})(?:\.(?P<fraction>[0-9]+))?)?"
+    r"(?P<tz>Z|[+-][0-9]{2}:[0-9]{2})$"
+)
+
+
+def validate_status_expires_at(value: Any, *, field_name: str = "typed_payload.expires_at") -> None:
+    """Status expiry is either absent or exactly read-safe by the PG authority filter.
+
+    The accept set is the PG regex plus PostgreSQL's calendar, UTC-offset,
+    input-capacity, and end-of-day checks. A value that would be rejected or
+    would make the authority read error is rejected here; empty means "no expiry".
+    """
+    if value in (None, ""):
+        return
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a timezone-aware ISO-8601 string")
+    if len(value) > 153:
+        raise ValueError(f"{field_name} exceeds PostgreSQL timestamp parser capacity")
+    match = _STATUS_EXPIRES_AT_RE.fullmatch(value)
+    if match is None:
+        raise ValueError(f"{field_name} must be a timezone-aware ISO-8601 string")
+    try:
+        # Reject calendar-invalid dates (for example Feb 30) before PG would cast them.
+        datetime(
+            int(match.group("year")),
+            int(match.group("month")),
+            int(match.group("day")),
+        )
+    except ValueError:
+        raise ValueError(f"{field_name} must be a valid calendar timestamp") from None
+    hour = int(match.group("hour"))
+    minute = int(match.group("minute"))
+    second = int(match.group("second") or "0")
+    fraction = match.group("fraction") or ""
+    if hour > 24 or minute > 59 or second > 60:
+        raise ValueError(f"{field_name} must be a valid calendar timestamp")
+    total_seconds = hour * 3600 + minute * 60 + second
+    if fraction:
+        total_seconds += int(fraction) / (10 ** len(fraction))
+    if total_seconds > 86400:
+        raise ValueError(f"{field_name} must be within the calendar day")
+    if hour == 24:
+        # PostgreSQL accepts 24:00(:00[.000]) only; it normalizes to the next day.
+        if minute or second or (fraction and any(ch != "0" for ch in fraction)):
+            raise ValueError(f"{field_name} must be a valid calendar timestamp")
+    timezone = match.group("tz")
+    if timezone != "Z":
+        offset_hour = int(timezone[1:3])
+        offset_minute = int(timezone[4:6])
+        if offset_hour > 15 or offset_minute > 59:
+            raise ValueError(f"{field_name} must use a valid UTC offset")
+
+
+def validate_typed_payload(
+    card_type: str,
+    payload: Mapping[str, Any],
+    *,
+    field_name: str = "payload",
+    strict_status_expiry: bool = False,
+) -> dict:
     if card_type not in MEMORY_CARD_TYPES:
         raise ValueError(f"unsupported MemoryCard card_type: {card_type}")
     if not isinstance(payload, Mapping):
@@ -347,6 +414,8 @@ def validate_typed_payload(card_type: str, payload: Mapping[str, Any], *, field_
     normalized = dict(payload)
     _require_fields(normalized, _TYPED_PAYLOAD_REQUIRED_FIELDS[card_type], field_name)
     _ensure_no_forbidden_content(normalized, field_name)
+    if card_type == "status" and strict_status_expiry:
+        validate_status_expires_at(normalized.get("expires_at"), field_name=f"{field_name}.expires_at")
     if card_type == "drift":
         _require_enum(normalized, "severity", _DRIFT_SEVERITIES, owner=field_name)
         _require_enum(normalized, "authority_lane", _DRIFT_AUTHORITY_LANES, owner=field_name)

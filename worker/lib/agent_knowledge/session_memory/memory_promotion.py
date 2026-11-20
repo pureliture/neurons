@@ -105,7 +105,7 @@ def human_approve_memory_card_candidate(
             "approved_at": approved_at,
         }
     )
-    validate_memory_card_envelope(accepted)
+    validate_memory_card_envelope(accepted, strict_status_expiry=True)
     feedback = build_feedback_record(
         candidate=accepted,
         decision_id=decision_id,
