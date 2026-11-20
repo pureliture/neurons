@@ -309,9 +309,15 @@ def _select_sessions_needing_projection(
         canonical_session_ids.add(session_id_hash)
         projected_source_hash = projected_source_hashes.get(session_id_hash, "")
         if use_bulk_hashes:
+            has_bulk_hash = (
+                session_id_hash in active_hashes
+                or session_id_hash in legacy_hashes
+            )
             current_source_hash = active_hashes.get(session_id_hash) or legacy_hashes.get(session_id_hash, "")
-            if session_id_hash in invalid_active or (
-                not probe_done and (session_id_hash == probe_session or probe_session is None)
+            if (
+                session_id_hash in invalid_active
+                or not has_bulk_hash
+                or (not probe_done and (session_id_hash == probe_session or probe_session is None))
             ):
                 probe_done = True
                 current_source_hash = resolve_source_hash_for_currentness(
