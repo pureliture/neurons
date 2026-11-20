@@ -355,14 +355,16 @@ _STATUS_EXPIRES_AT_RE = re.compile(
 def validate_status_expires_at(value: Any, *, field_name: str = "typed_payload.expires_at") -> None:
     """Status expiry is either absent or exactly read-safe by the PG authority filter.
 
-    The accept set is the PG regex plus the same calendar/offset checks PostgreSQL
-    applies while casting to timestamptz. A value that would be rejected or would
-    make the authority read error is rejected here; empty means "no expiry".
+    The accept set is the PG regex plus PostgreSQL's calendar, UTC-offset,
+    input-capacity, and end-of-day checks. A value that would be rejected or
+    would make the authority read error is rejected here; empty means "no expiry".
     """
     if value in (None, ""):
         return
     if not isinstance(value, str):
         raise ValueError(f"{field_name} must be a timezone-aware ISO-8601 string")
+    if len(value) > 153:
+        raise ValueError(f"{field_name} exceeds PostgreSQL timestamp parser capacity")
     match = _STATUS_EXPIRES_AT_RE.fullmatch(value)
     if match is None:
         raise ValueError(f"{field_name} must be a timezone-aware ISO-8601 string")
@@ -381,6 +383,11 @@ def validate_status_expires_at(value: Any, *, field_name: str = "typed_payload.e
     fraction = match.group("fraction") or ""
     if hour > 24 or minute > 59 or second > 60:
         raise ValueError(f"{field_name} must be a valid calendar timestamp")
+    total_seconds = hour * 3600 + minute * 60 + second
+    if fraction:
+        total_seconds += int(fraction) / (10 ** len(fraction))
+    if total_seconds > 86400:
+        raise ValueError(f"{field_name} must be within the calendar day")
     if hour == 24:
         # PostgreSQL accepts 24:00(:00[.000]) only; it normalizes to the next day.
         if minute or second or (fraction and any(ch != "0" for ch in fraction)):

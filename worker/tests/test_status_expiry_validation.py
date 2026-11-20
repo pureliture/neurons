@@ -44,6 +44,8 @@ INVALID = [
     "2026-11-20T12:00:00+15:60",
     "2026-11-20T12:00:00-16:00",
     "until next deploy",
+    "2999-01-01T23:59:60.5Z",
+    "2999-01-01T12:00:00." + "0" * 200 + "Z",
 ]
 
 
@@ -140,7 +142,15 @@ def test_empty_expiry_remains_no_expiry():
     validate_typed_payload("status", _status_payload(""), strict_status_expiry=True)
 
 
-@pytest.mark.parametrize("value", ["2026-11-20 12:00:00+00:00", "until next deploy"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "2026-11-20 12:00:00+00:00",
+        "until next deploy",
+        "2999-01-01T23:59:60.5Z",
+        "2999-01-01T12:00:00." + "0" * 200 + "Z",
+    ],
+)
 def test_auto_accept_blocks_non_pg_readable_expiry(value):
     candidate = _accepted_card(value)
     candidate["lifecycle_state"] = "needs_review"

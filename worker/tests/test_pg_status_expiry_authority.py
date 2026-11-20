@@ -67,12 +67,20 @@ def test_malformed_expiry_is_readable_reviewable_but_not_authority_or_approvable
     disabled = _envelope("status_disabled", FUTURE, auth="disabled")
     other = _envelope("status_other_project", FUTURE, project="another-project")
     invalid_calendar = _envelope("status_invalid_calendar", "2026-02-30T12:00:00Z")
-    for card in (malformed, valid, expired, disabled, other, invalid_calendar):
+    invalid_fraction = _envelope(
+        "status_invalid_fraction", "2999-01-01T12:00:00." + "0" * 200 + "Z"
+    )
+    invalid_combined = _envelope("status_invalid_combined", "2999-01-01T23:59:60.5Z")
+    cards = (
+        malformed, valid, expired, disabled, other,
+        invalid_calendar, invalid_fraction, invalid_combined,
+    )
+    for card in cards:
         _seed(store, card)
 
     authorized = store.list_authorized_cards(
         project=PROJECT,
-        memory_ids=[c["memory_id"] for c in (malformed, valid, expired, disabled, other, invalid_calendar)],
+        memory_ids=[c["memory_id"] for c in cards],
         limit=10,
     )
     assert [c["memory_id"] for c in authorized] == [valid["memory_id"]]
