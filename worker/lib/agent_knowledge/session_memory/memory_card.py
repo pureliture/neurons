@@ -355,15 +355,15 @@ _STATUS_EXPIRES_AT_RE = re.compile(
 def validate_status_expires_at(value: Any, *, field_name: str = "typed_payload.expires_at") -> None:
     """Status expiry is either absent or exactly read-safe by the PG authority filter.
 
-    The accept set is the PG regex plus PostgreSQL's calendar, UTC-offset,
-    input-capacity, and end-of-day checks. A value that would be rejected or
-    would make the authority read error is rejected here; empty means "no expiry".
+    Apply a conservative subset of PostgreSQL's timestamp syntax and limits.
+    Some PostgreSQL-readable boundary values are rejected rather than risking
+    acceptance of values the authority filter cannot read. Empty means no expiry.
     """
     if value in (None, ""):
         return
     if not isinstance(value, str):
         raise ValueError(f"{field_name} must be a timezone-aware ISO-8601 string")
-    if len(value) > 153:
+    if len(value) > 149:
         raise ValueError(f"{field_name} exceeds PostgreSQL timestamp parser capacity")
     match = _STATUS_EXPIRES_AT_RE.fullmatch(value)
     if match is None:
