@@ -385,3 +385,50 @@ def test_bulk_hash_missing_fallback_preserves_projected_blocked_and_propagates_e
             provider="",
             embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
         )
+
+
+def test_bodyless_bundle_with_null_content_hash_matches_per_session() -> None:
+    store = InMemoryCouchDBSourceStore()
+    sid, _ = _seed_legacy_session(
+        store,
+        "bodyless-null-ch",
+        extra_bundle_fields={"content_hash": None},
+    )
+
+    bulk = sr.iter_legacy_source_hashes(store)
+    assert sid in bulk
+    assert bulk[sid] == sr.resolve_source_hash_for_currentness(
+        session_id_hash=sid,
+        store=store,
+    )
+    assert bulk[sid] == sr.resolve_active_source_revision(
+        session_id_hash=sid,
+        store=store,
+    ).source_hash
+
+
+def test_bulk_selection_isolates_per_session_resolution_error_and_continues(capsys) -> None:
+    store = InMemoryCouchDBSourceStore()
+    store.base_url = "http://couchdb.test"
+    sids = [
+        _seed_legacy_session(store, f"iso-{idx}")[0]
+        for idx in range(10)
+    ]
+    sorted_sids = sorted(sids)
+    bad_sid, ok_sid_1, ok_sid_2 = sorted_sids[0], sorted_sids[1], sorted_sids[2]
+    bad_bundle_id = dm.tool_evidence_bundle_doc_id(bad_sid, 0)
+    store._docs[bad_bundle_id]["body"] = "unhashed body"
+
+    selected = _select_sessions_needing_projection(
+        store,
+        limit=2,
+        backend="postgres_pgvector",
+        project="",
+        provider="",
+        embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
+    )
+
+    assert [row["session_id_hash"] for row in selected] == [ok_sid_1, ok_sid_2]
+    err = capsys.readouterr().err
+    assert "[selection] unresolved_skipped=1 last_reason=sourcerevisionresolutionerror" in err
+    assert bad_sid not in err

@@ -2113,7 +2113,7 @@ def iter_legacy_source_hashes(
             for document in store.iter_by_type(
                 dm.SourceDocType.TOOL_EVIDENCE_BUNDLE,
                 fields=None,
-                selector={"$or": [{"content_hash": {"$exists": False}}, {"content_hash": ""}]},
+                selector={"$or": [{"content_hash": {"$exists": False}}, {"content_hash": ""}, {"content_hash": None}]},
                 **scan_kwargs,
             ):
                 doc_id = str(document.get("_id") or "")
