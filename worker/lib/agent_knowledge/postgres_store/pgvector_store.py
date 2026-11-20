@@ -4917,6 +4917,7 @@ _STATUS_EXPIRY_FILTER = r"""(
     OR CASE
         WHEN typed_payload->>'expires_at' ~
              '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$'
+             AND pg_input_is_valid(typed_payload->>'expires_at', 'timestamptz')
         THEN (typed_payload->>'expires_at')::timestamptz > %s
         ELSE FALSE
        END

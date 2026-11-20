@@ -3,7 +3,11 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Mapping
 
-from .memory_card import validate_feedback_record, validate_memory_card_envelope
+from .memory_card import (
+    validate_feedback_record,
+    validate_memory_card_envelope,
+    validate_status_expires_at,
+)
 from .memory_promotion import ACCEPTED_EVIDENCE_KINDS, mark_candidate_needs_review
 
 
@@ -132,6 +136,15 @@ def apply_auto_acceptance_plan(
     operator_approval_ref: str = "",
     requested_operations: list[str] | None = None,
 ) -> dict:
+    candidate_block_reason = classify_candidate_block_reason(candidate)
+    if candidate_block_reason:
+        return {
+            "schema_version": "llm_brain_auto_acceptance_application.v1",
+            "status": "blocked_invalid_candidate",
+            "accepted_truth_changed": False,
+            "write_performed": False,
+            "reason": candidate_block_reason,
+        }
     try:
         _validate_requested_auto_operations(
             [*list(evaluation.get("requested_operations") or []), *list(requested_operations or [])]
@@ -151,7 +164,7 @@ def apply_auto_acceptance_plan(
             "accepted_truth_changed": False,
             "write_performed": False,
         }
-    if not _accepted_evidence_basis(validate_memory_card_envelope(candidate)) or not evaluation.get("accepted_evidence_basis"):
+    if not _accepted_evidence_basis(validate_memory_card_envelope(candidate, strict_status_expiry=True)) or not evaluation.get("accepted_evidence_basis"):
         return {
             "schema_version": "llm_brain_auto_acceptance_application.v1",
             "status": "blocked_missing_accepted_evidence",
@@ -175,7 +188,7 @@ def apply_auto_acceptance_plan(
             "write_performed": False,
             "reason": "operator_approval_ref is required for auto accepted/current truth confirmation",
         }
-    card = deepcopy(validate_memory_card_envelope(candidate))
+    card = deepcopy(validate_memory_card_envelope(candidate, strict_status_expiry=True))
     card.update(
         {
             "lifecycle_state": "auto_accepted",
@@ -189,7 +202,7 @@ def apply_auto_acceptance_plan(
             "reason_capsule": dict(evaluation["reason_capsule"]),
         }
     )
-    validate_memory_card_envelope(card)
+    validate_memory_card_envelope(card, strict_status_expiry=True)
     return {
         "schema_version": "llm_brain_auto_acceptance_application.v1",
         "status": "auto_accepted",
@@ -232,6 +245,11 @@ def classify_candidate_block_reason(candidate: Mapping[str, Any]) -> str:
     if candidate.get("currentness") == "conflicted":
         return "conflict"
     payload = candidate.get("typed_payload") or {}
+    if candidate.get("card_type") == "status":
+        try:
+            validate_status_expires_at(payload.get("expires_at"))
+        except ValueError:
+            return "invalid_status_expires_at"
     if candidate.get("card_type") == "drift" and payload.get("severity") == "high":
         return "high_severity_drift"
     return ""
@@ -245,6 +263,11 @@ def _forced_review_reason(card: Mapping[str, Any], policy: Mapping[str, Any]) ->
     if card.get("currentness") == "conflicted":
         return "conflict"
     payload = card.get("typed_payload") or {}
+    if card.get("card_type") == "status":
+        try:
+            validate_status_expires_at(payload.get("expires_at"))
+        except ValueError:
+            return "invalid_status_expires_at"
     if card.get("card_type") == "drift" and payload.get("severity") == "high":
         return "high_severity_drift"
     if card.get("governance_tier") not in tuple(policy["allowed_governance_tiers"]):
