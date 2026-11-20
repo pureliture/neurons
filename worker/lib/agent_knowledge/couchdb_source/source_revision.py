@@ -1634,11 +1634,34 @@ def _get_bounded_currentness_document(
         raise
 
 
+def _is_bodyless_tool_evidence_bundle(
+    document: Mapping[str, object], *, full_document: bool = False
+) -> bool:
+    """True only when a tool_evidence_bundle is proven to carry no body.
+
+    Streamed descriptors set ``__source_document_hash`` for every full document
+    and set ``__body_hash`` whenever a ``body`` key is present, so absence of
+    ``__body_hash`` proves no body exists. Non-streamed callers must pass
+    ``full_document=True`` from a full-document read; projected metadata rows
+    remain fail-closed.
+    """
+    if str(document.get("doc_type") or "") != dm.SourceDocType.TOOL_EVIDENCE_BUNDLE:
+        return False
+    if str(document.get("content_hash") or ""):
+        return False
+    if "__source_document_hash" in document:
+        return "__body_hash" not in document
+    if not full_document:
+        return False
+    return document.get("body") in (None, "")
+
+
 def _currentness_component(
     document: Mapping[str, object],
     *,
     budget: dict[str, int],
     validated_descriptor: Mapping[str, object] | None = None,
+    full_document: bool = False,
 ) -> dict[str, str]:
     doc_type = str(document.get("doc_type") or "")
     if (
@@ -1649,12 +1672,24 @@ def _currentness_component(
         raise SourceRevisionResolutionError(
             "source revision body hash does not match its content hash"
         )
+    if (
+        full_document
+        and doc_type in _BODY_MATERIAL_DOC_TYPES
+        and not str(document.get("content_hash") or "")
+        and document.get("body") not in (None, "")
+    ):
+        raise SourceRevisionResolutionError(
+            "source revision currentness requires a material hash for body-bearing source types"
+        )
     if validated_descriptor is None:
         try:
             material_hash_field, _ = _material_identity(document)
             if (
                 material_hash_field == "document_hash"
                 and doc_type != dm.SourceDocType.TRANSCRIPT_SESSION
+                and not _is_bodyless_tool_evidence_bundle(
+                    document, full_document=full_document
+                )
             ):
                 raise SourceRevisionResolutionError(
                     "source revision currentness requires a material hash for body-free source types"
@@ -1924,6 +1959,13 @@ def _active_currentness_components(
     return components
 
 
+def _has_material_hash_field(document: Mapping[str, object]) -> bool:
+    return any(
+        str(document.get(field) or "")
+        for field in ("content_hash", "coverage_hash", "source_hash")
+    )
+
+
 def _legacy_currentness_components(
     *,
     store: CouchDBSourceStore,
@@ -1950,7 +1992,39 @@ def _legacy_currentness_components(
                 raise SourceRevisionResolutionError(
                     "transcript session currentness record unexpectedly contains a body"
                 )
-            components.append(_currentness_component(document, budget=budget))
+            full_document = False
+            if (
+                doc_type == dm.SourceDocType.TOOL_EVIDENCE_BUNDLE
+                and "__source_document_hash" not in document
+                and not _has_material_hash_field(document)
+            ):
+                doc_id = str(document.get("_id") or "")
+                if not doc_id:
+                    raise SourceRevisionResolutionError(
+                        "source revision currentness requires a material hash for body-free source types"
+                    )
+                loaded = _get_bounded_currentness_document(
+                    store=store,
+                    document_id=doc_id,
+                    max_response_bytes=currentness_page_bytes(),
+                    reason_code="source_revision_page_bytes_exceeded",
+                )
+                if (
+                    loaded is None
+                    or _is_immutable_source_copy(loaded)
+                    or str(loaded.get("session_id_hash") or "") != session_id_hash
+                    or str(loaded.get("doc_type") or "") != doc_type
+                ):
+                    raise SourceRevisionResolutionError(
+                        "source revision currentness member changed during scan"
+                    )
+                document = loaded
+                full_document = True
+            components.append(
+                _currentness_component(
+                    document, budget=budget, full_document=full_document
+                )
+            )
     return components
 
 
@@ -1992,6 +2066,7 @@ def iter_legacy_source_hashes(
         # Production has a doc_type Mango index. Forcing it avoids a full DB
         # scan per bookmark page (which stalled selection for 10+ minutes).
         scan_kwargs.update(use_index=use_index, allow_fallback=False)
+    bodyless_bundle_candidates: dict[str, str] = {}
     for doc_type in (
         dm.SourceDocType.TRANSCRIPT_SESSION,
         dm.SourceDocType.CONVERSATION_CHUNK,
@@ -2008,6 +2083,18 @@ def iter_legacy_source_hashes(
                 invalid.add(session_id_hash)
                 components_by_session.pop(session_id_hash, None)
                 continue
+            if (
+                doc_type == dm.SourceDocType.TOOL_EVIDENCE_BUNDLE
+                and "__source_document_hash" not in document
+                and not _has_material_hash_field(document)
+            ):
+                doc_id = str(document.get("_id") or "")
+                if not doc_id or doc_id in bodyless_bundle_candidates:
+                    invalid.add(session_id_hash)
+                    components_by_session.pop(session_id_hash, None)
+                    continue
+                bodyless_bundle_candidates[doc_id] = session_id_hash
+                continue
             budget = budgets.setdefault(session_id_hash, {"rows": 0, "compact_bytes": 0})
             try:
                 _consume_currentness_row(budget)
@@ -2017,6 +2104,56 @@ def iter_legacy_source_hashes(
                 components_by_session.pop(session_id_hash, None)
                 continue
             components_by_session.setdefault(session_id_hash, []).append(component)
+
+    if bodyless_bundle_candidates:
+        # Second bounded pass verifies full documents for hashless metadata-only
+        # tool_evidence_bundles so body-bearing tampering still fails closed.
+        seen_bodyless_ids: set[str] = set()
+        try:
+            for document in store.iter_by_type(
+                dm.SourceDocType.TOOL_EVIDENCE_BUNDLE,
+                fields=None,
+                selector={"$or": [{"content_hash": {"$exists": False}}, {"content_hash": ""}]},
+                **scan_kwargs,
+            ):
+                doc_id = str(document.get("_id") or "")
+                expected_sid = bodyless_bundle_candidates.get(doc_id)
+                if not expected_sid:
+                    continue
+                if doc_id in seen_bodyless_ids:
+                    invalid.add(expected_sid)
+                    components_by_session.pop(expected_sid, None)
+                    continue
+                seen_bodyless_ids.add(doc_id)
+                if expected_sid in invalid:
+                    continue
+                if (
+                    _is_immutable_source_copy(document)
+                    or str(document.get("doc_type") or "") != dm.SourceDocType.TOOL_EVIDENCE_BUNDLE
+                    or str(document.get("session_id_hash") or "") != expected_sid
+                    or _has_material_hash_field(document)
+                ):
+                    invalid.add(expected_sid)
+                    components_by_session.pop(expected_sid, None)
+                    continue
+                budget = budgets.setdefault(expected_sid, {"rows": 0, "compact_bytes": 0})
+                try:
+                    _consume_currentness_row(budget)
+                    component = _currentness_component(
+                        document, budget=budget, full_document=True
+                    )
+                except SourceRevisionResolutionError:
+                    invalid.add(expected_sid)
+                    components_by_session.pop(expected_sid, None)
+                    continue
+                components_by_session.setdefault(expected_sid, []).append(component)
+        except Exception as exc:
+            if getattr(exc, "code", "") != "couchdb_response_too_large":
+                raise
+        for doc_id, expected_sid in bodyless_bundle_candidates.items():
+            if doc_id not in seen_bodyless_ids:
+                invalid.add(expected_sid)
+                components_by_session.pop(expected_sid, None)
 
     hashes: dict[str, str] = {}
     for session_id_hash, components in components_by_session.items():
