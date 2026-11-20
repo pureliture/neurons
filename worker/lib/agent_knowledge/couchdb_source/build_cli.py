@@ -190,6 +190,7 @@ def _select_sessions_needing_projection(
         session_doc_id,
     )
     from .source_revision import (
+        SourceRevisionResolutionError,
         iter_active_source_hashes,
         iter_legacy_source_hashes,
         resolve_active_source_revision_from_snapshot,
@@ -284,6 +285,8 @@ def _select_sessions_needing_projection(
     canonical_session_ids: set[str] = set()
     current_only_session_ids: list[str] = []
     current_only_seen: set[str] = set()
+    unresolved_skipped = 0
+    last_unresolved_reason = ""
     sessions = iter(
         _iter_by_type(
             store,
@@ -309,14 +312,25 @@ def _select_sessions_needing_projection(
         canonical_session_ids.add(session_id_hash)
         projected_source_hash = projected_source_hashes.get(session_id_hash, "")
         if use_bulk_hashes:
+            has_bulk_hash = (
+                session_id_hash in active_hashes
+                or session_id_hash in legacy_hashes
+            )
             current_source_hash = active_hashes.get(session_id_hash) or legacy_hashes.get(session_id_hash, "")
-            if session_id_hash in invalid_active or (
-                not probe_done and (session_id_hash == probe_session or probe_session is None)
+            if (
+                session_id_hash in invalid_active
+                or not has_bulk_hash
+                or (not probe_done and (session_id_hash == probe_session or probe_session is None))
             ):
                 probe_done = True
-                current_source_hash = resolve_source_hash_for_currentness(
-                    session_id_hash=session_id_hash, store=store
-                )
+                try:
+                    current_source_hash = resolve_source_hash_for_currentness(
+                        session_id_hash=session_id_hash, store=store
+                    )
+                except SourceRevisionResolutionError as exc:
+                    unresolved_skipped += 1
+                    last_unresolved_reason = _safe_reason_code(type(exc).__name__)
+                    continue
             if session_id_hash in active_hashes:
                 scope = active_scope.get(session_id_hash, {})
                 if (
@@ -404,6 +418,11 @@ def _select_sessions_needing_projection(
             if blocked_source_hashes.get(session_id_hash) == resolved.source_hash:
                 continue
             selected.append(session)
+    if unresolved_skipped:
+        print(
+            f"[selection] unresolved_skipped={unresolved_skipped} last_reason={last_unresolved_reason}",
+            file=sys.stderr,
+        )
     return selected
 
 
