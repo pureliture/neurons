@@ -18,11 +18,13 @@ identity_conflicts_auto_resolved, projected, schema_version, selected, skipped.
 from __future__ import annotations
 
 import argparse
+import copy
 import base64
 import json
 import os
 import sys
 import re
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from agent_knowledge.pipeline_progress import emit_progress
@@ -175,6 +177,7 @@ def _select_sessions_needing_projection(
     embedding_profile: str = "",
     representation: str = "session_v1",
     dead_letter_lookup=None,
+    ready_content_lookup=None,
 ) -> list[dict]:
     """Return sessions whose projected revision is not the current source revision.
 
@@ -240,6 +243,11 @@ def _select_sessions_needing_projection(
         ]
     else:
         states = raw_states
+    state_by_id = {
+        str(state.get("session_id_hash") or ""): state
+        for state in states
+        if str(state.get("session_id_hash") or "")
+    }
     projected_source_hashes = {
         session_id_hash: str(state.get("projected_source_hash") or "")
         for state in states
@@ -359,6 +367,24 @@ def _select_sessions_needing_projection(
                 and (session_id_hash, current_source_hash) in legacy_ready
             ):
                 continue
+            state = state_by_id.get(session_id_hash, {})
+            if (
+                backend == "postgres_pgvector"
+                and projected_source_hash
+                and projected_source_hash != current_source_hash
+                and str(state.get("projection_status") or "") == ProjectionStatus.PROJECTED
+                and _ready_content_matches(
+                    ready_content_lookup,
+                    state,
+                    session_id_hash=session_id_hash,
+                    project=project,
+                    provider=provider,
+                )
+                and _repair_projected_source_hash(
+                    store, state, session_id_hash, current_source_hash
+                )
+            ):
+                continue
             if blocked_source_hashes.get(session_id_hash) == current_source_hash:
                 continue
             selected.append(session)
@@ -416,6 +442,24 @@ def _select_sessions_needing_projection(
                 and (session_id_hash, resolved.source_hash) in legacy_ready
             ):
                 continue
+            state = state_by_id.get(session_id_hash, {})
+            if (
+                backend == "postgres_pgvector"
+                and projected_source_hash
+                and projected_source_hash != resolved.source_hash
+                and str(state.get("projection_status") or "") == ProjectionStatus.PROJECTED
+                and _ready_content_matches(
+                    ready_content_lookup,
+                    state,
+                    session_id_hash=session_id_hash,
+                    project=project,
+                    provider=provider,
+                )
+                and _repair_projected_source_hash(
+                    store, state, session_id_hash, resolved.source_hash
+                )
+            ):
+                continue
             if blocked_source_hashes.get(session_id_hash) == resolved.source_hash:
                 continue
             selected.append(session)
@@ -466,6 +510,7 @@ def _write_selection_checkpoint(
     pending_session_ids: list[str] | tuple[str, ...] = (),
     full_walk_in_progress: bool = False,
     pending_attempts: dict[str, int] | None = None,
+    exhausted_session_ids: dict[str, str] | None = None,
 ) -> None:
     import datetime
 
@@ -490,6 +535,10 @@ def _write_selection_checkpoint(
     if pending_attempts:
         payload["pending_session_attempts"] = {
             str(key): int(value) for key, value in pending_attempts.items() if str(key)
+        }
+    if exhausted_session_ids:
+        payload["exhausted_session_ids"] = {
+            str(key): str(value) for key, value in exhausted_session_ids.items() if str(key)
         }
     # A full walk that stopped at its cap has not examined the remaining tail.
     # Record that instead of claiming the database-wide sequence as seen, so the
@@ -575,6 +624,57 @@ def _legacy_ready_projection_sessions(store, states: list[dict]) -> set[tuple[st
             result.add((session_id_hash, source_hash))
     return result
 
+
+
+def _ready_content_matches(
+    ready_content_lookup,
+    state: dict,
+    *,
+    session_id_hash: str,
+    project: str,
+    provider: str,
+) -> bool:
+    if ready_content_lookup is None:
+        return False
+    active_content_hash = str(state.get("active_content_hash") or "")
+    if not active_content_hash:
+        return False
+    try:
+        return bool(
+            ready_content_lookup(
+                session_id_hash=session_id_hash,
+                project=project,
+                provider=provider,
+                content_hash=active_content_hash,
+            )
+        )
+    except Exception:
+        return False
+
+
+def _repair_projected_source_hash(
+    store,
+    state: dict,
+    session_id_hash: str,
+    current_source_hash: str,
+) -> bool:
+    """Repair a stale source-hash pointer after verifying identical content."""
+    repaired = copy.deepcopy(state)
+    repaired["projected_source_hash"] = current_source_hash
+    repaired["source_hash_repaired_at"] = datetime.now(timezone.utc).isoformat()
+    receipts = repaired.get("backend_receipts")
+    if isinstance(receipts, dict) and isinstance(receipts.get("postgres_pgvector"), dict):
+        receipts["postgres_pgvector"]["projected_source_hash"] = current_source_hash
+    result = store.put(repaired)
+    return str(getattr(result, "outcome", "")) != "conflict"
+
+
+def _recorded_source_hash(store, session_id_hash: str) -> str:
+    from .document_model import projection_state_doc_id
+
+    state = store.get(projection_state_doc_id(session_id_hash)) or {}
+    return str(state.get("source_hash") or "")
+
 def _evaluate_session_change(
     store,
     session_id_hash: str,
@@ -584,6 +684,7 @@ def _evaluate_session_change(
     embedding_profile: str = "",
     representation: str = "session_v1",
     dead_letter_lookup=None,
+    ready_content_lookup=None,
 ) -> tuple[bool, dict | None]:
     """Single-session mirror of ``_select_sessions_needing_projection`` (pg backend).
 
@@ -676,6 +777,22 @@ def _evaluate_session_change(
             merged, embedding_profile=embedding_profile
         ) != representation
     ):
+        if (
+            projected_source_hash
+            and projected_source_hash != current_source_hash
+            and str(state.get("projection_status") or "") == ProjectionStatus.PROJECTED
+            and _ready_content_matches(
+                ready_content_lookup,
+                merged,
+                session_id_hash=session_id_hash,
+                project=project,
+                provider=provider,
+            )
+            and _repair_projected_source_hash(
+                store, state, session_id_hash, current_source_hash
+            )
+        ):
+            return False, None
         if _has_legacy_ready_projection_evidence(
             merged, documents, session_id_hash, current_source_hash
         ):
@@ -695,6 +812,7 @@ def _select_sessions_incremental(
     embedding_profile: str = "",
     representation: str = "session_v1",
     dead_letter_lookup=None,
+    ready_content_lookup=None,
 ) -> tuple[list[dict], dict, int]:
     """Change-feed driven selection.
 
@@ -752,6 +870,7 @@ def _select_sessions_incremental(
             embedding_profile=embedding_profile,
             representation=representation,
             dead_letter_lookup=dead_letter_lookup,
+            ready_content_lookup=ready_content_lookup,
         )
         if needs and session is not None:
             selected.append(session)
@@ -817,6 +936,7 @@ def _resolve_pending_sessions(
     embedding_profile: str = "",
     representation: str = "session_v1",
     dead_letter_lookup=None,
+    ready_content_lookup=None,
 ) -> list[dict]:
     """Re-select previously chosen sessions whose projection is still unfinished.
 
@@ -839,6 +959,7 @@ def _resolve_pending_sessions(
                 embedding_profile=embedding_profile,
                 representation=representation,
                 dead_letter_lookup=dead_letter_lookup,
+                ready_content_lookup=ready_content_lookup,
             )
         except ProjectionDeadLetterLookupError:
             raise
@@ -862,6 +983,7 @@ def _select_sessions_for_cycle(
     representation: str = "session_v1",
     dead_letter_lookup=None,
     persist: bool = True,
+    ready_content_lookup=None,
 ) -> list[dict]:
     """Checkpoint-aware selection: incremental when possible, full walk otherwise.
 
@@ -930,8 +1052,15 @@ def _select_sessions_for_cycle(
         embedding_profile=embedding_profile,
         representation=representation,
         dead_letter_lookup=dead_letter_lookup,
+        ready_content_lookup=ready_content_lookup,
     )
     pending_attempts = dict(checkpoint.get("pending_session_attempts") or {})
+    exhausted = dict(checkpoint.get("exhausted_session_ids") or {})
+    for identity, recorded_hash in list(exhausted.items()):
+        current_hash = _recorded_source_hash(store, identity)
+        if current_hash and current_hash != recorded_hash:
+            exhausted.pop(identity, None)
+            pending_attempts.pop(identity, None)
     attempts_before = set(pending_attempts)
     pending_sessions, pending_attempts, dropped_pending = _apply_pending_attempt_cap(
         pending_sessions, pending_attempts
@@ -942,6 +1071,9 @@ def _select_sessions_for_cycle(
             file=sys.stderr,
         )
     exhausted_identities = attempts_before - set(pending_attempts)
+    for identity in exhausted_identities:
+        exhausted[identity] = _recorded_source_hash(store, identity)
+        pending_attempts[identity] = MAX_PENDING_ATTEMPTS
     if limit <= 0:
         processed_pending = pending_sessions
         fresh_limit: int | None = None  # unlimited
@@ -966,6 +1098,7 @@ def _select_sessions_for_cycle(
                 embedding_profile=embedding_profile,
                 representation=representation,
                 dead_letter_lookup=dead_letter_lookup,
+                ready_content_lookup=ready_content_lookup,
             )
         except ProjectionDeadLetterLookupError:
             raise
@@ -978,7 +1111,7 @@ def _select_sessions_for_cycle(
             fresh = [
                 session
                 for session in fresh
-                if _session_identity(session) not in exhausted_identities
+                if _session_identity(session) not in exhausted
             ]
             sessions = _dedupe_sessions(processed_pending + fresh)
             next_seq = str(new_checkpoint.get("last_seq") or last_seq)
@@ -1014,11 +1147,12 @@ def _select_sessions_for_cycle(
             embedding_profile=embedding_profile,
             representation=representation,
             dead_letter_lookup=dead_letter_lookup,
+            ready_content_lookup=ready_content_lookup,
         )
         fresh = [
             session
             for session in fresh
-            if _session_identity(session) not in exhausted_identities
+            if _session_identity(session) not in exhausted
         ]
         sessions = _dedupe_sessions(processed_pending + fresh)
         capped = fresh_limit is not None and fresh_limit > 0 and len(fresh) >= fresh_limit
@@ -1045,8 +1179,9 @@ def _select_sessions_for_cycle(
                 pending_attempts={
                     key: value
                     for key, value in pending_attempts.items()
-                    if key in set(durable_pending)
+                    if key in set(durable_pending) or key in exhausted
                 },
+                exhausted_session_ids=exhausted,
             )
         except OSError:
             pass
@@ -1212,6 +1347,34 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
 
+    ready_content_lookup = None
+    if dead_letter_lookup is not None and hasattr(
+        dead_letter_lookup, "find_ready_chunk_by_identity"
+    ):
+        from ..model_connectors import DEFAULT_EMBEDDING_PROFILE_ID
+
+        lookup_store = dead_letter_lookup
+        lookup_profile = str(embedding_profile or DEFAULT_EMBEDDING_PROFILE_ID)
+
+        def ready_content_lookup(
+            *, session_id_hash: str, project: str, provider: str, content_hash: str
+        ) -> bool:
+            if not content_hash:
+                return False
+            try:
+                return (
+                    lookup_store.find_ready_chunk_by_identity(
+                        session_id_hash=session_id_hash,
+                        project=project,
+                        provider=provider,
+                        content_hash=content_hash,
+                        embedding_model=lookup_profile,
+                    )
+                    is not None
+                )
+            except Exception:
+                return False
+
     # --- Session selection --------------------------------------------------
     # A single start marker lets the checker distinguish an instrumented image
     # from one that predates progress events; it is not a repeated heartbeat.
@@ -1253,6 +1416,7 @@ def main(argv: list[str] | None = None) -> int:
                 representation=representation,
                 dead_letter_lookup=dead_letter_lookup,
                 persist=not args.dry_run,
+                ready_content_lookup=ready_content_lookup,
             )
     except ProjectionDeadLetterLookupError as exc:
         print(
