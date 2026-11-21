@@ -19,7 +19,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Mapping
 
-from .idempotency import IdempotencyDecision, IdempotencyOutcome, classify_idempotency
+from .idempotency import (
+    IdempotencyDecision,
+    IdempotencyOutcome,
+    classify_idempotency,
+    envelope_fingerprint,
+)
 
 
 SQLITE_BUSY_TIMEOUT_MS = 60000
@@ -53,6 +58,7 @@ class DeliveryJobSpec:
     payload_hash: str
     status: str = "pending"
     next_retry_at: str = ""
+    envelope_fingerprint: str = ""
 
 
 @dataclass(frozen=True)
@@ -189,6 +195,7 @@ class RAGIngressStateDB:
                     event_id TEXT PRIMARY KEY,
                     idempotency_key TEXT NOT NULL,
                     payload_hash TEXT NOT NULL,
+                    envelope_fingerprint TEXT NOT NULL DEFAULT '',
                     source TEXT DEFAULT '',
                     kind TEXT DEFAULT '',
                     target_profile TEXT DEFAULT '',
@@ -212,6 +219,7 @@ class RAGIngressStateDB:
                     session_id_hash TEXT DEFAULT '',
                     idempotency_key TEXT NOT NULL,
                     payload_hash TEXT NOT NULL,
+                    envelope_fingerprint TEXT NOT NULL DEFAULT '',
                     input_epoch TEXT DEFAULT '',
                     status TEXT NOT NULL,
                     lease_owner TEXT DEFAULT '',
@@ -262,6 +270,7 @@ class RAGIngressStateDB:
                     command_id TEXT NOT NULL REFERENCES commands(command_id) ON DELETE RESTRICT,
                     idempotency_key TEXT NOT NULL,
                     payload_hash TEXT NOT NULL,
+                    envelope_fingerprint TEXT NOT NULL DEFAULT '',
                     target_profile TEXT NOT NULL,
                     document_kind TEXT NOT NULL,
                     status TEXT NOT NULL,
@@ -290,12 +299,14 @@ class RAGIngressStateDB:
                 CREATE TABLE IF NOT EXISTS delivery_payloads (
                     idempotency_key TEXT PRIMARY KEY,
                     payload_hash TEXT NOT NULL,
+                    envelope_fingerprint TEXT NOT NULL DEFAULT '',
                     payload_json TEXT NOT NULL,
                     recorded_at TEXT NOT NULL
                 );
                 """
             )
             _migrate_backend_neutral_delivery_schema(connection)
+            _migrate_envelope_fingerprint_schema(connection)
 
     def command_transaction(self) -> "CommandTransaction":
         return CommandTransaction(self)
@@ -314,36 +325,61 @@ class RAGIngressStateDB:
             raise ValueError("idempotencyKey is required")
         if not payload_hash:
             raise ValueError("contentHash is required")
+        fingerprint = envelope_fingerprint(payload)
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            existing = connection.execute(
+            # The committed command is authoritative: it is the row that gates
+            # command creation and delivery jobs. Check it before the inbox
+            # shadow so a re-sync cannot pass on a stale inbox-only view.
+            command = connection.execute(
                 """
-                SELECT * FROM inbox_events
+                SELECT * FROM commands
                 WHERE idempotency_key = ?
                 ORDER BY created_at ASC
                 LIMIT 1
                 """,
                 (idempotency_key,),
             ).fetchone()
+            existing = command
+            if existing is None:
+                existing = connection.execute(
+                    """
+                    SELECT * FROM inbox_events
+                    WHERE idempotency_key = ?
+                    ORDER BY created_at ASC
+                    LIMIT 1
+                    """,
+                    (idempotency_key,),
+                ).fetchone()
             decision = classify_idempotency(
                 _row_to_dict(existing) if existing else None,
                 idempotency_key=idempotency_key,
                 payload_hash=payload_hash,
+                envelope_fingerprint=fingerprint,
             )
             stamp = _iso(now)
+            event = event_id or _new_id("inbox")
+            # Repeated apply attempts may reuse an operator-supplied event id.
+            # Keep every audit row instead of turning a duplicate/conflict into
+            # an uncaught PRIMARY KEY error.
+            while connection.execute(
+                "SELECT 1 FROM inbox_events WHERE event_id = ?", (event,)
+            ).fetchone() is not None:
+                event = f"{event}_{uuid.uuid4().hex[:12]}"
             connection.execute(
                 """
                 INSERT INTO inbox_events (
-                    event_id, idempotency_key, payload_hash, source, kind, target_profile,
-                    payload_ref, received_at, persisted_at, accept_outcome, outcome_reason,
-                    created_at, updated_at
+                    event_id, idempotency_key, payload_hash, envelope_fingerprint,
+                    source, kind, target_profile, payload_ref, received_at,
+                    persisted_at, accept_outcome, outcome_reason, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    event_id or _new_id("inbox"),
+                    event,
                     idempotency_key,
                     payload_hash,
+                    fingerprint,
                     _json_dumps(payload.get("source") or {}),
                     str(payload.get("kind") or ""),
                     str(payload.get("targetProfile") or payload.get("target_profile") or ""),
@@ -369,31 +405,56 @@ class RAGIngressStateDB:
         session_id_hash: str = "",
         input_epoch: str = "",
         status: str = "pending",
+        envelope_fingerprint: str = "",
         now: datetime | None = None,
-    ) -> None:
+    ) -> IdempotencyDecision:
         stamp = _iso(now)
         with self.connect() as connection:
-            connection.execute(
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
                 """
-                INSERT INTO commands (
-                    command_id, command_type, resource_id_hash, session_id_hash,
-                    idempotency_key, payload_hash, input_epoch, status, created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                SELECT * FROM commands
+                WHERE idempotency_key = ?
+                ORDER BY created_at ASC
+                LIMIT 1
                 """,
-                (
-                    command_id,
-                    command_type,
-                    resource_id_hash,
-                    session_id_hash,
-                    idempotency_key,
-                    payload_hash,
-                    input_epoch,
-                    status,
-                    stamp,
-                    stamp,
-                ),
+                (idempotency_key,),
+            ).fetchone()
+            decision = classify_idempotency(
+                _row_to_dict(existing) if existing else None,
+                idempotency_key=idempotency_key,
+                payload_hash=payload_hash,
+                envelope_fingerprint=envelope_fingerprint,
             )
+            if not decision.accepted:
+                return decision
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO commands (
+                        command_id, command_type, resource_id_hash, session_id_hash,
+                        idempotency_key, payload_hash, envelope_fingerprint,
+                        input_epoch, status, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        command_id,
+                        command_type,
+                        resource_id_hash,
+                        session_id_hash,
+                        idempotency_key,
+                        payload_hash,
+                        envelope_fingerprint,
+                        input_epoch,
+                        status,
+                        stamp,
+                        stamp,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                return IdempotencyDecision(IdempotencyOutcome.CONFLICT, "command_key_race")
+            return decision
 
     def claim_command(
         self,
@@ -479,6 +540,7 @@ class RAGIngressStateDB:
         target_profile: str,
         document_kind: str,
         status: str = "pending",
+        envelope_fingerprint: str = "",
         now: datetime | None = None,
     ) -> None:
         spec = DeliveryJobSpec(
@@ -488,9 +550,11 @@ class RAGIngressStateDB:
             target_profile=target_profile,
             document_kind=document_kind,
             status=status,
+            envelope_fingerprint=envelope_fingerprint,
         )
         stamp = _iso(now)
         with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             if connection.execute(
                 "SELECT 1 FROM commands WHERE command_id = ?",
                 (command_id,),
@@ -501,11 +565,12 @@ class RAGIngressStateDB:
                 existing,
                 idempotency_key=spec.idempotency_key,
                 payload_hash=spec.payload_hash,
+                envelope_fingerprint=spec.envelope_fingerprint,
             )
-            if decision.outcome == IdempotencyOutcome.DUPLICATE:
+            if not decision.accepted:
+                if decision.conflict:
+                    raise StateDBError("delivery idempotency conflict")
                 return
-            if decision.outcome == IdempotencyOutcome.CONFLICT:
-                raise StateDBError("delivery idempotency conflict")
             _insert_delivery_job(connection, spec, stamp, command_id=command_id)
 
     def claim_delivery_job(
@@ -808,6 +873,7 @@ class RAGIngressStateDB:
         command_type: str,
         idempotency_key: str,
         payload_hash: str,
+        envelope_fingerprint: str = "",
         result: CommandResultSpec,
         domain_records: Iterable[DomainRecordSpec],
         delivery_jobs: Iterable[DeliveryJobSpec],
@@ -822,6 +888,7 @@ class RAGIngressStateDB:
             command_type=command_type,
             idempotency_key=idempotency_key,
             payload_hash=payload_hash,
+            envelope_fingerprint=envelope_fingerprint,
             result=result,
             domain_records=domain_records,
             delivery_jobs=delivery_jobs,
@@ -868,9 +935,10 @@ class RAGIngressStateDB:
     ) -> str:
         """Persist the redacted wire payload for later delivery; returns an outcome.
 
-        Idempotent and fail-closed: re-recording the same idempotency_key with the
-        SAME contentHash is ``already_present``; with a DIFFERENT contentHash it is a
-        genuine ``conflict`` and the stored payload is NOT overwritten.
+        Idempotent and fail-closed: re-recording the same idempotency_key with
+        the same canonical envelope is ``already_present``; a different envelope
+        (including metadata-only changes) is a ``conflict`` and the stored
+        payload is NOT overwritten. Legacy rows without a fingerprint conflict.
         """
         idempotency_key = str(payload.get("idempotencyKey") or "")
         payload_hash = str(payload.get("contentHash") or "")
@@ -878,30 +946,45 @@ class RAGIngressStateDB:
             raise ValueError("idempotencyKey is required")
         if not payload_hash:
             raise ValueError("contentHash is required")
+        fingerprint = envelope_fingerprint(payload)
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
-                "SELECT payload_hash FROM delivery_payloads WHERE idempotency_key = ?",
+                """
+                SELECT idempotency_key, payload_hash, envelope_fingerprint
+                FROM delivery_payloads WHERE idempotency_key = ?
+                """,
                 (idempotency_key,),
             ).fetchone()
             if existing is not None:
-                if str(existing["payload_hash"]) != payload_hash:
-                    return "conflict"
-                return "already_present"
-            connection.execute(
-                """
-                INSERT INTO delivery_payloads (
-                    idempotency_key, payload_hash, payload_json, recorded_at
+                decision = classify_idempotency(
+                    _row_to_dict(existing),
+                    idempotency_key=idempotency_key,
+                    payload_hash=payload_hash,
+                    envelope_fingerprint=fingerprint,
                 )
-                VALUES (?, ?, ?, ?)
-                """,
-                (
-                    idempotency_key,
-                    payload_hash,
-                    _json_dumps(payload),
-                    _iso(now),
-                ),
-            )
+                if decision.duplicate:
+                    return "already_present"
+                return "conflict"
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO delivery_payloads (
+                        idempotency_key, payload_hash, envelope_fingerprint,
+                        payload_json, recorded_at
+                    )
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        idempotency_key,
+                        payload_hash,
+                        fingerprint,
+                        _json_dumps(payload),
+                        _iso(now),
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                return "conflict"
             return "recorded"
 
     def get_delivery_payload(self, idempotency_key: str) -> dict | None:
@@ -1049,6 +1132,7 @@ class CommandTransaction:
         command_type: str,
         idempotency_key: str,
         payload_hash: str,
+        envelope_fingerprint: str = "",
         result: CommandResultSpec,
         domain_records: Iterable[DomainRecordSpec] = (),
         delivery_jobs: Iterable[DeliveryJobSpec],
@@ -1072,29 +1156,53 @@ class CommandTransaction:
             self._connection = connection
             connection.execute("BEGIN IMMEDIATE")
             try:
-                connection.execute(
+                existing = connection.execute(
                     """
-                    INSERT INTO commands (
-                        command_id, command_type, resource_id_hash, session_id_hash,
-                        idempotency_key, payload_hash, input_epoch, status,
-                        lease_owner, lease_until, attempt_count, created_at, updated_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'claimed', ?, ?, 1, ?, ?)
+                    SELECT * FROM commands
+                    WHERE idempotency_key = ?
+                    ORDER BY created_at ASC
+                    LIMIT 1
                     """,
-                    (
-                        command_id,
-                        command_type,
-                        resource_id_hash,
-                        session_id_hash,
-                        idempotency_key,
-                        payload_hash,
-                        input_epoch,
-                        lease_owner,
-                        lease_until,
-                        stamp,
-                        stamp,
-                    ),
+                    (idempotency_key,),
+                ).fetchone()
+                decision = classify_idempotency(
+                    _row_to_dict(existing) if existing else None,
+                    idempotency_key=idempotency_key,
+                    payload_hash=payload_hash,
+                    envelope_fingerprint=envelope_fingerprint,
                 )
+                if not decision.accepted:
+                    connection.rollback()
+                    return CommandTransactionResult(command_id, decision.outcome, ())
+                try:
+                    connection.execute(
+                        """
+                        INSERT INTO commands (
+                            command_id, command_type, resource_id_hash, session_id_hash,
+                            idempotency_key, payload_hash, envelope_fingerprint,
+                            input_epoch, status, lease_owner, lease_until,
+                            attempt_count, created_at, updated_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'claimed', ?, ?, 1, ?, ?)
+                        """,
+                        (
+                            command_id,
+                            command_type,
+                            resource_id_hash,
+                            session_id_hash,
+                            idempotency_key,
+                            payload_hash,
+                            envelope_fingerprint,
+                            input_epoch,
+                            lease_owner,
+                            lease_until,
+                            stamp,
+                            stamp,
+                        ),
+                    )
+                except sqlite3.IntegrityError:
+                    connection.rollback()
+                    return CommandTransactionResult(command_id, "conflict", ())
                 if inbox_event_id:
                     _consume_inbox_event(connection, inbox_event_id, command_id, stamp)
                 _maybe_fail(inject_failure_at, "claim")
@@ -1255,16 +1363,18 @@ def _insert_delivery_job(
     connection.execute(
         """
         INSERT INTO delivery_jobs (
-            job_id, command_id, idempotency_key, payload_hash, target_profile,
-            document_kind, status, next_retry_at, created_at, updated_at
+            job_id, command_id, idempotency_key, payload_hash,
+            envelope_fingerprint, target_profile, document_kind, status,
+            next_retry_at, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             job.job_id,
             command_id,
             job.idempotency_key,
             job.payload_hash,
+            job.envelope_fingerprint,
             job.target_profile,
             job.document_kind,
             job.status,
@@ -1345,27 +1455,36 @@ class _DeliveryPlan:
 def _plan_delivery_jobs(connection: sqlite3.Connection, jobs: tuple[DeliveryJobSpec, ...]) -> _DeliveryPlan:
     to_insert: list[DeliveryJobSpec] = []
     duplicate_job_ids: list[str] = []
-    planned_keys: dict[str, str] = {}
+    planned_keys: dict[str, dict] = {}
     for job in jobs:
-        existing_payload_hash = planned_keys.get(job.idempotency_key)
-        if existing_payload_hash is not None:
-            if existing_payload_hash == job.payload_hash:
-                duplicate_job_ids.append(job.job_id)
-                continue
-            return _DeliveryPlan((), duplicate_job_ids, IdempotencyDecision("conflict", "same_batch_conflict"))
-        existing = _find_delivery_job_by_idempotency_key(connection, job.idempotency_key)
         decision = classify_idempotency(
-            existing,
+            planned_keys.get(job.idempotency_key),
             idempotency_key=job.idempotency_key,
             payload_hash=job.payload_hash,
+            envelope_fingerprint=job.envelope_fingerprint,
         )
-        if decision.outcome == IdempotencyOutcome.CONFLICT:
-            return _DeliveryPlan((), duplicate_job_ids, decision)
+        existing_job_id = job.job_id
+        if decision.outcome == IdempotencyOutcome.ACCEPTED:
+            existing = _find_delivery_job_by_idempotency_key(connection, job.idempotency_key)
+            if existing is not None:
+                existing_job_id = str(existing.get("job_id") or job.job_id)
+            decision = classify_idempotency(
+                existing,
+                idempotency_key=job.idempotency_key,
+                payload_hash=job.payload_hash,
+                envelope_fingerprint=job.envelope_fingerprint,
+            )
         if decision.outcome == IdempotencyOutcome.DUPLICATE:
-            duplicate_job_ids.append(str(existing.get("job_id") or job.job_id))
+            duplicate_job_ids.append(existing_job_id)
             continue
+        if decision.outcome != IdempotencyOutcome.ACCEPTED:
+            return _DeliveryPlan((), duplicate_job_ids, decision)
         to_insert.append(job)
-        planned_keys[job.idempotency_key] = job.payload_hash
+        planned_keys[job.idempotency_key] = {
+            "idempotency_key": job.idempotency_key,
+            "payload_hash": job.payload_hash,
+            "envelope_fingerprint": job.envelope_fingerprint,
+        }
     return _DeliveryPlan(tuple(to_insert), duplicate_job_ids)
 
 
@@ -1500,3 +1619,15 @@ def _migrate_backend_neutral_delivery_schema(connection: sqlite3.Connection) -> 
             old_column=old_column,
             new_column="index_run_id",
         )
+
+
+def _migrate_envelope_fingerprint_schema(connection: sqlite3.Connection) -> None:
+    """Add canonical fingerprint columns to legacy databases, fail-closed.
+
+    Legacy rows keep the ``''`` default and therefore conflict rather than
+    being mistaken for verified duplicates. Fresh databases already declare the
+    columns in ``CREATE TABLE``; this migration is idempotent for both cases.
+    """
+
+    for table in ("inbox_events", "commands", "delivery_jobs", "delivery_payloads"):
+        _ensure_column(connection, table, "envelope_fingerprint", "TEXT NOT NULL DEFAULT ''")

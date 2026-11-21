@@ -66,6 +66,7 @@ from .source_store import (
     SourceStoreError,
     StoredRevision,
     _classify_document_idempotency,
+    _document_envelope_fingerprint,
     _is_immutable_source_document,
     _is_revision_scoped_source_copy,
     _require_active_source_revision_allows_delete,
@@ -550,12 +551,14 @@ class CouchDBHttpSourceStore:
             return self.put_if_absent(document)
         doc_id = str(document["_id"])
         incoming_hash = payload_hash(document)
+        incoming_fingerprint = _document_envelope_fingerprint(document)
         existing = self.get(doc_id)
 
         decision = _classify_document_idempotency(
             existing,
             doc_id=doc_id,
             incoming_hash=incoming_hash,
+            incoming_fingerprint=incoming_fingerprint,
         )
         if existing is not None and decision.outcome == IdempotencyOutcome.DUPLICATE:
             return StoredRevision(doc_id=doc_id, rev=str(existing.get("_rev", "")), outcome="duplicate")
@@ -569,7 +572,7 @@ class CouchDBHttpSourceStore:
             session_id_hash=str(source_document.get("session_id_hash") or ""),
         )
         outcome = "conflict_resolved" if existing is not None else "accepted"
-        rev = self._write(doc_id, document, incoming_hash, existing)
+        rev = self._write(doc_id, document, incoming_hash, incoming_fingerprint, existing)
         return StoredRevision(doc_id=doc_id, rev=rev, outcome=outcome)
 
     def put_if_absent(self, document: dict) -> StoredRevision:
@@ -578,12 +581,14 @@ class CouchDBHttpSourceStore:
         validate_for_write(document)
         doc_id = str(document["_id"])
         incoming_hash = payload_hash(document)
+        incoming_fingerprint = _document_envelope_fingerprint(document)
         existing = self.get(doc_id)
         if existing is not None:
             decision = _classify_document_idempotency(
                 existing,
                 doc_id=doc_id,
                 incoming_hash=incoming_hash,
+                incoming_fingerprint=incoming_fingerprint,
             )
             if decision.outcome == IdempotencyOutcome.DUPLICATE:
                 return StoredRevision(
@@ -610,10 +615,17 @@ class CouchDBHttpSourceStore:
         stored.pop("_rev", None)
         stored["idempotency_key"] = doc_id
         stored["payload_hash"] = incoming_hash
+        stored["envelope_fingerprint"] = incoming_fingerprint
         status, response = self._request("PUT", self._doc_path(doc_id), json_body=stored)
         if status == 409:
             current = self.get(doc_id)
-            if current is not None and payload_hash(current) == incoming_hash:
+            retry_decision = _classify_document_idempotency(
+                current,
+                doc_id=doc_id,
+                incoming_hash=incoming_hash,
+                incoming_fingerprint=incoming_fingerprint,
+            )
+            if current is not None and retry_decision.outcome == IdempotencyOutcome.DUPLICATE:
                 return StoredRevision(
                     doc_id=doc_id,
                     rev=str(current.get("_rev") or ""),
@@ -645,10 +657,12 @@ class CouchDBHttpSourceStore:
         if current_rev != str(expected_rev or ""):
             raise SourceStoreConflict("conditional source revision changed")
         incoming_hash = payload_hash(document)
+        incoming_fingerprint = _document_envelope_fingerprint(document)
         decision = _classify_document_idempotency(
             current,
             doc_id=doc_id,
             incoming_hash=incoming_hash,
+            incoming_fingerprint=incoming_fingerprint,
         )
         if current is not None and decision.outcome == IdempotencyOutcome.DUPLICATE:
             return StoredRevision(doc_id=doc_id, rev=current_rev, outcome="duplicate")
@@ -669,6 +683,7 @@ class CouchDBHttpSourceStore:
         stored.pop("_rev", None)
         stored["idempotency_key"] = doc_id
         stored["payload_hash"] = incoming_hash
+        stored["envelope_fingerprint"] = incoming_fingerprint
         if current_rev:
             stored["_rev"] = current_rev
         status, response = self._request(
@@ -712,10 +727,12 @@ class CouchDBHttpSourceStore:
                 source_hash_authoritative=source_hash_authoritative,
             )
             incoming_hash = payload_hash(merged)
+            incoming_fingerprint = _document_envelope_fingerprint(merged)
             decision = _classify_document_idempotency(
                 current,
                 doc_id=doc_id,
                 incoming_hash=incoming_hash,
+                incoming_fingerprint=incoming_fingerprint,
             )
             if current is not None and decision.outcome == IdempotencyOutcome.DUPLICATE:
                 return StoredRevision(
@@ -733,6 +750,7 @@ class CouchDBHttpSourceStore:
             stored = copy.deepcopy(merged)
             stored["idempotency_key"] = doc_id
             stored["payload_hash"] = incoming_hash
+            stored["envelope_fingerprint"] = incoming_fingerprint
             if current is not None:
                 current_rev = str(current.get("_rev") or "")
                 if not current_rev:
@@ -822,8 +840,10 @@ class CouchDBHttpSourceStore:
             stored["source_locator_hash"] = replacement_source_locator_hash
         validate_for_write(stored)
         incoming_hash = payload_hash(stored)
+        incoming_fingerprint = _document_envelope_fingerprint(stored)
         stored["idempotency_key"] = doc_id
         stored["payload_hash"] = incoming_hash
+        stored["envelope_fingerprint"] = incoming_fingerprint
         status, response = self._request("PUT", self._doc_path(doc_id), json_body=stored)
         if status == 409:
             raise SourceStoreConflict("conditional temporal patch revision changed")
@@ -835,19 +855,26 @@ class CouchDBHttpSourceStore:
             outcome="conflict_resolved",
         )
 
-    def _write(self, doc_id: str, document: dict, incoming_hash: str, existing: dict | None) -> str:
+    def _write(self, doc_id: str, document: dict, incoming_hash: str, incoming_fingerprint: str, existing: dict | None) -> str:
         stored = copy.deepcopy(document)
         stored.pop("_rev", None)
         stored["idempotency_key"] = doc_id
         stored["payload_hash"] = incoming_hash
+        stored["envelope_fingerprint"] = incoming_fingerprint
         if existing is not None and existing.get("_rev"):
             stored["_rev"] = existing["_rev"]
         status, payload = self._request("PUT", self._doc_path(doc_id), json_body=stored)
         if status == 409:
-            # Lost-update conflict: re-read the current _rev and retry once. The
-            # deterministic _id + content hash keep this idempotent.
+            # Lost-update conflict: re-read current state and accept only a
+            # true duplicate, using the same legacy-safe fingerprint rule.
             current = self.get(doc_id)
-            if current is not None and payload_hash(current) == incoming_hash:
+            retry_decision = _classify_document_idempotency(
+                current,
+                doc_id=doc_id,
+                incoming_hash=incoming_hash,
+                incoming_fingerprint=incoming_fingerprint,
+            )
+            if current is not None and retry_decision.outcome == IdempotencyOutcome.DUPLICATE:
                 return str(current.get("_rev", ""))
             stored["_rev"] = current["_rev"] if current and current.get("_rev") else None
             if stored["_rev"] is None:

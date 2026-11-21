@@ -90,6 +90,39 @@ def test_record_delivery_payload_outcomes(tmp_path):
     assert state_db.get_delivery_payload("ka") == payload
 
 
+def test_record_delivery_payload_metadata_only_change_conflicts(tmp_path):
+    state_db = _state_db(tmp_path)
+    payload = _payload(key="meta-delivery", body="body meta")
+    assert state_db.record_delivery_payload(payload) == "recorded"
+
+    changed = json.loads(json.dumps(payload))
+    changed["payload"]["document"]["metadata"]["type"] = "changed"
+    assert changed["contentHash"] == payload["contentHash"]
+    assert state_db.record_delivery_payload(changed) == "conflict"
+    assert state_db.get_delivery_payload("meta-delivery") == payload
+
+
+def test_record_delivery_payload_legacy_row_without_fingerprint_conflicts(tmp_path):
+    state_db = _state_db(tmp_path)
+    payload = _payload(key="legacy-delivery", body="legacy body")
+    with state_db.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO delivery_payloads (
+                idempotency_key, payload_hash, envelope_fingerprint,
+                payload_json, recorded_at
+            ) VALUES (?, ?, '', ?, ?)
+            """,
+            (
+                "legacy-delivery",
+                payload["contentHash"],
+                json.dumps(payload, sort_keys=True),
+                "2026-06-10T09:00:00+00:00",
+            ),
+        )
+    assert state_db.record_delivery_payload(payload) == "conflict"
+
+
 def test_backfill_apply_persists_delivery_payload(tmp_path):
     state_db = _state_db(tmp_path)
     payload = _payload(key="kb", body="body b")

@@ -45,7 +45,7 @@ _MAX_OBJECT_KEYS = 100_000
 _MAX_ARRAY_ITEMS = 100_000
 _MAX_ERROR_PAYLOAD_BYTES = 1024 * 1024
 
-_EXCLUDED_TOP_LEVEL_FIELDS = frozenset({"_rev", "idempotency_key", "payload_hash"})
+_EXCLUDED_TOP_LEVEL_FIELDS = frozenset({"_rev", "idempotency_key", "payload_hash", "envelope_fingerprint"})
 
 _CAPTURE_FIELDS = frozenset(
     {

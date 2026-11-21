@@ -118,6 +118,7 @@ _BUNDLE_BOOKKEEPING_FIELDS = frozenset(
         "_rev",
         "idempotency_key",
         "payload_hash",
+        "envelope_fingerprint",
         "source_snapshot_schema_version",
         "source_snapshot_scope",
         "source_snapshot_origin_id",
