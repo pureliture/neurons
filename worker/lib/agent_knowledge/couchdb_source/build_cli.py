@@ -256,6 +256,11 @@ def _select_sessions_needing_projection(
         and str(state.get("_id") or "") == projection_state_doc_id(session_id_hash)
         and str(state.get("projection_status") or "") == ProjectionStatus.PROJECTED
     }
+    legacy_ready = (
+        _legacy_ready_projection_sessions(store, states)
+        if backend == "postgres_pgvector"
+        else set()
+    )
     use_bulk_hashes = bool(getattr(store, "base_url", ""))
     active_hashes: dict[str, str] = {}
     legacy_hashes: dict[str, str] = {}
@@ -349,6 +354,11 @@ def _select_sessions_needing_projection(
                 != representation
             )
         ):
+            if (
+                backend == "postgres_pgvector"
+                and (session_id_hash, current_source_hash) in legacy_ready
+            ):
+                continue
             if blocked_source_hashes.get(session_id_hash) == current_source_hash:
                 continue
             selected.append(session)
@@ -401,6 +411,11 @@ def _select_sessions_needing_projection(
                 != representation
             )
         ):
+            if (
+                backend == "postgres_pgvector"
+                and (session_id_hash, resolved.source_hash) in legacy_ready
+            ):
+                continue
             if blocked_source_hashes.get(session_id_hash) == resolved.source_hash:
                 continue
             selected.append(session)
@@ -485,6 +500,80 @@ def _write_selection_checkpoint(
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, sort_keys=True)
 
+
+def _has_legacy_ready_projection_evidence(
+    state: dict,
+    documents: list[dict],
+    session_id_hash: str,
+    current_source_hash: str,
+) -> bool:
+    """Legacy projected receipts may omit content hashes.
+
+    Accept a completed session when its state is projected, a PG receipt exists,
+    the current source revision has a coverage manifest, and at least one ready
+    conversation chunk carries content from that exact source revision.
+    """
+    from .document_model import coverage_manifest_doc_id
+    from .document_model import ProjectionStatus
+
+    if str(state.get("projection_status") or "") != ProjectionStatus.PROJECTED:
+        return False
+    receipts = state.get("backend_receipts")
+    if not isinstance(receipts, dict) or not isinstance(receipts.get("postgres_pgvector"), dict):
+        return False
+    if str(state.get("projected_source_hash") or ""):
+        return False
+    if not current_source_hash:
+        return False
+    coverage = next(
+        (
+            document
+            for document in documents
+            if str(document.get("_id") or "") == coverage_manifest_doc_id(session_id_hash)
+        ),
+        None,
+    )
+    if coverage is None or str(coverage.get("source_hash") or "") != current_source_hash:
+        return False
+    if int(coverage.get("conversation_chunk_count") or 0) < 1:
+        return False
+    return any(
+        str(document.get("doc_type") or "") == "conversation_chunk"
+        and str(document.get("content_hash") or "")
+        for document in documents
+    )
+
+
+def _legacy_ready_projection_sessions(store, states: list[dict]) -> set[tuple[str, str]]:
+    """Bulk variant of :func:`_has_legacy_ready_projection_evidence`."""
+    from .document_model import SourceDocType
+    from .document_model import ProjectionStatus
+
+    projected = {
+        str(state.get("session_id_hash") or "")
+        for state in states
+        if str(state.get("projection_status") or "") == ProjectionStatus.PROJECTED
+        and isinstance(state.get("backend_receipts"), dict)
+        and isinstance(state["backend_receipts"].get("postgres_pgvector"), dict)
+        and not str(state.get("projected_source_hash") or "")
+    }
+    result: set[tuple[str, str]] = set()
+    for document in _iter_by_type(
+        store,
+        SourceDocType.COVERAGE_MANIFEST,
+        fields=["session_id_hash", "source_hash", "conversation_chunk_count"],
+        selector={},
+        page_size=10000,
+    ):
+        session_id_hash = str(document.get("session_id_hash") or "")
+        source_hash = str(document.get("source_hash") or "")
+        if (
+            session_id_hash in projected
+            and source_hash
+            and int(document.get("conversation_chunk_count") or 0) > 0
+        ):
+            result.add((session_id_hash, source_hash))
+    return result
 
 def _evaluate_session_change(
     store,
@@ -587,7 +676,9 @@ def _evaluate_session_change(
             merged, embedding_profile=embedding_profile
         ) != representation
     ):
-        if blocked_source_hash and blocked_source_hash == current_source_hash:
+        if _has_legacy_ready_projection_evidence(
+            merged, documents, session_id_hash, current_source_hash
+        ):
             return False, None
         return True, canonical if canonical is not None else resolved.sessions[0]
     return False, None
@@ -841,6 +932,7 @@ def _select_sessions_for_cycle(
         dead_letter_lookup=dead_letter_lookup,
     )
     pending_attempts = dict(checkpoint.get("pending_session_attempts") or {})
+    attempts_before = set(pending_attempts)
     pending_sessions, pending_attempts, dropped_pending = _apply_pending_attempt_cap(
         pending_sessions, pending_attempts
     )
@@ -849,6 +941,7 @@ def _select_sessions_for_cycle(
             f"[selection] pending_attempts_exhausted dropped={dropped_pending}",
             file=sys.stderr,
         )
+    exhausted_identities = attempts_before - set(pending_attempts)
     if limit <= 0:
         processed_pending = pending_sessions
         fresh_limit: int | None = None  # unlimited
@@ -882,6 +975,11 @@ def _select_sessions_for_cycle(
                 file=sys.stderr,
             )
         else:
+            fresh = [
+                session
+                for session in fresh
+                if _session_identity(session) not in exhausted_identities
+            ]
             sessions = _dedupe_sessions(processed_pending + fresh)
             next_seq = str(new_checkpoint.get("last_seq") or last_seq)
             next_full_walk_pending = False
@@ -917,6 +1015,11 @@ def _select_sessions_for_cycle(
             representation=representation,
             dead_letter_lookup=dead_letter_lookup,
         )
+        fresh = [
+            session
+            for session in fresh
+            if _session_identity(session) not in exhausted_identities
+        ]
         sessions = _dedupe_sessions(processed_pending + fresh)
         capped = fresh_limit is not None and fresh_limit > 0 and len(fresh) >= fresh_limit
         next_full_walk_pending = capped
