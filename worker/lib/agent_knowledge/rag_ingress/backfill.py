@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Mapping
 
-from .idempotency import IdempotencyOutcome, classify_idempotency
+from .idempotency import IdempotencyOutcome, classify_idempotency, envelope_fingerprint
 from .server_runtime import job_id_for_payload, validate_ingress_payload
 from .state_db import RAGIngressStateDB
 
@@ -60,8 +60,14 @@ def plan_backfill_from_payloads(payloads: Iterable[Mapping[str, object]]) -> dic
         validate_ingress_payload(payload)
         idempotency_key = str(payload["idempotencyKey"])
         payload_hash = str(payload["contentHash"])
+        fingerprint = envelope_fingerprint(payload)
         existing = seen.get(idempotency_key)
-        decision = classify_idempotency(existing, idempotency_key=idempotency_key, payload_hash=payload_hash)
+        decision = classify_idempotency(
+            existing,
+            idempotency_key=idempotency_key,
+            payload_hash=payload_hash,
+            envelope_fingerprint=fingerprint,
+        )
         event_id = f"backfill_{job_id_for_payload(payload)}_{index}"
         if decision.outcome == IdempotencyOutcome.ACCEPTED:
             job_id = job_id_for_payload(payload)
@@ -70,6 +76,7 @@ def plan_backfill_from_payloads(payloads: Iterable[Mapping[str, object]]) -> dic
                     "event_id": event_id,
                     "idempotency_key": idempotency_key,
                     "payload_hash": payload_hash,
+                    "envelope_fingerprint": fingerprint,
                     "accept_outcome": "accepted",
                 },
                 "command": {
@@ -77,6 +84,7 @@ def plan_backfill_from_payloads(payloads: Iterable[Mapping[str, object]]) -> dic
                     "command_type": "transcript_ingest",
                     "idempotency_key": idempotency_key,
                     "payload_hash": payload_hash,
+                    "envelope_fingerprint": fingerprint,
                 },
                 "domain_record": {
                     "domain_record_id": f"domain_{job_id}",
@@ -88,6 +96,7 @@ def plan_backfill_from_payloads(payloads: Iterable[Mapping[str, object]]) -> dic
                     "job_id": job_id,
                     "idempotency_key": idempotency_key,
                     "payload_hash": payload_hash,
+                    "envelope_fingerprint": fingerprint,
                     "target_profile": str(payload["targetProfile"]),
                     "document_kind": str(payload["kind"]),
                 },
@@ -96,6 +105,7 @@ def plan_backfill_from_payloads(payloads: Iterable[Mapping[str, object]]) -> dic
             seen[idempotency_key] = {
                 "idempotency_key": idempotency_key,
                 "payload_hash": payload_hash,
+                "envelope_fingerprint": fingerprint,
                 "accept_outcome": "accepted",
                 "job_id": job_id,
             }

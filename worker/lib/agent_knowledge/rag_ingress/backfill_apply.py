@@ -8,9 +8,9 @@ created and then parity-checked with ``rag-ingress-state shadow-readiness``.
 Scope and safety:
 - It writes ONLY to the new state DB candidate. It never mutates the legacy ledger,
   the source file queue, or RetiredIndexBridge.
-- It is idempotent: a command whose ``idempotency_key`` already exists is skipped,
-  so re-running the apply against a growing source queue is a safe sync, never a
-  duplicate insert or a UNIQUE violation.
+- It is idempotent for identical canonical envelopes: an existing command with
+  the same ``idempotencyKey`` and envelope fingerprint is skipped, while a
+  mutated envelope re-using the key is reported as a conflict.
 - ``dry_run`` performs no DB write and returns the planner counts only.
 - The report contains counts and booleans only; it never echoes raw idempotency
   keys, payload hashes, job ids, document bodies, or filesystem paths.
@@ -18,11 +18,12 @@ Scope and safety:
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from typing import Iterable, Mapping
 
 from .backfill import plan_backfill_from_payloads, read_payload_file
-from .idempotency import IdempotencyOutcome
+from .idempotency import IdempotencyOutcome, envelope_fingerprint
 from .server_runtime import job_id_for_payload, validate_ingress_payload
 from .state_db import (
     CommandResultSpec,
@@ -48,55 +49,65 @@ def read_queue_payloads(queue_root: Path | str) -> list[dict]:
 def _apply_one(state_db: RAGIngressStateDB, payload: Mapping[str, object]) -> str:
     """Apply a single payload to the candidate; return an outcome label.
 
-    Idempotency vs conflict are distinguished by ``payload_hash``: an already-present
-    command with the SAME hash is a safe re-sync (``already_present``); the SAME
-    idempotency key with a DIFFERENT hash is a genuine conflict (a mutated payload
-    re-using a key) and must surface as ``conflict``, not be masked as a clean sync.
+    The authoritative command row (checked atomically by ``record_inbox_shadow``)
+    gates command and delivery-job creation. Identical canonical envelopes are a
+    safe re-sync (``already_present``); any envelope mutation re-using the key --
+    including metadata-only changes -- is a ``conflict``, never a clean sync.
     """
     validate_ingress_payload(dict(payload))
     idempotency_key = str(payload["idempotencyKey"])
     payload_hash = str(payload["contentHash"])
+    fingerprint = envelope_fingerprint(payload)
     job_id = job_id_for_payload(dict(payload))
-    existing_command = state_db.get_row("commands", "idempotency_key", idempotency_key)
-    if existing_command is not None:
-        if str(existing_command.get("payload_hash") or "") != payload_hash:
-            return "conflict"
+    event_id = f"backfill_{job_id}"
+
+    decision = state_db.record_inbox_shadow(dict(payload), event_id=event_id)
+    if decision.outcome == IdempotencyOutcome.CONFLICT:
+        return "conflict"
+    if decision.outcome == IdempotencyOutcome.QUARANTINED:
+        return "conflict"
+    if decision.outcome in (
+        IdempotencyOutcome.DUPLICATE,
+        IdempotencyOutcome.REPLAYABLE,
+    ):
         # M8.1 fill-gap: candidates seeded before delivery_payloads existed get
-        # their payload persisted on the next idempotent re-sync
+        # their payload persisted on the next idempotent re-sync.
         if state_db.record_delivery_payload(payload) == "conflict":
             return "conflict"
         return "already_present"
-    decision = state_db.record_inbox_shadow(dict(payload), event_id=f"backfill_{job_id}")
-    if decision.outcome == IdempotencyOutcome.CONFLICT:
+
+    try:
+        transaction = state_db.consume_inbox_with_command(
+            inbox_event_id=event_id,
+            command_id=f"cmd_{job_id}",
+            command_type="transcript_ingest",
+            idempotency_key=idempotency_key,
+            payload_hash=payload_hash,
+            envelope_fingerprint=fingerprint,
+            result=CommandResultSpec(decision="completed"),
+            domain_records=[
+                DomainRecordSpec(
+                    domain_record_id=f"domain_{job_id}",
+                    domain_kind="delivery_projection",
+                    lifecycle_status="prepared",
+                    payload_hash=payload_hash,
+                )
+            ],
+            delivery_jobs=[
+                DeliveryJobSpec(
+                    job_id=job_id,
+                    target_profile=str(payload["targetProfile"]),
+                    document_kind=str(payload["kind"]),
+                    idempotency_key=idempotency_key,
+                    payload_hash=payload_hash,
+                    envelope_fingerprint=fingerprint,
+                )
+            ],
+        )
+    except sqlite3.IntegrityError:
+        # A concurrent writer won the commands.idempotency_key race.
         return "conflict"
-    if decision.outcome == IdempotencyOutcome.DUPLICATE:
-        return "already_present"
-    transaction = state_db.consume_inbox_with_command(
-        inbox_event_id=f"backfill_{job_id}",
-        command_id=f"cmd_{job_id}",
-        command_type="transcript_ingest",
-        idempotency_key=idempotency_key,
-        payload_hash=payload_hash,
-        result=CommandResultSpec(decision="completed"),
-        domain_records=[
-            DomainRecordSpec(
-                domain_record_id=f"domain_{job_id}",
-                domain_kind="delivery_projection",
-                lifecycle_status="prepared",
-                payload_hash=payload_hash,
-            )
-        ],
-        delivery_jobs=[
-            DeliveryJobSpec(
-                job_id=job_id,
-                target_profile=str(payload["targetProfile"]),
-                document_kind=str(payload["kind"]),
-                idempotency_key=idempotency_key,
-                payload_hash=payload_hash,
-            )
-        ],
-    )
-    if str(getattr(transaction, "status", "") or "") == "quarantined":
+    if str(getattr(transaction, "status", "") or "") in {"quarantined", "conflict"}:
         return "conflict"
     if state_db.record_delivery_payload(payload) == "conflict":
         return "conflict"

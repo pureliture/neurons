@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from agent_knowledge.rag_ingress.idempotency import IdempotencyOutcome, classify_idempotency
+from agent_knowledge.rag_ingress.idempotency import (
+    IdempotencyOutcome,
+    classify_idempotency,
+    envelope_fingerprint,
+)
 from agent_knowledge.rag_ingress.rag_ready_document import build_ingress_enqueue_payload, build_rag_ready_document
 from agent_knowledge.rag_ingress.server_runtime import IngressJobQueue, RagIngressRuntime
 from agent_knowledge.rag_ingress.state_db import (
@@ -53,6 +59,7 @@ def _job(
     *,
     idempotency_key: str = "idem_1",
     payload_hash: str = "sha256:payload",
+    envelope_fingerprint: str = "sha256:job-envelope",
 ) -> DeliveryJobSpec:
     return DeliveryJobSpec(
         job_id=job_id,
@@ -60,6 +67,7 @@ def _job(
         payload_hash=payload_hash,
         target_profile="transcript-memory",
         document_kind="conversation_chunk",
+        envelope_fingerprint=envelope_fingerprint,
     )
 
 
@@ -99,33 +107,73 @@ def test_state_db_creates_m2_tables(tmp_path):
 
 
 def test_idempotency_classifier_distinguishes_duplicate_conflict_and_preserved_states():
+    fingerprint = "sha256:envelope"
     assert (
         classify_idempotency(None, idempotency_key="k", payload_hash="h").outcome
         == IdempotencyOutcome.ACCEPTED
     )
     assert (
         classify_idempotency(
-            {"idempotency_key": "k", "payload_hash": "h"},
+            {"idempotency_key": "k", "payload_hash": "h", "envelope_fingerprint": fingerprint},
             idempotency_key="k",
             payload_hash="h",
+            envelope_fingerprint=fingerprint,
         ).outcome
         == IdempotencyOutcome.DUPLICATE
     )
     assert (
         classify_idempotency(
-            {"idempotency_key": "k", "payload_hash": "h1"},
+            {"idempotency_key": "k", "payload_hash": "h1", "envelope_fingerprint": "sha256:old"},
             idempotency_key="k",
             payload_hash="h2",
+            envelope_fingerprint="sha256:new",
+        ).outcome
+        == IdempotencyOutcome.CONFLICT
+    )
+    # A metadata-only change keeps payload_hash but changes the canonical
+    # envelope; a legacy row or a missing incoming fingerprint fails closed.
+    assert (
+        classify_idempotency(
+            {"idempotency_key": "k", "payload_hash": "h", "envelope_fingerprint": "sha256:old"},
+            idempotency_key="k",
+            payload_hash="h",
+            envelope_fingerprint="sha256:new",
         ).outcome
         == IdempotencyOutcome.CONFLICT
     )
     assert (
         classify_idempotency(
-            {"idempotency_key": "k", "payload_hash": "h", "status": "replayable"},
+            {"idempotency_key": "k", "payload_hash": "h"},
+            idempotency_key="k",
+            payload_hash="h",
+            envelope_fingerprint=fingerprint,
+        ).outcome
+        == IdempotencyOutcome.CONFLICT
+    )
+    assert (
+        classify_idempotency(
+            {"idempotency_key": "k", "payload_hash": "h", "envelope_fingerprint": fingerprint},
             idempotency_key="k",
             payload_hash="h",
         ).outcome
-        == IdempotencyOutcome.REPLAYABLE
+        == IdempotencyOutcome.CONFLICT
+    )
+    for terminal in (IdempotencyOutcome.QUARANTINED, IdempotencyOutcome.REPLAYABLE):
+        decision = classify_idempotency(
+            {"idempotency_key": "k", "payload_hash": "h", "status": terminal},
+            idempotency_key="k",
+            payload_hash="h",
+            envelope_fingerprint="sha256:different",
+        )
+        assert decision.outcome == terminal
+    assert (
+        classify_idempotency(
+            {"idempotency_key": "other", "payload_hash": "h", "envelope_fingerprint": "sha256:old"},
+            idempotency_key="k",
+            payload_hash="h",
+            envelope_fingerprint="sha256:new",
+        ).outcome
+        == IdempotencyOutcome.ACCEPTED
     )
 
 
@@ -382,6 +430,7 @@ def test_create_delivery_job_converges_duplicate_and_rejects_conflict(tmp_path):
         command_id="cmd_a",
         idempotency_key="delivery_key",
         payload_hash="sha256:payload",
+        envelope_fingerprint="sha256:delivery-envelope",
         target_profile="transcript-memory",
         document_kind="conversation_chunk",
         now=NOW,
@@ -391,6 +440,7 @@ def test_create_delivery_job_converges_duplicate_and_rejects_conflict(tmp_path):
         command_id="cmd_b",
         idempotency_key="delivery_key",
         payload_hash="sha256:payload",
+        envelope_fingerprint="sha256:delivery-envelope",
         target_profile="transcript-memory",
         document_kind="conversation_chunk",
         now=NOW,
@@ -403,6 +453,7 @@ def test_create_delivery_job_converges_duplicate_and_rejects_conflict(tmp_path):
             command_id="cmd_b",
             idempotency_key="delivery_key",
             payload_hash="sha256:different",
+            envelope_fingerprint="sha256:different-envelope",
             target_profile="transcript-memory",
             document_kind="conversation_chunk",
             now=NOW,
@@ -458,7 +509,14 @@ def test_command_transaction_conflicting_delivery_intent_quarantines_without_job
         idempotency_key="cmd_conflict",
         payload_hash="sha256:different",
         result=CommandResultSpec(decision="accepted"),
-        delivery_jobs=[_job("job_conflict", idempotency_key="delivery_key", payload_hash="sha256:different")],
+        delivery_jobs=[
+            _job(
+                "job_conflict",
+                idempotency_key="delivery_key",
+                payload_hash="sha256:payload",
+                envelope_fingerprint="sha256:metadata-changed",
+            )
+        ],
         mutate=lambda _tx: (_ for _ in ()).throw(AssertionError("conflict must not mutate")),
         now=NOW + timedelta(seconds=1),
     )
@@ -542,3 +600,160 @@ def test_state_db_creates_absent_file_0600_and_rejects_unsafe_existing_paths(tmp
     monkeypatch.setattr(state_db_module.os, "getuid", lambda: os.stat(owner_mismatch).st_uid + 1)
     with pytest.raises(ValueError, match="owner must match"):
         RAGIngressStateDB(owner_mismatch)
+
+
+def test_envelope_fingerprint_is_canonical_and_covers_metadata():
+    payload = {
+        "contentHash": "sha256:same",
+        "b": 2,
+        "a": {"metadata": {"type": "conversation_chunk"}, "label": "한글"},
+    }
+    expected = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
+    )
+    assert envelope_fingerprint(payload) == expected
+    reordered = {"a": payload["a"], "b": 2, "contentHash": "sha256:same"}
+    assert envelope_fingerprint(reordered) == expected
+    metadata_changed = {
+        "contentHash": "sha256:same",
+        "b": 2,
+        "a": {"metadata": {"type": "changed"}, "label": "한글"},
+    }
+    assert envelope_fingerprint(metadata_changed) != expected
+
+
+def test_inbox_shadow_persists_fingerprint_and_metadata_change_conflicts(tmp_path):
+    db = _db(tmp_path)
+    payload = _payload(key="metadata-change")
+    assert db.record_inbox_shadow(payload, now=NOW).outcome == "accepted"
+    row = db.get_row("inbox_events", "idempotency_key", "metadata-change")
+    assert row["envelope_fingerprint"] == envelope_fingerprint(payload)
+
+    changed = json.loads(json.dumps(payload))
+    changed["payload"]["document"]["metadata"]["type"] = "changed"
+    assert changed["contentHash"] == payload["contentHash"]
+    assert db.record_inbox_shadow(changed, now=NOW).outcome == "conflict"
+
+
+def test_terminal_command_outcomes_survive_fingerprint_mismatch(tmp_path):
+    db = _db(tmp_path)
+    for status in (IdempotencyOutcome.QUARANTINED, IdempotencyOutcome.REPLAYABLE):
+        key = f"terminal-gate-{status}"
+        payload = _payload(key=key)
+        changed = json.loads(json.dumps(payload))
+        changed["payload"]["document"]["body"] = "different body"
+        changed["contentHash"] = "sha256:different"
+        db.create_command(
+            command_id=f"cmd_{status}",
+            command_type="transcript_ingest",
+            idempotency_key=key,
+            payload_hash=str(payload["contentHash"]),
+            envelope_fingerprint=envelope_fingerprint(payload),
+            status=status,
+            now=NOW,
+        )
+        assert db.record_inbox_shadow(changed, now=NOW).outcome == status
+
+
+def test_migration_adds_envelope_fingerprint_columns_to_legacy_db(tmp_path):
+    parent = tmp_path / "private"
+    parent.mkdir(mode=0o700)
+    os.chmod(parent, 0o700)
+    path = parent / "legacy.sqlite"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """
+        CREATE TABLE inbox_events (
+            event_id TEXT PRIMARY KEY,
+            idempotency_key TEXT NOT NULL,
+            payload_hash TEXT NOT NULL,
+            source TEXT DEFAULT '',
+            kind TEXT DEFAULT '',
+            target_profile TEXT DEFAULT '',
+            payload_ref TEXT DEFAULT '',
+            received_at TEXT NOT NULL,
+            persisted_at TEXT NOT NULL,
+            accept_outcome TEXT NOT NULL,
+            consumed_by_command_id TEXT DEFAULT '',
+            consumed_at TEXT DEFAULT '',
+            outcome_reason TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE commands (
+            command_id TEXT PRIMARY KEY,
+            command_type TEXT NOT NULL,
+            resource_id_hash TEXT DEFAULT '',
+            session_id_hash TEXT DEFAULT '',
+            idempotency_key TEXT NOT NULL,
+            payload_hash TEXT NOT NULL,
+            input_epoch TEXT DEFAULT '',
+            status TEXT NOT NULL,
+            lease_owner TEXT DEFAULT '',
+            lease_until TEXT DEFAULT '',
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            last_error_class TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE delivery_jobs (
+            job_id TEXT PRIMARY KEY,
+            command_id TEXT NOT NULL REFERENCES commands(command_id) ON DELETE RESTRICT,
+            idempotency_key TEXT NOT NULL,
+            payload_hash TEXT NOT NULL,
+            target_profile TEXT NOT NULL,
+            document_kind TEXT NOT NULL,
+            status TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            next_retry_at TEXT DEFAULT '',
+            lease_owner TEXT DEFAULT '',
+            lease_until TEXT DEFAULT '',
+            index_target_id TEXT DEFAULT '',
+            index_document_id TEXT DEFAULT '',
+            index_run_id TEXT DEFAULT '',
+            last_error_class TEXT DEFAULT '',
+            last_reconciled_at TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE delivery_payloads (
+            idempotency_key TEXT PRIMARY KEY,
+            payload_hash TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            recorded_at TEXT NOT NULL
+        );
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO commands (
+            command_id, command_type, idempotency_key, payload_hash,
+            status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "cmd_legacy",
+            "transcript_ingest",
+            "legacy-key",
+            "sha256:legacy",
+            "completed",
+            NOW.isoformat(),
+            NOW.isoformat(),
+        ),
+    )
+    connection.commit()
+    connection.close()
+    os.chmod(path, 0o600)
+
+    db = RAGIngressStateDB(path)
+    with db.connect() as connection:
+        for table in ("inbox_events", "commands", "delivery_jobs", "delivery_payloads"):
+            columns = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")}
+            assert "envelope_fingerprint" in columns
+
+    assert db.get_row("commands", "idempotency_key", "legacy-key")["envelope_fingerprint"] == ""
+    payload = _payload(key="legacy-key")
+    assert db.record_inbox_shadow(payload, now=NOW).outcome == "conflict"

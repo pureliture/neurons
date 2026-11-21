@@ -1,13 +1,19 @@
 import hashlib
 import json
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from agent_knowledge.rag_ingress.backfill import state_db_counts
 from agent_knowledge.rag_ingress.backfill_apply import (
     apply_backfill_to_state_db,
     read_queue_payloads,
 )
+from agent_knowledge.rag_ingress.idempotency import envelope_fingerprint
 from agent_knowledge.rag_ingress.state_db import RAGIngressStateDB
+
+WORKERS = 6
+
 
 
 def _payload(*, key, body="hello chunk body", target_profile="index-transcript-memory", kind="conversation_chunk"):
@@ -138,3 +144,89 @@ def test_backfill_apply_conflict_same_key_different_body(tmp_path):
     assert conflict["applied_count"] == 0
     assert conflict["already_present_count"] == 0
     assert conflict["cutover_status"] == "cutover_blocked"
+
+
+def test_backfill_apply_first_apply_accepted_then_retransmission_duplicate(tmp_path):
+    state_db = RAGIngressStateDB(_private_db_path(tmp_path))
+    payload = _payload(key="first-apply", body="first body")
+
+    first = apply_backfill_to_state_db(state_db=state_db, payloads=[payload], dry_run=False)
+    assert first["applied_count"] == 1
+    assert first["conflict_count"] == 0
+    assert state_db_counts(state_db)["commands"] == 1
+    assert state_db.get_row("commands", "idempotency_key", "first-apply")["envelope_fingerprint"] == (
+        envelope_fingerprint(payload)
+    )
+
+    retransmission = apply_backfill_to_state_db(
+        state_db=state_db, payloads=[json.loads(json.dumps(payload))], dry_run=False
+    )
+    assert retransmission["already_present_count"] == 1
+    assert retransmission["applied_count"] == 0
+    assert retransmission["conflict_count"] == 0
+    assert state_db_counts(state_db)["commands"] == 1
+    assert state_db_counts(state_db)["delivery_jobs"] == 1
+
+
+def test_backfill_apply_metadata_only_change_conflicts(tmp_path):
+    state_db = RAGIngressStateDB(_private_db_path(tmp_path))
+    payload = _payload(key="metadata-key", body="unchanged body")
+    assert apply_backfill_to_state_db(state_db=state_db, payloads=[payload], dry_run=False)["applied_count"] == 1
+
+    changed = json.loads(json.dumps(payload))
+    changed["payload"]["document"]["metadata"]["type"] = "different_metadata"
+    assert changed["contentHash"] == payload["contentHash"]
+    assert envelope_fingerprint(changed) != envelope_fingerprint(payload)
+
+    result = apply_backfill_to_state_db(state_db=state_db, payloads=[changed], dry_run=False)
+    assert result["conflict_count"] == 1
+    assert result["applied_count"] == 0
+    assert result["already_present_count"] == 0
+    assert state_db_counts(state_db)["commands"] == 1
+    assert state_db_counts(state_db)["delivery_jobs"] == 1
+    assert state_db.get_row("commands", "idempotency_key", "metadata-key")["envelope_fingerprint"] == (
+        envelope_fingerprint(payload)
+    )
+
+
+def test_backfill_apply_legacy_row_without_fingerprint_conflicts(tmp_path):
+    state_db = RAGIngressStateDB(_private_db_path(tmp_path))
+    key = "legacy-key"
+    stamp = "2026-06-10T09:00:00+00:00"
+    with state_db.connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO commands (
+                command_id, command_type, idempotency_key, payload_hash,
+                envelope_fingerprint, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, '', ?, ?, ?)
+            """,
+            ("cmd_legacy", "transcript_ingest", key, "sha256:legacy", "completed", stamp, stamp),
+        )
+
+    result = apply_backfill_to_state_db(
+        state_db=state_db, payloads=[_payload(key=key, body="legacy body")], dry_run=False
+    )
+    assert result["conflict_count"] == 1
+    assert result["applied_count"] == 0
+    assert state_db_counts(state_db)["commands"] == 1
+    assert state_db_counts(state_db)["delivery_jobs"] == 0
+
+
+def test_backfill_apply_concurrent_writers_converge_to_one_apply(tmp_path):
+    state_db = RAGIngressStateDB(_private_db_path(tmp_path))
+    payload = _payload(key="concurrent-key", body="same body")
+    barrier = threading.Barrier(WORKERS)
+
+    def attempt() -> dict:
+        barrier.wait(timeout=10)
+        return apply_backfill_to_state_db(state_db=state_db, payloads=[payload], dry_run=False)
+
+    with ThreadPoolExecutor(max_workers=WORKERS) as executor:
+        results = list(executor.map(lambda _: attempt(), range(WORKERS)))
+
+    assert sum(int(result["applied_count"]) for result in results) == 1
+    assert sum(int(result["already_present_count"]) for result in results) == WORKERS - 1
+    assert sum(int(result["conflict_count"]) for result in results) == 0
+    assert state_db_counts(state_db)["commands"] == 1
+    assert state_db_counts(state_db)["delivery_jobs"] == 1

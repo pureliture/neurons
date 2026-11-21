@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol, runtime_checkable
 
-from ..rag_ingress.idempotency import IdempotencyOutcome, classify_idempotency
+from ..rag_ingress.idempotency import IdempotencyOutcome, classify_idempotency, envelope_fingerprint
 from .document_model import (
     SourceDocType,
     active_source_revision_pointer_doc_id,
@@ -105,6 +105,20 @@ SOURCE_REVISION_MEMBER_SOURCE_DOC_TYPES = frozenset(
         SourceDocType.TOOL_EVIDENCE_BUNDLE,
     }
 )
+
+
+SOURCE_STORE_BOOKKEEPING_KEYS = frozenset(
+    {"_id", "_rev", "idempotency_key", "payload_hash", "envelope_fingerprint"}
+)
+
+
+def _document_envelope_fingerprint(document: dict) -> str:
+    """Fingerprint the full source document, excluding store bookkeeping only."""
+
+    return envelope_fingerprint(
+        {key: value for key, value in document.items() if key not in SOURCE_STORE_BOOKKEEPING_KEYS}
+    )
+
 def _is_revision_scoped_source_copy(document: dict | None) -> bool:
     """Whether a source document is an immutable revision-scoped copy."""
 
@@ -373,7 +387,9 @@ def payload_hash(document: dict) -> str:
 
     doc_type = str(document.get("doc_type") or "")
     if doc_type == SourceDocType.REPO_USAGE_PATTERN:
-        return _structured_payload_hash({k: v for k, v in document.items() if k not in ("_id", "_rev", "idempotency_key", "payload_hash")})
+        return _structured_payload_hash(
+            {k: v for k, v in document.items() if k not in SOURCE_STORE_BOOKKEEPING_KEYS}
+        )
     if doc_type == SourceDocType.TOOL_EVIDENCE_BUNDLE:
         return _structured_payload_hash(
             {
@@ -408,7 +424,7 @@ def payload_hash(document: dict) -> str:
                     "observed_at_end": str(document.get("observed_at_end") or ""),
                 }
             )
-    payload = {k: v for k, v in document.items() if k not in ("_id", "_rev", "idempotency_key", "payload_hash")}
+    payload = {k: v for k, v in document.items() if k not in SOURCE_STORE_BOOKKEEPING_KEYS}
     blob = repr(sorted(payload.items()))
     return "sha256:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
@@ -428,6 +444,7 @@ def _classify_document_idempotency(
     *,
     doc_id: str,
     incoming_hash: str,
+    incoming_fingerprint: str,
 ):
     normalized = copy.deepcopy(existing) if existing is not None else None
     if normalized is not None:
@@ -439,6 +456,7 @@ def _classify_document_idempotency(
         normalized,
         idempotency_key=doc_id,
         payload_hash=incoming_hash,
+        envelope_fingerprint=incoming_fingerprint,
     )
 
 
@@ -650,12 +668,14 @@ class InMemoryCouchDBSourceStore:
             return self.put_if_absent(document)
         doc_id = str(document["_id"])
         incoming_hash = payload_hash(document)
+        incoming_fingerprint = _document_envelope_fingerprint(document)
         existing = self._docs.get(doc_id)
 
         decision = _classify_document_idempotency(
             existing,
             doc_id=doc_id,
             incoming_hash=incoming_hash,
+            incoming_fingerprint=incoming_fingerprint,
         )
         if existing is not None and decision.outcome == IdempotencyOutcome.DUPLICATE:
             return StoredRevision(doc_id=doc_id, rev=str(existing["_rev"]), outcome="duplicate")
@@ -679,10 +699,11 @@ class InMemoryCouchDBSourceStore:
         rev = f"{rev_number}-{incoming_hash.split(':', 1)[-1][:12]}"
         stored = copy.deepcopy(document)
         stored["_rev"] = rev
-        # ``idempotency_key``/``payload_hash`` let a later put re-use
-        # classify_idempotency without recomputing the prior payload identity.
+        # Bookkeeping makes a later put re-use classify_idempotency without
+        # recomputing the prior payload identity or canonical envelope.
         stored["idempotency_key"] = doc_id
         stored["payload_hash"] = incoming_hash
+        stored["envelope_fingerprint"] = incoming_fingerprint
         self._docs[doc_id] = stored
         self._note_change(doc_id)
         return StoredRevision(doc_id=doc_id, rev=rev, outcome=outcome)
@@ -693,12 +714,14 @@ class InMemoryCouchDBSourceStore:
         validate_for_write(document)
         doc_id = str(document["_id"])
         incoming_hash = payload_hash(document)
+        incoming_fingerprint = _document_envelope_fingerprint(document)
         existing = self._docs.get(doc_id)
         if existing is not None:
             decision = _classify_document_idempotency(
                 existing,
                 doc_id=doc_id,
                 incoming_hash=incoming_hash,
+                incoming_fingerprint=incoming_fingerprint,
             )
             if decision.outcome == IdempotencyOutcome.DUPLICATE:
                 return StoredRevision(
@@ -726,6 +749,7 @@ class InMemoryCouchDBSourceStore:
         stored["_rev"] = rev
         stored["idempotency_key"] = doc_id
         stored["payload_hash"] = incoming_hash
+        stored["envelope_fingerprint"] = incoming_fingerprint
         self._docs[doc_id] = stored
         self._note_change(doc_id)
         return StoredRevision(doc_id=doc_id, rev=rev, outcome="accepted")
@@ -769,10 +793,12 @@ class InMemoryCouchDBSourceStore:
         if current_rev != str(expected_rev or ""):
             raise SourceStoreConflict("conditional source revision changed")
         incoming_hash = payload_hash(document)
+        incoming_fingerprint = _document_envelope_fingerprint(document)
         decision = _classify_document_idempotency(
             current,
             doc_id=doc_id,
             incoming_hash=incoming_hash,
+            incoming_fingerprint=incoming_fingerprint,
         )
         if current is not None and decision.outcome == IdempotencyOutcome.DUPLICATE:
             return StoredRevision(doc_id=doc_id, rev=current_rev, outcome="duplicate")
@@ -796,6 +822,7 @@ class InMemoryCouchDBSourceStore:
         stored["_rev"] = rev
         stored["idempotency_key"] = doc_id
         stored["payload_hash"] = incoming_hash
+        stored["envelope_fingerprint"] = incoming_fingerprint
         self._docs[doc_id] = stored
         self._note_change(doc_id)
         return StoredRevision(
@@ -869,7 +896,7 @@ class InMemoryCouchDBSourceStore:
             session_id_hash=str(current.get("session_id_hash") or ""),
         )
         updated = copy.deepcopy(current)
-        for key in ("_rev", "idempotency_key", "payload_hash"):
+        for key in ("_rev", "idempotency_key", "payload_hash", "envelope_fingerprint"):
             updated.pop(key, None)
         updated["observed_at_start"] = str(observed_at_start or "")
         updated["observed_at_end"] = str(observed_at_end or "")
@@ -882,12 +909,14 @@ class InMemoryCouchDBSourceStore:
         updated["source_locator_hash"] = replacement_source_locator_hash
         validate_for_write(updated)
         incoming_hash = payload_hash(updated)
+        incoming_fingerprint = _document_envelope_fingerprint(updated)
         current_rev = str(current.get("_rev") or "")
         rev_number = int(current_rev.split("-", 1)[0]) + 1
         rev = f"{rev_number}-{incoming_hash.split(':', 1)[-1][:12]}"
         updated["_rev"] = rev
         updated["idempotency_key"] = doc_id
         updated["payload_hash"] = incoming_hash
+        updated["envelope_fingerprint"] = incoming_fingerprint
         self._docs[doc_id] = updated
         self._note_change(doc_id)
         return StoredRevision(doc_id=doc_id, rev=rev, outcome="conflict_resolved")

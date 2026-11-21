@@ -6,8 +6,27 @@ recording the returned outcome; this module only decides which outcome applies.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import Mapping
+
+
+def envelope_fingerprint(payload: Mapping[str, object]) -> str:
+    """Canonical fingerprint of a complete ingress envelope.
+
+    Unlike ``contentHash`` this covers every field in the payload mapping,
+    including metadata, so a metadata-only mutation cannot masquerade as an
+    idempotent retransmission.
+    """
+
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 class IdempotencyOutcome:
@@ -49,12 +68,18 @@ def classify_idempotency(
     *,
     idempotency_key: str,
     payload_hash: str,
+    envelope_fingerprint: str = "",
 ) -> IdempotencyDecision:
     """Classify a new attempt against an existing record.
 
     ``existing`` is expected to be the current local record for the same natural
     key. Passing a mismatched key is treated as no match so callers can safely
     use broader lookup projections in tests.
+
+    Terminal QUARANTINED/REPLAYABLE records always win. For a matching key the
+    canonical envelope fingerprint is compared before any duplicate decision:
+    a missing or mismatched fingerprint fails closed as a conflict, even when
+    the legacy ``payload_hash`` still agrees.
     """
 
     if not idempotency_key:
@@ -75,7 +100,15 @@ def classify_idempotency(
     if existing_key != idempotency_key:
         return IdempotencyDecision(IdempotencyOutcome.ACCEPTED, "different_idempotency_key")
 
+    if not envelope_fingerprint:
+        return IdempotencyDecision(IdempotencyOutcome.CONFLICT, "missing_incoming_envelope_fingerprint")
+    existing_fingerprint = str(existing.get("envelope_fingerprint") or "")
+    if not existing_fingerprint:
+        return IdempotencyDecision(IdempotencyOutcome.CONFLICT, "missing_existing_envelope_fingerprint")
+    if existing_fingerprint != envelope_fingerprint:
+        return IdempotencyDecision(IdempotencyOutcome.CONFLICT, "same_key_different_envelope_fingerprint")
+
     existing_hash = str(existing.get("payload_hash") or "")
     if existing_hash == payload_hash:
-        return IdempotencyDecision(IdempotencyOutcome.DUPLICATE, "same_key_same_payload_hash")
+        return IdempotencyDecision(IdempotencyOutcome.DUPLICATE, "same_key_same_envelope")
     return IdempotencyDecision(IdempotencyOutcome.CONFLICT, "same_key_different_payload_hash")
