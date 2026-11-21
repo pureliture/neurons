@@ -145,7 +145,7 @@ def _source_document_hash(document: Mapping[str, object]) -> str:
     payload = {
         str(key): value
         for key, value in document.items()
-        if key not in {"_rev", "idempotency_key", "payload_hash"}
+        if key not in {"_rev", "idempotency_key", "payload_hash", "envelope_fingerprint"}
     }
     return _canonical_hash(payload)
 
@@ -307,7 +307,7 @@ def _source_snapshot_scope(
                 {
                     str(key): value
                     for key, value in document.items()
-                    if key not in {"_id", "_rev", "idempotency_key", "payload_hash"}
+                    if key not in {"_id", "_rev", "idempotency_key", "payload_hash", "envelope_fingerprint"}
                 }
                 for document in documents
             ],

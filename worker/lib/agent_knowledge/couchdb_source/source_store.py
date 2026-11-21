@@ -450,8 +450,11 @@ def _classify_document_idempotency(
     if normalized is not None:
         # Recompute from document fields so identity-schema upgrades do not turn
         # an exact legacy duplicate into a one-time false conflict merely because
-        # its stored bookkeeping hash used the older identity contract.
+        # its stored bookkeeping hash used the older identity contract. The same
+        # rule applies to a legacy document with no stored envelope fingerprint.
         normalized["payload_hash"] = payload_hash(normalized)
+        if not normalized.get("envelope_fingerprint"):
+            normalized["envelope_fingerprint"] = _document_envelope_fingerprint(normalized)
     return classify_idempotency(
         normalized,
         idempotency_key=doc_id,
@@ -578,14 +581,14 @@ def merge_transcript_session_documents(
 
     if existing is None:
         merged = copy.deepcopy(incoming)
-        for field in ("_rev", "idempotency_key", "payload_hash"):
+        for field in ("_rev", "idempotency_key", "payload_hash", "envelope_fingerprint"):
             merged.pop(field, None)
         return merged
 
     assert_transcript_session_identity(existing=existing, incoming=incoming)
 
     merged = copy.deepcopy(existing)
-    for field in ("_rev", "idempotency_key", "payload_hash"):
+    for field in ("_rev", "idempotency_key", "payload_hash", "envelope_fingerprint"):
         merged.pop(field, None)
     for field in (
         "doc_type",
