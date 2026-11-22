@@ -1572,6 +1572,13 @@ def main(argv: list[str] | None = None) -> int:
     # from one that predates progress events; it is not a repeated heartbeat.
     emit_progress("selection", 0, 0)
     explicit_session_ids = _explicit_session_ids(args.session_id_hashes)
+    embedding_budget = None
+    effective_limit = args.limit
+    if backend == "postgres_pgvector" and not args.dry_run and not explicit_session_ids:
+        cycle_chunks, per_session_chunks = _embedding_cycle_budget(os.environ)
+        embedding_budget = dict(cycle_chunks=cycle_chunks, per_session_chunks=per_session_chunks)
+        session_limit = max(1, cycle_chunks // per_session_chunks)
+        effective_limit = min(args.limit, session_limit) if args.limit > 0 else session_limit
     if explicit_session_ids is None:
         print(
             json.dumps(
@@ -1599,7 +1606,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             sessions = _select_sessions_for_cycle(
                 store,
-                limit=args.limit,
+                limit=effective_limit,
                 project=str(args.project or ""),
                 provider=str(args.provider or ""),
                 backend=backend,
@@ -1792,6 +1799,10 @@ def main(argv: list[str] | None = None) -> int:
                 "schema_version": BUILD_CLI_SCHEMA_VERSION,
                 "dry_run": False,
                 "selected": selected_count,
+                "embedding_cycle_limit": embedding_budget["cycle_chunks"] if embedding_budget else 0,
+                "embedding_capped": bool(
+                    embedding_budget and effective_limit < args.limit
+                ),
                 "projected": projected,
                 "failed": failed,
                 "skipped": skipped,
@@ -1853,6 +1864,25 @@ def _build_pg_dead_letter_lookup(environ):
         pgvector_version=environ.get("LLM_BRAIN_PGVECTOR_VERSION", "0.8.0"),
     )
 
+
+
+DEFAULT_EMBEDDING_CYCLE_CHUNKS = 512
+DEFAULT_EMBEDDING_SESSION_CHUNKS = 16
+MAX_EMBEDDING_CYCLE_CHUNKS = 1000
+
+
+def _embedding_cycle_budget(environ):
+    """Conservative per-run embedding budget shared by full and incremental modes."""
+    try:
+        cycle = int(environ.get("PG_EMBEDDING_CHUNKS_PER_CYCLE",
+                                str(DEFAULT_EMBEDDING_CYCLE_CHUNKS)))
+        session = int(environ.get("PG_EMBEDDING_CHUNKS_PER_SESSION",
+                                  str(DEFAULT_EMBEDDING_SESSION_CHUNKS)))
+    except (TypeError, ValueError):
+        raise ValueError("invalid_pg_embedding_budget") from None
+    if cycle < 1 or session < 1:
+        raise ValueError("invalid_pg_embedding_budget")
+    return min(cycle, MAX_EMBEDDING_CYCLE_CHUNKS), session
 
 def _build_pg_projector(environ):
     dsn = (
