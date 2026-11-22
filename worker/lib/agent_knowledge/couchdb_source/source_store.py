@@ -151,6 +151,15 @@ def _selector_value(doc: dict, key: str):
     return value
 
 
+def _has_selector_key(doc: dict, key: str) -> bool:
+    value = doc
+    for part in key.split("."):
+        if not isinstance(value, dict) or part not in value:
+            return False
+        value = value[part]
+    return True
+
+
 def _matches_selector(doc: dict, selector: dict) -> bool:
     """Match the subset of Mango operators used by projection recovery.
 
@@ -159,6 +168,13 @@ def _matches_selector(doc: dict, selector: dict) -> bool:
     real selector contract instead of silently matching nothing.
     """
     for key, expected in selector.items():
+        if key == "$or":
+            if not isinstance(expected, list) or not any(
+                isinstance(branch, dict) and _matches_selector(doc, branch)
+                for branch in expected
+            ):
+                return False
+            continue
         actual = _selector_value(doc, key)
         if isinstance(expected, dict):
             for operator, operand in expected.items():
@@ -169,6 +185,8 @@ def _matches_selector(doc: dict, selector: dict) -> bool:
                         matches = False
                 elif operator == "$in":
                     matches = actual in operand
+                elif operator == "$exists":
+                    matches = _has_selector_key(doc, key) is bool(operand)
                 else:
                     return False
                 if not matches:
