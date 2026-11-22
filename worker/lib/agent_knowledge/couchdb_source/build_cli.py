@@ -374,6 +374,7 @@ def _select_sessions_needing_projection(
                 and projected_source_hash != current_source_hash
                 and str(state.get("projection_status") or "") == ProjectionStatus.PROJECTED
                 and _ready_content_matches(
+                    store,
                     ready_content_lookup,
                     state,
                     session_id_hash=session_id_hash,
@@ -449,6 +450,7 @@ def _select_sessions_needing_projection(
                 and projected_source_hash != resolved.source_hash
                 and str(state.get("projection_status") or "") == ProjectionStatus.PROJECTED
                 and _ready_content_matches(
+                    store,
                     ready_content_lookup,
                     state,
                     session_id_hash=session_id_hash,
@@ -626,7 +628,20 @@ def _legacy_ready_projection_sessions(store, states: list[dict]) -> set[tuple[st
 
 
 
+def _current_representation_content_hash(store, session_id_hash: str) -> str:
+    from ..public_safe_util import public_safe_mask_body
+    from .document_model import sha256_hash
+    from .session_memory_materializer import materialize_session_memory
+
+    try:
+        current = materialize_session_memory(session_id_hash=session_id_hash, store=store)
+        return sha256_hash(public_safe_mask_body(current.body))
+    except Exception:
+        return ""
+
+
 def _ready_content_matches(
+    store,
     ready_content_lookup,
     state: dict,
     *,
@@ -635,21 +650,43 @@ def _ready_content_matches(
     provider: str,
 ) -> bool:
     if ready_content_lookup is None:
-        return False
-    active_content_hash = str(state.get("active_content_hash") or "")
-    if not active_content_hash:
-        return False
-    try:
-        return bool(
-            ready_content_lookup(
-                session_id_hash=session_id_hash,
-                project=project,
-                provider=provider,
-                content_hash=active_content_hash,
-            )
+        print(
+            "[selection] ready_check lookup=0 hash_source=skipped hash_present=0 "
+            "chunk_id_present=0 match=0",
+            file=sys.stderr,
         )
-    except Exception:
         return False
+    receipts = state.get("backend_receipts")
+    pg = receipts.get("postgres_pgvector") if isinstance(receipts, dict) else None
+    pg = pg if isinstance(pg, dict) else {}
+    chunk_id = str(pg.get("session_memory_knowledge_id") or "")
+    content_hash = str(pg.get("representation_content_hash") or "")
+    hash_source = "receipt"
+    if not content_hash:
+        content_hash = _current_representation_content_hash(store, session_id_hash)
+        hash_source = "materialized"
+    eligible = bool(ready_content_lookup is not None and content_hash)
+    match = False
+    if eligible:
+        try:
+            match = bool(
+                ready_content_lookup(
+                    session_id_hash=session_id_hash,
+                    project=project,
+                    provider=provider,
+                    content_hash=content_hash,
+                    chunk_id=chunk_id,
+                )
+            )
+        except Exception:
+            match = False
+    print(
+        f"[selection] ready_check lookup={int(ready_content_lookup is not None)} "
+        f"hash_source={hash_source} hash_present={int(bool(content_hash))} "
+        f"chunk_id_present={int(bool(chunk_id))} match={int(match)}",
+        file=sys.stderr,
+    )
+    return match
 
 
 def _repair_projected_source_hash(
@@ -782,6 +819,7 @@ def _evaluate_session_change(
             and projected_source_hash != current_source_hash
             and str(state.get("projection_status") or "") == ProjectionStatus.PROJECTED
             and _ready_content_matches(
+                store,
                 ready_content_lookup,
                 merged,
                 session_id_hash=session_id_hash,
@@ -1357,11 +1395,23 @@ def main(argv: list[str] | None = None) -> int:
         lookup_profile = str(embedding_profile or DEFAULT_EMBEDDING_PROFILE_ID)
 
         def ready_content_lookup(
-            *, session_id_hash: str, project: str, provider: str, content_hash: str
+            *,
+            session_id_hash: str,
+            project: str,
+            provider: str,
+            content_hash: str,
+            chunk_id: str = "",
         ) -> bool:
             if not content_hash:
                 return False
             try:
+                if chunk_id:
+                    row = lookup_store.get_chunk(chunk_id)
+                    return bool(
+                        row is not None
+                        and str(getattr(row, "content_hash", "") or "") == content_hash
+                        and str(getattr(row, "embedding_state", "") or "") == "ready"
+                    )
                 return (
                     lookup_store.find_ready_chunk_by_identity(
                         session_id_hash=session_id_hash,
