@@ -930,6 +930,10 @@ class PgSessionMemoryProjector:
         embedder = getattr(self, "_chunk_embedder", None)
         if isinstance(embedder, _CycleBudgetEmbedder) or hasattr(embedder, "remaining"):
             embedder.remaining = max(int(getattr(embedder, "remaining", 0) or 0), 1_000_000)
+        if hasattr(embedder, "session_budget"):
+            embedder.session_budget = max(
+                int(getattr(embedder, "session_budget", 0) or 0), 1_000_000
+            )
 
     def close(self) -> None:
         if self._chunk_embedder is not None:

@@ -5,10 +5,15 @@ import io
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from agent_knowledge.couchdb_source import build_cli
 from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
+from agent_knowledge.rag_ingress.pg_backfill import PgSessionMemoryProjector
+from agent_knowledge.rag_ingress.pg_embedding_chunks import BoundedPgEmbedding
+from agent_knowledge.model_connectors import DEFAULT_EMBEDDING_DIM, DEFAULT_EMBEDDING_MODEL
 from test_pending_state_sweep import (
     PROJECT,
     PROVIDER,
@@ -110,3 +115,32 @@ def test_real_single_session_error_still_exits_one(tmp_path: Path, monkeypatch) 
 
     assert code == 1
     assert report["failed"] == 1
+
+
+def test_single_session_exemption_lifts_session_chunk_budget(tmp_path: Path) -> None:
+    calls = []
+
+    class _Delegate:
+        model = DEFAULT_EMBEDDING_MODEL
+        size = DEFAULT_EMBEDDING_DIM
+
+        def embed(self, text: str) -> list[float]:
+            del text
+            calls.append(1)
+            return [0.1] * DEFAULT_EMBEDDING_DIM
+
+    bounded = BoundedPgEmbedding(
+        _Delegate(),
+        cache_path=str(tmp_path / "cache.sqlite3"),
+        endpoint_scope="test",
+        cycle_budget=1,
+        session_budget=1,
+    )
+    projector = PgSessionMemoryProjector(
+        SimpleNamespace(), _Delegate(), chunk_embedder=bounded
+    )
+    projector.exempt_from_cycle_budget()
+
+    bounded.embed("x" * 17000, content_hash="sha256:" + "a" * 64)
+
+    assert len(calls) >= 2  # chunk count exceeded original session_budget=1
