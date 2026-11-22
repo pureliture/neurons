@@ -1000,6 +1000,81 @@ def _resolve_pending_sessions(
     return still_pending
 
 
+
+def _pending_state_session_ids(
+    store,
+    *,
+    limit: int,
+    project: str,
+    provider: str,
+    ready_content_lookup,
+    exhausted: dict,
+) -> list[str]:
+    """Find state-pending sessions whose CouchDB chunks lack a PG ready row.
+
+    Incremental selection only visits the checkpoint and the change feed, so a
+    projection_state document that stayed pending across a completed full walk
+    is never revisited. This bounded sweep closes that gap without a DB DSN.
+    """
+    from .document_model import SourceDocType
+
+    selector = {"projection_status": "pending"}
+    if project:
+        selector["project"] = project
+    if provider:
+        selector["provider"] = provider
+    states = store.find_by_type(
+        SourceDocType.PROJECTION_STATE,
+        fields=["_id", "session_id_hash", "active_content_hash", "backend_receipts"],
+        selector=selector,
+        limit=limit if limit > 0 else 0,
+    )
+    selected: list[str] = []
+    scanned = 0
+    chunked = 0
+    for state in states:
+        sid = str(state.get("session_id_hash") or "")
+        if not sid.startswith("sha256:") or sid in exhausted:
+            continue
+        scanned += 1
+        chunk_docs = store.find_by_type(
+            SourceDocType.CONVERSATION_CHUNK,
+            fields=["session_id_hash"],
+            selector={"session_id_hash": sid},
+            limit=1,
+        )
+        if not chunk_docs:
+            continue
+        chunked += 1
+        active_hash = str(state.get("active_content_hash") or "")
+        receipts = state.get("backend_receipts")
+        pg = receipts.get("postgres_pgvector") if isinstance(receipts, dict) else None
+        chunk_id = str(pg.get("session_memory_knowledge_id") or "") if isinstance(pg, dict) else ""
+        if not active_hash:
+            continue
+        try:
+            exists = bool(
+                ready_content_lookup(
+                    session_id_hash=sid,
+                    project=project,
+                    provider=provider,
+                    content_hash=active_hash,
+                    chunk_id=chunk_id,
+                )
+            )
+        except Exception:
+            continue
+        if exists:
+            continue
+        selected.append(sid)
+        if limit > 0 and len(selected) >= limit:
+            break
+    print(
+        f"[selection] pending_state_sweep scanned={scanned} chunked={chunked} "
+        f"missing_pg={len(selected)}",
+        file=sys.stderr,
+    )
+    return selected
 def _select_sessions_for_cycle(
     store,
     *,
@@ -1073,6 +1148,23 @@ def _select_sessions_for_cycle(
             *_valid_projection_ids(stale_terminal),
             *_valid_projection_ids(failures),
         ]))
+
+    exhausted_before_sweep = dict(checkpoint.get("exhausted_session_ids") or {})
+    if (
+        backend == "postgres_pgvector"
+        and ready_content_lookup is not None
+        and normalized != "full"
+    ):
+        sweep_limit = limit if limit > 0 else 0
+        swept = _pending_state_session_ids(
+            store,
+            limit=sweep_limit,
+            project=project,
+            provider=provider,
+            ready_content_lookup=ready_content_lookup,
+            exhausted=exhausted_before_sweep,
+        )
+        pending_ids = list(dict.fromkeys([*pending_ids, *swept]))
     pending_sessions = _resolve_pending_sessions(
         store,
         pending_ids,
