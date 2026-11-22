@@ -1726,6 +1726,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
             return 2
+        if selected_count <= 1 and (explicit_session_ids or str(args.project or "")):
+            exempt = getattr(projector, "exempt_from_cycle_budget", None)
+            if callable(exempt):
+                exempt()
     projected = 0
     failed = 0
     skipped = 0
@@ -1793,6 +1797,16 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         _close_if_supported(projector)
 
+    if (
+        selected_count == 1
+        and projected == 0
+        and failed == 0
+        and (explicit_session_ids or str(args.project or ""))
+    ):
+        failed = 1
+        failure_reason = "single_session_not_projected"
+        for row in session_reports:
+            row.update(status="failed", error_class=failure_reason)
     print(
         json.dumps(
             {

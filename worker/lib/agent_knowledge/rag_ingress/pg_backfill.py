@@ -28,7 +28,7 @@ from ..postgres_store.pgvector_store import PgVectorStore, SessionChunk, _as_opt
 from .pg_embedding_privacy import assert_pg_embedding_egress_safe
 from .pg_embedding_chunks import (
     CHUNK_BYTES, CHUNKED_PROFILE, INVALID_TEXT_NUL,
-    InvalidProjectionText, assert_pg_text_safe,
+    EmbeddingChunksPending, InvalidProjectionText, assert_pg_text_safe,
 )
 
 
@@ -923,6 +923,13 @@ class PgSessionMemoryProjector:
         else:
             self.last_local_representation_receipt = None
         return chosen_id
+
+    def exempt_from_cycle_budget(self) -> None:
+        """Let an explicitly requested small run finish within this cycle."""
+        self._local_egress_remaining = max(self._local_egress_remaining, 1_000_000)
+        embedder = getattr(self, "_chunk_embedder", None)
+        if isinstance(embedder, _CycleBudgetEmbedder) or hasattr(embedder, "remaining"):
+            embedder.remaining = max(int(getattr(embedder, "remaining", 0) or 0), 1_000_000)
 
     def close(self) -> None:
         if self._chunk_embedder is not None:
