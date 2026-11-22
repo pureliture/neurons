@@ -969,3 +969,35 @@ def test_run_consume_publishes_session_changed_after_delivery(tmp_path, monkeypa
     assert headers["Nats-Msg-Id"].startswith("sm:")
     assert event["session_id_hash"] == payload["payload"]["document"]["metadata"]["session_id_hash"]
     assert "body" not in event
+
+
+def test_public_redaction_output_passes_wire_and_leak_gates():
+    """Regression: the redactor's own output must not look like a leak.
+
+    Public term substitutions used to synthesize credential-shaped prose
+    ("Basic token" -> "Basic credential") and credential-URL placeholders kept
+    the ``user:pass@`` shape, so an already-redacted body failed
+    ``_wire_payload_is_conservatively_redacted`` and the delivery leak gate,
+    surfacing as an ingress rejection / delivery quarantine.
+    """
+    from agent_knowledge.rag_ingress.server_runtime import public_ingress_leak_violations
+    from agent_knowledge.redaction import redact_public_ingress_text
+
+    raw = (
+        "---\nschema_version: agent_knowledge_document.v2\nresult_type: conversation_chunk\n---\n"
+        "Basic token handling and access token rotation were discussed.\n"
+        "postgresql://alice:hunter2xyz@db.internal:5432/app kept working.\n"
+        "Bearer token refresh and raw_transcript piping came up.\n"
+    )
+    public = redact_public_ingress_text(raw)
+
+    assert redact_text_v2(public) == public
+    assert redact_public_ingress_text(public) == public
+    assert public_ingress_leak_violations(public) == []
+    assert "hunter2xyz" not in public
+    assert "alice" not in public
+
+    # Narrowing the placeholder shape must not blind the gate to real leaks.
+    assert public_ingress_leak_violations("Bearer ghp_ABCdef0123456789xyzQQ012345")
+    assert public_ingress_leak_violations("postgresql://alice:hunter2xyz@db.internal/app")
+    assert public_ingress_leak_violations("token: ghp_ABCdef0123456789xyzQQ012345")
