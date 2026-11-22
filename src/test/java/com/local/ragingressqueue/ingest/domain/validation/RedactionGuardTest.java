@@ -96,6 +96,22 @@ class RedactionGuardTest {
             .anyMatch(violation -> violation.contains("token"));
     }
 
+    @Test
+    void secretKeywordInProseIsNotAnAssignment() {
+        // Regression: the assignment pattern used to accept whitespace as the
+        // separator, so ordinary prose ("secret classification policy…") was
+        // rejected as a credential assignment and quarantined at the ingress API.
+        assertThat(guard.inspect(redactedBody()
+            + "\nthe secret classification policy and password rotation guidance"
+            + "\nwe discussed secret handling and token classification in prose"))
+            .isEmpty();
+        // An actual assignment (":" or "=") still trips the guard.
+        assertThat(guard.inspect(redactedBody() + "\nsecret = sk-abcdefghijklmnopqrstuvwxyz012345"))
+            .anyMatch(violation -> violation.contains("secret"));
+        assertThat(guard.inspect(redactedBody() + "\npassword: sk-abcdefghijklmnopqrstuvwxyz012345"))
+            .anyMatch(violation -> violation.contains("password"));
+    }
+
     private String redactedBody() {
         return """
             ---

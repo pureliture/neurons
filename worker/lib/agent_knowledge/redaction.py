@@ -48,7 +48,9 @@ AUTH_HEADER_RE = re.compile(
     r"\b(Authorization|X-Api-Key|Api-Key|Cookie|Set-Cookie)\b\s*[:=]\s*(Bearer\s+[^ \n\t,;]+|Basic\s+[^ \n\t,;]+|[^ \n\t,;]+)",
     re.IGNORECASE,
 )
-CREDENTIAL_URL_RE = re.compile(r"://[^/\s:@]+:[^@\s/]+@")
+# ``<`` is excluded from both user-info slots so the redaction placeholder
+# ``://<redacted:secret>@`` written by this module is not a credential URL.
+CREDENTIAL_URL_RE = re.compile(r"://[^/\s:@<]+:[^@\s/<]+@")
 LOWER_SECRET_ASSIGNMENT_RE = re.compile(
     r"\b(password|passwd|secret|token|api[_-]?key)\b\s*[:=]\s*(\"[^\"]*\"|'[^']*'|[^ \n\t,'\"}]+)",
     re.IGNORECASE,
@@ -98,4 +100,8 @@ def redact_public_ingress_text(text: str, *, private_path_patterns=None) -> str:
     redacted = DOCUMENT_ID_TERM_RE.sub("document_ref", redacted)
     redacted = PRIVATE_LOCATOR_TERM_RE.sub("redacted_locator", redacted)
     redacted = RAW_TRANSCRIPT_TERM_RE.sub("redacted transcript", redacted)
-    return redacted
+    # The term substitutions above can synthesize credential-shaped text from
+    # benign prose ("Basic token" -> "Basic credential"). Re-run the credential
+    # scrubs so the output is a fixed point of redact_text_v2; the wire-payload
+    # gate and public_ingress_leak_violations fail-close on anything else.
+    return redact_text_v2(redacted, private_path_patterns=private_path_patterns)
