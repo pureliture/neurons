@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import sys
+import os
 from typing import Any
 
 from ..couchdb_source.document_model import assert_index_target_allowed, sha256_hash
@@ -240,6 +241,37 @@ def project_pg_representation(*, materialized, source_store, sql_store, embed_pr
     return {"status": "projected", "reason": "", "ref": chunk_id}
 
 
+
+
+def _local_cycle_embedding_budget() -> int:
+    """Bound actual local embedding egress per build cycle (not just plan size)."""
+    try:
+        value = int(os.environ.get("PG_EMBEDDING_CHUNKS_PER_CYCLE", "512"))
+    except (TypeError, ValueError):
+        raise ValueError("invalid_pg_embedding_budget") from None
+    if value < 1:
+        raise ValueError("invalid_pg_embedding_budget")
+    return min(value, 1000)
+
+
+class _CycleBudgetEmbedder:
+    """Fallback bounded egress for callers without BoundedPgEmbedding."""
+
+    def __init__(self, delegate, budget: int) -> None:
+        self.delegate = delegate
+        self.remaining = budget
+
+    def embed(self, text: str, *, content_hash: str = "") -> list[float]:
+        del content_hash
+        if self.remaining <= 0:
+            raise EmbeddingChunksPending()
+        self.remaining -= 1
+        return list(self.delegate.embed(text))
+
+    def close(self) -> None:
+        closer = getattr(self.delegate, "close", None)
+        if callable(closer):
+            closer()
 class PgSessionMemoryProjector:
     """Project session-memory into the PgVectorStore.
 
@@ -268,6 +300,11 @@ class PgSessionMemoryProjector:
         self._allow_deferred = bool(allow_deferred_on_model_unavailable)
         self._representation = representation
         self._segment_max_bytes = int(segment_max_bytes)
+        self._local_egress_remaining = _local_cycle_embedding_budget()
+        if self._chunk_embedder is None:
+            self._chunk_embedder = _CycleBudgetEmbedder(
+                self._embed, self._local_egress_remaining
+            )
         self.last_local_representation_receipt: dict[str, Any] | None = None
         self.last_local_identity_scheme: str | None = None
         self.last_local_identity_bypassed_rows: int = 0
@@ -389,12 +426,9 @@ class PgSessionMemoryProjector:
         # body's historical embedding provenance. Only new embedding is gated.
         # Reject, never redact: the unchanged body must match its content hash.
         assert_pg_embedding_egress_safe(body)
-        if chunked:
-            if self._chunk_embedder is None:
-                raise ValueError("bounded PG chunk embedder is required for large input")
-            vector = self._chunk_embedder.embed(body, content_hash=content_hash)
-        else:
-            vector = self._embed.embed(body)
+        if self._chunk_embedder is None:
+            raise ValueError("bounded PG chunk embedder is required")
+        vector = self._chunk_embedder.embed(body, content_hash=content_hash)
         if len(vector) != embedding_size:
             raise ValueError(
                 f"embedding returned {len(vector)} dims, expected {embedding_size}"
@@ -541,7 +575,7 @@ class PgSessionMemoryProjector:
                 pending_ids.append(segment.segment_id)
             segment_ids.append(segment.segment_id)
 
-        for _ in pending_ids:
+        if pending_ids and self._local_egress_remaining > 0:
             worker = LocalEmbeddingOutboxWorker(
                 store=self._store,
                 embedding_fn=self._embed.embed,
@@ -549,7 +583,12 @@ class PgSessionMemoryProjector:
                 lease_seconds=60,
                 embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
             )
+            budget = min(self._local_egress_remaining, len(pending_ids))
+            worker.batch_size = budget
             worker.run_once()
+            self._local_egress_remaining -= min(
+                int(getattr(worker, "last_batch_attempted", budget) or 0), budget
+            )
             if worker.last_batch_failed and not self._allow_deferred:
                 raise RuntimeError("local embedding model call failed during projection")
 
@@ -823,7 +862,11 @@ class PgSessionMemoryProjector:
         # Model call happens strictly outside the PG transaction.
         # If the model service is temporarily unavailable and deferred mode is enabled,
         # the parent row and durable local_embedding_outbox job remain committed.
-        if outbox_id is not None and callable(getattr(self._embed, "embed", None)):
+        if (
+            outbox_id is not None
+            and self._local_egress_remaining > 0
+            and callable(getattr(self._embed, "embed", None))
+        ):
             from ..postgres_store.outbox_worker import LocalEmbeddingOutboxWorker
 
             worker = LocalEmbeddingOutboxWorker(
@@ -834,6 +877,9 @@ class PgSessionMemoryProjector:
                 embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
             )
             worker.run_once()
+            self._local_egress_remaining -= int(
+                getattr(worker, "last_batch_attempted", 1) or 0
+            )
             if worker.last_batch_failed and not self._allow_deferred:
                 raise RuntimeError("local embedding model call failed during projection")
 

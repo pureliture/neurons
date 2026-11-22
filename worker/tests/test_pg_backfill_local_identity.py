@@ -211,22 +211,19 @@ def test_segment_projection_reuses_ready_rows_and_only_embeds_changed_tail(monke
             self.last_batch_failed = False
 
         def run_once(self):
-            pending = next(
-                (
-                    chunk_id
-                    for chunk_id, local in self.store.local_embeddings.items()
-                    if local["state"] == "pending"
-                ),
-                None,
-            )
-            if pending is None:
-                return 0
-            text = self.store.rows[pending].content_markdown
-            self.store.local_embeddings[pending].update(
-                state="ready",
-                vector=self.embedding_fn(text),
-            )
-            return 1
+            pending = [
+                chunk_id
+                for chunk_id, local in self.store.local_embeddings.items()
+                if local["state"] == "pending"
+            ][: int(getattr(self, "batch_size", 1))]
+            for chunk_id in pending:
+                text = self.store.rows[chunk_id].content_markdown
+                self.store.local_embeddings[chunk_id].update(
+                    state="ready",
+                    vector=self.embedding_fn(text),
+                )
+            self.last_batch_attempted = len(pending)
+            return len(pending)
 
     monkeypatch.setattr(
         "agent_knowledge.postgres_store.outbox_worker.LocalEmbeddingOutboxWorker",
