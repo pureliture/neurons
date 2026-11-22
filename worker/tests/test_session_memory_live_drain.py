@@ -89,8 +89,8 @@ def _seed(store: InMemoryCouchDBSourceStore, raw_id: str, *, status: str = "") -
 
 
 def _expected_ready_hash(store, sid: str) -> str:
-    materialized = materialize_session_memory(session_id_hash=sid, store=store)
-    return dm.sha256_hash(public_safe_mask_body(materialized.body))
+    state = store.get(dm.projection_state_doc_id(sid)) or {}
+    return str(state.get("active_content_hash") or "")
 
 
 def _ready_lookup(expected_hash: str, *, accept: bool = True):
@@ -133,7 +133,7 @@ def _cycle(store, *, limit: int = 10, ready_content_lookup=None) -> list[dict]:
     )
 
 
-def test_instrumented_ready_check_uses_materialized_hash_and_repairs(capsys) -> None:
+def test_instrumented_ready_check_uses_active_hash_and_repairs(capsys) -> None:
     store = InMemoryCouchDBSourceStore()
     sid = _seed(store, "drifted", status=dm.ProjectionStatus.PROJECTED)
     expected = _expected_ready_hash(store, sid)
@@ -151,7 +151,7 @@ def test_instrumented_ready_check_uses_materialized_hash_and_repairs(capsys) -> 
     stderr = capsys.readouterr().err
     state = store.get(dm.projection_state_doc_id(sid))
 
-    assert "hash_source=materialized" in stderr
+    assert "hash_source=active" in stderr
     assert "hash_present=1" in stderr
     assert "match=1" in stderr
     assert needs is False

@@ -628,18 +628,6 @@ def _legacy_ready_projection_sessions(store, states: list[dict]) -> set[tuple[st
 
 
 
-def _current_representation_content_hash(store, session_id_hash: str) -> str:
-    from ..public_safe_util import public_safe_mask_body
-    from .document_model import sha256_hash
-    from .session_memory_materializer import materialize_session_memory
-
-    try:
-        current = materialize_session_memory(session_id_hash=session_id_hash, store=store)
-        return sha256_hash(public_safe_mask_body(current.body))
-    except Exception:
-        return ""
-
-
 def _ready_content_matches(
     store,
     ready_content_lookup,
@@ -649,6 +637,7 @@ def _ready_content_matches(
     project: str,
     provider: str,
 ) -> bool:
+    del store
     if ready_content_lookup is None:
         print(
             "[selection] ready_check lookup=0 hash_source=skipped hash_present=0 "
@@ -660,14 +649,13 @@ def _ready_content_matches(
     pg = receipts.get("postgres_pgvector") if isinstance(receipts, dict) else None
     pg = pg if isinstance(pg, dict) else {}
     chunk_id = str(pg.get("session_memory_knowledge_id") or "")
-    content_hash = str(pg.get("representation_content_hash") or "")
-    hash_source = "receipt"
+    content_hash = str(state.get("active_content_hash") or "")
+    hash_source = "active"
     if not content_hash:
-        content_hash = _current_representation_content_hash(store, session_id_hash)
-        hash_source = "materialized"
-    eligible = bool(ready_content_lookup is not None and content_hash)
+        content_hash = str(pg.get("representation_content_hash") or "")
+        hash_source = "receipt"
     match = False
-    if eligible:
+    if content_hash:
         try:
             match = bool(
                 ready_content_lookup(
@@ -681,8 +669,8 @@ def _ready_content_matches(
         except Exception:
             match = False
     print(
-        f"[selection] ready_check lookup={int(ready_content_lookup is not None)} "
-        f"hash_source={hash_source} hash_present={int(bool(content_hash))} "
+        f"[selection] ready_check lookup=1 hash_source={hash_source} "
+        f"hash_present={int(bool(content_hash))} "
         f"chunk_id_present={int(bool(chunk_id))} match={int(match)}",
         file=sys.stderr,
     )
@@ -702,8 +690,11 @@ def _repair_projected_source_hash(
     receipts = repaired.get("backend_receipts")
     if isinstance(receipts, dict) and isinstance(receipts.get("postgres_pgvector"), dict):
         receipts["postgres_pgvector"]["projected_source_hash"] = current_source_hash
-    result = store.put(repaired)
-    return str(getattr(result, "outcome", "")) != "conflict"
+    try:
+        result = store.put(repaired)
+        return str(getattr(result, "outcome", "")) != "conflict"
+    except Exception:
+        return False
 
 
 def _recorded_source_hash(store, session_id_hash: str) -> str:
