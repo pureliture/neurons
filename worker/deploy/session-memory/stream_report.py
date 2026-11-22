@@ -41,7 +41,7 @@ PROGRESS_ENUMS = {
     ),
     "phase": frozenset({"start", "running", "complete", "completed", "failed", "pending", "building"}),
     "unit": frozenset({"chunks", "sessions", "bytes"}),
-    "status": frozenset({"ok", "failed", "pending", "running", "completed"}),
+    "status": frozenset({"ok", "failed", "pending", "running", "completed", "completed_with_failures"}),
 }
 _SESSION_HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
 _ERROR_CLASS = re.compile(r"^[A-Za-z_][A-Za-z0-9_.:-]{0,63}$")
@@ -242,7 +242,7 @@ def summarize(raw: bytes | None) -> dict:
         skipped = int(report.get("skipped") or 0)
     except (TypeError, ValueError):
         return {"schema_version": SCHEMA_VERSION, "error": "invalid_report_counters"}
-    status = "failed" if failed > 0 else (
+    status = "completed_with_failures" if failed > 0 else (
         "no_progress" if selected > 0 and projected == 0 else "ok"
     )
     return {
@@ -273,7 +273,7 @@ def main() -> int:
     print(json.dumps(summary, sort_keys=True, separators=(",", ":")))
     if "error" in summary:
         return 3
-    return 1 if summary["status"] in {"failed", "no_progress"} else 0
+    return 1 if summary["status"] == "no_progress" else 0
 
 
 if __name__ == "__main__":

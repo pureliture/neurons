@@ -304,7 +304,7 @@ def test_internal_outcomes_file_is_allowlisted_and_private(tmp_path):
         SESSION_MEMORY_BUILD_OUTCOMES_FILE=str(path),
     )
     result = _run(env)
-    assert result.returncode == 1  # failed=1 in the synthetic report
+    assert result.returncode == 0  # failed=1 is isolated, not a child failure
     assert path.exists()
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     payload = json.loads(path.read_text())

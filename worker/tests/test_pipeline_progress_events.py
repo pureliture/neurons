@@ -401,10 +401,10 @@ def test_filter_progress_does_not_become_the_report(tmp_path) -> None:
         b'{"failed":2,"projected":0,"selected":2,"skipped":0}\n'
     )
     result = _run_filter(payload)
-    assert result.returncode == 1
+    assert result.returncode == 0
     lines = [line for line in result.stdout.decode().splitlines() if line]
     summary = json.loads(lines[-1])
-    assert summary["status"] == "failed"
+    assert summary["status"] == "completed_with_failures"
     assert summary["failed"] == 2
 
 
@@ -442,7 +442,7 @@ def test_filter_writes_outcomes_side_channel_with_allowlisted_rows(tmp_path) -> 
         + b"\n"
     )
     result = _run_filter(payload, outcomes=outcomes)
-    assert result.returncode == 1
+    assert result.returncode == 0
     payload = json.loads(outcomes.read_text())
     assert payload["schema_version"] == "build_outcomes.v1"
     assert payload["sessions"] == [
