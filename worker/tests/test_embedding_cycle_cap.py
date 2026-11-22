@@ -20,7 +20,7 @@ from test_pending_state_sweep import (
 )
 
 
-def _run(store, pg, path: Path, *, cycle_chunks: int, per_session: int = 16):
+def _run(store, pg, path: Path, *, cycle_chunks: int, per_session: int = 16, cap_enabled: bool = True):
     argv = ["--limit", "50", "--approval", str(path.parent / "approval.json")]
     (path.parent / "approval.json").write_text(json.dumps({
         "schema_version": "agent_knowledge_live_approval.v1",
@@ -38,10 +38,11 @@ def _run(store, pg, path: Path, *, cycle_chunks: int, per_session: int = 16):
         "COUCHDB_DB": "transcript_source",
         "SESSION_MEMORY_PROJECTION_BACKEND": "postgres_pgvector",
         "SESSION_MEMORY_SELECTION_MODE": "incremental",
-        "SESSION_MEMORY_SELECTION_CHECKPOINT": str(path),
         "PG_EMBEDDING_CHUNKS_PER_CYCLE": str(cycle_chunks),
         "PG_EMBEDDING_CHUNKS_PER_SESSION": str(per_session),
     }
+    if cap_enabled:
+        env["PG_EMBEDDING_CYCLE_CAP_ENABLED"] = "1"
     stdout, stderr = io.StringIO(), io.StringIO()
     with contextlib.ExitStack() as stack:
         stack.enter_context(patch.dict(os.environ, env, clear=True))
@@ -104,3 +105,20 @@ def test_remainder_is_processed_on_next_cycle(tmp_path: Path, monkeypatch) -> No
     assert first_ids.isdisjoint(second_ids)
     assert first_ids | second_ids <= set(sids)
     assert pg.insert_calls == 4
+
+
+def test_without_cap_flag_legacy_batch_selection_is_unchanged(tmp_path: Path) -> None:
+    store = InMemoryCouchDBSourceStore()
+    for index in range(10):
+        _seed(store, f"legacy-{index}")
+    pg = _PgStore(ready_ids=set())
+    path = tmp_path / "selection-checkpoint.json"
+    _write_checkpoint(path)
+
+    code, report, _stderr = _run(store, pg, path, cycle_chunks=96, cap_enabled=False)
+
+    assert code == 0
+    assert report["selected"] == 10
+    assert report["projected"] == 10
+    assert "embedding_cycle_limit" not in report
+    assert "embedding_capped" not in report

@@ -135,7 +135,7 @@ def _run_build(store, *, fail_ids: set[str], pg: _PgStore, checkpoint: Path):
         "COUCHDB_USER": "",
         "COUCHDB_PASSWORD": "",
         "COUCHDB_DB": "transcript_source",
-        "SESSION_MEMORY_PROJECTION_BACKEND": "postgres_pgvector",
+        "PG_EMBEDDING_CYCLE_CAP_ENABLED": "1",
         "SESSION_MEMORY_SELECTION_MODE": "full",
         "SESSION_MEMORY_SELECTION_CHECKPOINT": str(checkpoint),
     }
