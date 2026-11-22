@@ -93,6 +93,7 @@ def _projector(store, provider):
 
 
 def test_actual_embedding_egress_never_exceeds_cycle_cap(monkeypatch) -> None:
+    monkeypatch.setenv("PG_EMBEDDING_CYCLE_CAP_ENABLED", "1")
     monkeypatch.setenv("PG_EMBEDDING_CHUNKS_PER_CYCLE", str(CAP))
     monkeypatch.setattr(
         "agent_knowledge.postgres_store.outbox_worker.LocalEmbeddingOutboxWorker",
@@ -111,6 +112,7 @@ def test_actual_embedding_egress_never_exceeds_cycle_cap(monkeypatch) -> None:
 
 
 def test_remaining_egress_is_processed_on_next_projector(monkeypatch) -> None:
+    monkeypatch.setenv("PG_EMBEDDING_CYCLE_CAP_ENABLED", "1")
     monkeypatch.setenv("PG_EMBEDDING_CHUNKS_PER_CYCLE", str(CAP))
     monkeypatch.setattr(
         "agent_knowledge.postgres_store.outbox_worker.LocalEmbeddingOutboxWorker",

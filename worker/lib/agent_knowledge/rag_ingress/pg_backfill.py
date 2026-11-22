@@ -243,6 +243,13 @@ def project_pg_representation(*, materialized, source_store, sql_store, embed_pr
 
 
 
+def _embedding_cycle_cap_enabled() -> bool:
+    """Cap logic is opt-in; legacy projection behavior remains the default."""
+    return str(os.environ.get("PG_EMBEDDING_CYCLE_CAP_ENABLED", "")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
 def _local_cycle_embedding_budget() -> int:
     """Bound actual local embedding egress per build cycle (not just plan size)."""
     try:
@@ -300,11 +307,15 @@ class PgSessionMemoryProjector:
         self._allow_deferred = bool(allow_deferred_on_model_unavailable)
         self._representation = representation
         self._segment_max_bytes = int(segment_max_bytes)
-        self._local_egress_remaining = _local_cycle_embedding_budget()
-        if self._chunk_embedder is None:
-            self._chunk_embedder = _CycleBudgetEmbedder(
-                self._embed, self._local_egress_remaining
-            )
+        self._cycle_cap_enabled = _embedding_cycle_cap_enabled()
+        if self._cycle_cap_enabled:
+            self._local_egress_remaining = _local_cycle_embedding_budget()
+            if self._chunk_embedder is None:
+                self._chunk_embedder = _CycleBudgetEmbedder(
+                    self._embed, self._local_egress_remaining
+                )
+        else:
+            self._local_egress_remaining = 0
         self.last_local_representation_receipt: dict[str, Any] | None = None
         self.last_local_identity_scheme: str | None = None
         self.last_local_identity_bypassed_rows: int = 0
@@ -426,9 +437,17 @@ class PgSessionMemoryProjector:
         # body's historical embedding provenance. Only new embedding is gated.
         # Reject, never redact: the unchanged body must match its content hash.
         assert_pg_embedding_egress_safe(body)
-        if self._chunk_embedder is None:
-            raise ValueError("bounded PG chunk embedder is required")
-        vector = self._chunk_embedder.embed(body, content_hash=content_hash)
+        if not self._cycle_cap_enabled:
+            if chunked:
+                if self._chunk_embedder is None:
+                    raise ValueError("bounded PG chunk embedder is required for large input")
+                vector = self._chunk_embedder.embed(body, content_hash=content_hash)
+            else:
+                vector = self._embed.embed(body)
+        else:
+            if self._chunk_embedder is None:
+                raise ValueError("bounded PG chunk embedder is required")
+            vector = self._chunk_embedder.embed(body, content_hash=content_hash)
         if len(vector) != embedding_size:
             raise ValueError(
                 f"embedding returned {len(vector)} dims, expected {embedding_size}"
@@ -575,22 +594,35 @@ class PgSessionMemoryProjector:
                 pending_ids.append(segment.segment_id)
             segment_ids.append(segment.segment_id)
 
-        if pending_ids and self._local_egress_remaining > 0:
-            worker = LocalEmbeddingOutboxWorker(
-                store=self._store,
-                embedding_fn=self._embed.embed,
-                batch_size=1,
-                lease_seconds=60,
-                embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
-            )
-            budget = min(self._local_egress_remaining, len(pending_ids))
-            worker.batch_size = budget
-            worker.run_once()
-            self._local_egress_remaining -= min(
-                int(getattr(worker, "last_batch_attempted", budget) or 0), budget
-            )
-            if worker.last_batch_failed and not self._allow_deferred:
-                raise RuntimeError("local embedding model call failed during projection")
+        if self._cycle_cap_enabled:
+            if pending_ids and self._local_egress_remaining > 0:
+                worker = LocalEmbeddingOutboxWorker(
+                    store=self._store,
+                    embedding_fn=self._embed.embed,
+                    batch_size=1,
+                    lease_seconds=60,
+                    embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
+                )
+                budget = min(self._local_egress_remaining, len(pending_ids))
+                worker.batch_size = budget
+                worker.run_once()
+                self._local_egress_remaining -= min(
+                    int(getattr(worker, "last_batch_attempted", budget) or 0), budget
+                )
+                if worker.last_batch_failed and not self._allow_deferred:
+                    raise RuntimeError("local embedding model call failed during projection")
+        else:
+            for _ in pending_ids:
+                worker = LocalEmbeddingOutboxWorker(
+                    store=self._store,
+                    embedding_fn=self._embed.embed,
+                    batch_size=1,
+                    lease_seconds=60,
+                    embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
+                )
+                worker.run_once()
+                if worker.last_batch_failed and not self._allow_deferred:
+                    raise RuntimeError("local embedding model call failed during projection")
 
         for segment in segments:
             stored = self._store.get_chunk(segment.segment_id)
@@ -864,7 +896,7 @@ class PgSessionMemoryProjector:
         # the parent row and durable local_embedding_outbox job remain committed.
         if (
             outbox_id is not None
-            and self._local_egress_remaining > 0
+            and (not self._cycle_cap_enabled or self._local_egress_remaining > 0)
             and callable(getattr(self._embed, "embed", None))
         ):
             from ..postgres_store.outbox_worker import LocalEmbeddingOutboxWorker
@@ -877,9 +909,10 @@ class PgSessionMemoryProjector:
                 embedding_profile=LOCAL_EMBEDDING_PROFILE_ID,
             )
             worker.run_once()
-            self._local_egress_remaining -= int(
-                getattr(worker, "last_batch_attempted", 1) or 0
-            )
+            if self._cycle_cap_enabled:
+                self._local_egress_remaining -= int(
+                    getattr(worker, "last_batch_attempted", 1) or 0
+                )
             if worker.last_batch_failed and not self._allow_deferred:
                 raise RuntimeError("local embedding model call failed during projection")
 
@@ -925,7 +958,8 @@ class PgSessionMemoryProjector:
         return chosen_id
 
     def exempt_from_cycle_budget(self) -> None:
-        """Let an explicitly requested small run finish within this cycle."""
+        if not self._cycle_cap_enabled:
+            return
         self._local_egress_remaining = max(self._local_egress_remaining, 1_000_000)
         embedder = getattr(self, "_chunk_embedder", None)
         if isinstance(embedder, _CycleBudgetEmbedder) or hasattr(embedder, "remaining"):

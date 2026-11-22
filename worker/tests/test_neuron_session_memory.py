@@ -316,6 +316,7 @@ def test_neuron_session_memory_build_live_runs_with_valid_approval(tmp_path, cap
     import agent_knowledge.session_memory.neuron_session_memory as nsm
 
     monkeypatch.setenv("RETIRED_INDEX_BRIDGE_API_KEY", "test-token")
+    monkeypatch.setenv("PG_EMBEDDING_CYCLE_CAP_ENABLED", "1")
     monkeypatch.setattr(sync, "resolve_dataset_id", lambda **kw: "ds-session-memory")
     argv = _live_argv(tmp_path)
     argv.extend(["--limit", "50"])

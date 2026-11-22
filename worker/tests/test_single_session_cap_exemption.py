@@ -46,7 +46,7 @@ class _Projector:
         return None
 
 
-def _run(store, pg, path: Path, *, fail: bool = False):
+def _run(store, pg, path: Path, *, fail: bool = False, cap_enabled: bool = True):
     argv = ["--project", PROJECT, "--approval", str(path.parent / "approval.json")]
     (path.parent / "approval.json").write_text(json.dumps({
         "schema_version": "agent_knowledge_live_approval.v1",
@@ -64,8 +64,9 @@ def _run(store, pg, path: Path, *, fail: bool = False):
         "COUCHDB_DB": "transcript_source",
         "SESSION_MEMORY_PROJECTION_BACKEND": "postgres_pgvector",
         "SESSION_MEMORY_SELECTION_MODE": "incremental",
-        "SESSION_MEMORY_SELECTION_CHECKPOINT": str(path),
     }
+    if cap_enabled:
+        env["PG_EMBEDDING_CYCLE_CAP_ENABLED"] = "1"
     projector = _Projector(fail=fail)
     stdout = io.StringIO()
     with contextlib.ExitStack() as stack:
@@ -117,7 +118,8 @@ def test_real_single_session_error_still_exits_one(tmp_path: Path, monkeypatch) 
     assert report["failed"] == 1
 
 
-def test_single_session_exemption_lifts_session_chunk_budget(tmp_path: Path) -> None:
+def test_single_session_exemption_lifts_session_chunk_budget(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("PG_EMBEDDING_CYCLE_CAP_ENABLED", "1")
     calls = []
 
     class _Delegate:
@@ -144,3 +146,19 @@ def test_single_session_exemption_lifts_session_chunk_budget(tmp_path: Path) -> 
     bounded.embed("x" * 17000, content_hash="sha256:" + "a" * 64)
 
     assert len(calls) >= 2  # chunk count exceeded original session_budget=1
+
+
+def test_single_session_without_cap_flag_is_unchanged(tmp_path: Path) -> None:
+    store = InMemoryCouchDBSourceStore()
+    _seed(store, "legacy-single-session")
+    pg = _PgStore(ready_ids=set())
+    path = tmp_path / "selection-checkpoint.json"
+    _write_checkpoint(path)
+
+    code, report, projector = _run(store, pg, path, cap_enabled=False)
+
+    assert code == 0
+    assert report["projected"] == 1
+    assert projector.exempted is False
+    assert "embedding_cycle_limit" not in report
+    assert "embedding_capped" not in report

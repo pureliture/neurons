@@ -1572,9 +1572,15 @@ def main(argv: list[str] | None = None) -> int:
     # from one that predates progress events; it is not a repeated heartbeat.
     emit_progress("selection", 0, 0)
     explicit_session_ids = _explicit_session_ids(args.session_id_hashes)
+    embedding_cycle_cap_enabled = _embedding_cycle_cap_enabled(os.environ)
     embedding_budget = None
     effective_limit = args.limit
-    if backend == "postgres_pgvector" and not args.dry_run and not explicit_session_ids:
+    if (
+        embedding_cycle_cap_enabled
+        and backend == "postgres_pgvector"
+        and not args.dry_run
+        and not explicit_session_ids
+    ):
         cycle_chunks, per_session_chunks = _embedding_cycle_budget(os.environ)
         embedding_budget = dict(cycle_chunks=cycle_chunks, per_session_chunks=per_session_chunks)
         session_limit = max(1, cycle_chunks // per_session_chunks)
@@ -1726,7 +1732,11 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
             return 2
-        if selected_count <= 1 and (explicit_session_ids or str(args.project or "")):
+        if (
+            embedding_cycle_cap_enabled
+            and selected_count <= 1
+            and (explicit_session_ids or str(args.project or ""))
+        ):
             exempt = getattr(projector, "exempt_from_cycle_budget", None)
             if callable(exempt):
                 exempt()
@@ -1798,7 +1808,8 @@ def main(argv: list[str] | None = None) -> int:
         _close_if_supported(projector)
 
     if (
-        selected_count == 1
+        embedding_cycle_cap_enabled
+        and selected_count == 1
         and projected == 0
         and failed == 0
         and (explicit_session_ids or str(args.project or ""))
@@ -1807,29 +1818,28 @@ def main(argv: list[str] | None = None) -> int:
         failure_reason = "single_session_not_projected"
         for row in session_reports:
             row.update(status="failed", error_class=failure_reason)
-    print(
-        json.dumps(
-            {
-                "schema_version": BUILD_CLI_SCHEMA_VERSION,
-                "dry_run": False,
-                "selected": selected_count,
-                "embedding_cycle_limit": embedding_budget["cycle_chunks"] if embedding_budget else 0,
-                "embedding_capped": bool(
-                    embedding_budget and effective_limit < args.limit
-                ),
-                "projected": projected,
-                "failed": failed,
-                "skipped": skipped,
-                "skipped_inconsistent": skipped_inconsistent,
-                "identity_conflicts_auto_resolved": identity_conflicts_auto_resolved,
-                "segments_total": segments_total,
-                "segments_reused": segments_reused,
-                "segments_embedded": segments_embedded,
-                "sessions": session_reports,
-            },
-            sort_keys=True,
+    report = {
+        "schema_version": BUILD_CLI_SCHEMA_VERSION,
+        "dry_run": False,
+        "selected": selected_count,
+        "projected": projected,
+        "failed": failed,
+        "skipped": skipped,
+        "skipped_inconsistent": skipped_inconsistent,
+        "identity_conflicts_auto_resolved": identity_conflicts_auto_resolved,
+        "segments_total": segments_total,
+        "segments_reused": segments_reused,
+        "segments_embedded": segments_embedded,
+        "sessions": session_reports,
+    }
+    if embedding_cycle_cap_enabled:
+        report["embedding_cycle_limit"] = (
+            embedding_budget["cycle_chunks"] if embedding_budget else 0
         )
-    )
+        report["embedding_capped"] = bool(
+            embedding_budget and effective_limit < args.limit
+        )
+    print(json.dumps(report, sort_keys=True))
     if not args.dry_run and not explicit_session_ids:
         _persist_post_projection_pending(session_reports)
     return 0 if failed == 0 else 1
@@ -1878,6 +1888,13 @@ def _build_pg_dead_letter_lookup(environ):
         pgvector_version=environ.get("LLM_BRAIN_PGVECTOR_VERSION", "0.8.0"),
     )
 
+
+
+def _embedding_cycle_cap_enabled(environ) -> bool:
+    """Cap logic is opt-in; the legacy path remains the default."""
+    return str(environ.get("PG_EMBEDDING_CYCLE_CAP_ENABLED", "")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
 
 
 DEFAULT_EMBEDDING_CYCLE_CHUNKS = 512

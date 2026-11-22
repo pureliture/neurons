@@ -32,6 +32,7 @@ def test_build_once_passes_bounded_limit_without_explicit_limit(
         "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
         "HOME": os.environ["HOME"],
         "SESSION_MEMORY_APP_DIR": str(tmp_path),
+        "PG_EMBEDDING_CYCLE_CAP_ENABLED": "1",
         "PG_EMBEDDING_CHUNKS_PER_CYCLE": "1000",
         "PG_EMBEDDING_CHUNKS_PER_SESSION": "16",
         "SESSION_MEMORY_PROJECTION_BACKEND": "postgres_pgvector",
@@ -50,6 +51,7 @@ def test_build_once_passes_bounded_limit_without_explicit_limit(
 
 
 def test_legacy_live_entrypoint_uses_same_cycle_limit(monkeypatch) -> None:
+    monkeypatch.setenv("PG_EMBEDDING_CYCLE_CAP_ENABLED", "1")
     monkeypatch.setenv("PG_EMBEDDING_CHUNKS_PER_CYCLE", "1000")
     monkeypatch.setenv("PG_EMBEDDING_CHUNKS_PER_SESSION", "16")
 

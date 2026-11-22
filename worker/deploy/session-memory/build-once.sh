@@ -8,28 +8,34 @@ chmod 700 state state/runtime 2>/dev/null || true
 
 export SESSION_MEMORY_PROJECTION_BACKEND="${SESSION_MEMORY_PROJECTION_BACKEND:-postgres_pgvector}"
 
-configured_limit="${SESSION_MEMORY_BUILD_LIMIT:-0}"
-cycle_chunks="${PG_EMBEDDING_CHUNKS_PER_CYCLE:-512}"
-per_session="${PG_EMBEDDING_CHUNKS_PER_SESSION:-16}"
-if [[ ! "$configured_limit" =~ ^[0-9]+$ || ! "$cycle_chunks" =~ ^[0-9]+$ || ! "$per_session" =~ ^[0-9]+$ ]]; then
-  echo "[build-guard] invalid build/embedding budget" >&2
-  exit 2
-fi
-if (( per_session < 1 )); then
-  echo "[build-guard] PG_EMBEDDING_CHUNKS_PER_SESSION must be positive" >&2
-  exit 2
-fi
-if (( cycle_chunks > 1000 )); then
-  cycle_chunks=1000
-fi
-session_budget=$((cycle_chunks / per_session))
-if (( session_budget < 1 )); then
-  session_budget=1
-fi
-if (( configured_limit == 0 )); then
-  limit="$session_budget"
+cap_enabled="${PG_EMBEDDING_CYCLE_CAP_ENABLED:-}"
+cap_enabled="${cap_enabled,,}"
+if [[ "$cap_enabled" =~ ^(1|true|yes|on)$ ]]; then
+  configured_limit="${SESSION_MEMORY_BUILD_LIMIT:-0}"
+  cycle_chunks="${PG_EMBEDDING_CHUNKS_PER_CYCLE:-512}"
+  per_session="${PG_EMBEDDING_CHUNKS_PER_SESSION:-16}"
+  if [[ ! "$configured_limit" =~ ^[0-9]+$ || ! "$cycle_chunks" =~ ^[0-9]+$ || ! "$per_session" =~ ^[0-9]+$ ]]; then
+    echo "[build-guard] invalid build/embedding budget" >&2
+    exit 2
+  fi
+  if (( per_session < 1 )); then
+    echo "[build-guard] PG_EMBEDDING_CHUNKS_PER_SESSION must be positive" >&2
+    exit 2
+  fi
+  if (( cycle_chunks > 1000 )); then
+    cycle_chunks=1000
+  fi
+  session_budget=$((cycle_chunks / per_session))
+  if (( session_budget < 1 )); then
+    session_budget=1
+  fi
+  if (( configured_limit == 0 )); then
+    limit="$session_budget"
+  else
+    limit="$configured_limit"
+  fi
 else
-  limit="$configured_limit"
+  limit="${SESSION_MEMORY_BUILD_LIMIT:-10}"
 fi
 approval="state/couchdb-build-approval.json"
 

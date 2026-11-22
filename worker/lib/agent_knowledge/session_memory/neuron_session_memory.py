@@ -23,7 +23,11 @@ SCHEMA_VERSION = "agent_knowledge_neuron_session_memory.v1"
 COMMAND = "neuron-session-memory-build"
 NEURON_SESSION_MEMORY_BUILD_OPERATION = "neuron_session_memory_build"
 
-
+def _embedding_cycle_cap_enabled() -> bool:
+    """Cap logic is opt-in; legacy delivery limits remain the default."""
+    return str(os.environ.get("PG_EMBEDDING_CYCLE_CAP_ENABLED", "")).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
 
 def live_cycle_session_limit() -> int:
     """Effective live session cap shared with the CouchDB build entrypoint."""
@@ -476,16 +480,19 @@ def _run_live(args: argparse.Namespace, raw_argv: list[str]) -> int:
         max_processed_per_run=args.max_processed_per_run,
         transcript_read_source="index_read_sot",
     )
+    delivery_limit = args.limit
+    if _embedding_cycle_cap_enabled():
+        delivery_limit = (
+            min(args.limit, live_cycle_session_limit())
+            if args.limit > 0
+            else live_cycle_session_limit()
+        )
     report = run_neuron_session_memory_build_once(
         config=config,
         token=token,
         shadow_db_path=args.shadow_db,
         watermark_path=args.watermark_file,
-        delivery_limit=(
-            min(args.limit, live_cycle_session_limit())
-            if args.limit > 0
-            else live_cycle_session_limit()
-        ),
+        delivery_limit=delivery_limit,
     )
     _print_report(
         {
