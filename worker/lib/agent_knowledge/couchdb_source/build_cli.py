@@ -1696,7 +1696,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     if not args.dry_run and not explicit_session_ids:
         _persist_post_projection_pending(session_reports)
-    return 0
+    return 0 if failed == 0 else 1
 
 
 def _explicit_session_ids(values) -> list[str] | None:

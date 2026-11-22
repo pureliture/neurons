@@ -204,8 +204,10 @@ def test_full_rescan_isolates_failures_and_drains_completed(tmp_path: Path) -> N
 
     assert first_error is None, first_stderr[-2000:]
     assert second_error is None, second_stderr[-2000:]
-    assert first_code == 0
-    assert second_code == 0
+    # Failures are isolated per session, but a run that had failures still
+    # reports failure: monitoring depends on this exit-code contract.
+    assert first_code == 1
+    assert second_code == 1
     assert first["selected"] == 50
     assert first["projected"] == 48
     assert first["failed"] == 2
