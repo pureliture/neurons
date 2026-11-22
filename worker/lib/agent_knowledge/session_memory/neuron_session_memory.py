@@ -24,6 +24,18 @@ COMMAND = "neuron-session-memory-build"
 NEURON_SESSION_MEMORY_BUILD_OPERATION = "neuron_session_memory_build"
 
 
+
+def live_cycle_session_limit() -> int:
+    """Effective live session cap shared with the CouchDB build entrypoint."""
+    try:
+        cycle = int(os.environ.get("PG_EMBEDDING_CHUNKS_PER_CYCLE", "512"))
+        per_session = int(os.environ.get("PG_EMBEDDING_CHUNKS_PER_SESSION", "16"))
+    except (TypeError, ValueError):
+        raise ValueError("invalid_pg_embedding_budget") from None
+    if cycle < 1 or per_session < 1:
+        raise ValueError("invalid_pg_embedding_budget")
+    return max(1, min(cycle, 1000) // per_session)
+
 def read_recent_transcript_deliveries(
     shadow_db_path: str | Path,
     *,
@@ -469,7 +481,11 @@ def _run_live(args: argparse.Namespace, raw_argv: list[str]) -> int:
         token=token,
         shadow_db_path=args.shadow_db,
         watermark_path=args.watermark_file,
-        delivery_limit=args.limit,
+        delivery_limit=(
+            min(args.limit, live_cycle_session_limit())
+            if args.limit > 0
+            else live_cycle_session_limit()
+        ),
     )
     _print_report(
         {

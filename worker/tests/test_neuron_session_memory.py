@@ -321,7 +321,7 @@ def test_neuron_session_memory_build_live_runs_with_valid_approval(tmp_path, cap
     argv.extend(["--limit", "50"])
 
     def _stub(**kw):
-        assert kw["delivery_limit"] == 50
+        assert kw["delivery_limit"] == 32  # default cycle budget 512 / 16
         return {
             "seed": {"seeded_sessions": 0, "new_watermark": ""},
             "build": {"status": "ok", "processed": 2, "deferred": 0},
