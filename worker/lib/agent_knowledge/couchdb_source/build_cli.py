@@ -1247,6 +1247,46 @@ def _iter_by_type(store, doc_type: str, *, fields: list[str], selector: dict, pa
         )
 
 
+
+
+def _persist_post_projection_pending(session_reports: list[dict]) -> None:
+    """Drop successfully projected sessions from pending immediately.
+
+    Failures and unfinished sessions stay pending; exhausted identities remain
+    suppressed. This keeps the next cycle from reselecting completed work.
+    """
+    path = _selection_checkpoint_path()
+    checkpoint = _read_selection_checkpoint(path)
+    completed = {
+        str(row.get("session_id_hash") or "")
+        for row in session_reports
+        if str(row.get("status") or "") == "projected"
+    }
+    pending = [sid for sid in _pending_session_ids(checkpoint) if sid not in completed]
+    pending_set = set(pending)
+    attempts = {
+        key: value
+        for key, value in (checkpoint.get("pending_session_attempts") or {}).items()
+        if key in pending_set
+    }
+    exhausted = {
+        key: value
+        for key, value in (checkpoint.get("exhausted_session_ids") or {}).items()
+        if key in pending_set
+    }
+    try:
+        _write_selection_checkpoint(
+            path,
+            str(checkpoint.get("last_seq") or ""),
+            pending_session_ids=pending,
+            full_walk_in_progress=bool(checkpoint.get("full_walk_in_progress")),
+            embedding_profile=str(checkpoint.get("embedding_profile") or ""),
+            representation=str(checkpoint.get("representation") or "session_v1"),
+            pending_attempts=attempts,
+            exhausted_session_ids=exhausted,
+        )
+    except OSError:
+        pass
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="neuron-knowledge couchdb-session-memory-build",
@@ -1654,6 +1694,8 @@ def main(argv: list[str] | None = None) -> int:
             sort_keys=True,
         )
     )
+    if not args.dry_run and not explicit_session_ids:
+        _persist_post_projection_pending(session_reports)
     return 0 if failed == 0 else 1
 
 
