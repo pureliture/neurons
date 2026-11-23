@@ -837,7 +837,7 @@ class CanonicalLocalEmbeddingClient:
                     code = err_code
         except Exception:
             pass
-        retryable = status in {429, 503}
+        retryable = status == 429 or 500 <= status < 600
         return LocalEmbeddingClientError(
             code,
             f"local embedding service returned HTTP {status}",
@@ -867,7 +867,7 @@ class CanonicalLocalEmbeddingClient:
                 code = err_obj["code"]
 
         if isinstance(status, int):
-            retryable = status in {429, 503}
+            retryable = status == 429 or 500 <= status < 600
             if code == "sdk_transport_error":
                 code = f"http_{status}"
             return LocalEmbeddingClientError(
@@ -876,12 +876,14 @@ class CanonicalLocalEmbeddingClient:
                 status_code=status,
                 retryable=retryable,
                 retry_after_seconds=retry_after,
+                stage="batch_http",
             )
 
         return LocalEmbeddingClientError(
             "transport_unavailable",
             "local embedding endpoint is unreachable",
             retryable=True,
+            stage="batch_http",
         )
 
 

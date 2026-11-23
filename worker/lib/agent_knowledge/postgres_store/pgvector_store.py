@@ -46,7 +46,10 @@ _TRANSIENT_LOCAL_OUTBOX_ERRORS = frozenset(
         "transport_unavailable",
         "sdk_transport_error",
         "http_429",
+        "http_500",
+        "http_502",
         "http_503",
+        "http_504",
     }
 )
 

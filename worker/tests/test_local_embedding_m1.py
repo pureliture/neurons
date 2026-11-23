@@ -636,7 +636,7 @@ def test_client_skips_trailing_whitespace_and_isolates_zero_norm_chunks(monkeypa
     with pytest.raises(LocalEmbeddingClientError) as crash_exc:
         client.embed_document(doc_with_crash_chunk)
     assert crash_exc.value.code == "internal_error"
-    assert crash_exc.value.retryable is False
+    assert crash_exc.value.retryable is True
     assert crash_exc.value.stage == "batch_http"
 
     # Pure non-whitespace zero-norm document (no valid chunk at all) MUST still fail closed with stage set
