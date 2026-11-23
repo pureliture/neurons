@@ -62,10 +62,12 @@ stop_parked() {
 }
 
 run_parked_loop() {
+  local scheduler_sleep_seconds
+  scheduler_sleep_seconds=$(positive_int_or_default "${SESSION_MEMORY_SCHEDULER_SLEEP_SECONDS:-}" 60)
   trap stop_parked TERM INT
   echo "[entrypoint] parked (builds disabled)"
   while true; do
-    sleep "${SESSION_MEMORY_SCHEDULER_SLEEP_SECONDS:-60}" &
+    sleep "$scheduler_sleep_seconds" &
     parked_child=$!
     wait "$parked_child" || true
     parked_child=""

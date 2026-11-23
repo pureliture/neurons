@@ -272,6 +272,21 @@ def test_entrypoint_main_default_executes_build(tmp_path: Path) -> None:
             proc.wait()
 
 
+def test_parked_scheduler_validates_sleep_interval(tmp_path: Path) -> None:
+    import shlex
+    entrypoint = Path("deploy/session-memory/entrypoint.sh").resolve()
+    marker = tmp_path / "sleep-value"
+    shell = (f"source {shlex.quote(str(entrypoint))}; "
+             f"sleep() {{ printf '%s' \"$1\" > {shlex.quote(str(marker))}; kill -TERM $$; }}; "
+             "run_parked_loop")
+    for value, expected in (("0", "60"), ("-1", "60"), ("invalid", "60"), ("3", "3")):
+        marker.unlink(missing_ok=True)
+        env = dict(os.environ, SESSION_MEMORY_SCHEDULER_SLEEP_SECONDS=value)
+        result = subprocess.run(["bash", "-c", shell], env=env, capture_output=True, text=True, timeout=5)
+        assert result.returncode == 0, result.stderr
+        assert marker.read_text() == expected
+
+
 def test_entrypoint_build_mode_keeps_original_exec_contract() -> None:
     script = Path("deploy/session-memory/entrypoint.sh").read_text(encoding="utf-8")
     assert "build) exec /app/deploy/build-once.sh ;;" in script
