@@ -51,6 +51,27 @@ stop_watch() {
   exit 0
 }
 
+parked_child=""
+
+stop_parked() {
+  echo "[parked] stop requested"
+  if [ -n "${parked_child:-}" ]; then
+    kill "$parked_child" 2>/dev/null || true
+  fi
+  exit 0
+}
+
+run_parked_loop() {
+  trap stop_parked TERM INT
+  echo "[entrypoint] parked (builds disabled)"
+  while true; do
+    sleep "${SESSION_MEMORY_SCHEDULER_SLEEP_SECONDS:-60}" &
+    parked_child=$!
+    wait "$parked_child" || true
+    parked_child=""
+  done
+}
+
 # RUN_MODE=watch: JetStream durable consumer(Python 상주)를 감싸는 재기동 루프.
 # consumer는 정상 동작 중 종료하지 않으며, NATS 오류(rc=1)나 설정 오류(rc=2)로
 # 끝나면 bounded backoff 후 다시 띄운다. build 실행은 consumer 안에서 build-once.sh로 한다.
@@ -115,6 +136,10 @@ main() {
   case "${RUN_MODE:-cron}" in
     build) exec /app/deploy/build-once.sh ;;
     cron)
+      if [ "${SESSION_MEMORY_BUILD_DISABLED:-}" = "1" ]; then
+        run_parked_loop
+        return
+      fi
       build_interval_seconds=$(positive_int_or_default "${SESSION_MEMORY_BUILD_INTERVAL_SECONDS:-}" 180)
       scheduler_sleep_seconds=$(positive_int_or_default "${SESSION_MEMORY_SCHEDULER_SLEEP_SECONDS:-}" 60)
       echo "[entrypoint] scheduler started (build=${build_interval_seconds}s, sleep=${scheduler_sleep_seconds}s)"
