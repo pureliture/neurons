@@ -1830,7 +1830,7 @@ def test_bounded_selection_snapshot_race_fails_closed_with_safe_reason_code(
     pass_counter = {"calls": 0}
     orig_iter = couchdb_projection_cli._iter_session_revisions
 
-    def _churning_iter(source_store, *, project, provider):
+    def _churning_iter(source_store, *, project, provider, **_kwargs):
         pass_counter["calls"] += 1
         yield from orig_iter(source_store, project=project, provider=provider)
         # Inject a new session after each pass so pass 1 and pass 2 never match across attempts.
@@ -1858,7 +1858,7 @@ def test_bounded_selection_snapshot_race_fails_closed_with_safe_reason_code(
     _seed_session(recover_store, raw_id="recover-base", project="neurons")
     recover_calls = {"n": 0}
 
-    def _transient_iter(source_store, *, project, provider):
+    def _transient_iter(source_store, *, project, provider, **_kwargs):
         recover_calls["n"] += 1
         yield from orig_iter(source_store, project=project, provider=provider)
         if recover_calls["n"] == 1:

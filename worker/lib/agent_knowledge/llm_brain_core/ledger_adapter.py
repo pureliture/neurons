@@ -592,6 +592,29 @@ class LedgerGraphProjectionStateStore:
                 ).fetchone()
         return row is not None
 
+    def snapshot_projected_source_state(self) -> tuple[set[tuple[str, str, str, str]], set[tuple[str, str, str]]]:
+        exact: set[tuple[str, str, str, str]] = set()
+        invalid: set[tuple[str, str, str]] = set()
+        with self._ledger._connect() as connection:
+            if not _table_exists(connection, "llm_brain_graph_projection_state"):
+                return exact, invalid
+            rows = connection.execute(
+                "SELECT project, natural_id, source_hash, extraction_level, upsert_result "
+                "FROM llm_brain_graph_projection_state"
+            ).fetchall()
+        for row in rows:
+            project = str(row[0] or "")
+            natural_id = str(row[1] or "")
+            source_hash = str(row[2] or "")
+            level = str(row[3] or "")
+            result = str(row[4] or "")
+            if not natural_id or not source_hash:
+                continue
+            exact.add((project, natural_id, source_hash, level))
+            if level == EXTRACTION_LEVEL_ENTITY and result in ("source_invalid", "invalid_source"):
+                invalid.add((project, natural_id, source_hash))
+        return exact, invalid
+
     def list_natural_ids(
         self,
         project: str | None = None,
