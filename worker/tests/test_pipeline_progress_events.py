@@ -371,6 +371,7 @@ def test_filter_relays_progress_and_keeps_report(tmp_path) -> None:
         "projected": 1,
         "failed": 0,
         "skipped": 0,
+        "terminal_skipped": 0,
     }
     assert len(lines) == 3
     assert "sk-live-abc" not in result.stdout.decode()

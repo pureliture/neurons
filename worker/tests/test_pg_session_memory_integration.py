@@ -122,7 +122,10 @@ def test_secret_egress_rejection_blocks_queue_until_source_changes(lane):
 
     _append_source_content(" deploy note sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789")
     rc, report = lane["run"]()
-    assert report["projected"] == 0 and report["failed"] == 1
+    assert rc == 0
+    assert report["projected"] == 0
+    assert report["failed"] == 0
+    assert report["terminal_skipped"] == 1
     receipt = _receipt(lane)
     assert receipt["projection_status"] == "failed"
     assert receipt["failure_reason"] == "secret_egress_policy"
@@ -135,7 +138,8 @@ def test_secret_egress_rejection_blocks_queue_until_source_changes(lane):
 
     _append_source_content(" postscript")
     rc, report = lane["run"]()
-    assert report["failed"] == 1
+    assert rc == 0
+    assert report["terminal_skipped"] == 1
     refreshed = lane["couch"].get(dm.projection_state_doc_id(lane["sid"]))
     assert str(refreshed.get("failure_source_hash") or "") not in ("", blocked_hash)
 

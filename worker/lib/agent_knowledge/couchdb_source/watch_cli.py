@@ -61,7 +61,7 @@ DEFAULT_MAX_DELIVER = 5
 DEFAULT_NAK_BACKOFF_SECONDS = (30, 60, 120, 300)
 DEFAULT_BUILD_LIMIT = 10
 DEFAULT_BUILD_TIMEOUT_SECONDS = 300
-ACK_STATUSES = frozenset({"projected", "pending", "skipped"})
+ACK_STATUSES = frozenset({"projected", "pending", "skipped", "terminal_skipped"})
 
 
 def _positive_int(value: object, default: int) -> int:
