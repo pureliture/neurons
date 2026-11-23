@@ -8,6 +8,8 @@ import math
 import os
 import sys
 import time
+import signal
+import threading
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -58,6 +60,51 @@ SELECTION_ERROR_FIELD = "selection_error"
 SELECTION_DEFERRED_FIELD = "selection_deferred"
 SELECTION_LEGACY_HASH_FIELD = "_selection_legacy_hash"
 
+DEFAULT_GRAPH_PROJECTION_DEADLINE_SECONDS = 300.0
+DEFAULT_GRAPH_LLM_ATTEMPT_TIMEOUT_SECONDS = 120.0
+DEFAULT_GRAPH_LLM_WRITE_TIMEOUT_SECONDS = 180.0
+
+
+class GraphProjectionDeadlineExceeded(RuntimeError):
+    """Raised when a projection run exceeds its wall-clock deadline."""
+
+
+def _projection_deadline_seconds(environ: dict[str, str] | None = None) -> float:
+    env = os.environ if environ is None else environ
+    try:
+        value = float(env.get("LLM_BRAIN_GRAPH_PROJECTION_DEADLINE_SECONDS", "") or 0)
+    except (TypeError, ValueError):
+        raise ValueError("invalid_graph_projection_deadline") from None
+    if value < 0:
+        raise ValueError("invalid_graph_projection_deadline")
+    return value or DEFAULT_GRAPH_PROJECTION_DEADLINE_SECONDS
+
+
+def _start_projection_deadline(seconds: float) -> list[Any] | None:
+    """Bound wall-clock runtime; SIGKILL-safe flock release happens in finally."""
+    if seconds <= 0 or threading.current_thread() is not threading.main_thread():
+        return None
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    state: list[Any] = [previous_handler, (0.0, 0.0), False]
+
+    def _handler(_signum: int, _frame: Any) -> None:
+        state[2] = True
+        raise GraphProjectionDeadlineExceeded()
+
+    signal.signal(signal.SIGALRM, _handler)
+    state[1] = signal.setitimer(signal.ITIMER_REAL, seconds)
+    return state
+
+
+def _stop_projection_deadline(state: list[Any] | None) -> None:
+    if state is None:
+        return
+    previous_handler, previous_timer = state[0], state[1]
+    signal.setitimer(signal.ITIMER_REAL, 0)
+    signal.signal(signal.SIGALRM, previous_handler)
+    if previous_timer[0] > 0:
+        signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
+
 
 @dataclass(frozen=True)
 class _SessionSelection:
@@ -95,6 +142,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Stop after this many non-resumed successful graph upserts. 0 means no cap.",
     )
     parser.add_argument("--runtime-dir", default="")
+    parser.add_argument(
+        "--runtime-deadline-seconds",
+        type=float,
+        default=_projection_deadline_seconds(),
+        help="Wall-clock deadline for one projection run; 0 disables the deadline.",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -120,6 +173,7 @@ def main(argv: list[str] | None = None) -> int:
             report_every=int(args.report_every),
             max_projects=int(args.max_projects),
             runtime_dir=Path(args.runtime_dir) if args.runtime_dir else None,
+            runtime_deadline_seconds=float(args.runtime_deadline_seconds),
         )
     except Exception as exc:
         diag = extract_safe_error_diagnostics(exc)
@@ -168,10 +222,17 @@ def run_couchdb_projection(
     max_projects: int = 0,
     graph_adapter: Any | None = None,
     runtime_dir: Path | None = None,
+    runtime_deadline_seconds: float | None = None,
 ) -> dict[str, Any]:
     lock_handle, locked_report = _acquire_runtime_lock(runtime_dir)
     if locked_report is not None:
         return locked_report
+    deadline_seconds = (
+        _projection_deadline_seconds()
+        if runtime_deadline_seconds is None
+        else float(runtime_deadline_seconds)
+    )
+    deadline_state = _start_projection_deadline(deadline_seconds)
     # lock 획득 직후부터 전체를 try/finally로 감싸 Ledger/store/adapter/selection
     # 구성 중 예외가 나도 lock file handle release를 보장한다.
     try:
@@ -285,6 +346,15 @@ def run_couchdb_projection(
                     artifact_store=artifact_store,
                     extractor_version="couchdb-graph-project.1",
                 )
+                _write_jsonl(
+                    progress_jsonl,
+                    {
+                        "event": "lock_heartbeat",
+                        "run_id": run_id,
+                        "index": index,
+                        "phase": "before_llm",
+                    },
+                )
                 if resume and not reextract_entities:
                     episode_source_hash = str(episode.payload.get("source_hash") or "")
                     if projection_state_store.has_projected_source_hash(
@@ -314,6 +384,17 @@ def run_couchdb_projection(
                     duplicates += d
                     skipped_disabled += sd
                     failed += f
+                _write_jsonl(
+                    progress_jsonl,
+                    {
+                        "event": "lock_heartbeat",
+                        "run_id": run_id,
+                        "index": index,
+                        "phase": "after_llm",
+                    },
+                )
+                if deadline_state is not None and deadline_state[2]:
+                    raise GraphProjectionDeadlineExceeded()
                 if reason:
                     failure_reasons[reason] += 1
                     if error_meta.get("error_param"):
@@ -400,6 +481,8 @@ def run_couchdb_projection(
                 stopped_after_max_projects = True
                 break
 
+        if deadline_state is not None and deadline_state[2]:
+            raise GraphProjectionDeadlineExceeded()
         elapsed_total_ms = int((time.monotonic() - started) * 1000)
         attempted = processed
         status = (
@@ -509,6 +592,7 @@ def run_couchdb_projection(
             "raw_paths_printed": False,
         }
     finally:
+        _stop_projection_deadline(deadline_state)
         if lock_handle is not None:
             _release_runtime_lock(lock_handle)
 
@@ -656,10 +740,15 @@ def _auth_header(user: str, password: str) -> str:
     return f"Basic {token}"
 
 
-def _graph_environ(*, extract_entities: bool | None, reextract_entities: bool) -> dict[str, str] | None:
-    if extract_entities is None and not reextract_entities:
-        return None
+def _graph_environ(*, extract_entities: bool | None, reextract_entities: bool) -> dict[str, str]:
     graph_environ = dict(os.environ)
+    for key, default in (
+        ("LLM_BRAIN_GRAPH_PRIMARY_ATTEMPT_TIMEOUT_SECONDS", DEFAULT_GRAPH_LLM_ATTEMPT_TIMEOUT_SECONDS),
+        ("LLM_BRAIN_GRAPH_FALLBACK_ATTEMPT_TIMEOUT_SECONDS", DEFAULT_GRAPH_LLM_ATTEMPT_TIMEOUT_SECONDS),
+        ("LLM_BRAIN_GRAPH_WRITE_TIMEOUT_SECONDS", DEFAULT_GRAPH_LLM_WRITE_TIMEOUT_SECONDS),
+    ):
+        if not str(graph_environ.get(key, "") or "").strip():
+            graph_environ[key] = str(default)
     if extract_entities is not None:
         graph_environ["LLM_BRAIN_GRAPH_EXTRACT_ENTITIES"] = "true" if extract_entities else "false"
     if reextract_entities:
