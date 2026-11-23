@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import urllib.error
@@ -80,5 +81,38 @@ def test_sdk_transport_retry_classification(status, retryable):
         assert exc.value.stage == "batch_http"
         expected_calls = 3 if retryable else 1
         assert fake.calls == expected_calls
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("status,retryable", [(502, True), (503, True), (429, True), (400, False), (413, False)])
+def test_async_sdk_transport_retry_classification(status, retryable):
+    class SyntheticSDKError(Exception):
+        def __init__(self):
+            super().__init__("synthetic failure")
+            self.status_code = status
+            self.body = {"error": {"code": f"http_{status}"}}
+
+    class AsyncSDKClient:
+        def __init__(self):
+            self.calls = 0
+            self.embeddings = SimpleNamespace(create=self.create)
+
+        async def create(self, **kwargs):
+            self.calls += 1
+            raise SyntheticSDKError()
+
+    fake = AsyncSDKClient()
+    client = CanonicalLocalEmbeddingClient(
+        base_url="http://127.0.0.1:9/v1", use_openai_sdk=True,
+        async_openai_client=fake, max_retries=2, retry_backoff_seconds=0,
+    )
+    try:
+        with pytest.raises(LocalEmbeddingClientError) as exc:
+            asyncio.run(client.aembed_document("synthetic input"))
+        assert exc.value.retryable is retryable
+        assert exc.value.status_code == status
+        assert exc.value.stage == "batch_http"
+        assert fake.calls == (3 if retryable else 1)
     finally:
         client.close()
