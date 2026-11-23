@@ -6,10 +6,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..couchdb_source.document_model import sha256_hash
-from .chunk_overlap import ChunkView
+from ..local_embedding.canonical import split_utf8_chunks_v1
 
 if TYPE_CHECKING:
     from ..couchdb_source.session_memory_materializer import MaterializedSessionMemory
+    from ..session_memory.chunk_overlap import ChunkView
+
+# `from __future__ import annotations` keeps these annotations as strings at
+# runtime; the TYPE_CHECKING import above is sufficient for static checking.
 
 
 @dataclass(frozen=True)
@@ -114,34 +118,46 @@ def build_segments(
     if current:
         grouped.append(tuple(current))
 
-    segments: list[SessionSegment] = []
+    raw_items: list[tuple[int, tuple[ChunkView, ...], tuple[str, ...], str]] = []
     for segment_index, members in enumerate(grouped):
         is_final_segment = segment_index == len(grouped) - 1
+        segment_evidence = evidence if is_final_segment else ()
         text = _render_segment(
             provider=materialized.provider,
             project=materialized.project,
             session_id_hash=materialized.session_id_hash,
             segment_index=segment_index,
             views=members,
-            tool_evidence_bodies=evidence if is_final_segment else (),
+            tool_evidence_bodies=segment_evidence,
         )
+        raw_items.append((segment_index, members, segment_evidence, text))
+
+    segments: list[SessionSegment] = []
+    for segment_index, members, _segment_evidence, text in raw_items:
+        turn_start = min(view.turn_start_index for view in members)
+        turn_end = max(view.turn_end_index for view in members)
         member_hashes = tuple(view.content_hash for view in members)
-        content_hash = sha256_hash(text)
-        segments.append(
-            SessionSegment(
-                segment_index=segment_index,
-                turn_start=min(view.turn_start_index for view in members),
-                turn_end=max(view.turn_end_index for view in members),
-                member_hashes=member_hashes,
-                text=text,
-                content_hash=content_hash,
-                segment_id=_segment_identity(
-                    project=materialized.project,
-                    provider=materialized.provider,
-                    session_id_hash=materialized.session_id_hash,
+        if len(text.encode("utf-8")) <= max_bytes:
+            chunks = (text,)
+        else:
+            chunks = split_utf8_chunks_v1(text, max_chunk_bytes=max_bytes)
+        for chunk in chunks:
+            content_hash = sha256_hash(chunk)
+            segments.append(
+                SessionSegment(
+                    segment_index=segment_index,
+                    turn_start=turn_start,
+                    turn_end=turn_end,
+                    member_hashes=member_hashes,
+                    text=chunk,
                     content_hash=content_hash,
-                    max_bytes=max_bytes,
-                ),
+                    segment_id=_segment_identity(
+                        project=materialized.project,
+                        provider=materialized.provider,
+                        session_id_hash=materialized.session_id_hash,
+                        content_hash=content_hash,
+                        max_bytes=max_bytes,
+                    ),
+                )
             )
-        )
     return tuple(segments)
