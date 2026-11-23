@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import threading
-import time
 from typing import Any
 
 from agent_knowledge.llm_brain_core.graph import FakeGraphMemoryAdapter
@@ -21,17 +20,13 @@ class _FakeChunkStore:
         *,
         chunks: list[dict[str, Any]],
         cards: list[dict[str, Any]] | None = None,
-        delay_seconds: float = 0.0,
     ) -> None:
         self._chunks = chunks
         self._cards = cards or []
-        self._delay = delay_seconds
         self.search_calls = 0
 
     def search_session_chunks(self, *_args, **_kwargs) -> list[dict[str, Any]]:
         self.search_calls += 1
-        if self._delay > 0:
-            time.sleep(self._delay)
         return [dict(row) for row in self._chunks]
 
     def list_authorized_cards(self, *_args, **_kwargs) -> list[dict[str, Any]]:
@@ -122,12 +117,15 @@ def test_resolve_query_overlaps_pg_chunks_with_graph_search_preserving_quality()
     adapter.upsert_episode(ep)
 
     orig_search = adapter.search_context
+    # Prove both lookups are in flight at the same time; a wall-clock bound
+    # on artificial sleeps made this test depend on scheduler wakeups.
+    overlap = threading.Barrier(2, timeout=5)
 
-    def slow_search_context(**kwargs):
-        time.sleep(0.18)
+    def overlapped_search_context(**kwargs):
+        overlap.wait()
         return orig_search(**kwargs)
 
-    adapter.search_context = slow_search_context  # type: ignore[method-assign]
+    adapter.search_context = overlapped_search_context  # type: ignore[method-assign]
 
     cards = [
         {
@@ -155,7 +153,14 @@ def test_resolve_query_overlaps_pg_chunks_with_graph_search_preserving_quality()
             "currentness": "current",
         }
     ]
-    store = _FakeChunkStore(chunks=chunks, cards=cards, delay_seconds=0.18)
+    store = _FakeChunkStore(chunks=chunks, cards=cards)
+    orig_chunks = store.search_session_chunks
+
+    def overlapped_search_session_chunks(*args, **kwargs):
+        overlap.wait()
+        return orig_chunks(*args, **kwargs)
+
+    store.search_session_chunks = overlapped_search_session_chunks  # type: ignore[method-assign]
 
     embed_lock = threading.Lock()
     embed_calls = 0
@@ -172,11 +177,9 @@ def test_resolve_query_overlaps_pg_chunks_with_graph_search_preserving_quality()
         embed_query=counting_embed,
     )
 
-    t0 = time.monotonic()
     result = resolver.resolve(project="neurons", query="GoCD release pipeline")
-    elapsed = time.monotonic() - t0
-
-    assert elapsed < 0.30, f"Expected overlapped graph+PG search (<0.30s), took {elapsed:.3f}s"
+    # The barrier fails if either lookup did not start while the other was
+    # in flight, which is the invariant the old 0.30s threshold approximated.
     assert embed_calls == 1
     assert store.search_calls == 1
     assert result["metadata"]["retrieval_path"] == "graph_neo4j"
