@@ -39,7 +39,10 @@ _LOCAL_OUTBOX_ERROR_PARAMS = frozenset(
         "unknown_model",
         "ValueError",
         "http_429",
+        "http_500",
+        "http_502",
         "http_503",
+        "http_504",
     }
 )
 _LOCAL_OUTBOX_STAGES = frozenset(

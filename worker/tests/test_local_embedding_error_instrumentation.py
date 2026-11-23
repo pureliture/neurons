@@ -148,9 +148,25 @@ def test_synthetic_122881_byte_korean_input_through_local_service(
             with pytest.raises(LocalEmbeddingClientError) as exc_info:
                 client.embed_document(text)
             assert exc_info.value.code == "internal_error"
-            assert exc_info.value.retryable is False
+            assert exc_info.value.retryable is True
     finally:
         client.close()
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_transient_http_502_returns_retry_state_not_dead_letter() -> None:
+    failure = _run_worker(
+        lambda _text: (_ for _ in ()).throw(
+            LocalEmbeddingClientError(
+                "http_502",
+                "local embedding service returned HTTP 502",
+                status_code=502,
+                retryable=True,
+                stage="batch_http",
+            )
+        )
+    )
+    assert failure["retryable"] is True
+    assert failure["error_code"].startswith("retryable_error:http_502")
