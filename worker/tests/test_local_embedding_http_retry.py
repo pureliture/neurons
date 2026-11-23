@@ -85,6 +85,39 @@ def test_sdk_transport_retry_classification(status, retryable):
         client.close()
 
 
+def test_sdk_recovers_after_transient_502():
+    class RecoveringSDKClient:
+        def __init__(self):
+            self.calls = 0
+            self.embeddings = SimpleNamespace(create=self.create)
+
+        def create(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                class SyntheticSDKError(Exception):
+                    status_code = 502
+                    body = {"error": {"code": "http_502"}}
+                raise SyntheticSDKError("synthetic outage")
+            return SimpleNamespace(
+                model=kwargs["model"],
+                data=[SimpleNamespace(index=0, embedding=[1.0] + [0.0] * 255)],
+                usage=SimpleNamespace(prompt_tokens=1),
+            )
+
+    fake = RecoveringSDKClient()
+    client = CanonicalLocalEmbeddingClient(
+        base_url="http://127.0.0.1:9/v1", use_openai_sdk=True,
+        openai_client=fake, max_retries=2, sleep_fn=lambda _s: None,
+    )
+    try:
+        result = client.embed_document("synthetic input")
+        assert fake.calls == 2
+        assert len(result.vector) == 256
+        assert result.vector[0] != 0
+    finally:
+        client.close()
+
+
 @pytest.mark.parametrize("status,retryable", [(502, True), (503, True), (429, True), (400, False), (413, False)])
 def test_async_sdk_transport_retry_classification(status, retryable):
     class SyntheticSDKError(Exception):
