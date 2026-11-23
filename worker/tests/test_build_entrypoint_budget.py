@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -23,12 +24,17 @@ def test_build_once_passes_bounded_limit_without_explicit_limit(
     fake_python.write_text(
         "#!/bin/sh\n"
         f"printf '%s\\n' \"$*\" >> '{capture}'\n"
-        "printf '%s\\n' '{\"schema_version\":\"build_guard_summary.v1\",\"status\":\"ok\","
-        "\"selected\":0,\"projected\":0,\"failed\":0,\"skipped\":0}'\n",
+        'if [ "${1:-}" = "-m" ]; then\n'
+        "  printf '%s\\n' '{\"schema_version\":\"build_guard_summary.v1\",\"status\":\"ok\","
+        "\"selected\":0,\"projected\":0,\"failed\":0,\"skipped\":0}'\n"
+        "  exit 0\n"
+        "fi\n"
+        'exec "${REAL_PY}" "$@"\n',
         encoding="utf-8",
     )
     fake_python.chmod(0o700)
     env = {
+        "REAL_PY": sys.executable,
         "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
         "HOME": os.environ["HOME"],
         "SESSION_MEMORY_APP_DIR": str(tmp_path),

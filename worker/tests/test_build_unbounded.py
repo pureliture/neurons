@@ -277,6 +277,18 @@ def test_stream_filter_discards_secret_and_extra_fields():
     text = json.dumps(summary)
     assert "SECRET" not in text and "SYNTHETIC" not in text
 
+def test_stream_filter_captures_final_report_without_trailing_newline():
+    import io
+
+    module = _load_stream_report()
+    data = b'{"selected":0,"projected":0,"failed":0}\nnot-json\n{"selected":1,"projected":1,"failed":0}'
+    raw, oversize = module.scan_stream(io.BytesIO(data))
+
+    assert oversize is False
+    summary = module.summarize(raw)
+    assert summary["selected"] == 1
+    assert summary["projected"] == 1
+
 
 def test_progress_event_is_forwarded_without_secret(tmp_path):
     env = _env(tmp_path, FAKE_REPORT_MODE="progress")

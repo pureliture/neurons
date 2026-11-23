@@ -1,4 +1,8 @@
+import os
+import select
+import signal
 import subprocess
+import time
 from pathlib import Path
 
 
@@ -115,9 +119,9 @@ def test_entrypoint_daily_job_stamps_survive_scheduler_restart(tmp_path: Path) -
 def test_entrypoint_scheduler_runs_only_the_build_lane() -> None:
     script = Path("deploy/session-memory/entrypoint.sh").read_text(encoding="utf-8")
 
-    assert "cd /app || exit 1" in script
+    assert 'cd /app || exit 1' in script
     assert "[entrypoint] scheduler started" in script
-    assert "run_build() { /app/deploy/build-once.sh; }" in script
+    assert 'run_build() { /app/deploy/build-once.sh; }' in script
     assert 'if [ $((now - last_build)) -ge "$build_interval_seconds" ]; then' in script
     assert "run_build || echo" in script
 
@@ -214,3 +218,75 @@ def test_compose_defaults_to_cron_and_health_checks_watch_heartbeat() -> None:
     assert "SESSION_MEMORY_WATCH_IDLE_SWEEP_SECONDS: ${SESSION_MEMORY_WATCH_IDLE_SWEEP_SECONDS:-900}" in compose
     assert "SESSION_MEMORY_WATCH_MAX_DELIVER: ${SESSION_MEMORY_WATCH_MAX_DELIVER:-5}" in compose
     assert '"couchdb-session-memory-watch", "--health"' in compose
+
+
+def _run_scheduler(tmp_path: Path, *, disabled: bool) -> tuple[subprocess.Popen, Path]:
+    import shlex
+    marker = tmp_path / "builds"
+    entrypoint = Path("deploy/session-memory/entrypoint.sh").resolve()
+    # Real main() dispatch, replacing only the /app filesystem and build boundary.
+    shell = (
+        f"source {shlex.quote(str(entrypoint))}; "
+        f"cd() {{ builtin cd {shlex.quote(str(tmp_path))}; }}; "
+        f"run_build() {{ printf build > {shlex.quote(str(marker))}; }}; main"
+    )
+    env = dict(os.environ, SESSION_MEMORY_SCHEDULER_SLEEP_SECONDS="60")
+    env.pop("SESSION_MEMORY_BUILD_DISABLED", None)
+    if disabled:
+        env["SESSION_MEMORY_BUILD_DISABLED"] = "1"
+    return subprocess.Popen(["bash", "-c", shell], env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, start_new_session=True), marker
+
+
+def test_entrypoint_main_disabled_does_not_invoke_build_and_sigterm_terminates(tmp_path: Path) -> None:
+    proc, marker = _run_scheduler(tmp_path, disabled=True)
+    try:
+        assert proc.stdout is not None
+        assert select.select([proc.stdout], [], [], 5)[0], "parked scheduler did not start"
+        assert proc.stdout.readline().strip() == "[entrypoint] parked (builds disabled)"
+        assert not marker.exists()
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=5)
+        assert proc.returncode == 0
+        assert not marker.exists()
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+
+
+def test_entrypoint_main_default_executes_build(tmp_path: Path) -> None:
+    proc, marker = _run_scheduler(tmp_path, disabled=False)
+    try:
+        for _ in range(50):
+            if marker.exists() and marker.read_text() == "build":
+                break
+            time.sleep(0.1)
+        assert marker.read_text() == "build"
+    finally:
+        os.killpg(proc.pid, signal.SIGTERM)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+
+
+def test_parked_scheduler_validates_sleep_interval(tmp_path: Path) -> None:
+    import shlex
+    entrypoint = Path("deploy/session-memory/entrypoint.sh").resolve()
+    marker = tmp_path / "sleep-value"
+    shell = (f"source {shlex.quote(str(entrypoint))}; "
+             f"sleep() {{ printf '%s' \"$1\" > {shlex.quote(str(marker))}; kill -TERM $$; }}; "
+             "run_parked_loop")
+    for value, expected in (("0", "60"), ("-1", "60"), ("invalid", "60"), ("3", "3")):
+        marker.unlink(missing_ok=True)
+        env = dict(os.environ, SESSION_MEMORY_SCHEDULER_SLEEP_SECONDS=value)
+        result = subprocess.run(["bash", "-c", shell], env=env, capture_output=True, text=True, timeout=5)
+        assert result.returncode == 0, result.stderr
+        assert marker.read_text() == expected
+
+
+def test_entrypoint_build_mode_keeps_original_exec_contract() -> None:
+    script = Path("deploy/session-memory/entrypoint.sh").read_text(encoding="utf-8")
+    assert "build) exec /app/deploy/build-once.sh ;;" in script
