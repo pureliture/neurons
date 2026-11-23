@@ -17,6 +17,7 @@ identity_conflicts_auto_resolved, projected, schema_version, selected, skipped.
 
 from __future__ import annotations
 
+import hashlib
 import argparse
 import copy
 import base64
@@ -53,6 +54,31 @@ BUILD_CLI_OPERATION = "couchdb_session_memory_build"
 # proceed (no-progress guard). Its change-feed entry re-enters if the source
 # still differs from the projected revision.
 MAX_PENDING_ATTEMPTS = 6
+
+
+def _shard_config(
+    shard_index: int | str | None = None,
+    shard_count: int | str | None = None,
+    environ=None,
+) -> tuple[int, int]:
+    """Resolve shard options; default (0, 1) preserves the legacy single lane."""
+    env = os.environ if environ is None else environ
+    try:
+        index = int(shard_index if shard_index is not None else env.get("SESSION_MEMORY_BUILD_SHARD_INDEX", "0"))
+        count = int(shard_count if shard_count is not None else env.get("SESSION_MEMORY_BUILD_SHARD_COUNT", "1"))
+    except (TypeError, ValueError):
+        raise ValueError("invalid_session_memory_build_shard") from None
+    if count < 1 or index < 0 or index >= count:
+        raise ValueError("invalid_session_memory_build_shard")
+    return index, count
+
+
+def _session_in_shard(session_id_hash: str, shard_index: int, shard_count: int) -> bool:
+    """Stable deterministic shard membership from the canonical session id."""
+    if shard_count <= 1:
+        return True
+    digest = hashlib.sha256(str(session_id_hash).encode("utf-8")).digest()
+    return int.from_bytes(digest, "big") % shard_count == shard_index
 
 
 def _build_auth_header(user: str, password: str) -> str:
@@ -178,6 +204,8 @@ def _select_sessions_needing_projection(
     representation: str = "session_v1",
     dead_letter_lookup=None,
     ready_content_lookup=None,
+    shard_index: int = 0,
+    shard_count: int = 1,
 ) -> list[dict]:
     """Return sessions whose projected revision is not the current source revision.
 
@@ -316,6 +344,8 @@ def _select_sessions_needing_projection(
             break
         session_id_hash = str(session.get("session_id_hash") or "")
         if not session_id_hash:
+            continue
+        if not _session_in_shard(session_id_hash, shard_index, shard_count):
             continue
         if str(session.get("_id") or "") != session_doc_id(session_id_hash):
             if session_id_hash not in current_only_seen:
@@ -507,10 +537,13 @@ _SELECTION_CHECKPOINT_SCHEMA = "session_memory_selection_checkpoint.v1"
 _DEFAULT_SELECTION_CHECKPOINT = "/app/state/session-memory-selection-checkpoint.json"
 
 
-def _selection_checkpoint_path() -> str:
-    return os.environ.get(
+def _selection_checkpoint_path(shard_index: int = 0, shard_count: int = 1) -> str:
+    base = os.environ.get(
         "SESSION_MEMORY_SELECTION_CHECKPOINT", _DEFAULT_SELECTION_CHECKPOINT
     )
+    if shard_count > 1:
+        return f"{base}.shard-{shard_index}-{shard_count}"
+    return base
 
 
 def _read_selection_checkpoint(path: str) -> dict:
@@ -861,6 +894,8 @@ def _select_sessions_incremental(
     representation: str = "session_v1",
     dead_letter_lookup=None,
     ready_content_lookup=None,
+    shard_index: int = 0,
+    shard_count: int = 1,
 ) -> tuple[list[dict], dict, int]:
     """Change-feed driven selection.
 
@@ -897,6 +932,9 @@ def _select_sessions_incremental(
         ):
             raise ValueError("unmappable change document")
         session_id_hash = f"sha256:{candidate}"
+        if not _session_in_shard(session_id_hash, shard_index, shard_count):
+            current_watermark = seq
+            continue
         if row.get("deleted"):
             raise ValueError("deleted source document requires full walk")
         if session_id_hash in examined:
@@ -1028,6 +1066,8 @@ def _pending_state_session_ids(
     provider: str,
     ready_content_lookup,
     exhausted: dict,
+    shard_index: int = 0,
+    shard_count: int = 1,
 ) -> list[str]:
     """Find state-pending sessions whose CouchDB chunks lack a PG ready row.
 
@@ -1046,7 +1086,7 @@ def _pending_state_session_ids(
         SourceDocType.PROJECTION_STATE,
         fields=["_id", "session_id_hash", "active_content_hash", "backend_receipts"],
         selector=selector,
-        limit=limit if limit > 0 else 0,
+        limit=0 if shard_count > 1 else (limit if limit > 0 else 0),
     )
     selected: list[str] = []
     scanned = 0
@@ -1054,6 +1094,8 @@ def _pending_state_session_ids(
     for state in states:
         sid = str(state.get("session_id_hash") or "")
         if not sid.startswith("sha256:") or sid in exhausted:
+            continue
+        if not _session_in_shard(sid, shard_index, shard_count):
             continue
         scanned += 1
         chunk_docs = store.find_by_type(
@@ -1107,6 +1149,8 @@ def _select_sessions_for_cycle(
     dead_letter_lookup=None,
     persist: bool = True,
     ready_content_lookup=None,
+    shard_index: int = 0,
+    shard_count: int = 1,
 ) -> list[dict]:
     """Checkpoint-aware selection: incremental when possible, full walk otherwise.
 
@@ -1123,7 +1167,7 @@ def _select_sessions_for_cycle(
     normalized = (mode or "auto").strip().lower()
     if normalized not in {"auto", "incremental", "full"}:
         normalized = "auto"
-    path = _selection_checkpoint_path()
+    path = _selection_checkpoint_path(shard_index, shard_count)
     checkpoint = _read_selection_checkpoint(path)
     if representation not in {"session_v1", "segment_v1"}:
         raise ValueError("unsupported session-memory representation")
@@ -1134,7 +1178,10 @@ def _select_sessions_for_cycle(
     checkpoint_representation = str(checkpoint.get("representation") or "session_v1")
     if checkpoint_representation != representation:
         full_walk_pending = True
-    pending_ids = _pending_session_ids(checkpoint)
+    pending_ids = [
+        sid for sid in _pending_session_ids(checkpoint)
+        if _session_in_shard(sid, shard_index, shard_count)
+    ]
     if backend == "postgres_pgvector" and checkpoint.get("pg_input_policy_version") != PG_INPUT_POLICY_VERSION:
         from .document_model import SourceDocType, projection_state_doc_id
         # Re-evaluate only failures whose input policy changed: terminal attempts
@@ -1182,6 +1229,8 @@ def _select_sessions_for_cycle(
             provider=provider,
             ready_content_lookup=ready_content_lookup,
             exhausted=exhausted_before_sweep,
+            shard_index=shard_index,
+            shard_count=shard_count,
         )
         pending_ids = list(dict.fromkeys([*pending_ids, *swept]))
     pending_sessions = _resolve_pending_sessions(
@@ -1239,6 +1288,8 @@ def _select_sessions_for_cycle(
                 representation=representation,
                 dead_letter_lookup=dead_letter_lookup,
                 ready_content_lookup=ready_content_lookup,
+                shard_index=shard_index,
+                shard_count=shard_count,
             )
         except ProjectionDeadLetterLookupError:
             raise
@@ -1288,6 +1339,8 @@ def _select_sessions_for_cycle(
             representation=representation,
             dead_letter_lookup=dead_letter_lookup,
             ready_content_lookup=ready_content_lookup,
+            shard_index=shard_index,
+            shard_count=shard_count,
         )
         fresh = [
             session
@@ -1304,6 +1357,10 @@ def _select_sessions_for_cycle(
             file=sys.stderr,
         )
 
+    sessions = [
+        session for session in sessions
+        if _session_in_shard(_session_identity(session), shard_index, shard_count)
+    ]
     # Pending debt can be larger than this run's cap: keep every still-unfinished
     # id, including ids that were not reached because pending work filled the cap.
     durable_pending = _session_identity_many(remaining_pending) + _session_identity_many(sessions)
@@ -1360,13 +1417,13 @@ def _iter_by_type(store, doc_type: str, *, fields: list[str], selector: dict, pa
 
 
 
-def _persist_post_projection_pending(session_reports: list[dict]) -> None:
+def _persist_post_projection_pending(session_reports: list[dict], shard_index: int = 0, shard_count: int = 1) -> None:
     """Drop successfully projected sessions from pending immediately.
 
     Failures and unfinished sessions stay pending; exhausted identities remain
     suppressed. This keeps the next cycle from reselecting completed work.
     """
-    path = _selection_checkpoint_path()
+    path = _selection_checkpoint_path(shard_index, shard_count)
     checkpoint = _read_selection_checkpoint(path)
     completed = {
         str(row.get("session_id_hash") or "")
@@ -1407,6 +1464,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, default=0, help="Maximum sessions to process (0 = unlimited).")
     parser.add_argument("--project", default="", help="Scope selection to this project (empty = all).")
     parser.add_argument("--provider", default="", help="Scope selection to this provider (empty = all).")
+    parser.add_argument(
+        "--shard-index",
+        default=os.environ.get("SESSION_MEMORY_BUILD_SHARD_INDEX", "0"),
+        help="Zero-based shard index (default 0; env SESSION_MEMORY_BUILD_SHARD_INDEX).",
+    )
+    parser.add_argument(
+        "--shard-count",
+        default=os.environ.get("SESSION_MEMORY_BUILD_SHARD_COUNT", "1"),
+        help="Number of build shards (default 1 = no sharding; env SESSION_MEMORY_BUILD_SHARD_COUNT).",
+    )
     parser.add_argument("--approval", default="", help="Path to live-approval JSON (required for non-dry-run).")
     parser.add_argument("--dataset-name", default="session-memory", help="Projection dataset name (default: session-memory).")
     parser.add_argument(
@@ -1418,6 +1485,19 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
+    try:
+        shard_index, shard_count = _shard_config(args.shard_index, args.shard_count)
+    except ValueError:
+        print(
+            json.dumps(
+                {
+                    "error": "invalid_shard_config",
+                    "reason": "--shard-index/--shard-count must satisfy 0 <= index < count and count >= 1",
+                },
+                sort_keys=True,
+            )
+        )
+        return 2
 
     # Reconstruct the effective argv for approval matching.
     effective_argv = list(sys.argv[1:] if argv is None else argv)
@@ -1622,6 +1702,8 @@ def main(argv: list[str] | None = None) -> int:
                 dead_letter_lookup=dead_letter_lookup,
                 persist=not args.dry_run,
                 ready_content_lookup=ready_content_lookup,
+                shard_index=shard_index,
+                shard_count=shard_count,
             )
     except ProjectionDeadLetterLookupError as exc:
         print(
@@ -1841,7 +1923,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     print(json.dumps(report, sort_keys=True))
     if not args.dry_run and not explicit_session_ids:
-        _persist_post_projection_pending(session_reports)
+        _persist_post_projection_pending(session_reports, shard_index, shard_count)
     return 0 if failed == 0 else 1
 
 
