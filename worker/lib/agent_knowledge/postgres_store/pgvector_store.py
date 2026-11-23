@@ -3895,6 +3895,11 @@ class PgVectorStore:
             row = cur.fetchone()
             return int(_row_value(row, "incarnation", 0) or 2)
 
+    def recover_oversized_session_memory_chunks(self, **kwargs):
+        from .oversized_session_chunk_recovery import recover_oversized_session_memory_chunks
+
+        return recover_oversized_session_memory_chunks(self, **kwargs)
+
     def delete_session_chunk(
         self,
         chunk_id: str,
@@ -4388,6 +4393,51 @@ class PgVectorStore:
             "embedding_state": state_val,
             "updated_at": _as_aware_datetime(_row_value(row, "updated_at", 6)),
         }
+
+    def get_local_outbox_profile_id(
+        self,
+        *,
+        target_type: str = "session_chunk",
+        target_id: str,
+        conn: Any | None = None,
+    ) -> str:
+        """Return the profile_id of the latest dead-letter (or any) local outbox row for a target."""
+
+        if target_type not in {"session_chunk", "memory_card"}:
+            raise ValueError(f"unsupported target_type: {target_type}")
+        if not target_id:
+            raise ValueError("target_id is required")
+        with self._scope(conn=conn) as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT profile_id
+                      FROM local_embedding_outbox
+                     WHERE target_type = %s
+                       AND target_id = %s
+                       AND status = 'dead_letter'
+                     ORDER BY outbox_id DESC
+                     LIMIT 1
+                    """,
+                    (target_type, target_id),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    cur.execute(
+                        """
+                        SELECT profile_id
+                          FROM local_embedding_outbox
+                         WHERE target_type = %s
+                           AND target_id = %s
+                         ORDER BY outbox_id DESC
+                         LIMIT 1
+                        """,
+                        (target_type, target_id),
+                    )
+                    row = cur.fetchone()
+        if row is None:
+            return LOCAL_EMBEDDING_PROFILE_ID
+        return str(_row_value(row, "profile_id", 0) or LOCAL_EMBEDDING_PROFILE_ID)
 
     def has_dead_letter_local_outbox(
         self,

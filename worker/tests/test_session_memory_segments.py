@@ -50,15 +50,18 @@ def test_build_segments_preserves_turn_boundaries_and_max_bytes():
     assert segments[0].member_hashes == tuple(view.content_hash for view in views[:2])
 
 
-def test_view_over_max_bytes_is_kept_as_a_single_segment():
+def test_view_over_max_bytes_is_split_into_bounded_segments():
     view = _view(1, "long-view-" * 20)
 
     segments = build_segments(_materialized((view,)), max_bytes=64)
 
-    assert len(segments) == 1
-    assert segments[0].member_hashes == (view.content_hash,)
-    assert segments[0].turn_start == segments[0].turn_end == 1
-
+    assert len(segments) > 1
+    assert all(len(segment.text.encode("utf-8")) <= 64 for segment in segments)
+    assert all(segment.turn_start == segment.turn_end == 1 for segment in segments)
+    assert all(segment.member_hashes == (view.content_hash,) for segment in segments)
+    assert "".join(segment.text for segment in segments) == build_segments(
+        _materialized((view,)), max_bytes=10_000
+    )[0].text
 
 def test_segment_ids_and_content_hashes_are_deterministic_and_bounded():
     views = (_view(1, "first"), _view(2, "second"))
@@ -150,3 +153,43 @@ def test_tool_evidence_is_attached_only_to_last_segment():
     assert "## tool_evidence_summary" in segments[-1].text
     assert "evidence one" in segments[-1].text
     assert "evidence two" in segments[-1].text
+
+
+def test_huge_evidence_tail_is_split_into_bounded_segments():
+    views = (_view(1, "a" * 20),)
+    evidence = ("evidence-" * 100,)
+
+    segments = build_segments(_materialized(views, evidence), max_bytes=64)
+
+    assert len(segments) > 1
+    assert all(len(segment.text.encode("utf-8")) <= 64 for segment in segments)
+    assert "## tool_evidence_summary" in "".join(segment.text for segment in segments)
+    assert "evidence-" in "".join(segment.text for segment in segments)
+
+
+def test_split_preserves_multibyte_utf8_boundaries():
+    view = _view(1, "café-" * 100)
+
+    segments = build_segments(_materialized((view,)), max_bytes=64)
+
+    assert len(segments) > 1
+    assert all(len(segment.text.encode("utf-8")) <= 64 for segment in segments)
+    for segment in segments:
+        segment.text.encode("utf-8").decode("utf-8")
+    assert "".join(segment.text for segment in segments).encode("utf-8") == (
+        build_segments(_materialized((view,)), max_bytes=10_000)[0].text.encode("utf-8")
+    )
+
+
+def test_split_segment_ids_are_stable_across_rebuilds():
+    view = _view(1, "long-view-" * 20)
+
+    first = build_segments(_materialized((view,)), max_bytes=64)
+    second = build_segments(_materialized((view,)), max_bytes=64)
+
+    assert [segment.segment_id for segment in first] == [
+        segment.segment_id for segment in second
+    ]
+    assert [segment.content_hash for segment in first] == [
+        segment.content_hash for segment in second
+    ]
