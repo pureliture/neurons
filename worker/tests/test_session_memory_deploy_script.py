@@ -259,7 +259,7 @@ def test_entrypoint_main_default_executes_build(tmp_path: Path) -> None:
     proc, marker = _run_scheduler(tmp_path, disabled=False)
     try:
         for _ in range(50):
-            if marker.exists():
+            if marker.exists() and marker.read_text() == "build":
                 break
             time.sleep(0.1)
         assert marker.read_text() == "build"
