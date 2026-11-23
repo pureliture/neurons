@@ -250,6 +250,71 @@ def _category_for_reason(reason: str) -> str:
     return TERMINAL_REASON_CATEGORIES.get(reason, "unknown_terminal_skip")
 
 
+def record_terminal_skipped_audit(
+    ledger: Ledger,
+    *,
+    session_id_hash: str,
+    provider: str,
+    project: str,
+    reason: str,
+    attempts: int = 0,
+    source_hash_present: bool = False,
+) -> bool:
+    """Record a terminal-input skip without mutating dirty-session state.
+
+    Only closed identifiers and booleans are stored in details; no transcript
+    text, source hash value, or raw id is written outside the hash key column.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    category = _category_for_reason(reason)
+    details = {
+        "terminal_reason": reason,
+        "category": category,
+        "attempts": int(attempts),
+        "source_hash_present": bool(source_hash_present),
+    }
+    with ledger._connect() as connection:
+        connection.execute("PRAGMA busy_timeout=30000")
+        connection.execute(
+            """
+            INSERT INTO session_memory_terminal_skipped_audit (
+                session_id_hash, provider, project, original_status, terminal_status,
+                reason, category, source_knowledge_id, attempts, dirty_at,
+                skipped_at, audited_at, details_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id_hash) DO UPDATE SET
+                provider=excluded.provider,
+                project=excluded.project,
+                original_status=excluded.original_status,
+                terminal_status=excluded.terminal_status,
+                reason=excluded.reason,
+                category=excluded.category,
+                source_knowledge_id=excluded.source_knowledge_id,
+                attempts=excluded.attempts,
+                dirty_at=excluded.dirty_at,
+                skipped_at=excluded.skipped_at,
+                audited_at=excluded.audited_at,
+                details_json=excluded.details_json
+            """,
+            (
+                session_id_hash,
+                provider,
+                project,
+                "failed",
+                TERMINAL_SKIPPED_STATUS,
+                reason,
+                category,
+                "",
+                int(attempts),
+                "",
+                now,
+                now,
+                json.dumps(details, sort_keys=True, separators=(",", ":")),
+            ),
+        )
+    return True
+
+
 def _details_for(row: dict) -> dict:
     return {
         "terminal_reason": row.get("reason") or "",

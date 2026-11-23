@@ -26,8 +26,10 @@ import os
 import sys
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
-
+from ..ledger import Ledger
+from ..session_memory.terminal_skipped_quarantine import record_terminal_skipped_audit
 from agent_knowledge.pipeline_progress import emit_progress
 from agent_knowledge.rag_ingress.pg_embedding_chunks import (
     INCONSISTENT_HERMES_PROJECT_SCOPE,
@@ -43,6 +45,28 @@ def _safe_reason_code(value: object) -> str:
     """Closed identifier for log evidence; never carries text or session ids."""
     code = re.sub(r"[^a-z0-9_]+", "_", str(value or "").lower()).strip("_")[:48]
     return code or "unspecified"
+
+
+def _record_terminal_input_skip(
+    *,
+    session_id_hash: str,
+    provider: str,
+    project: str,
+    reason: str,
+    source_hash_present: bool = False,
+) -> bool:
+    """Best-effort audit write; a configured ledger is required."""
+    ledger_path = str(os.environ.get("LLM_BRAIN_LEDGER_PATH", "") or "")
+    if not ledger_path:
+        return False
+    return record_terminal_skipped_audit(
+        Ledger(Path(ledger_path)),
+        session_id_hash=session_id_hash,
+        provider=provider,
+        project=project,
+        reason=reason,
+        source_hash_present=source_hash_present,
+    )
 
 class ProjectionDeadLetterLookupError(RuntimeError):
     """The local dead-letter state needed for terminal suppression is unavailable."""
@@ -1425,12 +1449,17 @@ def _persist_post_projection_pending(session_reports: list[dict], shard_index: i
     """
     path = _selection_checkpoint_path(shard_index, shard_count)
     checkpoint = _read_selection_checkpoint(path)
-    completed = {
+    settled = {
         str(row.get("session_id_hash") or "")
         for row in session_reports
-        if str(row.get("status") or "") == "projected"
+        if str(row.get("status") or "") in {"projected", "terminal_skipped"}
     }
-    pending = [sid for sid in _pending_session_ids(checkpoint) if sid not in completed]
+    terminal = {
+        str(row.get("session_id_hash") or "")
+        for row in session_reports
+        if str(row.get("status") or "") == "terminal_skipped"
+    }
+    pending = [sid for sid in _pending_session_ids(checkpoint) if sid not in settled]
     pending_set = set(pending)
     attempts = {
         key: value
@@ -1442,6 +1471,7 @@ def _persist_post_projection_pending(session_reports: list[dict], shard_index: i
         for key, value in (checkpoint.get("exhausted_session_ids") or {}).items()
         if key in pending_set
     }
+    exhausted.update({sid: "terminal_input_reason" for sid in terminal if sid})
     try:
         _write_selection_checkpoint(
             path,
@@ -1830,6 +1860,9 @@ def main(argv: list[str] | None = None) -> int:
     segments_total = 0
     segments_reused = 0
     segments_embedded = 0
+    terminal_skipped = 0
+    terminal_audit_written = 0
+    terminal_reason_counts: dict[str, int] = {}
     session_reports: list[dict] = []
 
     try:
@@ -1852,18 +1885,34 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 projection = result.get("projection") or {}
                 status = str(projection.get("status") or "")
-                if status == "projected":
+                reason = _safe_reason_code(projection.get("reason"))
+                if reason in TERMINAL_INPUT_REASONS and (
+                    status == "failed" or not result.get("fully_materialized")
+                ):
+                    terminal_skipped += 1
+                    terminal_reason_counts[reason] = terminal_reason_counts.get(reason, 0) + 1
+                    outcome = "terminal_skipped"
+                    failure_reason = reason
+                    if reason == INCONSISTENT_HERMES_PROJECT_SCOPE:
+                        skipped_inconsistent += 1
+                    if _record_terminal_input_skip(
+                        session_id_hash=session_id_hash,
+                        provider=str(session.get("provider") or ""),
+                        project=str(session.get("project") or ""),
+                        reason=reason,
+                        source_hash_present=bool(projection.get("source_hash")),
+                    ):
+                        terminal_audit_written += 1
+                elif status == "projected":
                     projected += 1
                     outcome = "projected"
                 elif status == "pending" or not result.get("fully_materialized"):
                     skipped += 1
                     outcome = "pending"
-                    if str(projection.get("reason") or "") == INCONSISTENT_HERMES_PROJECT_SCOPE:
-                        skipped_inconsistent += 1
                 else:
                     failed += 1
                     outcome = "failed"
-                    failure_reason = _safe_reason_code(projection.get("reason"))
+                    failure_reason = reason
                 session_reports.append(
                     {"session_id_hash": session_id_hash, "status": outcome, "error_class": ""}
                 )
@@ -1888,11 +1937,25 @@ def main(argv: list[str] | None = None) -> int:
             emit_progress("projection", index + 1, selected_count, reason_code=failure_reason)
     finally:
         _close_if_supported(projector)
+    if terminal_reason_counts:
+        print(
+            json.dumps(
+                {
+                    "event": "terminal_input_skip_summary",
+                    "terminal_skipped": terminal_skipped,
+                    "reason_counts": dict(sorted(terminal_reason_counts.items())),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            file=sys.stderr,
+        )
 
     if (
         embedding_cycle_cap_enabled
         and selected_count == 1
         and projected == 0
+        and terminal_skipped == 0
         and failed == 0
         and (explicit_session_ids or str(args.project or ""))
     ):
@@ -1908,6 +1971,9 @@ def main(argv: list[str] | None = None) -> int:
         "failed": failed,
         "skipped": skipped,
         "skipped_inconsistent": skipped_inconsistent,
+        "terminal_skipped": terminal_skipped,
+        "terminal_audit_written": terminal_audit_written,
+        "terminal_skipped_reason_counts": dict(sorted(terminal_reason_counts.items())),
         "identity_conflicts_auto_resolved": identity_conflicts_auto_resolved,
         "segments_total": segments_total,
         "segments_reused": segments_reused,

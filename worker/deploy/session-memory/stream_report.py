@@ -240,10 +240,11 @@ def summarize(raw: bytes | None) -> dict:
         projected = int(report.get("projected") or 0)
         failed = int(report.get("failed") or 0)
         skipped = int(report.get("skipped") or 0)
+        terminal_skipped = int(report.get("terminal_skipped") or 0)
     except (TypeError, ValueError):
         return {"schema_version": SCHEMA_VERSION, "error": "invalid_report_counters"}
     status = "completed_with_failures" if failed > 0 else (
-        "no_progress" if selected > 0 and projected == 0 else "ok"
+        "no_progress" if selected > 0 and projected == 0 and terminal_skipped == 0 else "ok"
     )
     return {
         "schema_version": SCHEMA_VERSION,
@@ -252,6 +253,7 @@ def summarize(raw: bytes | None) -> dict:
         "projected": projected,
         "failed": failed,
         "skipped": skipped,
+        "terminal_skipped": terminal_skipped,
     }
 
 
