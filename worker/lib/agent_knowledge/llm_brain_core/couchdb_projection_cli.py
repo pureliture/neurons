@@ -757,6 +757,19 @@ def _graph_environ(*, extract_entities: bool | None, reextract_entities: bool) -
     return graph_environ
 
 
+def _snapshot_projected_source_state(projection_state_store):
+    """Compatibility accessor for projection-state stores.
+
+    Alternate store implementations (including fake/test stores) may only
+    implement the per-session ``has_projected_source_hash`` path. In that case
+    there is no bulk snapshot to cache, so return ``None`` and let callers use
+    the existing per-session currentness checks.
+    """
+    snapshot = getattr(projection_state_store, "snapshot_projected_source_state", None)
+    if not callable(snapshot):
+        return None
+    return snapshot()
+
 def _select_sessions(
     source_store: CouchDBSourceStore,
     *,
@@ -802,8 +815,20 @@ def _select_sessions_bounded(
         else MAX_GRAPH_SELECTION_SIZE
     )
 
+    _active_hashes, _invalid_active = iter_active_source_hashes(source_store)
+    _legacy_hashes = iter_legacy_source_hashes(source_store)
+
     for _attempt in range(GRAPH_SELECTION_SNAPSHOT_ATTEMPTS):
+        # Pass-local projection snapshot: re-read so a concurrent projection
+        # state change between pass 1 and pass 2 shows up in the digest and
+        # triggers the bounded retry instead of being masked by a stale cache.
+        _projected_state = (
+            _snapshot_projected_source_state(projection_state_store)
+            if projection_state_store is not None and extraction_level is not None
+            else None
+        )
         project_counts: dict[str, dict[str, int]] = {}
+
         source_count = 0
         first_digest = hashlib.sha256()
 
@@ -812,6 +837,10 @@ def _select_sessions_bounded(
             source_store,
             project=project,
             provider=provider,
+            active_hashes=_active_hashes,
+            invalid_active=_invalid_active,
+            legacy_hashes=_legacy_hashes,
+            projected_state=_projected_state,
         ):
             source_count += 1
             _validate_legacy_hash_for_currentness(
@@ -819,6 +848,7 @@ def _select_sessions_bounded(
                 source_store=source_store,
                 projection_state_store=projection_state_store,
                 extraction_level=extraction_level,
+                projected_state=_projected_state,
             )
             if session.get(SELECTION_ERROR_FIELD):
                 unresolved_count += 1
@@ -828,6 +858,7 @@ def _select_sessions_bounded(
                 session,
                 projection_state_store=projection_state_store,
                 extraction_level=extraction_level,
+                projected_state=_projected_state,
             )
             session_project = str(session.get("project") or "")
             counts = project_counts.setdefault(session_project, {"pending": 0, "current": 0})
@@ -869,11 +900,22 @@ def _select_sessions_bounded(
         selected_by_slot: dict[int, dict[str, Any]] = {}
         selected_session_ids: set[str] = set()
         snapshot_drifted = False
+        # Re-snapshot projection state for pass 2 so a concurrent change is
+        # not masked by the pass-1 cache.
+        _projected_state = (
+            _snapshot_projected_source_state(projection_state_store)
+            if projection_state_store is not None and extraction_level is not None
+            else None
+        )
 
         for session in _iter_session_revisions(
             source_store,
             project=project,
             provider=provider,
+            active_hashes=_active_hashes,
+            invalid_active=_invalid_active,
+            legacy_hashes=_legacy_hashes,
+            projected_state=_projected_state,
         ):
             observed_source_count += 1
             _validate_legacy_hash_for_currentness(
@@ -881,6 +923,7 @@ def _select_sessions_bounded(
                 source_store=source_store,
                 projection_state_store=projection_state_store,
                 extraction_level=extraction_level,
+                projected_state=_projected_state,
             )
             if session.get(SELECTION_ERROR_FIELD):
                 observed_unresolved_count += 1
@@ -893,6 +936,7 @@ def _select_sessions_bounded(
                 session,
                 projection_state_store=projection_state_store,
                 extraction_level=extraction_level,
+                projected_state=_projected_state,
             )
             _update_selection_digest(second_digest, session, is_current=is_current)
             session_project = str(session.get("project") or "")
@@ -1024,9 +1068,15 @@ def _iter_session_revisions(
     *,
     project: str,
     provider: str,
+    active_hashes: dict[str, str] | None = None,
+    invalid_active: set[str] | None = None,
+    legacy_hashes: dict[str, str] | None = None,
+    projected_state: tuple[set[tuple[str, str, str, str]], set[tuple[str, str, str]]] | None = None,
 ):
-    active_hashes, invalid_active = iter_active_source_hashes(source_store)
-    legacy_hashes = iter_legacy_source_hashes(source_store)
+    if active_hashes is None or invalid_active is None:
+        active_hashes, invalid_active = iter_active_source_hashes(source_store)
+    if legacy_hashes is None:
+        legacy_hashes = iter_legacy_source_hashes(source_store)
 
     probe_done = [False]
     probe_attempts = [0]
@@ -1113,6 +1163,7 @@ def _session_projection_is_current(
     *,
     projection_state_store: LedgerGraphProjectionStateStore | None,
     extraction_level: str | None,
+    projected_state: tuple[set[tuple[str, str, str, str]], set[tuple[str, str, str]]] | None = None,
 ) -> bool:
     source_hash = str(session.get("source_hash") or "")
     if (
@@ -1120,6 +1171,16 @@ def _session_projection_is_current(
         or projection_state_store is None
         or extraction_level is None
     ):
+        return False
+    if projected_state is not None:
+        project = str(session.get("project") or "")
+        natural_id = _session_natural_id(str(session.get("session_id_hash") or ""))
+        level = str(extraction_level)
+        exact, invalid = projected_state
+        if (project, natural_id, source_hash, level) in exact:
+            return True
+        if level != EXTRACTION_LEVEL_ENTITY and (project, natural_id, source_hash) in invalid:
+            return True
         return False
     return projection_state_store.has_projected_source_hash(
         str(session.get("project") or ""),
@@ -1155,6 +1216,7 @@ def _validate_legacy_hash_for_currentness(
     source_store: CouchDBSourceStore,
     projection_state_store: LedgerGraphProjectionStateStore | None,
     extraction_level: str | None,
+    projected_state: tuple[set[tuple[str, str, str, str]], set[tuple[str, str, str]]] | None = None,
 ) -> None:
     """Re-hash a projection-only hash only when it would suppress a session."""
     if not session.get(SELECTION_LEGACY_HASH_FIELD):
@@ -1163,6 +1225,7 @@ def _validate_legacy_hash_for_currentness(
         session,
         projection_state_store=projection_state_store,
         extraction_level=extraction_level,
+        projected_state=projected_state,
     ):
         return
     session_id_hash = str(session.get("session_id_hash") or "")
