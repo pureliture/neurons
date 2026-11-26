@@ -145,6 +145,37 @@ def test_large_source_set_uses_bounded_indexed_reads() -> None:
     assert len(store.queries) <= 4
 
 
+def test_default_legacy_scan_page_size_stays_bounded() -> None:
+    inner = InMemoryCouchDBSourceStore()
+    for index in range(25):
+        _seed_session(inner, f"pilot-{index}")
+    store = _RecordingStore(inner)
+
+    hashes = sr.iter_legacy_source_hashes(store, max_sessions=25)
+
+    assert len(hashes) == 25
+    # 2,048-row _find pages timed out in the deployed pod (30s client timeout).
+    assert 256 <= sr.LEGACY_SOURCE_SCAN_PAGE_SIZE <= 512
+    discovery, *children = store.queries
+    assert discovery[0] == dm.SourceDocType.TRANSCRIPT_SESSION
+    assert discovery[1]["limit"] == 25
+    assert discovery[1]["page_size"] == sr.LEGACY_SOURCE_SCAN_PAGE_SIZE
+    assert discovery[1]["use_index"] == ["legacy", "by_type"]
+    assert discovery[1]["allow_fallback"] is False
+    assert children
+    for doc_type, kwargs in children:
+        assert doc_type in (
+            dm.SourceDocType.CONVERSATION_CHUNK,
+            dm.SourceDocType.TOOL_EVIDENCE_BUNDLE,
+        )
+        assert kwargs["page_size"] == sr.LEGACY_SOURCE_SCAN_PAGE_SIZE
+        assert kwargs["use_index"] == ["legacy", "by_type"]
+        assert kwargs["allow_fallback"] is False
+        selected = kwargs["selector"]["session_id_hash"]["$in"]
+        assert len(selected) == 25
+        assert set(selected) == set(hashes)
+
+
 def test_capped_scan_omits_unverifiable_source_and_full_resolver_fails_closed() -> None:
     inner = InMemoryCouchDBSourceStore()
     good_sid = _seed_session(inner, "good")
