@@ -68,6 +68,8 @@ DEFAULT_GRAPH_LLM_WRITE_TIMEOUT_SECONDS = 180.0
 class GraphProjectionDeadlineExceeded(RuntimeError):
     """Raised when a projection run exceeds its wall-clock deadline."""
 
+    reason_code = "graph_projection_deadline_exceeded"
+
 
 def _projection_deadline_seconds(environ: dict[str, str] | None = None) -> float:
     env = os.environ if environ is None else environ

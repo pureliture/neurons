@@ -274,8 +274,11 @@ def test_second_scan_missing_or_oversized_candidate_fails_closed(monkeypatch):
 
     orig_iter = store.iter_by_type
 
+    def _is_verification_scan(kwargs: dict) -> bool:
+        return "$or" in (kwargs.get("selector") or {})
+
     def _missing_second_scan(doc_type, **kwargs):
-        if kwargs.get("selector"):
+        if _is_verification_scan(kwargs):
             return iter([])
         return orig_iter(doc_type, **kwargs)
 
@@ -283,7 +286,7 @@ def test_second_scan_missing_or_oversized_candidate_fails_closed(monkeypatch):
     assert sid not in sr.iter_legacy_source_hashes(store)
 
     def _oversized_second_scan(doc_type, **kwargs):
-        if kwargs.get("selector"):
+        if _is_verification_scan(kwargs):
             raise SourceStoreResponseTooLarge("too large")
         return orig_iter(doc_type, **kwargs)
 

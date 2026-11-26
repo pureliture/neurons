@@ -7,6 +7,7 @@ import pytest
 
 from agent_knowledge.couchdb_source import document_model as dm
 from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
+from agent_knowledge.couchdb_source.source_revision import LEGACY_SOURCE_SCAN_PAGE_SIZE
 from agent_knowledge.llm_brain_core.bulk_semantic import (
     BulkSemanticEntity,
     BulkSemanticExtractionResult,
@@ -455,7 +456,7 @@ def test_bulk_semantic_bounded_selection_preserves_scope_resume_and_report_count
 
         def iter_by_type(self, *args, page_size=10000, **kwargs):
             self.page_sizes.append(page_size)
-            assert 0 < page_size <= 256
+            assert 0 < page_size <= LEGACY_SOURCE_SCAN_PAGE_SIZE
             yield from super().iter_by_type(*args, page_size=page_size, **kwargs)
 
     store = _BoundedStore()
@@ -487,7 +488,7 @@ def test_bulk_semantic_bounded_selection_preserves_scope_resume_and_report_count
     assert first["projection"]["projected"] == 1
     assert first["projection"]["stopped_after_max_projects"] is True
     assert first["truncated"] is True
-    assert store.page_sizes and max(store.page_sizes) <= 256
+    assert store.page_sizes and max(store.page_sizes) <= LEGACY_SOURCE_SCAN_PAGE_SIZE
 
     resumed = run_couchdb_bulk_semantic_projection(
         ledger_path=tmp_path / "ledger.sqlite3",

@@ -53,6 +53,8 @@ _SOURCE_SNAPSHOT_SCOPE = "source_snapshot_scope"
 # (`fields=None`, active/legacy source bodies) must stay at 8 rows: a 100-row
 # page of 32 KiB bodies is ~3.3 MiB and fails closed with page-bytes-exceeded.
 SOURCE_CURRENTNESS_METADATA_PAGE_SIZE = 100
+LEGACY_SOURCE_SCAN_PAGE_SIZE = 2048
+LEGACY_SCAN_SELECTOR_MAX_SESSIONS = 512
 SOURCE_CURRENTNESS_FULL_DOCUMENT_PAGE_SIZE = 8
 SOURCE_CURRENTNESS_MAX_PAGE_BYTES = 512 * 1024
 SOURCE_CURRENTNESS_MAX_COMPACT_BYTES = 8 * 1024 * 1024
@@ -2047,63 +2049,105 @@ def _doc_type_index(store: CouchDBSourceStore) -> list[str] | str:
 
 
 def iter_legacy_source_hashes(
-    store: CouchDBSourceStore, *, page_size: int = 256
+    store: CouchDBSourceStore,
+    *,
+    page_size: int = LEGACY_SOURCE_SCAN_PAGE_SIZE,
+    selector: dict | None = None,
+    session_id_hashes: set[str] | None = None,
+    max_sessions: int = 0,
 ) -> dict[str, str]:
-    """Compute legacy currentness hashes with three whole-store paged scans.
+    """Compute legacy currentness hashes with bounded, indexed reads.
 
-    The per-session resolver issued one paged query per source doc type for
-    every one of the 9,000+ sessions. Grouping the same projected rows by
-    session in one pass yields identical canonical hashes with a bounded number
-    of requests. Sessions over budget or with invalid control data are omitted
-    so the caller falls back to the fail-closed per-session resolver.
+    One indexed transcript_session pass discovers the session universe; the
+    chunk and evidence passes are scoped to those sessions with a selector.
+    Cost scales with the sessions under consideration instead of a full walk
+    of all three document types. Sessions omitted by the cap, or with invalid
+    control data, are left to the caller's fail-closed per-session resolver.
     """
     components_by_session: dict[str, list[dict[str, str]]] = {}
     budgets: dict[str, dict[str, int]] = {}
     invalid: set[str] = set()
-    scan_kwargs: dict[str, object] = {"page_size": 256}
+    bodyless_bundle_candidates: dict[str, str] = {}
+    base_selector = dict(selector or {})
+    if session_id_hashes is not None:
+        base_selector["session_id_hash"] = {
+            "$in": sorted(str(sid) for sid in session_id_hashes)
+        }
+    scan_kwargs: dict[str, object] = {"page_size": max(1, int(page_size))}
     use_index = _doc_type_index(store)
     if use_index:
-        # Production has a doc_type Mango index. Forcing it avoids a full DB
-        # scan per bookmark page (which stalled selection for 10+ minutes).
+        # The by_type index bounds each bookmark page to one doc type; without
+        # it Mango walks the whole database for every page.
         scan_kwargs.update(use_index=use_index, allow_fallback=False)
-    bodyless_bundle_candidates: dict[str, str] = {}
-    for doc_type in (
+
+    def _collect(document: dict, doc_type: str) -> None:
+        session_id_hash = str(document.get("session_id_hash") or "")
+        if not session_id_hash or session_id_hash in invalid:
+            return
+        if _is_immutable_source_copy(document):
+            return
+        if doc_type == dm.SourceDocType.TRANSCRIPT_SESSION and "body" in document:
+            invalid.add(session_id_hash)
+            components_by_session.pop(session_id_hash, None)
+            return
+        if (
+            doc_type == dm.SourceDocType.TOOL_EVIDENCE_BUNDLE
+            and "__source_document_hash" not in document
+            and not _has_material_hash_field(document)
+        ):
+            doc_id = str(document.get("_id") or "")
+            if not doc_id or doc_id in bodyless_bundle_candidates:
+                invalid.add(session_id_hash)
+                components_by_session.pop(session_id_hash, None)
+                return
+            bodyless_bundle_candidates[doc_id] = session_id_hash
+            return
+        budget = budgets.setdefault(session_id_hash, {"rows": 0, "compact_bytes": 0})
+        try:
+            _consume_currentness_row(budget)
+            component = _currentness_component(document, budget=budget)
+        except SourceRevisionResolutionError:
+            invalid.add(session_id_hash)
+            components_by_session.pop(session_id_hash, None)
+            return
+        components_by_session.setdefault(session_id_hash, []).append(component)
+
+    # Phase 1: one bounded, indexed pass discovers the session universe.
+    for document in store.iter_by_type(
         dm.SourceDocType.TRANSCRIPT_SESSION,
+        fields=_CURRENTNESS_LEGACY_FIELDS.get(dm.SourceDocType.TRANSCRIPT_SESSION),
+        selector=base_selector,
+        limit=max(0, int(max_sessions)),
+        **scan_kwargs,
+    ):
+        _collect(document, dm.SourceDocType.TRANSCRIPT_SESSION)
+
+    candidates = {
+        sid for sid in components_by_session if sid not in invalid
+    } | set(bodyless_bundle_candidates.values())
+    if not candidates:
+        return {}
+
+    child_selector = dict(base_selector)
+    if len(candidates) <= LEGACY_SCAN_SELECTOR_MAX_SESSIONS:
+        # A small candidate set is worth an explicit $in filter; a full-store
+        # session universe would make every paged request carry thousands of
+        # hashes, so the by_type index and larger pages bound that case.
+        child_selector["session_id_hash"] = {"$in": sorted(candidates)}
+    # Phase 2: child documents are only read for the discovered sessions.
+    for doc_type in (
         dm.SourceDocType.CONVERSATION_CHUNK,
         dm.SourceDocType.TOOL_EVIDENCE_BUNDLE,
     ):
-        fields = _CURRENTNESS_LEGACY_FIELDS.get(doc_type)
-        for document in store.iter_by_type(doc_type, fields=fields, **scan_kwargs):
-            session_id_hash = str(document.get("session_id_hash") or "")
-            if not session_id_hash or session_id_hash in invalid:
+        for document in store.iter_by_type(
+            doc_type,
+            fields=_CURRENTNESS_LEGACY_FIELDS.get(doc_type),
+            selector=child_selector,
+            **scan_kwargs,
+        ):
+            if str(document.get("session_id_hash") or "") not in candidates:
                 continue
-            if _is_immutable_source_copy(document):
-                continue
-            if doc_type == dm.SourceDocType.TRANSCRIPT_SESSION and "body" in document:
-                invalid.add(session_id_hash)
-                components_by_session.pop(session_id_hash, None)
-                continue
-            if (
-                doc_type == dm.SourceDocType.TOOL_EVIDENCE_BUNDLE
-                and "__source_document_hash" not in document
-                and not _has_material_hash_field(document)
-            ):
-                doc_id = str(document.get("_id") or "")
-                if not doc_id or doc_id in bodyless_bundle_candidates:
-                    invalid.add(session_id_hash)
-                    components_by_session.pop(session_id_hash, None)
-                    continue
-                bodyless_bundle_candidates[doc_id] = session_id_hash
-                continue
-            budget = budgets.setdefault(session_id_hash, {"rows": 0, "compact_bytes": 0})
-            try:
-                _consume_currentness_row(budget)
-                component = _currentness_component(document, budget=budget)
-            except SourceRevisionResolutionError:
-                invalid.add(session_id_hash)
-                components_by_session.pop(session_id_hash, None)
-                continue
-            components_by_session.setdefault(session_id_hash, []).append(component)
+            _collect(document, doc_type)
 
     if bodyless_bundle_candidates:
         # Second bounded pass verifies full documents for hashless metadata-only
@@ -2113,7 +2157,14 @@ def iter_legacy_source_hashes(
             for document in store.iter_by_type(
                 dm.SourceDocType.TOOL_EVIDENCE_BUNDLE,
                 fields=None,
-                selector={"$or": [{"content_hash": {"$exists": False}}, {"content_hash": ""}, {"content_hash": None}]},
+                selector={
+                    **child_selector,
+                    "$or": [
+                        {"content_hash": {"$exists": False}},
+                        {"content_hash": ""},
+                        {"content_hash": None},
+                    ],
+                },
                 **scan_kwargs,
             ):
                 doc_id = str(document.get("_id") or "")
