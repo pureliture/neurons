@@ -19,6 +19,7 @@ from typing import Any
 from agent_knowledge.couchdb_source.couchdb_http_store import CouchDBHttpSourceStore
 from agent_knowledge.couchdb_source.document_model import SourceDocType
 from agent_knowledge.couchdb_source.source_revision import (
+    LEGACY_SOURCE_SCAN_PAGE_SIZE,
     SourceRevisionCurrentnessLimitError,
     SourceRevisionDeferredBudget,
     SourceRevisionResolutionError,
@@ -51,9 +52,9 @@ from .runtime_graph import build_graph_adapter_from_env
 
 COUCHDB_GRAPH_PROJECTION_SCHEMA_VERSION = "llm_brain_couchdb_graph_projection.v1"
 GRAPH_PROJECTION_CURSOR_SCHEMA_VERSION = "llm_brain_graph_projection_cursor.v1"
-# Discovery pages carry projected metadata only (no bodies); 1,024 rows stay
-# well inside the 8 MiB _find response cap and cut discovery requests 4x.
-GRAPH_SELECTION_PAGE_SIZE = 1024
+# Discovery pages carry projected metadata only (no bodies), but must never
+# exceed the proven legacy scan page bound.
+GRAPH_SELECTION_PAGE_SIZE = min(1024, LEGACY_SOURCE_SCAN_PAGE_SIZE)
 MAX_GRAPH_SELECTION_SIZE = 1000
 MAX_GRAPH_SELECTION_PROJECTS = 256
 GRAPH_SELECTION_SNAPSHOT_ATTEMPTS = 2
