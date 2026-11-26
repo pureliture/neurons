@@ -89,6 +89,27 @@ def test_graph_trigger_extract_entities_opt_in_adds_flag(tmp_path):
     assert "--extract-entities" in argv
 
 
+def test_graph_trigger_reextract_flag_forwarded_in_both_states(tmp_path):
+    calls: list[list[str]] = []
+
+    def _child(argv):  # type: ignore[no-untyped-def]
+        calls.append(list(argv or []))
+        print(json.dumps({"schema_version": "child.graph", "status": "ok"}))
+        return 0
+
+    for reextract in (True, False):
+        report = run_graph_trigger(
+            ledger_path=tmp_path / "ledger.sqlite3",
+            runtime_dir=tmp_path / "runtime",
+            execute=True,
+            extract_entities=True,
+            reextract_entities=reextract,
+            graph_main=_child,
+        )
+        assert report["status"] == "ok"
+        assert ("--reextract-entities" in calls[-1]) is reextract
+
+
 def test_graph_trigger_already_running_is_not_counted_as_mutation(tmp_path):
     def _child(argv):  # type: ignore[no-untyped-def]
         _ = argv

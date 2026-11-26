@@ -305,6 +305,110 @@ def test_reextract_advances_to_unprojected_tail_before_reprocessing_current_sess
     assert last_unprojected in touched
 
 
+
+def test_reextract_flag_reprojects_already_projected_session(tmp_path):
+    store = InMemoryCouchDBSourceStore()
+    _seed_session(store, raw_id="reextract-bypass")
+
+    first = _project(
+        tmp_path=tmp_path,
+        store=store,
+        graph_adapter=_EntityFlagFakeGraph(),
+        limit=5,
+    )
+    assert first["projection"]["projected"] == 1
+
+    second = run_couchdb_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=5,
+        project=PROJECT,
+        provider=PROVIDER,
+        enable_graph=True,
+        graph_required=False,
+        extract_entities=True,
+        reextract_entities=True,
+        resume=True,
+        report_every=100,
+        graph_adapter=_EntityFlagFakeGraph(),
+    )
+    assert second["status"] == "ok"
+    assert second["projection"]["attempted"] == 1
+    assert second["projection"]["projected"] == 1
+    assert second["projection"]["skipped_resumed"] == 0
+
+
+def test_no_reextract_flag_keeps_resume_skip_and_ok_exit(tmp_path, monkeypatch, capsys):
+    store = InMemoryCouchDBSourceStore()
+    _seed_session(store, raw_id="resume-kept")
+    monkeypatch.setattr(
+        couchdb_projection_cli, "_build_source_store", lambda **_kwargs: store
+    )
+    monkeypatch.setattr(
+        couchdb_projection_cli,
+        "build_graph_adapter_from_env",
+        lambda **_kwargs: _EntityFlagFakeGraph(),
+    )
+    argv = [
+        "--ledger",
+        str(tmp_path / "ledger.sqlite3"),
+        "--limit",
+        "5",
+        "--project",
+        PROJECT,
+        "--provider",
+        PROVIDER,
+        "--enable-graph",
+        "--extract-entities",
+        "--report-every",
+        "100",
+    ]
+
+    assert couchdb_projection_cli.main(argv) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["projection"]["projected"] == 1
+
+    # No flag: resume excludes already-current sessions from selection, so the
+    # second run neither re-projects nor fails; exit-code contract stays intact.
+    assert couchdb_projection_cli.main(argv) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second["projection"]["attempted"] == 0
+    assert second["projection"]["projected"] == 0
+    assert second["status"] == "ok"
+
+
+def test_adapter_force_reextract_bypasses_cli_resume_skip(tmp_path):
+    class _ForcedEntityGraph(_EntityFlagFakeGraph):
+        _force_reextract_entities = True
+
+    store = InMemoryCouchDBSourceStore()
+    _seed_session(store, raw_id="adapter-force")
+    first = _project(
+        tmp_path=tmp_path,
+        store=store,
+        graph_adapter=_EntityFlagFakeGraph(),
+        limit=5,
+    )
+    assert first["projection"]["projected"] == 1
+
+    second = run_couchdb_projection(
+        ledger_path=tmp_path / "ledger.sqlite3",
+        source_store=store,
+        limit=5,
+        project=PROJECT,
+        provider=PROVIDER,
+        enable_graph=True,
+        graph_required=False,
+        extract_entities=True,
+        reextract_entities=False,
+        resume=True,
+        report_every=100,
+        graph_adapter=_ForcedEntityGraph(),
+    )
+    assert second["projection"]["projected"] == 1
+    assert second["projection"]["skipped_resumed"] == 0
+
+
 def test_unscoped_limit_round_robins_across_projects_instead_of_starving_later_project(tmp_path):
     store = InMemoryCouchDBSourceStore()
     _seed_session(store, raw_id="alpha-1", project="alpha")
