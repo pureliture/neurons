@@ -2126,6 +2126,42 @@ def _doc_type_index(store: CouchDBSourceStore) -> list[str] | str:
     return ""
 
 
+def _session_first_index(store: CouchDBSourceStore) -> list[str] | str:
+    """Resolve a session_id_hash-leading Mango index descriptor on HTTP stores."""
+    if not getattr(store, "base_url", ""):
+        return ""
+    try:
+        status, payload = store._request("GET", f"/{store.db}/_index")  # type: ignore[attr-defined]
+    except Exception:
+        return ""
+    if status != 200:
+        return ""
+    sid_field = {"session_id_hash": "asc"}
+    type_field = {"doc_type": "asc"}
+    exact: list[list[str]] = []
+    session_only: list[list[str]] = []
+    for index in payload.get("indexes") or []:
+        if not isinstance(index, dict) or index.get("partial_filter_selector"):
+            continue
+        definition = index.get("def")
+        if not isinstance(definition, dict) or definition.get("partial_filter_selector"):
+            continue
+        fields = definition.get("fields")
+        if not isinstance(fields, list) or not fields or fields[0] != sid_field:
+            continue
+        ddoc = str(index.get("ddoc") or "").removeprefix("design/")
+        name = str(index.get("name") or "")
+        if not ddoc or not name:
+            continue
+        descriptor = [ddoc, name]
+        if len(fields) >= 2 and fields[1] == type_field:
+            exact.append(descriptor)
+        elif len(fields) == 1:
+            session_only.append(descriptor)
+    # sorted() keeps the forced hint deterministic when several indexes qualify.
+    return sorted(exact)[0] if exact else (sorted(session_only)[0] if session_only else "")
+
+
 def iter_legacy_source_hashes(
     store: CouchDBSourceStore,
     *,
@@ -2210,8 +2246,32 @@ def iter_legacy_source_hashes(
     if len(candidates) <= LEGACY_SCAN_SELECTOR_MAX_SESSIONS:
         # A small candidate set is worth an explicit $in filter; a full-store
         # session universe would make every paged request carry thousands of
-        # hashes, so the forced by_type index bounds that case.
+        # hashes, so the explicit by_type fallback below applies instead.
         child_selector["session_id_hash"] = {"$in": sorted(candidates)}
+
+    child_scan_kwargs = scan_kwargs
+    if len(candidates) <= LEGACY_SCAN_SELECTOR_MAX_SESSIONS:
+        # by_type only indexes doc_type: Mango would post-filter session_id_hash
+        # after walking every chunk/bundle (40s timeout in the deployed pod).
+        session_index = _session_first_index(store)
+        if (
+            getattr(store, "base_url", "")
+            and callable(getattr(store, "_request", None))
+            and not session_index
+        ):
+            # Fail closed instead of silently reverting to the full walk: the
+            # per-session resolver still marks every unverified session.
+            raise SourceRevisionResolutionError(
+                "legacy scan session-leading Mango index unavailable"
+            )
+        if session_index:
+            child_scan_kwargs = {
+                **scan_kwargs,
+                "use_index": session_index,
+                "allow_fallback": False,
+            }
+    # An oversized $in keeps the explicit by_type hint from scan_kwargs: that
+    # is the acknowledged full-scan fallback, never a silent index fallback.
     # Phase 2: child documents are only read for the discovered sessions.
     for doc_type in (
         dm.SourceDocType.CONVERSATION_CHUNK,
@@ -2221,7 +2281,7 @@ def iter_legacy_source_hashes(
             doc_type,
             fields=_CURRENTNESS_LEGACY_FIELDS.get(doc_type),
             selector=child_selector,
-            **scan_kwargs,
+            **child_scan_kwargs,
         ):
             if str(document.get("session_id_hash") or "") not in candidates:
                 continue
@@ -2243,7 +2303,7 @@ def iter_legacy_source_hashes(
                         {"content_hash": None},
                     ],
                 },
-                **scan_kwargs,
+                **child_scan_kwargs,
             ):
                 doc_id = str(document.get("_id") or "")
                 expected_sid = bodyless_bundle_candidates.get(doc_id)
