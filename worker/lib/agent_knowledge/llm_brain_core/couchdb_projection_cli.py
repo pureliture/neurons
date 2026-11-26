@@ -240,6 +240,7 @@ def run_couchdb_projection(
     deadline_state = _start_projection_deadline(deadline_seconds)
     # lock 획득 직후부터 전체를 try/finally로 감싸 Ledger/store/adapter/selection
     # 구성 중 예외가 나도 lock file handle release를 보장한다.
+    progress_started = False
     try:
         ledger = Ledger(ledger_path)
         artifact_store = LedgerSessionMemoryArtifactStore(ledger)
@@ -333,6 +334,7 @@ def run_couchdb_projection(
                 "started_at": started_at,
             },
         )
+        progress_started = True
 
         for index, session in enumerate(sessions, start=1):
             processed = index
@@ -603,6 +605,19 @@ def run_couchdb_projection(
             "project_count": len(by_project),
             "raw_paths_printed": False,
         }
+    except Exception as exc:
+        diag = extract_safe_error_diagnostics(exc)
+        _write_jsonl(
+            progress_jsonl,
+            {
+                "event": "failed",
+                "status": "failed",
+                "reason_code": str(diag["reason_code"]),
+                "after_start": progress_started,
+                "raw_paths_printed": False,
+            },
+        )
+        raise
     finally:
         _stop_projection_deadline(deadline_state)
         if lock_handle is not None:
