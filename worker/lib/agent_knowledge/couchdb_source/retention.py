@@ -130,7 +130,12 @@ def apply_retention(
     if will_compact:
         for doc_type in _COMPACTABLE_DOC_TYPES:
             to_delete.extend(
-                d["_id"] for d in store.find_by_session(session_id_hash=sid, doc_type=doc_type)
+                d["_id"]
+                for d in store.find_by_session(
+                    session_id_hash=sid,
+                    doc_type=doc_type,
+                    fields=["_id"],
+                )
             )
 
     result = {
@@ -171,7 +176,11 @@ def _anchor_fields(store: CouchDBSourceStore, session_id_hash: str) -> tuple[str
         SourceDocType.COVERAGE_MANIFEST,
         SourceDocType.PROJECTION_STATE,
     ):
-        docs = store.find_by_session(session_id_hash=session_id_hash, doc_type=doc_type)
+        docs = store.find_by_session(
+            session_id_hash=session_id_hash,
+            doc_type=doc_type,
+            fields=["provider", "project", "source_locator_hash"],
+        )
         if docs:
             d = docs[0]
             return d.get("provider", ""), d.get("project", ""), d.get("source_locator_hash", "")

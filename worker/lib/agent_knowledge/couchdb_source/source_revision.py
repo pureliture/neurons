@@ -135,6 +135,65 @@ class ResolvedSourceRevision:
     is_legacy_unpinned: bool
 
 
+class SourceResolutionMemo:
+    """Request-scoped reuse of one session's resolved source.
+
+    Entries live only for the caller's request. A cached revision is a snapshot:
+    a caller that must observe a concurrent activation performs a live pointer
+    read first and calls :meth:`observe_pointer`, which drops the entry when the
+    pointer document revision changed. Any local source write must call
+    :meth:`invalidate` before the next resolve. Unpinned sessions have no
+    pointer fence, so callers that must detect concurrent legacy writes (the
+    coverage convergence check) resolve with ``refresh=True`` instead of a memo
+    hit.
+    """
+
+    __slots__ = ("_entries",)
+
+    def __init__(self) -> None:
+        self._entries: dict[str, tuple[str, ResolvedSourceRevision]] = {}
+
+    @staticmethod
+    def _pointer_token(pointer: Mapping[str, object] | None) -> str:
+        if pointer is None:
+            return ""
+        return str(pointer.get("_rev") or "")
+
+    def get(self, session_id_hash: str) -> ResolvedSourceRevision | None:
+        entry = self._entries.get(str(session_id_hash))
+        return entry[1] if entry is not None else None
+
+    def remember(
+        self,
+        resolved: ResolvedSourceRevision,
+        *,
+        pointer: Mapping[str, object] | None,
+    ) -> None:
+        self._entries[str(resolved.session_id_hash)] = (
+            self._pointer_token(pointer),
+            resolved,
+        )
+
+    def invalidate(self, session_id_hash: str) -> None:
+        self._entries.pop(str(session_id_hash), None)
+
+    def observe_pointer(
+        self,
+        session_id_hash: str,
+        pointer: Mapping[str, object] | None,
+    ) -> bool:
+        """Drop a cached entry whose pointer revision changed; return True if dropped."""
+
+        key = str(session_id_hash)
+        entry = self._entries.get(key)
+        if entry is None:
+            return False
+        if entry[0] == self._pointer_token(pointer):
+            return False
+        self._entries.pop(key, None)
+        return True
+
+
 def _canonical_hash(value: Mapping[str, object] | list[object]) -> str:
     return dm.sha256_hash(
         json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
@@ -1246,6 +1305,8 @@ def resolve_active_source_revision(
     progress_callback=None,
     max_member_docs: int | None = None,
     deadline_monotonic: float | None = None,
+    memo: SourceResolutionMemo | None = None,
+    refresh: bool = False,
 ) -> ResolvedSourceRevision:
     """Resolve an active immutable revision, or the legacy set only if unpinned.
 
@@ -1253,6 +1314,11 @@ def resolve_active_source_revision(
     session that exceeds either raises :class:`SourceRevisionDeferredBudget`
     before returning anything, leaving the source untouched so a later cycle
     can retry it with a larger budget.
+
+    ``memo`` reuses one request's earlier resolution of the same session.
+    ``refresh=True`` bypasses that entry and replaces it with a fresh read; the
+    coverage convergence check uses it so a concurrent legacy write is still
+    observed exactly as before.
     """
 
     def _check_budget(members_total: int, members_read: int) -> None:
@@ -1266,6 +1332,10 @@ def resolve_active_source_revision(
             )
 
     dm.assert_hash_like("session_id_hash", session_id_hash)
+    if memo is not None and not refresh:
+        cached = memo.get(session_id_hash)
+        if cached is not None:
+            return cached
     pointer = store.get(dm.active_source_revision_pointer_doc_id(session_id_hash))
     if pointer is None:
         documents = _load_legacy_documents(
@@ -1273,13 +1343,16 @@ def resolve_active_source_revision(
             session_id_hash=session_id_hash,
             progress_callback=progress_callback,
         )
-        return _resolved(
+        resolved = _resolved(
             session_id_hash=session_id_hash,
             documents=documents,
             source_hash=_resolved_source_hash(documents),
             manifest_id=None,
             is_legacy_unpinned=True,
         )
+        if memo is not None:
+            memo.remember(resolved, pointer=None)
+        return resolved
 
     parsed_pointer = _parse_pointer(pointer, session_id_hash=session_id_hash)
     manifest = store.get(parsed_pointer["manifest_id"])
@@ -1337,13 +1410,16 @@ def resolve_active_source_revision(
         _emit_progress(progress_callback, index, len(members))
     if _resolved_source_hash(documents) != parsed_pointer["source_hash"]:
         raise SourceRevisionResolutionError("active source revision hash changed")
-    return _resolved(
+    resolved = _resolved(
         session_id_hash=session_id_hash,
         documents=documents,
         source_hash=parsed_pointer["source_hash"],
         manifest_id=parsed_pointer["manifest_id"],
         is_legacy_unpinned=False,
     )
+    if memo is not None:
+        memo.remember(resolved, pointer=pointer)
+    return resolved
 
 
 def resolve_active_source_revision_from_snapshot(

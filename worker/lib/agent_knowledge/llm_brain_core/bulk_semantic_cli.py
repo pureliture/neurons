@@ -97,6 +97,36 @@ def _source_authority_sources(manifest: Any, chunk_hash: str) -> list[dict[str, 
 def _pg_authority_by_hash(dsn: str, project: str, hashes: list[str], *, as_of=None):
     return authorized_sources_by_hash(dsn, project, hashes, as_of=as_of)
 
+
+def _load_full_input_documents(source_store, session_id_hash: str):
+    """Typed full-input reads for one session.
+
+    The untyped session scan also returns every immutable
+    ``source_revision_member`` copy and the revision manifest/pointer, which this
+    path never uses; on the largest measured session that was 4,474 of 8,954
+    documents. Each typed scan is bounded by the store's own pagination.
+    """
+
+    manifest = next(
+        iter(
+            source_store.find_by_session(
+                session_id_hash=session_id_hash,
+                doc_type=SourceDocType.COVERAGE_MANIFEST,
+            )
+        ),
+        None,
+    )
+    chunk_docs = source_store.find_by_session(
+        session_id_hash=session_id_hash,
+        doc_type=SourceDocType.CONVERSATION_CHUNK,
+    )
+    evidence_docs = source_store.find_by_session(
+        session_id_hash=session_id_hash,
+        doc_type=SourceDocType.TOOL_EVIDENCE_BUNDLE,
+    )
+    return manifest, chunk_docs, evidence_docs
+
+
 BULK_SEMANTIC_SCHEMA_VERSION = "llm_brain_couchdb_bulk_semantic.v1"
 # A session that cannot be read inside one cycle's budget is deferred, never
 # truncated: the next cycle retries it first with a doubled budget, and only an
@@ -506,19 +536,9 @@ def run_couchdb_bulk_semantic_projection(
                     source_store=source_store,
                 )
                 if full_input_state is not None:
-                    docs = source_store.find_by_session(session_id_hash=session_id_hash)
-                    manifest = next(
-                        (doc for doc in docs if doc.get("doc_type") == SourceDocType.COVERAGE_MANIFEST),
-                        None,
+                    manifest, chunk_docs, evidence_docs = _load_full_input_documents(
+                        source_store, session_id_hash
                     )
-                    chunk_docs = [
-                        doc for doc in docs
-                        if doc.get("doc_type") == SourceDocType.CONVERSATION_CHUNK
-                    ]
-                    evidence_docs = [
-                        doc for doc in docs
-                        if doc.get("doc_type") == SourceDocType.TOOL_EVIDENCE_BUNDLE
-                    ]
                     try:
                         validate_source_documents(chunk_docs + evidence_docs, manifest or {})
                         builder = FullInputBuilder(

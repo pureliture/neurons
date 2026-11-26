@@ -16,7 +16,7 @@ from __future__ import annotations
 import datetime
 import logging
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Mapping, Protocol, runtime_checkable
 
 from ..rag_ingress.pg_embedding_chunks import (
     PG_INPUT_POLICY_VERSION,
@@ -41,7 +41,11 @@ from .hermes_project_scope import (
     INCONSISTENT_HERMES_PROJECT_SCOPE,
     decide_hermes_project_scope,
 )
-from .source_revision import resolve_active_source_revision
+from .source_revision import (
+    ResolvedSourceRevision,
+    SourceResolutionMemo,
+    resolve_active_source_revision,
+)
 from .source_store import CouchDBSourceStore, SourceStoreConflict, SourceStoreError
 
 
@@ -111,15 +115,85 @@ class RecordingSessionMemoryProjector:
         return ref
 
 
-def update_coverage_with_tool_evidence(*, session_id_hash: str, store: CouchDBSourceStore) -> dict | None:
+def _coverage_manifest_matches(
+    persisted: Mapping[str, object] | None,
+    *,
+    expected_hash: str,
+    chunk_count: int,
+    bundle_count: int,
+    manifest_id: str | None,
+) -> bool:
+    """True when a persisted manifest already records one resolved source set."""
+
+    if not isinstance(persisted, Mapping) or not persisted or not expected_hash:
+        return False
+    if str(persisted.get("source_hash") or "") != expected_hash:
+        return False
+    if int(persisted.get("conversation_chunk_count") or 0) != int(chunk_count):
+        return False
+    if int(persisted.get("tool_evidence_bundle_count") or 0) != int(bundle_count):
+        return False
+    if manifest_id is not None and str(
+        persisted.get("active_source_manifest_id") or ""
+    ) != manifest_id:
+        return False
+    return True
+
+
+def coverage_manifest_is_current(
+    *,
+    session_id_hash: str,
+    store: CouchDBSourceStore,
+    resolved: ResolvedSourceRevision,
+) -> dict | None:
+    """Return the persisted coverage manifest when it already records ``resolved``.
+
+    This is the same predicate :func:`update_coverage_with_tool_evidence` uses for
+    convergence, evaluated *before* rebuilding the manifest so a verified
+    duplicate delivery can skip an expensive legacy load. A ``None`` result means
+    the manifest is missing or stale.
+    """
+
+    if resolved.is_legacy_unpinned:
+        if not resolved.sessions:
+            return None
+        if str(resolved.sessions[0].get("source_hash") or "") != resolved.source_hash:
+            return None
+        manifest_id = None
+    else:
+        if not resolved.manifest_id:
+            return None
+        manifest_id = resolved.manifest_id
+    persisted = store.get(coverage_manifest_doc_id(session_id_hash))
+    if not _coverage_manifest_matches(
+        persisted,
+        expected_hash=str(resolved.source_hash or ""),
+        chunk_count=len(resolved.conversation_chunks),
+        bundle_count=len(resolved.tool_evidence_bundles),
+        manifest_id=manifest_id,
+    ):
+        return None
+    return persisted
+
+
+def update_coverage_with_tool_evidence(
+    *,
+    session_id_hash: str,
+    store: CouchDBSourceStore,
+    memo: SourceResolutionMemo | None = None,
+) -> dict | None:
     """Rebuild the per-session coverage manifest with current tool evidence counts.
 
     Preserves the project_authority / ledger_comparison blocks from the existing
     manifest written during historical import.
     """
 
-    for _attempt in range(3):
-        snapshot = _coverage_snapshot(session_id_hash=session_id_hash, store=store)
+    for attempt in range(3):
+        if attempt and memo is not None:
+            # A retry exists because the previous snapshot lost a concurrent
+            # source update; it must observe the current source, not the memo.
+            memo.invalidate(session_id_hash)
+        snapshot = _coverage_snapshot(session_id_hash=session_id_hash, store=store, memo=memo)
         if snapshot is None:
             return None
         (
@@ -151,12 +225,22 @@ def update_coverage_with_tool_evidence(*, session_id_hash: str, store: CouchDBSo
                 incoming=session_doc,
                 source_hash_authoritative=True,
             )
+            if memo is not None:
+                # The aggregate document is a source member; its observed bounds
+                # and source hash feed the next resolution.
+                memo.invalidate(session_id_hash)
 
         # CouchDB's generic 409 retry can legally write a stale aggregate whose
         # revision was computed before a concurrent distinct chunk arrived. Read
         # the complete source again and converge only when the persisted manifest
-        # and session row cover that latest snapshot.
-        current = _coverage_snapshot(session_id_hash=session_id_hash, store=store)
+        # and session row cover that latest snapshot. ``refresh`` keeps this read
+        # live even when the request memo already holds an earlier resolution.
+        current = _coverage_snapshot(
+            session_id_hash=session_id_hash,
+            store=store,
+            memo=memo,
+            refresh=True,
+        )
         if current is None:
             continue
         (
@@ -169,28 +253,37 @@ def update_coverage_with_tool_evidence(*, session_id_hash: str, store: CouchDBSo
         persisted = store.get(coverage_manifest_doc_id(session_id_hash)) or {}
         session_current = current_sessions[0] if current_sessions else {}
         expected_hash = str(current_doc.get("source_hash") or "")
-        if (
-            str(persisted.get("source_hash") or "") == expected_hash
-            and int(persisted.get("conversation_chunk_count") or 0)
-            == int(current_doc.get("conversation_chunk_count") or 0)
-            and int(persisted.get("tool_evidence_bundle_count") or 0)
-            == int(current_doc.get("tool_evidence_bundle_count") or 0)
-            and (
-                not current_sessions
-                or not current_is_legacy_unpinned
-                or str(session_current.get("source_hash") or "") == expected_hash
-            )
+        if _coverage_manifest_matches(
+            persisted,
+            expected_hash=expected_hash,
+            chunk_count=int(current_doc.get("conversation_chunk_count") or 0),
+            bundle_count=int(current_doc.get("tool_evidence_bundle_count") or 0),
+            manifest_id=(
+                None
+                if current_is_legacy_unpinned
+                else str(current_doc.get("active_source_manifest_id") or "")
+            ),
+        ) and (
+            not current_sessions
+            or not current_is_legacy_unpinned
+            or str(session_current.get("source_hash") or "") == expected_hash
         ):
             return current_doc
     raise SourceStoreError("coverage manifest did not converge after concurrent source updates")
 
 
 def _coverage_snapshot(
-    *, session_id_hash: str, store: CouchDBSourceStore
+    *,
+    session_id_hash: str,
+    store: CouchDBSourceStore,
+    memo: SourceResolutionMemo | None = None,
+    refresh: bool = False,
 ) -> tuple[dict, list[dict], str, str, bool] | None:
     resolved = resolve_active_source_revision(
         session_id_hash=session_id_hash,
         store=store,
+        memo=memo,
+        refresh=refresh,
     )
     sessions = list(resolved.sessions)
     chunks = list(resolved.conversation_chunks)
@@ -264,6 +357,7 @@ def mark_projection_pending_if_source_changed(
     source_hash: str,
     store: CouchDBSourceStore,
     source_changed: bool,
+    memo: SourceResolutionMemo | None = None,
 ) -> dict:
     del source_changed
     state_id = projection_state_doc_id(session_id_hash)
@@ -272,6 +366,7 @@ def mark_projection_pending_if_source_changed(
         current_source_hash = _current_session_source_hash(
             session_id_hash=session_id_hash,
             store=store,
+            memo=memo,
         )
         if current_source_hash and source_hash != current_source_hash:
             return existing or {}
@@ -495,11 +590,15 @@ def materialize_session_memory(
 
 
 def _current_session_source_hash(
-    *, session_id_hash: str, store: CouchDBSourceStore
+    *,
+    session_id_hash: str,
+    store: CouchDBSourceStore,
+    memo: SourceResolutionMemo | None = None,
 ) -> str:
     resolved = resolve_active_source_revision(
         session_id_hash=session_id_hash,
         store=store,
+        memo=memo,
     )
     # Historical projection-CAS callers can run before any source document is
     # present. Preserve their empty-currentness sentinel, while still letting a

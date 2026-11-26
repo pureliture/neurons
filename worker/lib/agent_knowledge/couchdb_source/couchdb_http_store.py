@@ -20,21 +20,18 @@ from __future__ import annotations
 import base64
 import copy
 import errno
-import hashlib
 import json
 import os
 import shutil
 import tempfile
 import time
-from collections import OrderedDict
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote
 
 from .couchdb_currentness_stream import (
     parse_spooled_descriptor_page,
-    read_error_payload,
 )
 from .spool_reader import (
     SpoolDiskFull,
@@ -104,66 +101,6 @@ class CouchDBResponseTooLarge(CouchDBError):
     code = "couchdb_response_too_large"
 
 
-def _is_no_usable_index(payload: object) -> bool:
-    """True when a _find rejection says no index matches the sort."""
-    if not isinstance(payload, dict):
-        return False
-    return str(payload.get("error") or "") == "no_usable_index"
-
-
-DEFAULT_NO_USABLE_INDEX_TTL_SECONDS = 300.0
-_MAX_NO_USABLE_INDEX_CACHE_ENTRIES = 64
-_DEFAULT_SESSION_SORT: tuple[dict[str, str], ...] = ({"_id": "asc"},)
-
-
-def _canonical_typed_node(value: object, *, _seen: set[int] | None = None) -> object:
-    """Encode a Mango query structure with explicit runtime types and zero truncation.
-
-    Preserving exact values, list lengths, nesting depth, and scalar runtime types
-    (distinguishing ``bool`` from ``int``/``float``) prevents cache collisions across
-    deep selectors, wide ``$in``/``$or`` clauses, and ``partial_filter_selector``
-    predicates that depend on constant field values.
-    """
-    if value is None:
-        return ("null", None)
-    if isinstance(value, bool):
-        return ("bool", value)
-    if isinstance(value, int):
-        return ("int", value)
-    if isinstance(value, float):
-        return ("float", repr(value))
-    if isinstance(value, str):
-        return ("str", value)
-    active = _seen if _seen is not None else set()
-    obj_id = id(value)
-    if obj_id in active:
-        raise ValueError("cyclic Mango query structure is not allowed")
-    active.add(obj_id)
-    try:
-        if isinstance(value, Mapping):
-            return (
-                "map",
-                [
-                    [str(key), _canonical_typed_node(sub, _seen=active)]
-                    for key, sub in sorted(value.items(), key=lambda item: str(item[0]))
-                ],
-            )
-        if isinstance(value, (list, tuple)):
-            return ("seq", [_canonical_typed_node(item, _seen=active) for item in value])
-    finally:
-        active.discard(obj_id)
-    return ("repr", type(value).__qualname__, str(value))
-
-
-def _canonical_mango_digest(value: object) -> str:
-    encoded = json.dumps(
-        _canonical_typed_node(value),
-        ensure_ascii=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
 COUCHDB_FIND_MAX_PAGE_RESPONSE_BYTES = 8 * 1024 * 1024
 
 
@@ -214,7 +151,6 @@ class CouchDBHttpSourceStore:
         auth_header: str = "",
         request_timeout_seconds: float = 30,
         deadline_monotonic: float | None = None,
-        no_usable_index_ttl_seconds: float = DEFAULT_NO_USABLE_INDEX_TTL_SECONDS,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.db = db
@@ -222,36 +158,6 @@ class CouchDBHttpSourceStore:
         self.auth_header = auth_header
         self.request_timeout_seconds = request_timeout_seconds
         self.deadline_monotonic = deadline_monotonic
-        self.no_usable_index_ttl_seconds = max(0.0, float(no_usable_index_ttl_seconds))
-        self._no_usable_index_until: OrderedDict[tuple[object, ...], float] = OrderedDict()
-
-    def _is_sort_unusable_cached(self, cache_key: tuple[object, ...]) -> bool:
-        if self.no_usable_index_ttl_seconds <= 0:
-            return False
-        now = time.monotonic()
-        expires_at = self._no_usable_index_until.get(cache_key)
-        if expires_at is None:
-            return False
-        if now >= expires_at:
-            self._no_usable_index_until.pop(cache_key, None)
-            return False
-        self._no_usable_index_until.move_to_end(cache_key)
-        return True
-
-    def _remember_unusable_sort(self, cache_key: tuple[object, ...]) -> None:
-        if self.no_usable_index_ttl_seconds <= 0:
-            return
-        now = time.monotonic()
-        expired = [key for key, exp in self._no_usable_index_until.items() if now >= exp]
-        for key in expired:
-            self._no_usable_index_until.pop(key, None)
-        self._no_usable_index_until[cache_key] = now + self.no_usable_index_ttl_seconds
-        self._no_usable_index_until.move_to_end(cache_key)
-        while len(self._no_usable_index_until) > _MAX_NO_USABLE_INDEX_CACHE_ENTRIES:
-            self._no_usable_index_until.popitem(last=False)
-
-    def _clear_unusable_sort(self, cache_key: tuple[object, ...]) -> None:
-        self._no_usable_index_until.pop(cache_key, None)
 
     # --- HTTP plumbing --------------------------------------------------------
 
@@ -1083,15 +989,23 @@ class CouchDBHttpSourceStore:
         }
 
     def find_by_session(
-        self, *, session_id_hash: str, doc_type: str = "", progress_callback=None
+        self,
+        *,
+        session_id_hash: str,
+        doc_type: str = "",
+        fields: list[str] | None = None,
+        progress_callback=None,
     ) -> list[dict]:
         selector: dict = {"session_id_hash": session_id_hash}
         if doc_type:
             selector["doc_type"] = doc_type
+        page_size = 10000
         docs: list[dict] = []
         bookmark = ""
         while True:
-            body: dict = {"selector": selector, "limit": 10000}
+            body: dict = {"selector": selector, "limit": page_size}
+            if fields:
+                body["fields"] = list(fields)
             if bookmark:
                 body["bookmark"] = bookmark
             status, payload = self._request("POST", f"/{self.db}/_find", json_body=body)
@@ -1107,11 +1021,15 @@ class CouchDBHttpSourceStore:
                     progress_callback(len(docs), 0)
                 except Exception:
                     pass
+            if len(page) < page_size:
+                # A short page is the last page; an extra empty round-trip only
+                # adds latency to every session resolve.
+                break
             next_bookmark = str(payload.get("bookmark") or "")
             if not next_bookmark or next_bookmark == bookmark:
                 break
             bookmark = next_bookmark
-        if not doc_type:
+        if not doc_type and (not fields or "doc_type" in fields):
             docs = [doc for doc in docs if doc.get("doc_type") != SourceDocType.REPO_USAGE_PATTERN]
         docs.sort(key=lambda d: str(d.get("_id")))
         return docs
@@ -1142,30 +1060,12 @@ class CouchDBHttpSourceStore:
         }
         size = min(SESSION_QUERY_MAX_PAGE_SIZE, max(1, int(page_size)))
         bookmark = ""
-        sort_spec = [dict(item) for item in _DEFAULT_SESSION_SORT]
         normalized_fields = list(fields) if fields else None
-        # Scope the bounded TTL cache to endpoint, database, doc_type, lossless typed
-        # extra_selector digest, sort digest, and projected field list so partial
-        # indexes on doc_type or extra_selector constants, deep/wide selectors, and
-        # covering-index field projections never collide across distinct query plans.
-        cache_key = (
-            self.base_url,
-            self.db,
-            doc_type,
-            _canonical_mango_digest(extra_selector),
-            _canonical_mango_digest(sort_spec),
-            _canonical_mango_digest(normalized_fields),
-        )
-        # Pin `use_sort` once per iter_by_session call so a TTL boundary mid-scan
-        # can never mix sorted and unsorted bookmarks across pages.
-        use_sort = not self._is_sort_unusable_cached(cache_key)
         while True:
             body: dict = {
                 "selector": query_selector,
                 "limit": size,
             }
-            if use_sort:
-                body["sort"] = sort_spec
             if normalized_fields:
                 body["fields"] = list(normalized_fields)
             if bookmark:
@@ -1176,31 +1076,6 @@ class CouchDBHttpSourceStore:
                 json_body=body,
                 max_response_bytes=max_page_bytes,
             )
-            if status == 400 and _is_no_usable_index(payload) and use_sort:
-                # Remember the rejection under a bounded TTL scoped to the exact
-                # non-session query shape so later sessions skip the rejected 400
-                # round-trip while future index creation recovers after the TTL.
-                self._remember_unusable_sort(cache_key)
-                if bookmark:
-                    # If the sort index was dropped after page 1 already issued a
-                    # sorted-index bookmark, never pass that bookmark to an unsorted
-                    # fallback query (which would mix incompatible cursors). Fail
-                    # closed so the caller/retry restarts cleanly from page 1.
-                    raise CouchDBError(
-                        "_find by session sort index disappeared mid-pagination: HTTP 400",
-                        status_code=400,
-                    )
-                use_sort = False
-                body = dict(body)
-                body.pop("sort", None)
-                status, payload = self._request(
-                    "POST",
-                    f"/{self.db}/_find",
-                    json_body=body,
-                    max_response_bytes=max_page_bytes,
-                )
-            elif status == 200 and use_sort and not bookmark:
-                self._clear_unusable_sort(cache_key)
             if status != 200:
                 raise CouchDBError(f"_find by session failed: HTTP {status}", status_code=status)
             docs = payload.get("docs") if isinstance(payload, dict) else None
@@ -1257,20 +1132,8 @@ class CouchDBHttpSourceStore:
         }
         size = min(SESSION_QUERY_MAX_PAGE_SIZE, max(1, int(page_size)))
         bookmark = ""
-        sort_spec = [dict(item) for item in _DEFAULT_SESSION_SORT]
-        cache_key = (
-            self.base_url,
-            self.db,
-            doc_type,
-            _canonical_mango_digest(extra_selector),
-            _canonical_mango_digest(sort_spec),
-            _canonical_mango_digest(None),
-        )
-        use_sort = not self._is_sort_unusable_cached(cache_key)
         while True:
             request_body: dict = {"selector": query_selector, "limit": size}
-            if use_sort:
-                request_body["sort"] = sort_spec
             if bookmark:
                 request_body["bookmark"] = bookmark
             with self._request_to_spool(
@@ -1279,32 +1142,7 @@ class CouchDBHttpSourceStore:
                 json_body=request_body,
                 max_response_bytes=max_page_bytes,
             ) as (status, response_path):
-                if status == 400 and _is_no_usable_index(read_error_payload(response_path)) and use_sort:
-                    self._remember_unusable_sort(cache_key)
-                    if bookmark:
-                        raise CouchDBError(
-                            "_find by session sort index disappeared mid-pagination: HTTP 400",
-                            status_code=400,
-                        )
-                    use_sort = False
-                    request_body.pop("sort", None)
-                    with self._request_to_spool(
-                        "POST",
-                        f"/{self.db}/_find",
-                        json_body=request_body,
-                        max_response_bytes=max_page_bytes,
-                    ) as (fallback_status, fallback_path):
-                        if fallback_status != 200:
-                            raise CouchDBError(
-                                f"_find by session failed: HTTP {fallback_status}",
-                                status_code=fallback_status,
-                            )
-                        rows, next_bookmark = parse_spooled_descriptor_page(
-                            fallback_path, max_page_bytes=max_page_bytes, max_items=size
-                        )
-                elif status == 200:
-                    if use_sort and not bookmark:
-                        self._clear_unusable_sort(cache_key)
+                if status == 200:
                     rows, next_bookmark = parse_spooled_descriptor_page(
                         response_path, max_page_bytes=max_page_bytes, max_items=size
                     )

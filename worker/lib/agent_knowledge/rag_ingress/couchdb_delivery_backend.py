@@ -104,12 +104,14 @@ from ..couchdb_source.document_model import (
     sha256_hash,
 )
 from ..couchdb_source.session_memory_materializer import (
+    coverage_manifest_is_current,
     mark_projection_pending_if_source_changed,
     upsert_transcript_session_aggregate,
     update_coverage_with_tool_evidence,
 )
 from ..couchdb_source.source_revision import (
     ResolvedSourceRevision,
+    SourceResolutionMemo,
     SourceRevisionResolutionError,
     _source_document_logical_identity,
     active_source_origin_document_ids,
@@ -298,14 +300,25 @@ def _active_source_revision_before_ingress(
     *,
     store: CouchDBSourceStore,
     session_id_hash: str,
+    memo: SourceResolutionMemo | None = None,
 ) -> ResolvedSourceRevision | None:
-    """Resolve a pinned source set before any ingress write can alter it."""
+    """Resolve a pinned source set before any ingress write can alter it.
 
-    if store.get(active_source_revision_pointer_doc_id(session_id_hash)) is None:
+    The pointer read is always live: this helper guards a write (or checks the
+    activation race after one), so a memo may only supply the already-resolved
+    body for an unchanged pointer revision. A changed pointer drops that body
+    and forces a fresh resolution; there is no negative caching.
+    """
+
+    pointer = store.get(active_source_revision_pointer_doc_id(session_id_hash))
+    if memo is not None:
+        memo.observe_pointer(session_id_hash, pointer)
+    if pointer is None:
         return None
     return resolve_active_source_revision(
         store=store,
         session_id_hash=session_id_hash,
+        memo=memo,
     )
 
 
@@ -397,6 +410,12 @@ class CouchDBDeliveryBackend:
             raise SourceStoreConflict("procedural correction natural key conflict")
 
     def submit(self, job: DeliveryJobView) -> DeliveryBackendEvidence:
+        # One request-scoped memo per delivery attempt: the same session source
+        # is resolved once for the dedup gate, coverage, and projection. Every
+        # local source write below invalidates it before the next resolve, and
+        # the pre-write/post-write activation checks always read the pointer
+        # live, so a concurrent activation is never hidden by the memo.
+        memo = SourceResolutionMemo()
         # --- Gate 1: payload availability + integrity -------------------------
         try:
             payload, gate = resolve_delivery_payload(
@@ -452,7 +471,11 @@ class CouchDBDeliveryBackend:
         # refreshed.  Remember that this is an existing delivery for evidence,
         # but always run the aggregate reconciliation below.
         try:
-            existing = self.find_by_natural_key(job.idempotency_key, job.payload_hash)
+            existing = self.find_by_natural_key(
+                job.idempotency_key,
+                job.payload_hash,
+                memo=memo,
+            )
         except CouchDBError as exc:
             # A read failure before persistence cannot prove that no prior
             # write exists, so preserve the replay/reconcile boundary.
@@ -605,6 +628,7 @@ class CouchDBDeliveryBackend:
             active_revision = _active_source_revision_before_ingress(
                 store=self._store,
                 session_id_hash=session_id_hash,
+                memo=memo,
             )
             if active_revision is None:
                 # Legacy/unpinned behavior remains the aggregate reconciliation
@@ -623,13 +647,19 @@ class CouchDBDeliveryBackend:
                     incoming=session_doc,
                 )
                 chunk_revision = self._store.put_if_absent(chunk_doc)
+                if chunk_revision.outcome != "duplicate":
+                    # A new immutable chunk changed the legacy source set; the
+                    # next resolve must include it.
+                    memo.invalidate(session_id_hash)
                 upsert_transcript_session_aggregate(
                     store=self._store,
                     incoming=session_doc,
                 )
+                memo.invalidate(session_id_hash)
                 activated_after_legacy_write = _active_source_revision_before_ingress(
                     store=self._store,
                     session_id_hash=session_id_hash,
+                    memo=memo,
                 )
                 if activated_after_legacy_write is not None:
                     _assert_active_revision_matches_ingress(
@@ -671,9 +701,14 @@ class CouchDBDeliveryBackend:
                         ),
                         expected_predecessor=activated_after_legacy_write,
                     )
+                    if activated.source_hash != activated_after_legacy_write.source_hash:
+                        # The activation published a successor source set; the
+                        # predecessor resolution in the memo is now stale.
+                        memo.invalidate(session_id_hash)
                     coverage_doc = update_coverage_with_tool_evidence(
                         session_id_hash=session_id_hash,
                         store=self._store,
+                        memo=memo,
                     )
                     if (
                         coverage_doc is None
@@ -693,13 +728,33 @@ class CouchDBDeliveryBackend:
                             activated.source_hash
                             != activated_after_legacy_write.source_hash
                         ),
+                        memo=memo,
                     )
                     active_duplicate = active_duplicate or chunk_revision.outcome == "duplicate"
                 else:
-                    coverage_doc = update_coverage_with_tool_evidence(
-                        session_id_hash=session_id_hash,
-                        store=self._store,
-                    )
+                    coverage_doc = None
+                    if existing is not None and chunk_revision.outcome == "duplicate":
+                        # Verified duplicate delivery: when the persisted
+                        # coverage manifest already records this exact legacy
+                        # source, skip the rebuild and its second full legacy
+                        # load. Any stale or missing manifest falls through to
+                        # the unchanged reconciliation path.
+                        resolved_legacy = resolve_active_source_revision(
+                            store=self._store,
+                            session_id_hash=session_id_hash,
+                            memo=memo,
+                        )
+                        coverage_doc = coverage_manifest_is_current(
+                            session_id_hash=session_id_hash,
+                            store=self._store,
+                            resolved=resolved_legacy,
+                        )
+                    if coverage_doc is None:
+                        coverage_doc = update_coverage_with_tool_evidence(
+                            session_id_hash=session_id_hash,
+                            store=self._store,
+                            memo=memo,
+                        )
                     source_hash = str((coverage_doc or {}).get("source_hash") or "")
                     mark_projection_pending_if_source_changed(
                         session_id_hash=session_id_hash,
@@ -708,6 +763,7 @@ class CouchDBDeliveryBackend:
                         source_hash=source_hash,
                         store=self._store,
                         source_changed=chunk_revision.outcome != "duplicate",
+                        memo=memo,
                     )
             else:
                 # A pointer makes the selected source set immutable. Resolve it
@@ -779,15 +835,32 @@ class CouchDBDeliveryBackend:
                     ),
                     expected_predecessor=active_revision,
                 )
+                if activated.source_hash != active_revision.source_hash:
+                    # A successor source set was published; the predecessor
+                    # resolution in the memo is now stale.
+                    memo.invalidate(session_id_hash)
                 # A retry may find its chunk in the active revision after the
                 # pointer CAS. Re-run activation with its complete mutable
                 # origin set before reconciling secondary records: unchanged
                 # input is an idempotent pointer duplicate, while an origin
                 # drifted during that CAS becomes a new immutable successor.
-                coverage_doc = update_coverage_with_tool_evidence(
-                    session_id_hash=session_id_hash,
-                    store=self._store,
-                )
+                coverage_doc = None
+                if existing is not None and active_duplicate:
+                    # Verified duplicate delivery whose active revision already
+                    # contains this exact chunk: a coverage manifest that
+                    # records this revision needs no rebuild. Anything else
+                    # still goes through the full reconciliation path.
+                    coverage_doc = coverage_manifest_is_current(
+                        session_id_hash=session_id_hash,
+                        store=self._store,
+                        resolved=active_revision,
+                    )
+                if coverage_doc is None:
+                    coverage_doc = update_coverage_with_tool_evidence(
+                        session_id_hash=session_id_hash,
+                        store=self._store,
+                        memo=memo,
+                    )
                 if (
                     coverage_doc is None
                     or str(coverage_doc.get("source_hash") or "")
@@ -803,6 +876,7 @@ class CouchDBDeliveryBackend:
                     source_hash=activated.source_hash,
                     store=self._store,
                     source_changed=True,
+                    memo=memo,
                 )
 
         except SourceContractViolation as exc:
@@ -869,7 +943,11 @@ class CouchDBDeliveryBackend:
             pass
 
     def find_by_natural_key(
-        self, idempotency_key: str, payload_hash: str
+        self,
+        idempotency_key: str,
+        payload_hash: str,
+        *,
+        memo: SourceResolutionMemo | None = None,
     ) -> DeliveryBackendEvidence | None:
         """Return success evidence only for an exact authoritative chunk.
 
@@ -914,6 +992,7 @@ class CouchDBDeliveryBackend:
             active_revision = _active_source_revision_before_ingress(
                 store=self._store,
                 session_id_hash=session_id_hash,
+                memo=memo,
             )
         except (SourceRevisionResolutionError, ValueError):
             # A malformed active control plane cannot prove this delivery.

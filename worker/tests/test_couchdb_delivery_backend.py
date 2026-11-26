@@ -32,6 +32,11 @@ from agent_knowledge.couchdb_source.session_memory_materializer import (
     mark_projection_pending_if_source_changed,
 )
 from agent_knowledge.couchdb_source.build_cli import _select_sessions_needing_projection
+from agent_knowledge.couchdb_source.source_revision import (
+    activate_source_revision,
+    active_source_origin_document_ids,
+    resolve_active_source_revision,
+)
 from agent_knowledge.couchdb_source.source_store import (
     InMemoryCouchDBSourceStore,
     SourceStoreConflict,
@@ -1099,3 +1104,150 @@ def test_session_changed_hook_is_not_called_when_submit_fails(tmp_path):
         backend.submit(_job_view(state_db, "idem_session_changed_store_failure"))
 
     assert events == []
+
+
+class _LegacyScanCountingStore(InMemoryCouchDBSourceStore):
+    """Counts session-wide scans: one legacy resolve costs exactly three."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.legacy_scans = 0
+
+    def find_by_session(
+        self,
+        *,
+        session_id_hash: str,
+        doc_type: str = "",
+        fields: list[str] | None = None,
+        progress_callback=None,
+    ) -> list[dict]:
+        self.legacy_scans += 1
+        return super().find_by_session(
+            session_id_hash=session_id_hash,
+            doc_type=doc_type,
+            fields=fields,
+            progress_callback=progress_callback,
+        )
+
+
+def test_verified_duplicate_with_fresh_coverage_costs_one_legacy_resolve(tmp_path):
+    state_db = _state_db(tmp_path)
+    payload = _payload()
+    _seed(state_db, payload)
+    store = _LegacyScanCountingStore()
+    backend = _backend(state_db, store)
+
+    backend.submit(_job_view(state_db, "idem_key_1"))
+    coverage_id = coverage_manifest_doc_id(SESSION_ID_HASH)
+    coverage_rev = store.get(coverage_id)["_rev"]
+
+    store.legacy_scans = 0
+    evidence = backend.submit(_job_view(state_db, "idem_key_1"))
+
+    assert evidence.status == "succeeded"
+    # Exactly one legacy load (session + chunk + bundle); the coverage rebuild,
+    # its convergence re-read, and the projection currentness resolve are all
+    # skipped for a verified duplicate whose manifest is already current.
+    assert store.legacy_scans == 3
+    assert store.get(coverage_id)["_rev"] == coverage_rev
+
+
+def test_new_chunk_keeps_fresh_convergence_read_and_reuses_memo_for_projection(tmp_path):
+    state_db = _state_db(tmp_path)
+    first = _payload()
+    second = _payload(
+        idempotency_key="idem_key_2",
+        chunk_id="chunk_def456",
+        body="A distinct later conversation chunk.",
+    )
+    _seed(state_db, first, second)
+    store = _LegacyScanCountingStore()
+    backend = _backend(state_db, store)
+
+    backend.submit(_job_view(state_db, "idem_key_1"))
+    store.legacy_scans = 0
+    evidence = backend.submit(_job_view(state_db, "idem_key_2"))
+
+    assert evidence.status == "succeeded"
+    # Two legacy loads: the post-write coverage snapshot and the mandatory
+    # convergence re-read. The projection resolve reuses the convergence memo
+    # instead of a third load (the pre-memo path cost 9 scans).
+    assert store.legacy_scans == 6
+    coverage = store.get(coverage_manifest_doc_id(SESSION_ID_HASH))
+    assert coverage["conversation_chunk_count"] == 2
+    assert coverage["source_hash"] == resolve_active_source_revision(
+        store=store, session_id_hash=SESSION_ID_HASH
+    ).source_hash
+
+
+def test_stale_coverage_on_duplicate_falls_through_to_reconciliation(tmp_path):
+    state_db = _state_db(tmp_path)
+    payload = _payload()
+    _seed(state_db, payload)
+    store = _LegacyScanCountingStore()
+    backend = _backend(state_db, store)
+
+    backend.submit(_job_view(state_db, "idem_key_1"))
+    coverage_id = coverage_manifest_doc_id(SESSION_ID_HASH)
+    healthy_hash = store.get(coverage_id)["source_hash"]
+    stale = dict(store.get(coverage_id))
+    stale["source_hash"] = sha256_hash("stale-coverage")
+    store.put(stale)
+
+    store.legacy_scans = 0
+    evidence = backend.submit(_job_view(state_db, "idem_key_1"))
+
+    assert evidence.status == "succeeded"
+    # The freshness guard must not accept a manifest that disagrees with the
+    # resolved source: both the rebuild and its convergence read run.
+    assert store.legacy_scans == 6
+    assert store.get(coverage_id)["source_hash"] == healthy_hash
+
+
+class _ActivatingMergeStore(InMemoryCouchDBSourceStore):
+    """Publishes an active pointer right after the legacy aggregate merge."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.activate_once = True
+
+    def merge_transcript_session_aggregate(
+        self,
+        *,
+        incoming: dict,
+        max_attempts: int = 3,
+        source_hash_authoritative: bool = False,
+    ):
+        result = super().merge_transcript_session_aggregate(
+            incoming=incoming,
+            max_attempts=max_attempts,
+            source_hash_authoritative=source_hash_authoritative,
+        )
+        if self.activate_once:
+            self.activate_once = False
+            activate_source_revision(
+                store=self,
+                session_id_hash=str(incoming["session_id_hash"]),
+            )
+        return result
+
+
+def test_activation_after_legacy_write_is_observed_by_the_live_post_write_check(tmp_path):
+    state_db = _state_db(tmp_path)
+    payload = _payload()
+    _seed(state_db, payload)
+    store = _ActivatingMergeStore()
+    backend = _backend(state_db, store)
+
+    evidence = backend.submit(_job_view(state_db, "idem_key_1"))
+
+    assert evidence.status == "succeeded"
+    resolved = resolve_active_source_revision(store=store, session_id_hash=SESSION_ID_HASH)
+    assert resolved.is_legacy_unpinned is False
+    assert conversation_chunk_doc_id(SESSION_ID_HASH, CHUNK_ID) in active_source_origin_document_ids(
+        resolved
+    )
+    coverage = store.get(coverage_manifest_doc_id(SESSION_ID_HASH))
+    assert coverage["source_hash"] == resolved.source_hash
+    projection = store.get(projection_state_doc_id(SESSION_ID_HASH))
+    assert projection["projection_status"] == ProjectionStatus.PENDING
