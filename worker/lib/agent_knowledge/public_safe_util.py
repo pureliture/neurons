@@ -276,6 +276,7 @@ class SafeErrorType(StrEnum):
 class SafeReasonCode(StrEnum):
     """Closed allowlist of internal reason_code tokens emitted in diagnostics."""
 
+    GRAPH_PROJECTION_DEADLINE_EXCEEDED = "graph_projection_deadline_exceeded"
     GRAPH_SOURCE_SNAPSHOT_CHANGED = "graph_source_snapshot_changed"
     GRAPH_SELECTION_DUPLICATE_SESSION = "graph_selection_duplicate_session"
     GRAPH_SELECTION_PROJECT_SCOPE_EXCEEDED = "graph_selection_project_scope_exceeded"
@@ -508,6 +509,7 @@ class SafeErrorClass(StrEnum):
     EMBEDDING_PROVIDER_UNAVAILABLE = "EmbeddingProviderUnavailable"
     EVENT_VALIDATION_ERROR = "EventValidationError"
     GRAPH_OPERATION_CONFLICT_QUARANTINED_ERROR = "GraphOperationConflictQuarantinedError"
+    GRAPH_PROJECTION_DEADLINE_EXCEEDED = "GraphProjectionDeadlineExceeded"
     GROUP_FENCE_BUSY_ERROR = "GroupFenceBusyError"
     GROUP_FENCE_ERROR = "GroupFenceError"
     GROUP_QUARANTINED_ERROR = "GroupQuarantinedError"

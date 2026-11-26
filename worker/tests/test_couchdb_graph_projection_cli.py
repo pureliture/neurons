@@ -8,6 +8,7 @@ from typing import Any
 
 from agent_knowledge.couchdb_source import document_model as dm
 from agent_knowledge.couchdb_source.source_store import InMemoryCouchDBSourceStore
+from agent_knowledge.couchdb_source.source_revision import LEGACY_SOURCE_SCAN_PAGE_SIZE
 from agent_knowledge.ledger import Ledger
 import pytest
 
@@ -1359,7 +1360,7 @@ def test_projection_selection_streams_bounded_pages_and_does_not_load_projection
 
         def iter_by_type(self, *args, page_size=10000, **kwargs):
             self.page_sizes.append(page_size)
-            assert 0 < page_size <= 256
+            assert 0 < page_size <= LEGACY_SOURCE_SCAN_PAGE_SIZE
             yield from super().iter_by_type(*args, page_size=page_size, **kwargs)
 
     def _forbid_history_materialization(*args, **kwargs):
@@ -1381,13 +1382,13 @@ def test_projection_selection_streams_bounded_pages_and_does_not_load_projection
         graph_adapter=graph,
         limit=3,
     )
-
+    assert store.page_sizes and max(store.page_sizes) <= LEGACY_SOURCE_SCAN_PAGE_SIZE
     assert first["canonical_counts"]["source_sessions"] == 7
     assert first["canonical_counts"]["eligible_sessions"] == 7
     assert first["canonical_counts"]["selected_sessions"] == 3
     assert first["truncated"] is True
     assert first["projection"]["projected"] == 3
-    assert store.page_sizes and max(store.page_sizes) <= 256
+    assert store.page_sizes and max(store.page_sizes) <= LEGACY_SOURCE_SCAN_PAGE_SIZE
 
 
 def test_projection_selection_resumes_tail_after_bounded_page_cut(tmp_path):
