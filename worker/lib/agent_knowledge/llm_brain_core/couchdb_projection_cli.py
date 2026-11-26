@@ -249,6 +249,13 @@ def run_couchdb_projection(
             enable_flag=True if enable_graph else None,
             required_flag=bool(graph_required),
         )
+        # The adapter's force flag is the second authority for "re-extract" (the
+        # adapter reads it from LLM_BRAIN_GRAPH_FORCE_REEXTRACT_ENTITIES). If only
+        # that channel is set, the CLI must not still classify already-projected
+        # sessions as resumed.
+        effective_reextract = bool(reextract_entities) or bool(
+            getattr(graph, "_force_reextract_entities", False)
+        )
         worker = GraphProjectionWorker(graph, projection_state_store=projection_state_store)
         target_level = (
             EXTRACTION_LEVEL_ENTITY
@@ -260,7 +267,7 @@ def run_couchdb_projection(
             provider=provider,
             extraction_level=target_level,
             resume=resume,
-            include_current=bool(reextract_entities),
+            include_current=effective_reextract,
         )
         cursor_offset = _read_scheduler_cursor(
             runtime_dir,
@@ -273,7 +280,7 @@ def run_couchdb_projection(
             limit=limit,
             projection_state_store=projection_state_store if resume else None,
             extraction_level=target_level if resume else None,
-            include_current=bool(reextract_entities),
+            include_current=effective_reextract,
             cursor_offset=cursor_offset,
         )
         effective_cursor_offset = (
@@ -360,7 +367,7 @@ def run_couchdb_projection(
                         "phase": "before_llm",
                     },
                 )
-                if resume and not reextract_entities:
+                if resume and not effective_reextract:
                     episode_source_hash = str(episode.payload.get("source_hash") or "")
                     if projection_state_store.has_projected_source_hash(
                         session_project,
@@ -499,7 +506,7 @@ def run_couchdb_projection(
             status = "partial"
         removed_from_pending = (
             0
-            if reextract_entities
+            if effective_reextract
             else min(attempted, projected + duplicates + skipped_resumed)
         )
         cursor_advance = max(0, attempted - removed_from_pending)
