@@ -1106,11 +1106,20 @@ def _pending_state_session_ids(
         selector["project"] = project
     if provider:
         selector["provider"] = provider
-    states = store.find_by_type(
+    # Bound the sweep. The previous ``limit=0`` sharded path materialised every
+    # pending projection_state once per shard (three full scans on the measured
+    # deployment). A bounded pass inspects at most ``limit * shard_count``
+    # states; the sweep is a gap-filler behind the checkpoint/change-feed
+    # selection, so it must not dominate a cycle.
+    scan_limit = 0
+    if limit > 0:
+        scan_limit = int(limit) * (max(1, int(shard_count)) if shard_count > 1 else 1)
+    states = store.iter_by_type(
         SourceDocType.PROJECTION_STATE,
         fields=["_id", "session_id_hash", "active_content_hash", "backend_receipts"],
         selector=selector,
-        limit=0 if shard_count > 1 else (limit if limit > 0 else 0),
+        limit=scan_limit,
+        page_size=256,
     )
     selected: list[str] = []
     scanned = 0

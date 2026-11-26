@@ -261,7 +261,12 @@ class CouchDBSourceStore(Protocol):
     ) -> list[dict]: ...
 
     def find_by_session(
-        self, *, session_id_hash: str, doc_type: str = "", progress_callback=None
+        self,
+        *,
+        session_id_hash: str,
+        doc_type: str = "",
+        fields: list[str] | None = None,
+        progress_callback=None,
     ) -> list[dict]: ...
 
     def iter_by_session(
@@ -943,7 +948,12 @@ class InMemoryCouchDBSourceStore:
         return StoredRevision(doc_id=doc_id, rev=rev, outcome="conflict_resolved")
 
     def find_by_session(
-        self, *, session_id_hash: str, doc_type: str = "", progress_callback=None
+        self,
+        *,
+        session_id_hash: str,
+        doc_type: str = "",
+        fields: list[str] | None = None,
+        progress_callback=None,
     ) -> list[dict]:
         results = [
             copy.deepcopy(doc)
@@ -951,6 +961,8 @@ class InMemoryCouchDBSourceStore:
             if doc.get("session_id_hash") == session_id_hash
             and (doc.get("doc_type") == doc_type if doc_type else doc.get("doc_type") != SourceDocType.REPO_USAGE_PATTERN)
         ]
+        if fields:
+            results = [{key: doc[key] for key in fields if key in doc} for doc in results]
         results.sort(key=lambda d: str(d.get("_id")))
         if progress_callback is not None:
             try:

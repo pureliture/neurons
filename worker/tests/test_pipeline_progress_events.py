@@ -305,10 +305,11 @@ def test_materialization_progress_callback_failure_never_breaks_resolution() -> 
 
 
 def test_find_by_session_emits_one_event_per_fetched_page() -> None:
+    # A page shorter than the requested limit is the last page, so the walk
+    # ends there instead of paying one more empty-page request.
     pages = [
-        {"docs": [{"_id": "doc-a"}], "bookmark": "page-1"},
-        {"docs": [{"_id": "doc-b"}], "bookmark": "page-2"},
-        {"docs": [], "bookmark": "page-2"},
+        {"docs": [{"_id": f"doc-{idx}"} for idx in range(10000)], "bookmark": "page-1"},
+        {"docs": [{"_id": "doc-tail"}], "bookmark": "page-2"},
     ]
     calls: list[dict] = []
 
@@ -325,10 +326,12 @@ def test_find_by_session_emits_one_event_per_fetched_page() -> None:
         doc_type=dm.SourceDocType.CONVERSATION_CHUNK,
         progress_callback=lambda done, total: events.append((done, total)),
     )
-    assert [doc["_id"] for doc in docs] == ["doc-a", "doc-b"]
-    assert events == [(1, 0), (2, 0)]
+    assert len(docs) == 10001
+    assert docs[-1]["_id"] == "doc-tail"
+    assert events == [(10000, 0), (10001, 0)]
     assert calls[0]["limit"] == 10000 and "bookmark" not in calls[0]
     assert calls[1]["bookmark"] == "page-1"
+    assert len(calls) == 2
 
 
 # ---------------------------------------------------------------------------

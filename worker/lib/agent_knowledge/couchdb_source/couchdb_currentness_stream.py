@@ -43,7 +43,6 @@ _MAX_KEY_CHARS = 16 * 1024
 _MAX_CAPTURE_CHARS = 16 * 1024
 _MAX_OBJECT_KEYS = 100_000
 _MAX_ARRAY_ITEMS = 100_000
-_MAX_ERROR_PAYLOAD_BYTES = 1024 * 1024
 
 _EXCLUDED_TOP_LEVEL_FIELDS = frozenset({"_rev", "idempotency_key", "payload_hash", "envelope_fingerprint"})
 
@@ -741,21 +740,8 @@ def parse_spooled_descriptor_page(
         spool.close()
 
 
-def read_error_payload(path: Path) -> dict:
-    """Read a small CouchDB error payload from a spooled response."""
-
-    if path.stat().st_size > _MAX_ERROR_PAYLOAD_BYTES:
-        return {}
-    try:
-        value = json.loads(path.read_bytes().decode("utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return {}
-    return value if isinstance(value, dict) else {}
-
-
 __all__ = [
     "CurrentnessStreamError",
     "parse_spooled_descriptor_page",
-    "read_error_payload",
     "stream_spool_budget_bytes",
 ]

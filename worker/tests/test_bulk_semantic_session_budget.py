@@ -513,3 +513,39 @@ def test_interrupted_cycle_releases_lock_and_stays_resumable(
     assert report["status"] == "ok"
     assert calls == [session_id_hash, session_id_hash]
     assert report["projection"]["projected"] == 1
+
+
+def test_full_input_reads_are_typed_and_skip_revision_members() -> None:
+    from agent_knowledge.couchdb_source.document_model import SourceDocType
+
+    class _TypedStore:
+        def __init__(self, *, with_manifest: bool = True) -> None:
+            self.with_manifest = with_manifest
+            self.calls: list[str] = []
+
+        def find_by_session(
+            self, *, session_id_hash: str, doc_type: str = "", fields=None, progress_callback=None
+        ) -> list[dict]:
+            self.calls.append(doc_type)
+            if doc_type == SourceDocType.COVERAGE_MANIFEST and not self.with_manifest:
+                return []
+            return [{"_id": f"{doc_type}:1", "doc_type": doc_type, "session_id_hash": session_id_hash}]
+
+    store = _TypedStore()
+    manifest, chunks, evidence = cli._load_full_input_documents(
+        store, "sha256:" + "a" * 64
+    )
+
+    # An untyped scan would record "" and pull source_revision_member copies.
+    assert store.calls == [
+        SourceDocType.COVERAGE_MANIFEST,
+        SourceDocType.CONVERSATION_CHUNK,
+        SourceDocType.TOOL_EVIDENCE_BUNDLE,
+    ]
+    assert manifest["_id"].startswith(SourceDocType.COVERAGE_MANIFEST)
+    assert chunks[0]["_id"].startswith(SourceDocType.CONVERSATION_CHUNK)
+    assert evidence[0]["_id"].startswith(SourceDocType.TOOL_EVIDENCE_BUNDLE)
+
+    assert cli._load_full_input_documents(
+        _TypedStore(with_manifest=False), "sha256:" + "b" * 64
+    )[0] is None

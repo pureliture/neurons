@@ -5,6 +5,7 @@ import pytest
 from agent_knowledge.couchdb_source import document_model as dm
 from agent_knowledge.couchdb_source.source_revision import (
     ResolvedSourceRevision,
+    SourceResolutionMemo,
     SourceRevisionResolutionError,
     active_source_origin_document_ids,
     activate_source_revision,
@@ -1204,3 +1205,81 @@ def test_tool_evidence_bundle_body_hash_mismatch_still_fails():
                 "body": "public-safe evidence summary",
             }
         )
+
+
+class _CountingSourceStore(InMemoryCouchDBSourceStore):
+    """Counts the two reads a request memo is allowed to collapse."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.pointer_reads = 0
+        self.session_scans = 0
+
+    def get(self, doc_id: str) -> dict | None:
+        if doc_id == dm.active_source_revision_pointer_doc_id(_session_id_hash()):
+            self.pointer_reads += 1
+        return super().get(doc_id)
+
+    def find_by_session(
+        self,
+        *,
+        session_id_hash: str,
+        doc_type: str = "",
+        fields: list[str] | None = None,
+        progress_callback=None,
+    ) -> list[dict]:
+        self.session_scans += 1
+        return super().find_by_session(
+            session_id_hash=session_id_hash,
+            doc_type=doc_type,
+            fields=fields,
+            progress_callback=progress_callback,
+        )
+
+
+def test_request_memo_collapses_one_legacy_resolve_and_has_no_negative_cache() -> None:
+    store = _CountingSourceStore()
+    _seed_session_source(store)
+    sid = _session_id_hash()
+    memo = SourceResolutionMemo()
+    store.pointer_reads = 0
+    store.session_scans = 0
+
+    first = resolve_active_source_revision(store=store, session_id_hash=sid, memo=memo)
+    pointer_reads = store.pointer_reads
+    scans = store.session_scans
+
+    assert first.is_legacy_unpinned is True
+    assert pointer_reads == 1
+    assert scans == 3  # one legacy load: session + chunk + bundle
+
+    assert resolve_active_source_revision(store=store, session_id_hash=sid, memo=memo) is first
+    assert store.pointer_reads == pointer_reads
+    assert store.session_scans == scans
+
+    # A live read that still sees no pointer must keep the entry.
+    assert memo.observe_pointer(sid, None) is False
+    assert resolve_active_source_revision(store=store, session_id_hash=sid, memo=memo) is first
+
+    # A refreshed read (coverage convergence) is never served from the memo.
+    refreshed = resolve_active_source_revision(
+        store=store, session_id_hash=sid, memo=memo, refresh=True
+    )
+    assert store.session_scans == scans + 3
+    assert refreshed.source_hash == first.source_hash
+
+    # Activation is observed by the live pointer read: the legacy entry is
+    # dropped and the pinned revision is resolved from its control plane.
+    activate_source_revision(store=store, session_id_hash=sid)
+    pointer = store.get(dm.active_source_revision_pointer_doc_id(sid))
+    assert memo.observe_pointer(sid, pointer) is True
+    pinned = resolve_active_source_revision(store=store, session_id_hash=sid, memo=memo)
+    assert pinned is not first
+    assert pinned.is_legacy_unpinned is False
+    assert pinned.manifest_id is not None
+    assert len(pinned.conversation_chunks) == len(first.conversation_chunks)
+
+    # Local writes invalidate explicitly; the next resolve must not reuse the
+    # pinned entry (it is a fresh object, not the memoized revision).
+    memo.invalidate(sid)
+    assert resolve_active_source_revision(store=store, session_id_hash=sid, memo=memo) is not pinned
