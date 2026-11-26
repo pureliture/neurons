@@ -53,7 +53,9 @@ _SOURCE_SNAPSHOT_SCOPE = "source_snapshot_scope"
 # (`fields=None`, active/legacy source bodies) must stay at 8 rows: a 100-row
 # page of 32 KiB bodies is ~3.3 MiB and fails closed with page-bytes-exceeded.
 SOURCE_CURRENTNESS_METADATA_PAGE_SIZE = 100
-LEGACY_SOURCE_SCAN_PAGE_SIZE = 2048
+# A 2,048-row legacy _find page timed out in the deployed pod after source
+# documents grew; 256 is the previously proven bound for these scans.
+LEGACY_SOURCE_SCAN_PAGE_SIZE = 256
 LEGACY_SCAN_SELECTOR_MAX_SESSIONS = 512
 SOURCE_CURRENTNESS_FULL_DOCUMENT_PAGE_SIZE = 8
 SOURCE_CURRENTNESS_MAX_PAGE_BYTES = 512 * 1024
@@ -2132,7 +2134,7 @@ def iter_legacy_source_hashes(
     if len(candidates) <= LEGACY_SCAN_SELECTOR_MAX_SESSIONS:
         # A small candidate set is worth an explicit $in filter; a full-store
         # session universe would make every paged request carry thousands of
-        # hashes, so the by_type index and larger pages bound that case.
+        # hashes, so the forced by_type index bounds that case.
         child_selector["session_id_hash"] = {"$in": sorted(candidates)}
     # Phase 2: child documents are only read for the discovered sessions.
     for doc_type in (
