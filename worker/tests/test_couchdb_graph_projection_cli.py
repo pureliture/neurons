@@ -766,6 +766,32 @@ def test_progress_jsonl_uses_project_ref_not_raw_project(tmp_path):
     assert events[-1]["project_ref"] == events[0]["project_ref"]
 
 
+def test_prestart_failure_writes_sanitized_progress_failed_event(tmp_path, monkeypatch):
+    store = InMemoryCouchDBSourceStore()
+    progress = tmp_path / "progress.jsonl"
+
+    def _raise(*args, **kwargs):
+        raise couchdb_projection_cli.GraphProjectionDeadlineExceeded("raw deadline detail")
+
+    monkeypatch.setattr(couchdb_projection_cli, "_select_sessions_bounded", _raise)
+    with pytest.raises(couchdb_projection_cli.GraphProjectionDeadlineExceeded):
+        _project(
+            tmp_path=tmp_path,
+            store=store,
+            graph_adapter=_EntityFlagFakeGraph(),
+            limit=1,
+            progress_jsonl=progress,
+        )
+
+    events = [json.loads(line) for line in progress.read_text(encoding="utf-8").splitlines()]
+    assert len(events) == 1
+    assert events[0]["event"] == "failed"
+    assert events[0]["status"] == "failed"
+    assert events[0]["reason_code"] == "graph_projection_deadline_exceeded"
+    assert events[0]["after_start"] is False
+    assert "raw deadline detail" not in json.dumps(events)
+
+
 def test_projection_report_run_ref_binds_status_without_exposing_raw_run_id(tmp_path):
     store = InMemoryCouchDBSourceStore()
     _seed_session(store, raw_id="run-ref-binding")
