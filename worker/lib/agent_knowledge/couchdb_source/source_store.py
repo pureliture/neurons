@@ -183,6 +183,8 @@ def _matches_selector(doc: dict, selector: dict) -> bool:
                         matches = actual is not None and actual < operand
                     except TypeError:
                         matches = False
+                elif operator == "$eq":
+                    matches = actual == operand
                 elif operator == "$in":
                     matches = actual in operand
                 elif operator == "$exists":

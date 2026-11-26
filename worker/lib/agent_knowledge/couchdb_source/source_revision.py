@@ -2242,17 +2242,17 @@ def iter_legacy_source_hashes(
     if not candidates:
         return {}
 
-    child_selector = dict(base_selector)
-    if len(candidates) <= LEGACY_SCAN_SELECTOR_MAX_SESSIONS:
-        # A small candidate set is worth an explicit $in filter; a full-store
-        # session universe would make every paged request carry thousands of
-        # hashes, so the explicit by_type fallback below applies instead.
-        child_selector["session_id_hash"] = {"$in": sorted(candidates)}
-
+    # Multi-session $in selectors are unusable here: CouchDB expands $in into
+    # an OR that times out once doc_type is combined with it, and a session-first
+    # index hint does not help. Pin every child query to exactly one session.
+    child_selector = {
+        key: value for key, value in base_selector.items() if key != "session_id_hash"
+    }
+    bounded_children = len(candidates) <= LEGACY_SCAN_SELECTOR_MAX_SESSIONS
     child_scan_kwargs = scan_kwargs
-    if len(candidates) <= LEGACY_SCAN_SELECTOR_MAX_SESSIONS:
-        # by_type only indexes doc_type: Mango would post-filter session_id_hash
-        # after walking every chunk/bundle (40s timeout in the deployed pod).
+    if bounded_children:
+        # by_type post-filters session_id_hash after walking every chunk/bundle;
+        # the session-leading index keeps each $eq query to one session's rows.
         session_index = _session_first_index(store)
         if (
             getattr(store, "base_url", "")
@@ -2270,18 +2270,37 @@ def iter_legacy_source_hashes(
                 "use_index": session_index,
                 "allow_fallback": False,
             }
-    # An oversized $in keeps the explicit by_type hint from scan_kwargs: that
-    # is the acknowledged full-scan fallback, never a silent index fallback.
+    # Above the cap, the acknowledged by_type full-scan fallback keeps the
+    # explicit hint and omits the session filter entirely. The candidate check
+    # below still bounds which documents contribute to the hash.
+
+    def _iter_child_documents(
+        doc_type: str,
+        fields: list[str] | None,
+        sessions: list[str | None],
+        selector_extra: dict | None = None,
+    ):
+        for session_id_hash in sessions:
+            query_selector = dict(child_selector)
+            if session_id_hash is not None:
+                query_selector["session_id_hash"] = {"$eq": session_id_hash}
+            if selector_extra:
+                query_selector.update(selector_extra)
+            yield from store.iter_by_type(
+                doc_type,
+                fields=fields,
+                selector=query_selector,
+                **child_scan_kwargs,
+            )
+
+    child_sessions: list[str | None] = sorted(candidates) if bounded_children else [None]
     # Phase 2: child documents are only read for the discovered sessions.
     for doc_type in (
         dm.SourceDocType.CONVERSATION_CHUNK,
         dm.SourceDocType.TOOL_EVIDENCE_BUNDLE,
     ):
-        for document in store.iter_by_type(
-            doc_type,
-            fields=_CURRENTNESS_LEGACY_FIELDS.get(doc_type),
-            selector=child_selector,
-            **child_scan_kwargs,
+        for document in _iter_child_documents(
+            doc_type, _CURRENTNESS_LEGACY_FIELDS.get(doc_type), child_sessions
         ):
             if str(document.get("session_id_hash") or "") not in candidates:
                 continue
@@ -2290,20 +2309,24 @@ def iter_legacy_source_hashes(
     if bodyless_bundle_candidates:
         # Second bounded pass verifies full documents for hashless metadata-only
         # tool_evidence_bundles so body-bearing tampering still fails closed.
+        bodyless_sessions: list[str | None] = (
+            sorted(set(bodyless_bundle_candidates.values()))
+            if bounded_children
+            else [None]
+        )
         seen_bodyless_ids: set[str] = set()
         try:
-            for document in store.iter_by_type(
+            for document in _iter_child_documents(
                 dm.SourceDocType.TOOL_EVIDENCE_BUNDLE,
-                fields=None,
-                selector={
-                    **child_selector,
+                None,
+                bodyless_sessions,
+                {
                     "$or": [
                         {"content_hash": {"$exists": False}},
                         {"content_hash": ""},
                         {"content_hash": None},
-                    ],
+                    ]
                 },
-                **child_scan_kwargs,
             ):
                 doc_id = str(document.get("_id") or "")
                 expected_sid = bodyless_bundle_candidates.get(doc_id)

@@ -152,7 +152,7 @@ def test_large_source_set_uses_bounded_indexed_reads() -> None:
     assert discovery[1]["page_size"] == 17
     assert discovery[1]["use_index"] == ["legacy", "by_type"]
     assert discovery[1]["allow_fallback"] is False
-    assert children
+    assert len(children) == 2 * 5
     for doc_type, kwargs in children:
         assert doc_type in (
             dm.SourceDocType.CONVERSATION_CHUNK,
@@ -161,12 +161,11 @@ def test_large_source_set_uses_bounded_indexed_reads() -> None:
         assert kwargs["page_size"] == 17
         assert kwargs["use_index"] == SESSION_INDEX_HINT
         assert kwargs["allow_fallback"] is False
-        selected = kwargs["selector"]["session_id_hash"]["$in"]
-        assert 1 <= len(selected) <= 5
-        assert set(selected).issubset(set(sids))
-    # One discovery scan plus at most two scoped child scans and one scoped
-    # verification scan: never one request per source document.
-    assert len(store.queries) <= 4
+        selected = kwargs["selector"]["session_id_hash"]["$eq"]
+        assert selected in sids
+        assert "$in" not in kwargs["selector"]["session_id_hash"]
+    # One discovery scan plus two single-session $eq child scans per session.
+    assert len(store.queries) == 1 + 2 * 5
 
 
 def test_default_legacy_scan_page_size_stays_bounded() -> None:
@@ -186,7 +185,7 @@ def test_default_legacy_scan_page_size_stays_bounded() -> None:
     assert discovery[1]["page_size"] == sr.LEGACY_SOURCE_SCAN_PAGE_SIZE
     assert discovery[1]["use_index"] == ["legacy", "by_type"]
     assert discovery[1]["allow_fallback"] is False
-    assert children
+    assert len(children) == 2 * 25
     for doc_type, kwargs in children:
         assert doc_type in (
             dm.SourceDocType.CONVERSATION_CHUNK,
@@ -195,9 +194,11 @@ def test_default_legacy_scan_page_size_stays_bounded() -> None:
         assert kwargs["page_size"] == sr.LEGACY_SOURCE_SCAN_PAGE_SIZE
         assert kwargs["use_index"] == SESSION_INDEX_HINT
         assert kwargs["allow_fallback"] is False
-        selected = kwargs["selector"]["session_id_hash"]["$in"]
-        assert len(selected) == 25
-        assert set(selected) == set(hashes)
+        assert set(kwargs["selector"]["session_id_hash"]) == {"$eq"}
+        assert kwargs["selector"]["session_id_hash"]["$eq"] in set(hashes)
+    assert {
+        kwargs["selector"]["session_id_hash"]["$eq"] for _, kwargs in children
+    } == set(hashes)
 
 
 def test_child_pass_forces_session_first_index_including_bodyless_verification() -> None:
@@ -222,16 +223,23 @@ def test_child_pass_forces_session_first_index_including_bodyless_verification()
     assert discovery[1]["page_size"] == sr.LEGACY_SOURCE_SCAN_PAGE_SIZE
     assert discovery[1]["use_index"] == ["legacy", "by_type"]
     assert discovery[1]["allow_fallback"] is False
-    # chunk pass, bundle pass, and bodyless full-document verification pass.
-    assert len(children) == 3
+    # Two child passes per session plus one single-session bodyless verification.
+    assert len(children) == 2 * 25 + 1
     for doc_type, kwargs in children:
-        assert doc_type == dm.SourceDocType.TOOL_EVIDENCE_BUNDLE or doc_type == (
-            dm.SourceDocType.CONVERSATION_CHUNK
+        assert doc_type in (
+            dm.SourceDocType.CONVERSATION_CHUNK,
+            dm.SourceDocType.TOOL_EVIDENCE_BUNDLE,
         )
         assert kwargs["page_size"] == sr.LEGACY_SOURCE_SCAN_PAGE_SIZE
         assert kwargs["use_index"] == SESSION_INDEX_HINT
         assert kwargs["allow_fallback"] is False
-        assert kwargs["selector"]["session_id_hash"]["$in"] == sorted(sids)
+        assert set(kwargs["selector"]["session_id_hash"]) == {"$eq"}
+        assert kwargs["selector"]["session_id_hash"]["$eq"] in set(sids)
+    verification = [
+        kwargs for _, kwargs in children if "$or" in kwargs["selector"]
+    ]
+    assert len(verification) == 1
+    assert verification[0]["selector"]["session_id_hash"]["$eq"] == sids[0]
 
 
 def test_oversized_session_filter_keeps_explicit_by_type_fallback() -> None:
@@ -250,8 +258,24 @@ def test_oversized_session_filter_keeps_explicit_by_type_fallback() -> None:
     assert children
     for _, kwargs in children:
         assert "session_id_hash" not in kwargs["selector"]
+        assert "$in" not in json.dumps(kwargs["selector"])
         assert kwargs["use_index"] == ["legacy", "by_type"]
         assert kwargs["allow_fallback"] is False
+
+
+def test_session_hashes_never_leak_into_child_queries() -> None:
+    inner = InMemoryCouchDBSourceStore()
+    sids = [_seed_session(inner, f"leak-{index}") for index in range(5)]
+    store = _RecordingStore(inner)
+
+    assert len(sr.iter_legacy_source_hashes(store, session_id_hashes=set(sids))) == 5
+
+    _, *children = store.queries
+    assert len(children) == 2 * 5
+    for _, kwargs in children:
+        assert set(kwargs["selector"]["session_id_hash"]) == {"$eq"}
+        assert kwargs["selector"]["session_id_hash"]["$eq"] in sids
+        assert "$in" not in json.dumps(kwargs["selector"])
 
 
 def test_absent_composite_index_accepts_session_leading_index() -> None:
@@ -272,10 +296,11 @@ def test_absent_composite_index_accepts_session_leading_index() -> None:
     assert sr.iter_legacy_source_hashes(store)
 
     _, *children = store.queries
-    assert children
+    assert len(children) == 2
     for _, kwargs in children:
         assert kwargs["use_index"] == ["session2", "mango_session_id_hash_only"]
         assert kwargs["allow_fallback"] is False
+        assert set(kwargs["selector"]["session_id_hash"]) == {"$eq"}
 
 
 def test_missing_session_index_fails_closed_without_child_scan() -> None:
