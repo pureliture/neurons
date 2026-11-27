@@ -2614,6 +2614,64 @@ def test_previous_episodes_prompt_view_enforces_4kib_and_32kib_deterministic_pol
     assert sum(len(m.content.encode("utf-8")) for m in step3_msgs) < 42_000
 
 
+def test_default_previous_episode_prompt_budget_is_2kib_and_8kib():
+    from agent_knowledge.llm_brain_core.graphiti_adapter import (
+        GraphitiNeo4jConfig,
+        GraphitiNeo4jGraphMemoryAdapter,
+        build_bounded_previous_episodes_prompt_view,
+    )
+    from graphiti_core.prompts import prompt_library
+
+    config = GraphitiNeo4jConfig.from_env({})
+    assert config.previous_episode_max_bytes == 2048
+    assert config.previous_episodes_total_max_bytes == 8192
+    adapter = GraphitiNeo4jGraphMemoryAdapter(
+        _FakeGraphiti(),
+        default_group_id="/project/neurons",
+        previous_episode_max_bytes=config.previous_episode_max_bytes,
+        previous_episodes_total_max_bytes=config.previous_episodes_total_max_bytes,
+    )
+    assert adapter._previous_episode_max_bytes == 2048
+    assert adapter._previous_episodes_total_max_bytes == 8192
+
+    raw_nodes = []
+    for idx in range(8):
+        ep = OntologyEpisode.from_payload(
+            event_id=f"evt:budget_{idx}",
+            entity_type="Decision",
+            natural_id=f"decision:budget_{idx:02d}",
+            payload={
+                "brain_id": "/project/neurons",
+                "project": "neurons",
+                "title": f"Episode {idx:02d}",
+                "summary": f"item-{idx:02d}-" + ("s" * 3000),
+            },
+            source_event_ids=[f"sha256:{(idx * 1000 + j):064x}" for j in range(500)],
+            observed_at=f"2026-11-15T01:{idx:02d}:00+00:00",
+            reference_time=f"2026-11-15T01:{idx:02d}:00+00:00",
+        )
+        raw_nodes.append(
+            SimpleNamespace(uuid=ep.episode_id, content=json.dumps(ep.to_dict(), sort_keys=True))
+        )
+    bounded_nodes, stats = build_bounded_previous_episodes_prompt_view(
+        raw_nodes,
+        current_episode_uuid="episode:nonexistent",
+        per_episode_max_bytes=adapter._previous_episode_max_bytes,
+        total_max_bytes=adapter._previous_episodes_total_max_bytes,
+    )
+    assert stats["total_utf8_bytes"] <= 8192
+    for node in bounded_nodes:
+        assert len(node.content.encode("utf-8")) <= 2048
+    msgs = prompt_library.dedupe_nodes.nodes(
+        {
+            "extracted_nodes": [{"id": 0, "name": "Graphiti", "entity_type": ["Entity"]}],
+            "existing_nodes": [],
+            "episode_content": "x" * 10_002,
+            "previous_episodes": [node.content for node in bounded_nodes],
+        }
+    )
+    assert sum(len(message.content.encode("utf-8")) for message in msgs) < 25_000
+
 def test_reasoning_client_stateless_single_json_object_fallback_on_schema_http400():
     import httpx
     import openai
