@@ -927,6 +927,41 @@ def test_find_by_session_filters_by_doc_type():
     assert len(everything) == 3
 
 
+def test_find_by_session_retries_oversized_page_with_smaller_limit():
+    oversized_bytes = 8 * 1024 * 1024 + 1
+    calls = []
+
+    def transport(method, url, headers, body):
+        request = json.loads(body.decode("utf-8"))
+        calls.append(request)
+        if len(calls) == 1:
+            return ProxyResponse(200, b"x" * oversized_bytes, {})
+        return ProxyResponse(200, json.dumps({"docs": [], "bookmark": "end"}).encode(), {})
+
+    store = CouchDBHttpSourceStore(
+        base_url="http://couch.test:5984",
+        db="transcript_source",
+        transport=transport,
+    )
+
+    assert store.find_by_session(session_id_hash=_sid()) == []
+    assert [call["limit"] for call in calls] == [10000, 5000]
+
+
+def test_find_by_session_fails_closed_when_single_document_exceeds_byte_limit():
+    def transport(_method, _url, _headers, _body):
+        return ProxyResponse(200, b"x" * (8 * 1024 * 1024 + 1), {})
+
+    store = CouchDBHttpSourceStore(
+        base_url="http://couch.test:5984",
+        db="transcript_source",
+        transport=transport,
+    )
+
+    with pytest.raises(CouchDBResponseTooLarge):
+        store.find_by_session(session_id_hash=_sid())
+
+
 def test_find_by_session_follows_bookmarks_past_ten_thousand_documents():
     fake = FakeCouch()
     store = _store(fake)
