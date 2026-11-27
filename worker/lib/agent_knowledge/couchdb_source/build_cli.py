@@ -903,6 +903,30 @@ def _evaluate_session_change(
         ):
             return False, None
         return True, canonical if canonical is not None else resolved.sessions[0]
+    # A source revision can be "current" in CouchDB while its PG ready row is
+    # still missing (for example after an interrupted projection). Such a session
+    # must stay selectable so the PG gap is closed instead of being treated as
+    # already projected.
+    # Ignore a stale CouchDB receipt chunk id here: the PG row may still exist
+    # under the session identity even when the stored chunk id no longer resolves.
+    pg_missing = True
+    if ready_content_lookup is not None:
+        try:
+            pg_missing = not bool(
+                ready_content_lookup(
+                    session_id_hash=session_id_hash,
+                    project=project,
+                    provider=provider,
+                    content_hash=str(merged.get("active_content_hash") or merged.get("projected_source_hash") or ""),
+                    chunk_id="",
+                )
+            )
+        except Exception:
+            pg_missing = True
+    if ready_content_lookup is not None and pg_missing:
+        return True, canonical if canonical is not None else (
+            resolved.sessions[0] if getattr(resolved, "sessions", None) else {"session_id_hash": session_id_hash}
+        )
     return False, None
 
 
