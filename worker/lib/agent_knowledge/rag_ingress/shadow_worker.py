@@ -476,7 +476,8 @@ async def run_consume(*, nats_url: str, stream: str, subject: str, durable: str,
                 break
             continue  # idle fetch timeout on a long-running live loop: keep polling
         statuses = await asyncio.gather(*(handle_msg(msg) for msg in msgs))
-        results.extend(statuses)
+        if max_messages is not None:
+            results.extend(statuses)
         processed += sum(1 for status in statuses if status != "nak")
     await nc.drain()
     return {"processed": processed, "statuses": results, "store_counts": store.counts()}

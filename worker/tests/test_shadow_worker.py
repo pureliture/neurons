@@ -553,6 +553,17 @@ def test_run_consume_naks_uncertain_delivery_and_keeps_canonical_job_replayable(
     assert store.get_delivered(payload["idempotencyKey"]) is None
 
 
+def test_live_consume_does_not_accumulate_results():
+    """Live (unbounded) consume must not retain every per-message status in memory."""
+    import inspect
+
+    from agent_knowledge.rag_ingress import shadow_worker
+
+    source = inspect.getsource(shadow_worker.run_consume)
+    bounded_guard = "if max_messages is not None:\n            results.extend(statuses)"
+    assert bounded_guard in source, "results must be retained only in bounded test mode"
+
+
 def test_distinct_lease_owners_submit_exact_duplicate_once(tmp_path, monkeypatch):
     store = IngestStateStore(tmp_path / "ingress.sqlite", canonical_state=True)
     payload = _couchdb_payload(tag="canonical-concurrent-duplicate")
