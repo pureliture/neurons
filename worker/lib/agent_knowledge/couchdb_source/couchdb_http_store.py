@@ -1147,18 +1147,26 @@ class CouchDBHttpSourceStore:
             request_body: dict = {"selector": query_selector, "limit": size}
             if bookmark:
                 request_body["bookmark"] = bookmark
-            with self._request_to_spool(
-                "POST",
-                f"/{self.db}/_find",
-                json_body=request_body,
-                max_response_bytes=max_page_bytes,
-            ) as (status, response_path):
-                if status == 200:
-                    rows, next_bookmark = parse_spooled_descriptor_page(
-                        response_path, max_page_bytes=max_page_bytes, max_items=size
-                    )
-                else:
-                    raise CouchDBError(f"_find by session failed: HTTP {status}", status_code=status)
+            try:
+                with self._request_to_spool(
+                    "POST",
+                    f"/{self.db}/_find",
+                    json_body=request_body,
+                    max_response_bytes=max_page_bytes,
+                ) as (status, response_path):
+                    if status == 200:
+                        rows, next_bookmark = parse_spooled_descriptor_page(
+                            response_path, max_page_bytes=max_page_bytes, max_items=size
+                        )
+                    else:
+                        raise CouchDBError(f"_find by session failed: HTTP {status}", status_code=status)
+            except CouchDBResponseTooLarge:
+                # Same bounded retry as find_by_session: keep the bookmark and
+                # halve the descriptor page until one row fits or fail closed.
+                if size <= 1:
+                    raise
+                size = max(1, size // 2)
+                continue
             if not rows:
                 return
             for row in rows:

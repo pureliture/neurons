@@ -1202,6 +1202,56 @@ def test_iter_by_session_sends_no_default_sort_and_paginates_by_bookmark():
     assert [body["limit"] for body in fake.find_bodies] == [2, 2, 2]
 
 
+def test_iter_by_session_descriptors_retries_oversized_page_with_smaller_limit():
+    from contextlib import contextmanager
+
+    store = _store(FakeCouch())
+    store.ensure_database()
+    real_spool = store._request_to_spool
+    limits = []
+
+    @contextmanager
+    def _spy(method, path, *, json_body=None, max_response_bytes=None):
+        limits.append(json_body["limit"])
+        if len(limits) == 1:
+            raise CouchDBResponseTooLarge("oversized")
+        with real_spool(
+            method, path, json_body=json_body, max_response_bytes=max_response_bytes
+        ) as value:
+            yield value
+
+    store._request_to_spool = _spy  # type: ignore[method-assign]
+
+    assert list(store.iter_by_session_descriptors(
+        session_id_hash="s0",
+        doc_type=dm.SourceDocType.CONVERSATION_CHUNK,
+        fields=None,
+        selector=None,
+        page_size=8,
+        max_page_bytes=4096,
+    )) == []
+    assert limits == [8, 4]
+
+
+def test_iter_by_session_descriptors_fails_closed_for_single_oversized_row():
+    def _raise(*_args, **_kwargs):
+        raise CouchDBResponseTooLarge("oversized")
+
+    store = _store(FakeCouch())
+    store.ensure_database()
+    store._request_to_spool = _raise  # type: ignore[method-assign]
+
+    with pytest.raises(CouchDBResponseTooLarge):
+        list(store.iter_by_session_descriptors(
+            session_id_hash="s0",
+            doc_type=dm.SourceDocType.CONVERSATION_CHUNK,
+            fields=None,
+            selector=None,
+            page_size=1,
+            max_page_bytes=4096,
+        ))
+
+
 def test_iter_by_session_descriptors_sends_no_default_sort():
     from contextlib import contextmanager
 
