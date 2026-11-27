@@ -2159,6 +2159,96 @@ def test_reasoning_openai_generic_client_sets_opencode_session_header():
     assert client.client.default_headers.get("User-Agent") == "neurons-graphiti/1.0"
 
 
+def test_reasoning_client_auto_policy_prefers_json_object_on_opencode_go():
+    from graphiti_core.llm_client.config import LLMConfig
+
+    client = _ReasoningOpenAIGenericClient(
+        config=LLMConfig(
+            api_key="unit-test",
+            model="hy4-flash-free",
+            base_url="https://opencode.ai/zen/go/v1",
+        )
+    )
+    assert client.structured_output_mode == "json_object"
+    assert client._allow_schema_fallback is False
+    assert str(client.client.base_url).rstrip("/").endswith("/inference/go/openai/v1")
+
+
+def test_reasoning_client_auto_policy_keeps_json_schema_off_opencode():
+    from graphiti_core.llm_client.config import LLMConfig
+
+    client = _ReasoningOpenAIGenericClient(
+        config=LLMConfig(
+            api_key="unit-test",
+            model="deepseek-v4.1-flash",
+            base_url="https://llm.example.invalid/v1",
+        )
+    )
+    assert client.structured_output_mode == "json_schema"
+    assert client._allow_schema_fallback is True
+
+
+def test_reasoning_client_opencode_auto_sends_json_object_with_prompt_schema():
+    import httpx
+    import openai
+    from graphiti_core.llm_client.config import LLMConfig
+    from graphiti_core.prompts.extract_nodes import ExtractedEntities
+    from graphiti_core.prompts.models import Message
+
+    captured: list[dict] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(
+            200,
+            request=request,
+            json={
+                "id": "unit-test",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "hy4-flash-free",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": '{"extracted_entities": []}'},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+        )
+
+    async def _run():
+        http_client = httpx.AsyncClient(transport=httpx.MockTransport(_handler))
+        try:
+            oa = openai.AsyncOpenAI(
+                api_key="unit-test",
+                base_url="https://opencode.ai/inference/go/openai/v1",
+                http_client=http_client,
+            )
+            client = _ReasoningOpenAIGenericClient(
+                config=LLMConfig(
+                    api_key="unit-test",
+                    model="hy4-flash-free",
+                    base_url="https://opencode.ai/zen/go/v1",
+                ),
+                client=oa,
+            )
+            result = await client.generate_response(
+                [Message(role="user", content="unit test")], response_model=ExtractedEntities
+            )
+            assert result == {"extracted_entities": []}
+        finally:
+            await http_client.aclose()
+
+    asyncio.run(_run())
+    assert len(captured) == 1
+    body = captured[0]
+    assert body["model"] == "hy4-flash-free"
+    assert body["response_format"] == {"type": "json_object"}
+    assert "extracted_entities" in body["messages"][-1]["content"]
+
+
 def test_episode_node_to_ontology_supports_yaml_frontmatter():
     yaml_content = """---
 schema_version: agent_knowledge_document.v2

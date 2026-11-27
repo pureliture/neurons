@@ -63,6 +63,7 @@ from ..model_connectors.policy import validate_local_embedding_write_or_query_po
 from ..model_connectors.session_headers import (
     OPENCODE_CANONICAL_OPENAI_PATH,
     is_opencode_base_url,
+    is_opencode_go_openai_base_url,
     normalize_opencode_openai_base_url,
     opencode_session_headers,
 )
@@ -2029,9 +2030,18 @@ class _ReasoningOpenAIGenericClient(OpenAIGenericClient):
         **kwargs: Any,
     ) -> None:
         policy = _structured_output_mode_env(structured_output_policy)
-        if "structured_output_mode" not in kwargs:
-            kwargs["structured_output_mode"] = "json_object" if policy == "json_object" else "json_schema"
         cfg = kwargs.get("config") if "config" in kwargs else (args[0] if args else None)
+        configured_base_url = str(getattr(cfg, "base_url", "") or "") if cfg is not None else ""
+        # OpenCode Go reasoning models (hy4-flash-free) can answer json_schema
+        # requests with non-JSON or truncated content on this relay; OMP itself
+        # drops the field for such routes and relies on the prompt-carried schema.
+        # Prefer json_object (which injects the schema into the prompt) for that
+        # route unless the operator pinned an explicit mode.
+        if "structured_output_mode" not in kwargs:
+            if policy == "json_object" or (policy == "auto" and is_opencode_go_openai_base_url(configured_base_url)):
+                kwargs["structured_output_mode"] = "json_object"
+            else:
+                kwargs["structured_output_mode"] = "json_schema"
         if cfg is not None and getattr(cfg, "base_url", None):
             cfg.base_url = normalize_opencode_openai_base_url(str(cfg.base_url))
         super().__init__(*args, **kwargs)
