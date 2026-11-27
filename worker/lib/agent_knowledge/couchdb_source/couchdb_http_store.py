@@ -1008,10 +1008,18 @@ class CouchDBHttpSourceStore:
                 body["fields"] = list(fields)
             if bookmark:
                 body["bookmark"] = bookmark
-            status, payload = self._request(
-                "POST", f"/{self.db}/_find", json_body=body,
-                max_response_bytes=COUCHDB_FIND_MAX_PAGE_RESPONSE_BYTES,
-            )
+            try:
+                status, payload = self._request(
+                    "POST", f"/{self.db}/_find", json_body=body,
+                    max_response_bytes=COUCHDB_FIND_MAX_PAGE_RESPONSE_BYTES,
+                )
+            except CouchDBResponseTooLarge:
+                # Same bounded retry as find_by_type: keep the bookmark and
+                # halve the page until one document fits or fail closed.
+                if page_size <= 1:
+                    raise
+                page_size = max(1, page_size // 2)
+                continue
             if status != 200:
                 raise CouchDBError(f"_find failed: HTTP {status}", status_code=status)
             page = payload.get("docs", [])
