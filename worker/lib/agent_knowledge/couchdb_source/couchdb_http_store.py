@@ -1008,7 +1008,10 @@ class CouchDBHttpSourceStore:
                 body["fields"] = list(fields)
             if bookmark:
                 body["bookmark"] = bookmark
-            status, payload = self._request("POST", f"/{self.db}/_find", json_body=body)
+            status, payload = self._request(
+                "POST", f"/{self.db}/_find", json_body=body,
+                max_response_bytes=COUCHDB_FIND_MAX_PAGE_RESPONSE_BYTES,
+            )
             if status != 200:
                 raise CouchDBError(f"_find failed: HTTP {status}", status_code=status)
             page = payload.get("docs", [])
