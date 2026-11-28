@@ -1283,3 +1283,28 @@ def test_request_memo_collapses_one_legacy_resolve_and_has_no_negative_cache() -
     # pinned entry (it is a fresh object, not the memoized revision).
     memo.invalidate(sid)
     assert resolve_active_source_revision(store=store, session_id_hash=sid, memo=memo) is not pinned
+
+
+def test_hash_only_resolution_keeps_bodies_out_of_request_memo() -> None:
+    from agent_knowledge.couchdb_source.source_revision import (
+        resolve_active_source_hash,
+    )
+
+    store = InMemoryCouchDBSourceStore()
+    sid = _session_id_hash()
+    _seed_session_source(store)
+    expected = resolve_active_source_revision(
+        store=store, session_id_hash=sid
+    ).source_hash
+
+    memo = SourceResolutionMemo()
+    assert resolve_active_source_hash(
+        store=store, session_id_hash=sid, memo=memo
+    ) == expected
+    assert memo.get(sid) is None
+    assert memo.get_source_hash(sid) == expected
+    assert resolve_active_source_hash(
+        store=store, session_id_hash=sid, memo=memo
+    ) == expected
+    memo.invalidate(sid)
+    assert memo.get_source_hash(sid) is None

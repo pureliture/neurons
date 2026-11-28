@@ -19,7 +19,6 @@ import json
 import re
 from datetime import datetime, timezone
 from typing import Iterable, Mapping
-
 from ..rag_ingress.rag_ready_document import (
     SecretLikeMetadataError,
     assert_no_secret_like_metadata,
@@ -34,6 +33,8 @@ from ..session_memory.transcript_model import (
     canonicalize_project,
     canonicalize_provider,
 )
+
+_SHA256_CHUNK_CHARS = 65_536
 
 COUCHDB_SOURCE_SCHEMA_VERSION = "couchdb_transcript_source.v1"
 COUCHDB_SOURCE_OWNER = "couchdb-transcript-source"
@@ -135,7 +136,10 @@ def sha256_hash(value: str) -> str:
     to the one the parsers and packer already emit. Parity is asserted by tests.
     """
 
-    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256()
+    for offset in range(0, len(value), _SHA256_CHUNK_CHARS):
+        digest.update(value[offset : offset + _SHA256_CHUNK_CHARS].encode("utf-8"))
+    return "sha256:" + digest.hexdigest()
 
 
 def build_session_id_hash(provider: str, raw_session_id: str) -> str:

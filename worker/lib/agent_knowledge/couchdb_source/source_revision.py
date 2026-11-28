@@ -150,10 +150,11 @@ class SourceResolutionMemo:
     hit.
     """
 
-    __slots__ = ("_entries",)
+    __slots__ = ("_entries", "_source_hashes")
 
     def __init__(self) -> None:
         self._entries: dict[str, tuple[str, ResolvedSourceRevision]] = {}
+        self._source_hashes: dict[str, tuple[str, str]] = {}
 
     @staticmethod
     def _pointer_token(pointer: Mapping[str, object] | None) -> str:
@@ -164,6 +165,23 @@ class SourceResolutionMemo:
     def get(self, session_id_hash: str) -> ResolvedSourceRevision | None:
         entry = self._entries.get(str(session_id_hash))
         return entry[1] if entry is not None else None
+
+    def get_source_hash(self, session_id_hash: str) -> str | None:
+        entry = self._source_hashes.get(str(session_id_hash))
+        return entry[1] if entry is not None else None
+
+    def remember_source_hash(
+        self,
+        session_id_hash: str,
+        source_hash: str,
+        *,
+        pointer: Mapping[str, object] | None,
+    ) -> None:
+        # Hash-only callers never retain source bodies in the request memo.
+        self._source_hashes[str(session_id_hash)] = (
+            self._pointer_token(pointer),
+            str(source_hash),
+        )
 
     def remember(
         self,
@@ -177,23 +195,29 @@ class SourceResolutionMemo:
         )
 
     def invalidate(self, session_id_hash: str) -> None:
-        self._entries.pop(str(session_id_hash), None)
+        key = str(session_id_hash)
+        self._entries.pop(key, None)
+        self._source_hashes.pop(key, None)
 
     def observe_pointer(
         self,
         session_id_hash: str,
         pointer: Mapping[str, object] | None,
     ) -> bool:
-        """Drop a cached entry whose pointer revision changed; return True if dropped."""
+        """Drop cached entries whose pointer revision changed; return True if dropped."""
 
         key = str(session_id_hash)
+        token = self._pointer_token(pointer)
+        dropped = False
         entry = self._entries.get(key)
-        if entry is None:
-            return False
-        if entry[0] == self._pointer_token(pointer):
-            return False
-        self._entries.pop(key, None)
-        return True
+        if entry is not None and entry[0] != token:
+            self._entries.pop(key, None)
+            dropped = True
+        hash_entry = self._source_hashes.get(key)
+        if hash_entry is not None and hash_entry[0] != token:
+            self._source_hashes.pop(key, None)
+            dropped = True
+        return dropped
 
 
 def _canonical_hash(value: Mapping[str, object] | list[object]) -> str:
@@ -771,7 +795,9 @@ def _source_hash(documents: Iterable[Mapping[str, object]]) -> str:
 
 
 def _resolved_source_hash(documents: Iterable[Mapping[str, object]]) -> str:
-    items = list(documents)
+    # Keep one reference set of members: an extra list of full bodies would
+    # double the request heap before the hash is even computed.
+    items = documents if isinstance(documents, (list, tuple)) else list(documents)
     for item in items:
         _assert_material_body_integrity(item)
     try:
@@ -922,10 +948,11 @@ def _resolved(
     source_hash: str,
     manifest_id: str | None,
     is_legacy_unpinned: bool,
+    copy_documents: bool = True,
 ) -> ResolvedSourceRevision:
     grouped = {
         doc_type: tuple(
-            copy.deepcopy(dict(document))
+            (copy.deepcopy(dict(document)) if copy_documents else dict(document))
             for document in documents
             if document.get("doc_type") == doc_type
         )
@@ -1345,12 +1372,16 @@ def resolve_active_source_revision(
             session_id_hash=session_id_hash,
             progress_callback=progress_callback,
         )
+        source_hash = _resolved_source_hash(documents)
         resolved = _resolved(
             session_id_hash=session_id_hash,
             documents=documents,
-            source_hash=_resolved_source_hash(documents),
+            source_hash=source_hash,
             manifest_id=None,
             is_legacy_unpinned=True,
+            # find_by_session already returns fresh documents; a second deep
+            # copy of every body would only double the request's peak heap.
+            copy_documents=False,
         )
         if memo is not None:
             memo.remember(resolved, pointer=None)
@@ -1422,6 +1453,55 @@ def resolve_active_source_revision(
     if memo is not None:
         memo.remember(resolved, pointer=pointer)
     return resolved
+
+
+def resolve_active_source_hash(
+    *,
+    session_id_hash: str,
+    store: CouchDBSourceStore,
+    memo: SourceResolutionMemo | None = None,
+    refresh: bool = False,
+) -> str:
+    """Resolve the active source hash without retaining member bodies.
+
+    Legacy sessions have no pointer fence, so a convergence check must pass
+    ``refresh=True``; a request memo entry is otherwise safe for hash-only
+    callers and stores just the resolved hash.
+    """
+
+    dm.assert_hash_like("session_id_hash", session_id_hash)
+    if memo is not None and not refresh:
+        # A full resolution already in the request memo is a strictly cheaper
+        # source of the same hash: no second legacy scan and no body retention.
+        cached_resolved = memo.get(session_id_hash)
+        if cached_resolved is not None:
+            return cached_resolved.source_hash
+        cached = memo.get_source_hash(session_id_hash)
+        if cached is not None:
+            return cached
+    pointer = store.get(dm.active_source_revision_pointer_doc_id(session_id_hash))
+    if pointer is None:
+        documents = _load_legacy_documents(
+            store=store,
+            session_id_hash=session_id_hash,
+            progress_callback=None,
+        )
+        source_hash = _resolved_source_hash(documents) if documents else ""
+        if memo is not None:
+            memo.remember_source_hash(session_id_hash, source_hash, pointer=pointer)
+        return source_hash
+
+    # Pinned revisions still verify every member against the manifest before
+    # reporting a hash; they are not the source of the legacy memory ramp.
+    resolved = resolve_active_source_revision(
+        session_id_hash=session_id_hash,
+        store=store,
+        memo=None,
+        refresh=refresh,
+    )
+    if memo is not None:
+        memo.remember_source_hash(session_id_hash, resolved.source_hash, pointer=pointer)
+    return resolved.source_hash
 
 
 def resolve_active_source_revision_from_snapshot(

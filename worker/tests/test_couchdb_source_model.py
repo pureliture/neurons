@@ -259,3 +259,26 @@ def test_no_raw_path_or_id_in_serialized_documents() -> None:
 def test_session_id_hash_must_be_hash_not_raw() -> None:
     with pytest.raises(ValueError):
         dm.build_transcript_session_document(session=_session(session_id_hash="codex:sess-001"))
+
+
+def test_sha256_hash_streaming_matches_single_sha256() -> None:
+    import hashlib
+
+    samples = (
+        "",
+        "a",
+        "hello world",
+        "가나다라마바사\u0000\n'\"\\",
+        "\U0001f9e0" * 10,
+        "x" * 200_000,
+        "abc\U0001f600 deflection " * 12_000,
+    )
+    for value in samples:
+        expected = "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+        assert dm.sha256_hash(value) == expected
+
+    # The chunk boundary must not change the digest.
+    boundary = "_" * (dm._SHA256_CHUNK_CHARS - 1) + "\U0001f9e0" + "tail"
+    assert dm.sha256_hash(boundary) == (
+        "sha256:" + hashlib.sha256(boundary.encode("utf-8")).hexdigest()
+    )
