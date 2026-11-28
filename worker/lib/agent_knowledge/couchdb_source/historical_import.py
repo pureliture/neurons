@@ -86,6 +86,7 @@ class ImportStatus:
     SCOPE_VIOLATION = "scope_violation"
     ACTIVE_SOURCE_REVISION_BLOCKED = "active_source_revision_blocked"
     ACTIVE_SOURCE_REVISION_UNCERTAIN = "active_source_revision_uncertain"
+    SOURCE_STORE_CONFLICT = "source_store_conflict"
 
 
 @dataclass(frozen=True)
@@ -119,6 +120,7 @@ def import_historical_source(
     store: CouchDBSourceStore,
     server_inference: Callable[[], str] | None = None,
     ledger_comparison: Mapping[str, object] | None = None,
+    strict_put_if_absent: bool = False,
 ) -> ImportResult:
     provider = canonicalize_provider(locator.provider)
     lane = PROVIDER_LANES.get(provider)
@@ -192,6 +194,24 @@ def import_historical_source(
     source_documents = [session_doc, *chunk_docs]
     session_id_hash = parsed.session.session_id_hash
 
+    # Backfill invariant: an already stored session/chunk/coverage document is
+    # never replaced. Fail closed before any mutation when a target id exists;
+    # this only applies to callers that explicitly opt into strict backfill.
+    if strict_put_if_absent:
+        target_ids = [str(document["_id"]) for document in source_documents]
+        target_ids.append(coverage_manifest_doc_id(session_id_hash))
+        if any(store.get(document_id) is not None for document_id in target_ids):
+            return ImportResult(
+                provider=provider,
+                status=ImportStatus.SOURCE_STORE_CONFLICT,
+                session_id_hash=session_id_hash,
+                project=resolution.project,
+                project_source=resolution.source,
+                project_ambiguous=resolution.ambiguous,
+                index_project_mismatch=resolution.index_mismatch,
+                notes=("existing_source_document_preserved", "no_source_mutation"),
+            )
+
     # An existing pointer means this compatibility writer lacks a predecessor
     # it may safely replace.  Do this check before any mutable origin or
     # coverage write.  A pointer may still be published in the separate HTTP
@@ -227,10 +247,10 @@ def import_historical_source(
             # any additional origins.  Additive writes keep the live-ingress
             # recovery contract: the explicit successor below is mandatory
             # before success is reported.
-            if active_predecessor is None:
-                stored = store.put(document)
-            else:
+            if strict_put_if_absent or active_predecessor is not None:
                 stored = store.put_if_absent(document)
+            else:
+                stored = store.put(document)
             source_write_started = source_write_started or stored.outcome != "duplicate"
             active_predecessor = active_predecessor or _active_revision_after_write(
                 store=store,
@@ -273,7 +293,10 @@ def import_historical_source(
             ledger_comparison=ledger_comparison,
             project_authority=resolution.to_authority_block(),
         )
-        store.put(coverage_doc)
+        if strict_put_if_absent:
+            store.put_if_absent(coverage_doc)
+        else:
+            store.put(coverage_doc)
 
         # A pointer can be published after the last origin recheck and before
         # this coverage PUT.  Rebuild coverage from the active successor, not
@@ -298,7 +321,21 @@ def import_historical_source(
                 conversation_chunk_count=len(chunks),
                 successor_activated=True,
             )
-    except (SourceStoreConflict, SourceRevisionResolutionError):
+    except (SourceStoreConflict, SourceRevisionResolutionError) as exc:
+        if strict_put_if_absent and isinstance(exc, SourceStoreConflict):
+            notes = ("existing_source_document_preserved",)
+            if source_write_started:
+                notes = ("source_write_started_before_conflict", *notes)
+            return ImportResult(
+                provider=provider,
+                status=ImportStatus.SOURCE_STORE_CONFLICT,
+                session_id_hash=session_id_hash,
+                project=resolution.project,
+                project_source=resolution.source,
+                project_ambiguous=resolution.ambiguous,
+                index_project_mismatch=resolution.index_mismatch,
+                notes=notes,
+            )
         active_predecessor = _active_revision_after_write_or_none(
             store=store,
             session_id_hash=session_id_hash,

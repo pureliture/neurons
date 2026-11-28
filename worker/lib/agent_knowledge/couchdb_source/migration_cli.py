@@ -9,6 +9,9 @@ signal -- NOT RetiredIndexBridge's polluted metadata), and imports each session 
 Provider roots (overridable):
   codex        ~/.codex/sessions/**/*.jsonl              (cwd from payload.cwd)
   claude       ~/.claude/projects/**/*.jsonl             (cwd from record.cwd)
+  hermes       $(HERMES_STATE_DB|~/.hermes/profiles/atlas/state.db) -> admitted
+               sessions only; sqlite is opened mode=ro, fixtures go to runtime dir
+               (raw transcript never written to a report)
   gemini       ~/.gemini/tmp/*/chats/*.{jsonl,json}      (.json -> fixture; project from <proj> dir)
   antigravity  ~/.gemini/antigravity/**/.system_generated/**/*.jsonl  (agy is captured here too)
   grok         $(GROK_HOME|~/.grok)/sessions/**/updates.jsonl  (project via capture metadata; ACP has no top-level cwd)
@@ -34,6 +37,12 @@ from .current_source_supersession import (
     CURRENT_SOURCE_IMPORTED,
     activate_admitted_codex_current_source,
 )
+from .hermes_admission import (
+    HermesAdmissionManifest,
+    load_hermes_admission_manifest,
+    materialize_hermes_fixtures,
+    plan_hermes_import,
+)
 from .historical_import import ImportStatus, SourceLocator, import_historical_source
 from .session_memory_materializer import update_coverage_with_tool_evidence
 from .source_store import InMemoryCouchDBSourceStore
@@ -52,7 +61,7 @@ from ..session_memory.transcript_parsers import (
 MIGRATION_CLI_SCHEMA_VERSION = "transcript_migration_cli.v1"
 MIGRATION_CLI_OPERATION = "transcript_migration"
 
-MIGRATION_PROVIDERS = ("codex", "claude", "gemini", "antigravity", "grok")
+MIGRATION_PROVIDERS = ("codex", "claude", "gemini", "antigravity", "grok", "hermes")
 _CWD_SCAN_MAX_LINES = 50
 _CORRECTIVE_LOCATOR_ADMISSION_MANIFEST_FIELDS = frozenset({"locator", "admission", "project"})
 _LOCATOR_ADMISSION_FIELDS = frozenset(
@@ -72,17 +81,32 @@ def default_source_roots() -> dict[str, Path]:
     home = Path.home()
     codex_home = Path(os.environ.get("CODEX_HOME") or (home / ".codex"))
     grok_home = Path(os.environ.get("GROK_HOME") or (home / ".grok"))
+    hermes_db = Path(os.environ.get("HERMES_STATE_DB") or (home / ".hermes" / "profiles" / "atlas" / "state.db"))
     return {
         "codex": codex_home / "sessions",
         "claude": home / ".claude" / "projects",
         "gemini": home / ".gemini" / "tmp",
         "antigravity": home / ".gemini" / "antigravity",
         "grok": grok_home / "sessions",
+        "hermes": hermes_db,
     }
 
 
-def enumerate_provider_files(provider: str, root: Path) -> list[Path]:
+def enumerate_provider_files(
+    provider: str,
+    root: Path,
+    *,
+    runtime_dir: Path | None = None,
+    hermes_manifest: HermesAdmissionManifest | None = None,
+) -> list[Path]:
     root = Path(root)
+    if provider == "hermes":
+        # No manifest means no Hermes source is admitted (fail closed).
+        if hermes_manifest is None:
+            return []
+        runtime = runtime_dir or (Path.home() / ".config" / "neurons" / "hermes-normalized")
+        plan = plan_hermes_import(root, hermes_manifest)
+        return materialize_hermes_fixtures(root, plan, runtime)
     if not root.is_dir():
         return []
     if provider == "gemini":
@@ -149,6 +173,12 @@ def _iter_jsonl(path: Path, max_lines: int):
 
 def extract_cwd(provider: str, path: Path) -> str:
     """Best-effort: the session's own working directory (authoritative project)."""
+    if provider == "hermes" and path.suffix.lower() == ".json":
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return ""
+        return str(payload.get("cwd") or "") if isinstance(payload, dict) else ""
     if provider == "gemini" and path.suffix == ".json":
         # gemini .json: project derived from the <proj>/chats/ path segment instead
         return ""
@@ -272,6 +302,8 @@ def run_migration(
     limit: int | None = None,
     runtime_dir: Path | None = None,
     dry_run: bool = False,
+    hermes_manifest: HermesAdmissionManifest | None = None,
+    strict_put_if_absent: bool = False,
 ) -> dict:
     roots = roots if roots is not None else default_source_roots()
     providers = providers or list(MIGRATION_PROVIDERS)
@@ -280,10 +312,32 @@ def run_migration(
 
     for provider in providers:
         root = roots.get(provider)
-        files = enumerate_provider_files(provider, Path(root)) if root else []
+        prov = {"root": str(root or ""), "found": 0, "imported": 0, "ambiguous": 0, "mismatch": 0, "errors": 0}
+        if provider == "hermes":
+            # Hermes is manifest-gated: no out-of-list session is enumerated,
+            # and the sqlite database is only opened read-only.
+            if hermes_manifest is None or root is None:
+                prov["skipped"] = 1
+                prov["error_class"] = "hermes_admission_manifest_required"
+                report["by_provider"][provider] = prov
+                continue
+            plan = None
+            try:
+                plan = plan_hermes_import(Path(root), hermes_manifest)
+                files = materialize_hermes_fixtures(Path(root), plan, runtime_dir)
+            except ValueError:
+                prov["errors"] += 1
+                prov["error_class"] = "hermes_source_unavailable"
+                files = []
+            prov["manifest_entries"] = len(hermes_manifest.entries)
+            prov["manifest_misses"] = plan.manifest_misses if plan is not None else 0
+            prov["count_mismatches"] = len(plan.rejected) if plan is not None else 0
+            prov["errors"] += prov["manifest_misses"] + prov["count_mismatches"]
+        else:
+            files = enumerate_provider_files(provider, Path(root)) if root else []
         if limit is not None:
             files = files[: max(limit, 0)]
-        prov = {"root": str(root or ""), "found": len(files), "imported": 0, "ambiguous": 0, "mismatch": 0, "errors": 0}
+        prov["found"] = len(files)
         for path in files:
             try:
                 source_path = path
@@ -316,6 +370,7 @@ def run_migration(
                         cwd=cwd,
                     ),
                     store=store,
+                    strict_put_if_absent=strict_put_if_absent,
                 )
                 if result.status == ImportStatus.IMPORTED:
                     prov["imported"] += 1
@@ -728,6 +783,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--approval", default="", help="Path to live-approval JSON (required for non-dry-run).")
     parser.add_argument("--source-root", action="append", help="provider=/path override; repeatable")
+    parser.add_argument(
+        "--hermes-admission-manifest",
+        default="",
+        help="frozen hermes session hash/message-count manifest (required for --provider hermes)",
+    )
+    parser.add_argument(
+        "--strict-put-if-absent",
+        action="store_true",
+        help="backfill mode: never replace an existing source document; stop on conflict",
+    )
     parser.add_argument("--runtime-dir")
     parser.add_argument(
         "--locator-admission-manifest",
@@ -743,6 +808,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv if argv is not None else None)
     effective_argv = list(sys.argv[1:] if argv is None else argv)
+    requested_providers = args.provider or []
+    if "hermes" in requested_providers and not args.hermes_admission_manifest:
+        print(json.dumps({"status": "error", "error_class": "hermes_admission_manifest_required", "dry_run": bool(args.dry_run), "mutation_performed": False, "network_used": False}, sort_keys=True))
+        return 2
+    if "hermes" in requested_providers and not args.dry_run and not args.strict_put_if_absent:
+        print(json.dumps({"status": "error", "error_class": "hermes_requires_strict_put_if_absent", "dry_run": False, "mutation_performed": False, "network_used": False}, sort_keys=True))
+        return 2
 
     if args.tool_evidence and args.limit is not None:
         print(json.dumps({
@@ -760,6 +832,13 @@ def main(argv: list[str] | None = None) -> int:
         if "=" in raw:
             prov, _, p = raw.partition("=")
             roots_override[prov.strip()] = Path(p.strip()).expanduser()
+    hermes_manifest = None
+    if args.hermes_admission_manifest:
+        try:
+            hermes_manifest = load_hermes_admission_manifest(args.hermes_admission_manifest)
+        except ValueError:
+            print(json.dumps({"status": "error", "error_class": "hermes_admission_manifest_invalid", "dry_run": bool(args.dry_run), "mutation_performed": False, "network_used": False}, sort_keys=True))
+            return 2
 
     if args.corrective_current_source:
         if not args.dry_run:
@@ -787,6 +866,8 @@ def main(argv: list[str] | None = None) -> int:
             or args.reconcile_coverage
             or args.approval
             or args.runtime_dir
+            or args.hermes_admission_manifest
+            or args.strict_put_if_absent
         ):
             print(json.dumps({
                 "status": "error",
@@ -848,6 +929,7 @@ def main(argv: list[str] | None = None) -> int:
                 roots=roots,
                 providers=args.provider,
                 runtime_dir=runtime_dir,
+                hermes_manifest=hermes_manifest,
                 dry_run=True,
             )
             source_context_seed_errors = seed_report["errors"]
@@ -893,10 +975,12 @@ def main(argv: list[str] | None = None) -> int:
         limit=args.limit,
         runtime_dir=Path(args.runtime_dir) if args.runtime_dir else None,
         dry_run=args.dry_run,
+        hermes_manifest=hermes_manifest,
+        strict_put_if_absent=args.strict_put_if_absent,
     )
-    report["status"] = "ok"
+    report["status"] = "ok" if report["errors"] == 0 else "error"
     print(json.dumps(report, sort_keys=True))
-    return 0
+    return 0 if report["errors"] == 0 else 1
 
 
 def _live_approval_error(approval: str, *, dry_run: bool, effective_argv: list[str]) -> dict | None:
@@ -925,6 +1009,7 @@ __all__ = [
     "default_source_roots",
     "enumerate_provider_files",
     "extract_cwd",
+    "load_hermes_admission_manifest",
     "convert_gemini_json_to_fixture",
     "build_store_from_env",
     "run_migration",
