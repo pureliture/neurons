@@ -44,6 +44,7 @@ from .hermes_project_scope import (
 from .source_revision import (
     ResolvedSourceRevision,
     SourceResolutionMemo,
+    resolve_active_source_hash,
     resolve_active_source_revision,
 )
 from .source_store import CouchDBSourceStore, SourceStoreConflict, SourceStoreError
@@ -231,25 +232,44 @@ def update_coverage_with_tool_evidence(
                 memo.invalidate(session_id_hash)
 
         # CouchDB's generic 409 retry can legally write a stale aggregate whose
-        # revision was computed before a concurrent distinct chunk arrived. Read
-        # the complete source again and converge only when the persisted manifest
-        # and session row cover that latest snapshot. ``refresh`` keeps this read
-        # live even when the request memo already holds an earlier resolution.
-        current = _coverage_snapshot(
-            session_id_hash=session_id_hash,
-            store=store,
-            memo=memo,
-            refresh=True,
-        )
-        if current is None:
-            continue
-        (
-            current_doc,
-            current_sessions,
-            _current_start,
-            _current_end,
-            current_is_legacy_unpinned,
-        ) = current
+        # revision was computed before a concurrent distinct chunk arrived.
+        # Re-read the live source hash after the writes and converge only when
+        # the persisted manifest and session row cover it. A legacy session's
+        # hash covers counts/revision tokens, so the first snapshot's metadata
+        # stays valid when the hash still matches; no second full-body resolve
+        # (or memo entry holding bodies) is needed. Pinned sessions keep the
+        # full refresh because their manifest identity must be revalidated too.
+        if is_legacy_unpinned:
+            current_hash = resolve_active_source_hash(
+                session_id_hash=session_id_hash,
+                store=store,
+                memo=memo,
+                refresh=True,
+            )
+            if not current_hash:
+                continue
+            current_doc = dict(doc)
+            current_doc["source_hash"] = current_hash
+            session_doc_id = str(sessions[0].get("_id") or "") if sessions else ""
+            session_current = store.get(session_doc_id) if session_doc_id else None
+            current_sessions = [session_current] if session_current is not None else []
+            current_is_legacy_unpinned = True
+        else:
+            current = _coverage_snapshot(
+                session_id_hash=session_id_hash,
+                store=store,
+                memo=memo,
+                refresh=True,
+            )
+            if current is None:
+                continue
+            (
+                current_doc,
+                current_sessions,
+                _current_start,
+                _current_end,
+                current_is_legacy_unpinned,
+            ) = current
         persisted = store.get(coverage_manifest_doc_id(session_id_hash)) or {}
         session_current = current_sessions[0] if current_sessions else {}
         expected_hash = str(current_doc.get("source_hash") or "")
@@ -595,22 +615,13 @@ def _current_session_source_hash(
     store: CouchDBSourceStore,
     memo: SourceResolutionMemo | None = None,
 ) -> str:
-    resolved = resolve_active_source_revision(
+    # Hash-only resolution keeps the full bodies out of the request memo; an
+    # empty legacy source still uses the historical projection-CAS sentinel.
+    return resolve_active_source_hash(
         session_id_hash=session_id_hash,
         store=store,
         memo=memo,
     )
-    # Historical projection-CAS callers can run before any source document is
-    # present. Preserve their empty-currentness sentinel, while still letting a
-    # malformed active pointer raise from the resolver rather than falling back.
-    if (
-        resolved.is_legacy_unpinned
-        and not resolved.sessions
-        and not resolved.conversation_chunks
-        and not resolved.tool_evidence_bundles
-    ):
-        return ""
-    return resolved.source_hash
 
 
 def _projection_state_for_materialization(
