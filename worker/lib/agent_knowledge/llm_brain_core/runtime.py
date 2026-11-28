@@ -767,13 +767,20 @@ def session_episode_from_couchdb_source(
         max_member_docs=max_member_docs,
         deadline_monotonic=deadline_monotonic,
     )
+    evidence_prose = _extraction_text_from_evidence(captured_evidence)
+    # OntologyEpisode re-truncates extraction_text to 8,000 chars from the
+    # front. Appending evidence after a full conversation body silently dropped
+    # every tool line, so reserve the addendum's budget inside that same cap.
+    prose_budget = _MAX_EXTRACTION_CHARS
+    if evidence_prose:
+        prose_budget = max(
+            0,
+            _MAX_EXTRACTION_CHARS - len(evidence_prose) - len("\n\n"),
+        )
     extraction_text = _extraction_text_from_chunks(
         captured_chunks,
+        max_chars=prose_budget,
     )
-    # The compressed tool lane rides along as an addendum: it says which
-    # commands ran and how they turned out, which the conversation prose no
-    # longer carries (the rendered tool output is not part of the chunk body).
-    evidence_prose = _extraction_text_from_evidence(captured_evidence)
     if evidence_prose:
         extraction_text = f"{extraction_text}\n\n{evidence_prose}" if extraction_text else evidence_prose
     return episode_from_session_artifact(artifact, extraction_text=extraction_text)

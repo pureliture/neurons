@@ -997,7 +997,11 @@ class GraphFirstResolver:
                 "card_type": "status",
                 "title": title,
                 "summary": safe_summary,
-                "currentness": str(row.get("currentness") or "current"),
+                # Unknown revision/currentness must never be promoted to
+                # "current": that lets an unverified old chunk masquerade as
+                # fresh memory. Keep it explicitly unverified so the recall
+                # layer can separate past from current (or exclude it).
+                "currentness": str(row.get("currentness") or "unverified"),
                 "content_hash": content_hash,
                 "source": SOURCE_SESSION_MEMORY,
             }
