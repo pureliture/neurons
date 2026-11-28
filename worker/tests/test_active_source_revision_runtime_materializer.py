@@ -350,3 +350,34 @@ def test_invalid_active_pointer_fails_closed_before_artifact_or_projection(
     assert projector.calls == []
     assert store.get(dm.coverage_manifest_doc_id(_session_id_hash())) is None
     assert store.get(dm.projection_state_doc_id(_session_id_hash())) is None
+
+
+def test_evidence_addendum_survives_full_conversation_prose_budget() -> None:
+    store = InMemoryCouchDBSourceStore()
+    _put_session(store)
+    _put_chunk(
+        store,
+        chunk_id="oversized-conversation",
+        turn_index=1,
+        text="conversation prose " * 1000,
+    )
+    _put_bundle(
+        store,
+        part_index=1,
+        body=(
+            "### 1 command/ok\n"
+            "- tool: kubectl\n"
+            "- command: kubectl get pods\n"
+            "- result: ready\n"
+        ),
+    )
+
+    episode = session_episode_from_couchdb_source(
+        session_id_hash=_session_id_hash(),
+        source_store=store,
+    )
+
+    assert len(episode.extraction_text) <= 8000
+    assert episode.extraction_text.startswith("conversation prose")
+    assert "### 1 command/ok" in episode.extraction_text
+    assert episode.extraction_text.endswith("- result: ready")

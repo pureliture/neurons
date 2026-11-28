@@ -1047,6 +1047,36 @@ def test_session_chunk_cards_use_transcript_body_not_shared_header():
     assert _session_chunk_body("plain text only") == "plain text only"
 
 
+def test_session_chunk_unknown_currentness_is_not_promoted_to_current():
+    class ChunkStore(Store):
+        def list_context_cards(self, **kwargs):
+            return []
+
+        def hybrid_search(self, **kwargs):
+            return []
+
+        def search_session_chunks(self, query_vector, project=None, limit=5, conn=None):
+            return [
+                {
+                    "chunk_id": "chk_unverified",
+                    "project": project or "neurons",
+                    "content_markdown": _SESSION_CHUNK_HEADER.format(sid="u1") + "user: 오래된 작업 기록\n",
+                    "content_hash": HASH_A,
+                    "distance": 0.1,
+                }
+            ]
+
+    cards = GraphFirstResolver(
+        ChunkStore(cards=[]), Graph([]), lambda _: [0.1, 0.2]
+    )._session_chunk_cards(
+        SimpleNamespace(
+            project="neurons", query="작업", limit=5, mode="query", response_mode="answer"
+        )
+    )
+    assert cards
+    assert cards[0]["currentness"] == "unverified"
+
+
 def test_session_chunk_fallback_titles_differ_across_sessions():
     class DistinctChunkStore(Store):
         def list_context_cards(self, **kwargs):
