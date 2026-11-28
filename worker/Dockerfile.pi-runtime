@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1.7
+# Pi CLI runtime candidate. No build/push is performed by this task.
+FROM node:22.19.0-bookworm-slim
+
+# npm registry metadata for 1.7.0 declares engines.node >=22.19.0.
+RUN npm install -g --no-audit --no-fund @earendil-works/pi-coding-agent@1.7.0 \
+    && npm cache clean --force \
+    && pi --version
+
+# Pi reads ~/.pi/agent/models.json at runtime. No model config is baked in.
+RUN mkdir -p /home/node/.pi/agent && chown -R node:node /home/node/.pi
+
+USER node
+WORKDIR /home/node
+ENV HOME=/home/node
+
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["pi"]
+CMD ["--mode", "rpc", "--no-session"]
