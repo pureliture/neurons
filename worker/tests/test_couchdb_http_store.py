@@ -1348,3 +1348,73 @@ def test_iter_by_session_page_byte_cap_still_fails_closed_without_sort():
                 max_page_bytes=128,
             )
         )
+
+
+class _SessionScanTransport:
+    """Minimal transport with a mutable DB fence for session-scan cache tests."""
+
+    def __init__(self, docs: list[dict]) -> None:
+        self.docs = docs
+        self.seq = "1"
+        self.find_limits: list[int] = []
+        self.oversized_once = False
+        self._oversized_sent = False
+
+    def __call__(self, method: str, url: str, headers: dict, body: bytes) -> ProxyResponse:
+        parsed = urlparse(url)
+        if method == "GET" and parsed.path == "/transcript_source":
+            return ProxyResponse(200, json.dumps({"update_seq": self.seq}).encode(), {})
+        if method == "POST" and parsed.path == "/transcript_source/_find":
+            request = json.loads(body.decode("utf-8"))
+            self.find_limits.append(int(request["limit"]))
+            if self.oversized_once and not self._oversized_sent:
+                self._oversized_sent = True
+                return ProxyResponse(200, b"x" * (8 * 1024 * 1024 + 1), {})
+            selector = request["selector"]
+            docs = [
+                doc for doc in self.docs
+                if all(str(doc.get(key) or "") == str(value or "") for key, value in selector.items())
+            ]
+            return ProxyResponse(200, json.dumps({"docs": docs, "bookmark": "end"}).encode(), {})
+        return ProxyResponse(404, b"{}", {})
+
+
+def test_find_by_session_reuses_one_scan_until_database_fence_moves():
+    doc = _session_doc()
+    transport = _SessionScanTransport([doc])
+    store = CouchDBHttpSourceStore(
+        base_url="http://couch.test:5984", db="transcript_source", transport=transport
+    )
+
+    first = store.find_by_session(session_id_hash=_sid())
+    assert first == [doc]
+    assert transport.find_limits == [10000]
+
+    # Same DB snapshot: no Mango round-trip, and the cached body is a copy.
+    second = store.find_by_session(session_id_hash=_sid())
+    assert second == first
+    assert second is not first
+    assert transport.find_limits == [10000]
+
+    # Any write moves the fence; a fresh scan replaces the cached snapshot.
+    transport.seq = "2"
+    assert store.find_by_session(session_id_hash=_sid()) == first
+    assert transport.find_limits == [10000, 10000]
+
+
+def test_find_by_session_learns_page_ceiling_after_oversized_response():
+    doc = _session_doc()
+    transport = _SessionScanTransport([doc])
+    transport.oversized_once = True
+    store = CouchDBHttpSourceStore(
+        base_url="http://couch.test:5984", db="transcript_source", transport=transport
+    )
+
+    assert store.find_by_session(session_id_hash=_sid()) == [doc]
+    assert transport.find_limits == [10000, 5000]
+
+    transport.seq = "2"
+    assert store.find_by_session(session_id_hash=_sid()) == [doc]
+    # The second scan starts at the learned ceiling instead of repeating the
+    # entire halving cascade for the next message or the next session.
+    assert transport.find_limits == [10000, 5000, 5000]

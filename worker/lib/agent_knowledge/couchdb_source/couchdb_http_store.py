@@ -25,9 +25,11 @@ import os
 import shutil
 import tempfile
 import time
+import threading
+from collections import OrderedDict
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
 from pathlib import Path
+from contextlib import contextmanager
 from urllib.parse import quote
 
 from .couchdb_currentness_stream import (
@@ -102,6 +104,7 @@ class CouchDBResponseTooLarge(CouchDBError):
 
 
 COUCHDB_FIND_MAX_PAGE_RESPONSE_BYTES = 8 * 1024 * 1024
+SESSION_SCAN_CACHE_MAX_ENTRIES = 8
 
 
 def _urllib_transport(
@@ -158,6 +161,11 @@ class CouchDBHttpSourceStore:
         self.auth_header = auth_header
         self.request_timeout_seconds = request_timeout_seconds
         self.deadline_monotonic = deadline_monotonic
+        self._session_scan_page_size = 10000
+        self._session_scan_cache: OrderedDict[
+            tuple[str, str, tuple[str, ...]], tuple[str, tuple[dict, ...]]
+        ] = OrderedDict()
+        self._session_scan_cache_lock = threading.Lock()
 
     # --- HTTP plumbing --------------------------------------------------------
 
@@ -988,6 +996,15 @@ class CouchDBHttpSourceStore:
             "execution_stats": payload.get("execution_stats"),
         }
 
+    def _session_scan_fence(self) -> str:
+        """Read the DB update-sequence fence; an unreadable fence disables caching."""
+        try:
+            return str(self.read_change_sequence())
+        except Exception:
+            # The fence only gates cache reuse: an unreadable fence keeps the
+            # original fresh-scan path instead of failing the read itself.
+            return ""
+
     def find_by_session(
         self,
         *,
@@ -999,7 +1016,33 @@ class CouchDBHttpSourceStore:
         selector: dict = {"session_id_hash": session_id_hash}
         if doc_type:
             selector["doc_type"] = doc_type
-        page_size = 10000
+        fields_key = tuple(fields or ())
+        cache_key = (session_id_hash, doc_type, fields_key)
+        fence = self._session_scan_fence()
+        cached_docs: tuple[dict, ...] | None = None
+        if fence:
+            with self._session_scan_cache_lock:
+                cached = self._session_scan_cache.get(cache_key)
+                if cached is not None:
+                    if cached[0] == fence:
+                        self._session_scan_cache.move_to_end(cache_key)
+                        cached_docs = cached[1]
+                    else:
+                        # A write moved the fence: the old body is no longer
+                        # a valid snapshot, even for a repeated read.
+                        self._session_scan_cache.pop(cache_key, None)
+            if cached_docs is not None:
+                docs = [copy.deepcopy(doc) for doc in cached_docs]
+                if progress_callback is not None:
+                    try:
+                        progress_callback(len(docs), 0)
+                    except Exception:
+                        pass
+                return docs
+        # A prior oversized response taught this store a safe page ceiling.
+        # Starting there avoids paying the whole 10000 -> N halving cascade
+        # again on every session and every delivery message.
+        page_size = self._session_scan_page_size
         docs: list[dict] = []
         bookmark = ""
         while True:
@@ -1019,6 +1062,9 @@ class CouchDBHttpSourceStore:
                 if page_size <= 1:
                     raise
                 page_size = max(1, page_size // 2)
+                with self._session_scan_cache_lock:
+                    if page_size < self._session_scan_page_size:
+                        self._session_scan_page_size = page_size
                 continue
             if status != 200:
                 raise CouchDBError(f"_find failed: HTTP {status}", status_code=status)
@@ -1043,6 +1089,18 @@ class CouchDBHttpSourceStore:
         if not doc_type and (not fields or "doc_type" in fields):
             docs = [doc for doc in docs if doc.get("doc_type") != SourceDocType.REPO_USAGE_PATTERN]
         docs.sort(key=lambda d: str(d.get("_id")))
+        # Cache only a snapshot whose fence was unchanged across the whole
+        # scan. A concurrent write during paging leaves no cached body, so a
+        # later read cannot reuse a partially updated session.
+        if fence and self._session_scan_fence() == fence:
+            with self._session_scan_cache_lock:
+                self._session_scan_cache[cache_key] = (
+                    fence,
+                    tuple(copy.deepcopy(doc) for doc in docs),
+                )
+                self._session_scan_cache.move_to_end(cache_key)
+                while len(self._session_scan_cache) > SESSION_SCAN_CACHE_MAX_ENTRIES:
+                    self._session_scan_cache.popitem(last=False)
         return docs
 
     def iter_by_session(
